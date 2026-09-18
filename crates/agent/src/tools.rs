@@ -123,12 +123,6 @@ pub fn read_text(path: &Path, max_lines: usize) -> String {
     out
 }
 
-/// Runs `command` in `cwd` via the user shell.
-pub fn command_output(cwd: &Path, command: &str) -> (String, Option<i32>) {
-    let (text, code, _) = command_output_interruptible(cwd, command, &|| true);
-    (text, code)
-}
-
 /// Runs `command`, polling `alive` so the shell can kill a long process on stop.
 /// Returns (output, exit_code, was_killed).
 pub fn command_output_interruptible(
@@ -226,131 +220,26 @@ pub fn resolve_in_project(project: &Path, relative: &str) -> Result<PathBuf, Str
     Ok(full)
 }
 
-/// Writes file content inside the project. Returns (path, added, removed) line delta.
+/// Writes file content inside the project. Returns (path, added, removed) line delta
+/// computed with a real LCS line diff (not a HashSet approximation).
 pub fn write_project_file(project: &Path, relative: &str, content: &str) -> Result<(String, u32, u32), String> {
     let full = resolve_in_project(project, relative)?;
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let old = fs::read_to_string(&full).unwrap_or_default();
-    let old_lines = old.lines().count() as u32;
-    let new_lines = content.lines().count() as u32;
+    let (added, removed) = crate::patch::line_diff_counts(&old, content);
     fs::write(&full, content).map_err(|e| e.to_string())?;
-    let added = new_lines.saturating_sub(old_lines);
-    let removed = old_lines.saturating_sub(new_lines);
-    // If both non-zero and file replaced entirely, keep raw counts.
-    if old_lines > 0 && new_lines > 0 && old != content {
-        // approximate: count changed lines cheaply
-        let old_set: std::collections::HashSet<&str> = old.lines().collect();
-        let new_set: std::collections::HashSet<&str> = content.lines().collect();
-        let added = new_set.difference(&old_set).count() as u32;
-        let removed = old_set.difference(&new_set).count() as u32;
-        return Ok((relative.trim().to_owned(), added, removed));
-    }
     Ok((relative.trim().to_owned(), added, removed))
 }
 
 /// Verification command for a project layout, if any.
+/// Delegates to [`crate::verify::VerificationRunner`] inference (first candidate).
 pub fn detect_verify_command(project: &Path) -> Option<String> {
-    if project.join("Cargo.toml").is_file() {
-        return Some("cargo test --workspace --quiet".to_owned());
-    }
-    if project.join("package.json").is_file() {
-        if project.join("node_modules").is_dir() {
-            return Some("npm test --silent".to_owned());
-        }
-        return Some("npm test --silent".to_owned());
-    }
-    if project.join("pyproject.toml").is_file() || project.join("pytest.ini").is_file() {
-        return Some("python -m pytest -q".to_owned());
-    }
-    None
-}
-
-/// One file write extracted from model output.
-pub struct WriteOp {
-    pub path: String,
-    pub content: String,
-}
-
-/// Parses ```write / path: / --- / content fences.
-pub fn extract_writes(text: &str) -> Vec<WriteOp> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("```write") {
-        let after = &rest[start + 8..];
-        let Some(end) = after.find("```") else { break };
-        let block = &after[..end];
-        rest = &after[end + 3..];
-
-        let mut path = String::new();
-        let mut content_lines: Vec<&str> = Vec::new();
-        let mut in_body = false;
-        for line in block.lines() {
-            if in_body {
-                content_lines.push(line);
-                continue;
-            }
-            let trimmed = line.trim();
-            if trimmed == "---" || trimmed == "===" {
-                in_body = true;
-                continue;
-            }
-            if let Some(p) = trimmed.strip_prefix("path:") {
-                path = p.trim().trim_matches('"').to_owned();
-            }
-        }
-        // Fallback: first non-empty line before --- is the path
-        if path.is_empty() {
-            for line in block.lines() {
-                let t = line.trim();
-                if t.is_empty() || t.starts_with("path:") || t == "---" {
-                    if t == "---" {
-                        break;
-                    }
-                    continue;
-                }
-                path = t.to_owned();
-                break;
-            }
-        }
-        if path.is_empty() {
-            continue;
-        }
-        // If no --- separator, treat everything after the path line as body
-        if !in_body {
-            let mut seen_path = false;
-            let mut lines = Vec::new();
-            for line in block.lines() {
-                let t = line.trim();
-                if !seen_path {
-                    if t.is_empty() {
-                        continue;
-                    }
-                    if let Some(p) = t.strip_prefix("path:") {
-                        if path.is_empty() {
-                            path = p.trim().trim_matches('"').to_owned();
-                        }
-                        seen_path = true;
-                        continue;
-                    }
-                    if t == path {
-                        seen_path = true;
-                        continue;
-                    }
-                }
-                lines.push(line);
-            }
-            content_lines = lines;
-        }
-
-        let mut content = content_lines.join("\n");
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        out.push(WriteOp { path, content });
-    }
-    out
+    crate::verify::VerificationRunner::default()
+        .infer(project)
+        .first()
+        .map(|c| c.command.clone())
 }
 
 /// Best-effort git working-tree summary as (path, added, removed) line estimates.
@@ -435,8 +324,10 @@ mod tests {
     fn command_output_supports_multiline_shell() {
         let dir = std::env::temp_dir().join(format!("kodo-cmd-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let (text, code) = command_output(&dir, "echo one\necho two");
+        let (text, code, killed) =
+            command_output_interruptible(&dir, "echo one\necho two", &|| true);
         assert_eq!(code, Some(0));
+        assert!(!killed);
         assert!(text.contains("one"));
         assert!(text.contains("two"));
         let _ = fs::remove_dir_all(&dir);
@@ -452,15 +343,6 @@ mod tests {
         assert_eq!(delta.0, "src/hello.txt");
         assert!(dir.join("src/hello.txt").is_file());
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn extract_writes_reads_path_and_body() {
-        let text = "ok\n```write\npath: notes/a.md\n---\n# Title\nbody\n```\ndone";
-        let writes = extract_writes(text);
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].path, "notes/a.md");
-        assert!(writes[0].content.contains("# Title"));
     }
 
     #[test]
