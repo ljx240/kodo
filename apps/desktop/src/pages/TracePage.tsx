@@ -278,11 +278,12 @@ export function TracePage({
             </div>
           </section>
 
-          <nav className="page-tabs">
+          <nav className="page-tabs" role="tablist" aria-label="Trace views">
             {TABS.map((name) => (
               <button
                 key={name}
                 type="button"
+                role="tab"
                 className={`page-tab${name === tab ? " page-tab--active" : ""}`}
                 aria-selected={name === tab}
                 onClick={() => setTab(name)}

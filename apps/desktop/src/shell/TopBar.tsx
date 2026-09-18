@@ -17,6 +17,8 @@ type Props = {
   onNewChat: (projectPath?: string) => void;
   inspectorOpen: boolean;
   onToggleInspector: () => void;
+  sidebarVisible: boolean;
+  onToggleSidebar: () => void;
 };
 
 export function TopBar({
@@ -29,6 +31,8 @@ export function TopBar({
   onNewChat,
   inspectorOpen,
   onToggleInspector,
+  sidebarVisible,
+  onToggleSidebar,
 }: Props) {
   const tmpl = provider ? templateById(provider.template) : null;
   const modelLabel = provider?.model ?? "No model";
@@ -36,7 +40,14 @@ export function TopBar({
   return (
     <header className="topbar">
       <div className="topbar-left">
-        <button type="button" className="icon-btn" aria-label="Toggle sidebar">
+        <button
+          type="button"
+          className={`icon-btn${sidebarVisible ? "" : " icon-btn--active"}`}
+          aria-label="Toggle sidebar"
+          aria-expanded={sidebarVisible}
+          aria-controls="kodo-sidebar"
+          onClick={onToggleSidebar}
+        >
           <PanelLeft size={16} strokeWidth={1.7} />
         </button>
 
@@ -118,6 +129,8 @@ export function TopBar({
           type="button"
           className={`icon-btn icon-btn--boxed${inspectorOpen ? " icon-btn--active" : ""}`}
           aria-label="Toggle inspector"
+          aria-expanded={inspectorOpen}
+          aria-controls={inspectorOpen ? "kodo-inspector-panel" : undefined}
           onClick={onToggleInspector}
         >
           <PanelRight size={16} strokeWidth={1.7} />

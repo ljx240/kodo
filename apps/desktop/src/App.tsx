@@ -36,6 +36,7 @@ export function App() {
 
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [activeProviderIndex, setActiveProviderIndex] = useState(0);
+  const [sidebarVisible, setSidebarVisible] = useState(true);
   const [autoGitBranch] = useSetting("auto-detect-git-branch", "true");
 
   const onSnapshot = useCallback((snapshot: LiveSnapshot | null) => {
@@ -122,7 +123,7 @@ export function App() {
   };
 
   const setInspectorOpen = (open: boolean) =>
-    navigate(open ? location.pathname : `${location.pathname}?inspector=closed`);
+    navigate(open ? `${location.pathname}?inspector=open` : `${location.pathname}?inspector=closed`);
 
   const openFiles = () => {
     setInspectorTab("files");
@@ -145,7 +146,7 @@ export function App() {
 
   return (
     <div
-      className="app"
+      className={`app${sidebarVisible ? "" : " app--sidebar-hidden"}`}
       data-core={coreVersion ?? undefined}
       data-density={undefined}
     >
@@ -170,6 +171,8 @@ export function App() {
             onNewChat={(path) => void newChat(path)}
             inspectorOpen={route.inspectorOpen}
             onToggleInspector={() => setInspectorOpen(!route.inspectorOpen)}
+            sidebarVisible={sidebarVisible}
+            onToggleSidebar={() => setSidebarVisible((value) => !value)}
           />
         )}
 

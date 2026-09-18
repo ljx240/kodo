@@ -103,7 +103,7 @@ export function Sidebar({ route, inspectorOpen, activeConversationId, onSelectCo
   );
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" id="kodo-sidebar">
       {/* The window draws its title bar over this strip, so the space beside the
           traffic lights has to carry the drag region itself. */}
       <div className="sidebar-strip" data-tauri-drag-region>
