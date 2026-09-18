@@ -8,11 +8,15 @@
 //! loop does not parse Markdown fences itself; it only executes
 //! [`protocol::ToolInvocation`] values.
 
+mod classify;
 mod context;
 mod patch;
 mod plan;
 mod protocol;
 mod provider;
+mod skill;
+#[cfg(test)]
+mod skill_flow_tests;
 mod state;
 mod tools;
 mod verify;
@@ -20,6 +24,7 @@ mod verify;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use classify::classify;
 use context::ContextBudget;
 use patch::{apply_patch, create_file, delete_file, replace_range, ApplyPatchArgs, ReplaceRangeArgs};
 use plan::TaskPlan;
@@ -28,6 +33,7 @@ use protocol::{
     format_observations, parse_model_turn, protocol_instructions, ModelTurn, ToolArgs, ToolCall,
     ToolCallId, ToolError, ToolErrorCode, ToolInvocation, ToolName, ToolRegistry, ToolResult,
 };
+use skill::{SkillRegistry, SkillSpec};
 use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason};
 use tools::{
     command_output_interruptible, is_dangerous_command, read_text, search_files,
@@ -35,13 +41,15 @@ use tools::{
 };
 use verify::{FinalStatus, VerificationRunner};
 
+pub use classify::{classify as classify_task, TaskType};
 pub use context::{
     ContextBudget as TurnContextBudget, ContextManager, ContextSpan, DEFAULT_CONTEXT_CHARS,
 };
 pub use patch::PatchOutcome;
-pub use plan::{Subtask, SubtaskKind};
+pub use plan::{Evidence, Subtask, SubtaskKind, SubtaskStatus};
 pub use protocol::{ToolDefinition, ToolError as AgentToolError, ToolRegistry as AgentToolRegistry};
 pub use provider::{Provider, ProviderCapabilities};
+pub use skill::{ContextStrategy, SkillRegistry as AgentSkillRegistry, SkillSpec as AgentSkillSpec, VerificationPolicy};
 pub use state::{AgentState as TurnState, Budget as TurnBudget, FailReason as TurnFailReason};
 pub use tools::dangerous_reason;
 pub use verify::{FinalStatus as TurnFinalStatus, VerificationRunner as TurnVerifier};
@@ -623,10 +631,14 @@ fn patch_approval_step(
 }
 
 /// Drive one model turn's invocations → results (rejections become results).
+///
+/// When a skill is active, calls for disallowed tools are rejected **before**
+/// the Permission approval path (a skill can narrow tools, never widen them).
 fn run_invocations(
     invocations: Vec<ToolInvocation>,
     project: &Path,
     request: &RunRequest,
+    skill: Option<&SkillSpec>,
     alive: &Alive,
     approve: &Approve,
     emit: &mut Emit,
@@ -651,6 +663,18 @@ fn run_invocations(
                 results.push(ToolResult::from_rejection(&reject));
             }
             ToolInvocation::Ready(call) => {
+                if let Some(sk) = skill {
+                    if let Some(denied) = sk.gate(call.id.clone(), call.name.label(), &call.args.label())
+                    {
+                        notes.push(format!(
+                            "Skill `{}` 拒绝工具 `{}`（allowed_tools 白名单）",
+                            sk.name,
+                            call.name.label()
+                        ));
+                        results.push(denied);
+                        continue;
+                    }
+                }
                 let is_mutation = call.name.is_mutation();
                 let (keep, result) =
                     execute_tool_call(&call, project, request, alive, approve, emit, notes)?;
@@ -760,9 +784,30 @@ pub fn run(request: &RunRequest, alive: &Alive, approve: &Approve, emit: &mut Em
     let project = request.project.as_path();
     let mut notes: Vec<String> = Vec::new();
     let mut pre_observations: Vec<ToolResult> = Vec::new();
-    let registry = ToolRegistry::standard();
-    let mut machine = AgentMachine::new(&request.message, Budget::default());
+
+    // TaskClassifier → Skill Registry → skill-shaped plan (real Planner hook).
+    let task_type = classify(&request.message);
+    let skill = SkillRegistry::builtin().select(task_type).cloned();
+    let registry = match &skill {
+        Some(sk) => sk.filter_registry(ToolRegistry::standard()),
+        None => ToolRegistry::standard(),
+    };
+    let plan = match &skill {
+        Some(sk) => TaskPlan::from_skill(sk, &request.message),
+        None => TaskPlan::from_task(&request.message),
+    };
+    let mut machine = AgentMachine::with_plan(&request.message, plan, Budget::default());
     machine.handle(AgentEvent::TaskReceived);
+    notes.push(match &skill {
+        Some(sk) => format!(
+            "task_type={} · skill={} · strategy={} · verify={}",
+            task_type,
+            sk.name,
+            sk.context_strategy.label(),
+            sk.verification_policy.label()
+        ),
+        None => format!("task_type={task_type} · skill=none"),
+    });
 
     if !simple_step(
         Step::Reasoning { summary: machine.progress_summary() },
@@ -773,7 +818,7 @@ pub fn run(request: &RunRequest, alive: &Alive, approve: &Approve, emit: &mut Em
         return Ok(());
     }
 
-    // Plan (heuristic structured plan; model JSON may refine later).
+    // Plan (skill-shaped or heuristic; model JSON may refine later).
     machine.handle(AgentEvent::PlanReady);
     if !simple_step(
         Step::Reasoning {
@@ -787,8 +832,12 @@ pub fn run(request: &RunRequest, alive: &Alive, approve: &Approve, emit: &mut Em
     }
 
     // Dynamic lexical context: file map → path/grep ranking → budgeted spans.
-    // Replaces fixed README/Cargo/package/DESIGN head-of-file reads.
-    let mut context_mgr = ContextManager::new(project, ContextBudget::default());
+    // Budget preset comes from the skill's context_strategy when present.
+    let context_budget = skill
+        .as_ref()
+        .map(|sk| sk.context_strategy.budget())
+        .unwrap_or_else(ContextBudget::default);
+    let mut context_mgr = ContextManager::new(project, context_budget);
 
     // User-pinned context paths: validate inside the project and pin spans first.
     for rel in &request.pinned_context {
@@ -965,6 +1014,20 @@ pub fn run(request: &RunRequest, alive: &Alive, approve: &Approve, emit: &mut Em
     if provider_ready && alive() {
         let provider = request.provider.clone().expect("checked above");
         let mut system = system_prompt(project, &registry);
+        if let Some(sk) = &skill {
+            // Compact skill pointer only — workflow/criteria flow through the
+            // structured plan block, not a Markdown dump.
+            system.push_str(&format!(
+                "\nActive skill: {} (task_type={}, strategy={}, verify_policy={}). \
+                 The available tool list above is already filtered by this skill. \
+                 Follow the plan's workflow and acceptance criteria; never claim \
+                 done without tool/verification evidence.\n",
+                sk.name,
+                task_type,
+                sk.context_strategy.label(),
+                sk.verification_policy.label(),
+            ));
+        }
         if request.extended_thinking {
             system.push_str("\nThink step by step before answering.");
         }
@@ -992,7 +1055,23 @@ pub fn run(request: &RunRequest, alive: &Alive, approve: &Approve, emit: &mut Em
             // Verify gate when the machine is in Verify.
             if machine.state() == &AgentState::Verify {
                 let verifier = VerificationRunner::new(90_000);
-                let outcomes = verifier.run_all(project, alive, true);
+                // VerificationPolicy decides *what* may run — docs/review never
+                // trigger a full compile; tests-only skips build/lint.
+                let commands = match &skill {
+                    Some(sk) => sk.verification_commands(&verifier, project),
+                    None => verifier.infer(project),
+                };
+                if !alive() {
+                    machine.handle(AgentEvent::Cancel);
+                    break;
+                }
+                if commands.is_empty() {
+                    // Nothing runnable — fail honestly instead of faking a pass.
+                    notes.push("验证失败：当前 Skill 策略与项目没有可执行的验证命令".to_owned());
+                    machine.handle(AgentEvent::VerifyFinished { ok: false });
+                    continue;
+                }
+                let outcomes = verifier.run_commands(project, &commands, alive, true);
                 if !alive() {
                     machine.handle(AgentEvent::Cancel);
                     break;
@@ -1027,6 +1106,9 @@ pub fn run(request: &RunRequest, alive: &Alive, approve: &Approve, emit: &mut Em
 
                 if all_ok {
                     verified = true;
+                    // Attach the real command list as verification evidence.
+                    machine.plan_mut().verify_commands =
+                        commands.iter().map(|c| c.command.clone()).collect();
                     machine.handle(AgentEvent::VerifyFinished { ok: true });
                     history.push(ChatMessage {
                         role: "user".to_owned(),
@@ -1079,6 +1161,10 @@ pub fn run(request: &RunRequest, alive: &Alive, approve: &Approve, emit: &mut Em
                     // Optional: model may propose a refined plan in the first turn.
                     if machine.state() == &AgentState::Plan {
                         if let Some(plan) = TaskPlan::parse_model_json(&text) {
+                            let plan = match &skill {
+                                Some(sk) => refine_plan_with_skill(plan, sk),
+                                None => plan,
+                            };
                             *machine.plan_mut() = plan;
                         }
                     }
@@ -1135,6 +1221,7 @@ pub fn run(request: &RunRequest, alive: &Alive, approve: &Approve, emit: &mut Em
                         calls,
                         project,
                         request,
+                        skill.as_ref(),
                         alive,
                         approve,
                         emit,
@@ -1296,6 +1383,31 @@ fn system_prompt(project: &Path, registry: &ToolRegistry) -> String {
         project = project.display(),
         protocol = protocol_instructions(registry),
     )
+}
+
+/// Clamp a model-refined plan to the active skill's contract:
+/// policy owns `requires_verify`, skill completion criteria are a floor,
+/// and edit work is stripped when the skill forbids mutations.
+fn refine_plan_with_skill(mut plan: TaskPlan, skill: &SkillSpec) -> TaskPlan {
+    plan.requires_verify = skill.verification_policy.needs_run();
+    for criterion in &skill.completion_criteria {
+        if !plan.acceptance_criteria.iter().any(|c| c == criterion) {
+            plan.acceptance_criteria.push(criterion.clone());
+        }
+    }
+    let can_write = skill.allowed_tools.iter().any(|t| t.is_mutation());
+    if !can_write {
+        plan.subtasks.retain(|s| s.kind != plan::SubtaskKind::Edit);
+        if plan.subtasks.is_empty() {
+            plan.subtasks = skill
+                .workflow
+                .iter()
+                .map(|w| Subtask::new(w.id.clone(), w.title.clone(), w.kind))
+                .collect();
+        }
+        plan.current_subtask = plan.current_subtask.min(plan.subtasks.len());
+    }
+    plan
 }
 
 fn keywords_from(message: &str) -> Vec<String> {
@@ -1589,6 +1701,7 @@ mod tests {
             calls,
             &dir,
             &request,
+            None,
             &|| true,
             &|_, _| true,
             &mut |event| {
@@ -1640,6 +1753,7 @@ mod tests {
             calls,
             &dir,
             &request,
+            None,
             &|| true,
             &|_, _| true,
             &mut |event| {

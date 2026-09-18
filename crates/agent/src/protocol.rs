@@ -531,6 +531,18 @@ impl ToolRegistry {
         &self.defs
     }
 
+    /// Keep only definitions whose name passes `keep` (skill allowlists).
+    pub fn filtered<F: Fn(&str) -> bool>(&self, keep: F) -> Self {
+        Self {
+            defs: self
+                .defs
+                .iter()
+                .filter(|d| keep(d.name))
+                .cloned()
+                .collect(),
+        }
+    }
+
     pub fn find(&self, name: &str) -> Option<&ToolDefinition> {
         self.defs.iter().find(|d| d.name == name)
     }

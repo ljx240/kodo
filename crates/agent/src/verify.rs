@@ -280,12 +280,23 @@ impl VerificationRunner {
         stop_on_fail: bool,
     ) -> Vec<VerifyOutcome> {
         let cmds = self.infer(project);
+        self.run_commands(project, &cmds, alive, stop_on_fail)
+    }
+
+    /// Run an explicit command list (already filtered by skill policy).
+    pub fn run_commands(
+        &self,
+        project: &Path,
+        cmds: &[VerifyCommand],
+        alive: &dyn Fn() -> bool,
+        stop_on_fail: bool,
+    ) -> Vec<VerifyOutcome> {
         let mut out = Vec::new();
         for cmd in cmds {
             if !alive() {
                 break;
             }
-            let outcome = self.run_one(project, &cmd, alive);
+            let outcome = self.run_one(project, cmd, alive);
             let failed = !outcome.ok;
             out.push(outcome);
             if failed && stop_on_fail {

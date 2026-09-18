@@ -268,6 +268,7 @@ impl AgentMachine {
                     return Ok(S::Failed { reason: FailReason::BudgetExhausted });
                 }
                 self.pending_tool_count = count;
+                self.plan.mark_current_running();
                 Ok(S::Execute)
             }
             (S::GatherContext, ModelClaimedDone) => {
@@ -286,6 +287,7 @@ impl AgentMachine {
                     return Ok(S::Failed { reason: FailReason::BudgetExhausted });
                 }
                 self.pending_tool_count = count;
+                self.plan.mark_current_running();
                 Ok(S::Execute)
             }
             (S::Execute, ToolsFinished { results }) => {
@@ -319,6 +321,7 @@ impl AgentMachine {
             }
             (S::Verify, ModelRequestedTools { .. }) => {
                 // Unexpected mid-verify tools — allow but stay.
+                self.plan.mark_current_running();
                 Ok(S::Verify)
             }
             (S::Verify, ToolsFinished { results }) => {
@@ -335,6 +338,7 @@ impl AgentMachine {
             (S::Repair, RepairApplied) => Ok(S::Execute),
             (S::Repair, ModelRequestedTools { count }) => {
                 self.pending_tool_count = count;
+                self.plan.mark_current_running();
                 Ok(S::Execute)
             }
             (S::Repair, ToolsFinished { results }) => {
