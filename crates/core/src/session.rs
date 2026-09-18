@@ -635,24 +635,41 @@ mod tests {
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
 
         record_ask(&dir, &id, 10, "帮我看一下这个报错").expect("ask");
-        // context round-trip: with context field
-        record_ask_with_context(&dir, &id, 20, "再看这个", &["src/lib.rs".to_owned(), "a b.md".to_owned()])
-            .expect("ask+ctx");
+        let session = load(&dir, &id).expect("load");
+        assert_eq!(session.turns.len(), 1);
+        assert_eq!(session.turns[0].ask, "帮我看一下这个报错");
+        assert!(session.turns[0].context.is_empty());
+        assert!(!session.turns[0].done, "a fresh turn is not done");
+
+        record_turn_complete(&dir, &id, 20).expect("complete");
+        assert!(load(&dir, &id).expect("load").turns[0].done);
+    }
+
+    #[test]
+    fn ask_round_trips_pinned_context_paths() {
+        let tmp = TempDir::new("sess-ctx");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+
+        record_ask(&dir, &id, 10, "无上下文").expect("ask");
+        record_ask_with_context(
+            &dir,
+            &id,
+            20,
+            "再看这个",
+            &["src/lib.rs".to_owned(), "a b.md".to_owned()],
+        )
+        .expect("ask+ctx");
+
         let loaded = load(&dir, &id).expect("load");
         assert_eq!(loaded.turns.len(), 2);
         assert!(loaded.turns[0].context.is_empty());
+        assert_eq!(loaded.turns[0].ask, "无上下文");
         assert_eq!(
             loaded.turns[1].context,
             vec!["src/lib.rs".to_owned(), "a b.md".to_owned()]
         );
         assert_eq!(loaded.turns[1].ask, "再看这个");
-        let session = load(&dir, &id).expect("load");
-        assert_eq!(session.turns.len(), 1);
-        assert_eq!(session.turns[0].ask, "帮我看一下这个报错");
-        assert!(!session.turns[0].done, "a fresh turn is not done");
-
-        record_turn_complete(&dir, &id, 20).expect("complete");
-        assert!(load(&dir, &id).expect("load").turns[0].done);
     }
 
     #[test]

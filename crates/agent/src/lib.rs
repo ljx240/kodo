@@ -20,7 +20,7 @@ mod verify;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use context::{ContextBudget, ContextManager};
+use context::ContextBudget;
 use patch::{apply_patch, create_file, delete_file, replace_range, ApplyPatchArgs, ReplaceRangeArgs};
 use plan::TaskPlan;
 use provider::{ChatMessage, NativeToolCall};
@@ -35,7 +35,9 @@ use tools::{
 };
 use verify::{FinalStatus, VerificationRunner};
 
-pub use context::{ContextBudget as TurnContextBudget, ContextSpan, DEFAULT_CONTEXT_CHARS};
+pub use context::{
+    ContextBudget as TurnContextBudget, ContextManager, ContextSpan, DEFAULT_CONTEXT_CHARS,
+};
 pub use patch::PatchOutcome;
 pub use plan::{Subtask, SubtaskKind};
 pub use protocol::{ToolDefinition, ToolError as AgentToolError, ToolRegistry as AgentToolRegistry};
