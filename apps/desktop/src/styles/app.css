@@ -1,0 +1,989 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-md);
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.mono {
+  font-family: var(--kodo-font-mono);
+}
+
+/* ---------------------------------------------------------------- shell -- */
+
+.app {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* The top bar belongs to the window, not to the conversation pane: in the
+   references it runs above the Inspector and its bottom border crosses the
+   whole content area. */
+.content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--kodo-canvas);
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.page-inner {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 32px 40px;
+}
+
+.page-inner--wide {
+  max-width: none;
+  padding: 0 28px 28px;
+}
+
+/* -------------------------------------------------------------- sidebar -- */
+
+.sidebar {
+  width: var(--kodo-sidebar-width);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--kodo-sidebar);
+  border-right: 1px solid var(--kodo-border);
+}
+
+/* Holds the macOS traffic lights on the desktop build; empty otherwise. */
+.sidebar-strip {
+  height: var(--kodo-topbar-height);
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 8px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 18px 14px;
+}
+
+.brand-mark {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--kodo-accent);
+  color: #fff;
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.brand-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.brand-name {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.brand-tagline {
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-muted);
+}
+
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 30px;
+  flex: none;
+  margin: 0 12px 14px;
+  padding: 0 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-popover);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-md);
+  text-align: left;
+}
+
+.sidebar-search kbd {
+  margin-left: auto;
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-xs);
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0 12px 12px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  height: 34px;
+  padding: 0 18px;
+  border-radius: var(--kodo-radius);
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  text-decoration: none;
+}
+
+.nav-item svg {
+  color: var(--kodo-text-secondary);
+}
+
+.nav-item:hover {
+  background: var(--kodo-hover);
+}
+
+.nav-item--active {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-weight: 500;
+}
+
+.nav-item--active svg {
+  color: var(--kodo-accent);
+}
+
+.projects {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+  padding: 0 8px 0 12px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.tree {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+/* The row is the container and the tree's main button fills it, so the trailing
+   menu button shares the hover area without being part of the button that
+   expands the project. */
+.tree-project {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 34px;
+  padding: 0 4px 0 13px;
+  border-radius: var(--kodo-radius);
+  font-size: var(--kodo-font-md);
+}
+
+.tree-project-main {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  text-align: left;
+}
+
+.tree-project svg {
+  color: var(--kodo-text-secondary);
+  flex: none;
+}
+
+.tree-project:hover {
+  background: var(--kodo-hover);
+}
+
+/* Out of the way until the row is pointed at, so an untouched tree reads the
+   same as it did before projects had operations. */
+.tree-project .tree-more {
+  opacity: 0;
+}
+
+.tree-project:hover .tree-more,
+.tree-more:focus-visible {
+  opacity: 1;
+}
+
+.tree-input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--kodo-accent);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font: inherit;
+}
+
+.tree-new {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  height: 34px;
+  padding: 0 4px 0 13px;
+}
+
+.tree-new svg {
+  color: var(--kodo-text-secondary);
+  flex: none;
+}
+
+/* A rejected write — a directory that already exists, a name that is not one
+   component. It is the only thing that changes when one fails. */
+.tree-error {
+  flex: none;
+  margin: 0 4px 8px;
+  padding: 6px 8px;
+  border-radius: var(--kodo-radius);
+  background: #fef2f2;
+  color: var(--kodo-error);
+  font-size: var(--kodo-font-sm);
+}
+
+.tree-project--open .tree-project-name {
+  font-weight: 600;
+}
+
+.tree-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Conversations hang off a thread line drawn below their project. */
+.tree-conversations {
+  margin-left: 35px;
+  border-left: 1px solid var(--kodo-border);
+}
+
+.tree-conversation {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  height: 33px;
+  padding: 0 8px 0 12px;
+  border-radius: var(--kodo-radius);
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+  text-align: left;
+}
+
+.tree-conversation svg {
+  flex: none;
+}
+
+.tree-conversation-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-conversation-time {
+  flex: none;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-muted);
+}
+
+.tree-conversation:hover {
+  background: var(--kodo-hover);
+}
+
+/* The reference marks the open conversation with a plain rounded pill; it
+   draws no accent rule down the row's edge. */
+.tree-conversation--active {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-weight: 500;
+}
+
+.tree-conversation--active svg {
+  color: var(--kodo-accent);
+}
+
+/* Shown only when a real scan found nothing, so it never reaches a screenshot.
+   The root is a path, so it has to be allowed to break anywhere. */
+.tree-empty {
+  padding: 4px 12px;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+}
+
+.tree-empty-path {
+  word-break: break-all;
+}
+
+/* Kodo has no account to sign into, so the foot of the sidebar carries the way
+   into Settings rather than a user row. */
+.sidebar-foot {
+  flex: none;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--kodo-border);
+}
+
+.avatar {
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-weight: 600;
+}
+
+.avatar--user {
+  width: 36px;
+  height: 36px;
+  background: var(--kodo-accent);
+  color: #fff;
+  font-size: 14px;
+}
+
+.avatar--kodo {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--kodo-accent);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+/* --------------------------------------------------------------- topbar -- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--kodo-topbar-height);
+  flex: none;
+  padding: 0 20px 0 24px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.topbar--plain {
+  padding: 0 16px;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* The reference keeps a wide gap before the window-level overflow menu. */
+.topbar-menu {
+  width: 150px;
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--kodo-font-md);
+  color: var(--kodo-text-secondary);
+}
+
+.crumbs svg {
+  color: var(--kodo-text-muted);
+}
+
+.crumb-sep {
+  color: var(--kodo-text-muted);
+}
+
+.crumb-current {
+  color: var(--kodo-text);
+}
+
+/* ---------------------------------------------------------- page header -- */
+
+/* The reference's header rule sits 70px below the top of the page. */
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  height: 71px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.page-head-mark {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  color: var(--kodo-text-secondary);
+}
+
+.page-head-text h1 {
+  font-size: var(--kodo-font-title);
+  font-weight: 600;
+}
+
+.page-head-text p {
+  margin-top: 2px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.page-meta {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--kodo-control-height);
+  padding: 0 10px;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text-muted);
+}
+
+.search-field input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  font-size: var(--kodo-font-md);
+  color: var(--kodo-text);
+}
+
+.search-field--inline {
+  width: 250px;
+}
+
+.search-field kbd {
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-muted);
+}
+
+/* --------------------------------------------------------- primitives --- */
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--kodo-radius-sm);
+  color: var(--kodo-text-secondary);
+}
+
+.icon-btn:hover {
+  background: var(--kodo-hover);
+}
+
+.icon-btn--sm {
+  width: 22px;
+  height: 22px;
+}
+
+.icon-btn--boxed {
+  border: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.icon-btn--active {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--kodo-hover);
+}
+
+.btn--primary {
+  background: var(--kodo-accent);
+  border-color: var(--kodo-accent);
+  color: #fff;
+}
+
+.btn--primary:hover {
+  background: var(--kodo-accent-hover);
+}
+
+.btn--block {
+  width: 100%;
+  height: 32px;
+  justify-content: center;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+}
+
+.chip:hover {
+  background: var(--kodo-hover);
+}
+
+.chip svg {
+  color: var(--kodo-text-muted);
+}
+
+.chip-icon {
+  color: var(--kodo-accent) !important;
+}
+
+/* A chip that reports rather than offers a choice — the branch, which Kodo has
+   no way to change without running git. */
+.chip--static,
+.chip--static:hover {
+  background: var(--kodo-canvas);
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------- menus -- */
+
+.menu-anchor {
+  position: relative;
+  display: flex;
+}
+
+/* Covers the window so the next click anywhere closes the panel. That is what
+   the menu uses instead of an outside-click listener. */
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-popover);
+  background: var(--kodo-canvas);
+  box-shadow: 0 8px 24px rgb(23 32 51 / 12%);
+}
+
+.menu--right {
+  left: auto;
+  right: 0;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: var(--kodo-radius-sm);
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.menu-item svg {
+  flex: none;
+  color: var(--kodo-text-secondary);
+}
+
+.menu-item:hover {
+  background: var(--kodo-hover);
+}
+
+.menu-item--danger,
+.menu-item--danger svg {
+  color: var(--kodo-error);
+}
+
+.code-chip {
+  padding: 1px 6px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+  white-space: nowrap;
+}
+
+.provider-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.delta-add {
+  color: var(--kodo-success);
+  font-size: var(--kodo-font-sm);
+}
+
+.delta-del {
+  color: var(--kodo-error);
+  font-size: var(--kodo-font-sm);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 0 9px 0 6px;
+  border-radius: 999px;
+  background: #eaf9f4;
+  color: var(--kodo-success);
+  font-size: var(--kodo-font-md);
+  font-weight: 500;
+}
+
+/* The reference pairs the pill with a filled success disc, not a check glyph. */
+.status-mark {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--kodo-success);
+  color: #fff;
+}
+
+.archived-pill {
+  padding: 2px 8px;
+  border-radius: var(--kodo-radius-sm);
+  background: #e9f7ef;
+  color: var(--kodo-success);
+  font-size: var(--kodo-font-xs);
+  font-weight: 500;
+}
+
+.model-pill {
+  padding: 2px 7px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+}
+
+.empty-note {
+  margin: 40px 0;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-md);
+  text-align: center;
+}
+
+.conv-title-input {
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: var(--kodo-radius-sm);
+  padding: 2px 8px;
+  font-size: var(--kodo-font-lg);
+  font-weight: 600;
+  min-width: 220px;
+}
+
+.approval-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--kodo-accent);
+  border-radius: var(--kodo-radius-md);
+  background: var(--kodo-selected, #eef5ff);
+}
+
+.approval-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.approval-text code {
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.trace-checks {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.rot-90 {
+  transform: rotate(90deg);
+}
+
+/* ------------------------------------------------------------ controls -- */
+
+/* The reference sets the control text and the chevron a step below the primary
+   UI text. */
+.select {
+  height: var(--kodo-control-height);
+  padding: 0 26px 0 10px;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: var(--kodo-radius-sm);
+  background-color: var(--kodo-canvas);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2398a2b3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  appearance: none;
+  font-size: var(--kodo-font-sm);
+}
+
+.input {
+  width: 100%;
+  height: var(--kodo-control-height);
+  padding: 0 10px;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  font-size: var(--kodo-font-md);
+}
+
+.input--tiny {
+  width: 72px;
+}
+
+.input-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.toggle {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: none;
+  border-radius: 10px;
+  background: var(--kodo-border-strong);
+}
+
+.toggle--on {
+  background: var(--kodo-accent);
+}
+
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 0.12s ease;
+}
+
+.toggle--on .toggle-knob {
+  left: 18px;
+}
+
+/* ── Provider list (Settings) ────────────────────────────────────────────── */
+
+.provider-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  margin-bottom: 6px;
+}
+
+.provider-row-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.provider-row-name {
+  font-weight: 600;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text);
+  white-space: nowrap;
+}
+
+.provider-row-model {
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+  white-space: nowrap;
+}
+
+.provider-row-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.icon-btn--danger {
+  color: var(--kodo-error);
+}
+
+.icon-btn--danger:hover {
+  background: var(--kodo-error-bg, rgba(220, 38, 38, 0.08));
+}
+
+/* ── Provider editor (inline form) ──────────────────────────────────────── */
+
+.provider-editor {
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  padding: 12px;
+  margin-bottom: 8px;
+}
+
+.provider-editor-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.btn--ghost {
+  background: none;
+  border: 1px solid var(--kodo-border);
+  color: var(--kodo-text-secondary);
+}
+
+.btn--ghost:hover {
+  background: var(--kodo-hover);
+}

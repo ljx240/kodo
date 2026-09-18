@@ -1,0 +1,308 @@
+//! The run driver: threads, session log writes, and the approval rendezvous.
+//!
+//! Work itself lives in `kodo-agent`. Steps are written **started** before the
+//! work runs and **completed** when it finishes, so a killed run leaves a real
+//! `running` envelope in the log.
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::Duration;
+
+use tauri::{AppHandle, Emitter};
+
+use kodo_agent::{self as agent, FileDelta, SinkEvent, Step, StepKind};
+use kodo_core::session::{self, Item, ItemKind, Phase, Status};
+
+use crate::view::{ItemView, RunEvent};
+
+pub use kodo_agent::Permission;
+
+#[derive(Default, Clone)]
+pub struct Runs(Arc<Mutex<HashSet<String>>>);
+
+impl Runs {
+    fn lock(&self) -> MutexGuard<'_, HashSet<String>> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn begin(&self, id: &str) -> bool {
+        self.lock().insert(id.to_owned())
+    }
+
+    pub fn is_live(&self, id: &str) -> bool {
+        self.lock().contains(id)
+    }
+
+    pub fn cancel(&self, id: &str) {
+        self.lock().remove(id);
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct Approvals(Arc<Mutex<HashMap<(String, u32), Sender<bool>>>>);
+
+impl Approvals {
+    fn lock(&self) -> MutexGuard<'_, HashMap<(String, u32), Sender<bool>>> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn wait_point(&self, session: &str, step: u32) -> (ApprovalTicket, Receiver<bool>) {
+        let (tx, rx) = mpsc::channel();
+        self.lock().insert((session.to_owned(), step), tx);
+        (ApprovalTicket { session: session.to_owned(), step, map: self.clone() }, rx)
+    }
+
+    pub fn resolve(&self, session: &str, step: u32, approved: bool) -> bool {
+        match self.lock().remove(&(session.to_owned(), step)) {
+            Some(tx) => tx.send(approved).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn clear_session(&self, session: &str) {
+        self.lock().retain(|(id, _), _| id != session);
+    }
+}
+
+pub struct ApprovalTicket {
+    session: String,
+    step: u32,
+    map: Approvals,
+}
+
+impl Drop for ApprovalTicket {
+    fn drop(&mut self) {
+        self.map.lock().remove(&(self.session.clone(), self.step));
+    }
+}
+
+fn step_kind_label(kind: StepKind) -> &'static str {
+    match kind {
+        StepKind::Reasoning => "thinking",
+        StepKind::Search => "search",
+        StepKind::FileRead => "read file",
+        StepKind::Command => "run command",
+        StepKind::ModelCall => "call model",
+        StepKind::FileChange => "edit files",
+        StepKind::AgentMessage => "draft answer",
+    }
+}
+
+fn to_item_kind(step: &Step) -> ItemKind {
+    match step {
+        Step::Reasoning { summary } => ItemKind::Reasoning { summary: summary.clone() },
+        Step::Search { query, detail } => ItemKind::Search { query: query.clone(), detail: detail.clone() },
+        Step::FileRead { path, detail } => ItemKind::FileRead { path: path.clone(), detail: detail.clone() },
+        Step::Command { command, cwd, output, exit_code } => ItemKind::CommandExecution {
+            command: command.clone(),
+            cwd: cwd.clone(),
+            output: output.clone(),
+            exit_code: *exit_code,
+        },
+        Step::ModelCall { model, input_tokens, output_tokens } => ItemKind::ModelCall {
+            model: model.clone(),
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
+        },
+        Step::FileChange { changes } => ItemKind::FileChange {
+            changes: changes
+                .iter()
+                .map(|FileDelta { path, added, removed }| session::Change {
+                    path: path.clone(),
+                    added: *added,
+                    removed: *removed,
+                })
+                .collect(),
+        },
+        Step::AgentMessage { text, checks } => ItemKind::AgentMessage {
+            text: text.clone(),
+            checks: checks.clone(),
+        },
+    }
+}
+
+pub struct StartArgs {
+    pub dir: PathBuf,
+    pub id: String,
+    pub project: PathBuf,
+    pub message: String,
+    pub provider: Option<agent::Provider>,
+    pub permission: Permission,
+    pub fallback_to_local: bool,
+    pub max_output_tokens: u32,
+    pub extended_thinking: bool,
+}
+
+pub fn start(app: &AppHandle, runs: &Runs, approvals: &Approvals, args: StartArgs) -> Result<(), String> {
+    if !runs.begin(&args.id) {
+        return Err("this session already has a run in flight".to_owned());
+    }
+
+    let app = app.clone();
+    let runs = runs.clone();
+    let approvals = approvals.clone();
+
+    thread::spawn(move || {
+        let notify = |event: RunEvent| {
+            let _ = app.emit("run:event", event);
+        };
+
+        notify(RunEvent::TurnStarted { session: args.id.clone() });
+
+        let alive_id = args.id.clone();
+        let alive_runs = runs.clone();
+        let alive = move || alive_runs.is_live(&alive_id);
+
+        let approve_id = args.id.clone();
+        let approve_approvals = approvals.clone();
+        let approve_app = app.clone();
+        let permission = args.permission;
+        let approve_seq = Arc::new(Mutex::new(0u32));
+        let approve = {
+            let approve_seq = approve_seq.clone();
+            move |kind: StepKind, command: &str| -> bool {
+                if !permission.needs_approval(kind, Some(command)) {
+                    return true;
+                }
+                let mut seq = approve_seq.lock().unwrap_or_else(|p| p.into_inner());
+                *seq += 1;
+                let step = *seq;
+                drop(seq);
+                let (ticket, rx) = approve_approvals.wait_point(&approve_id, step);
+                let reason = agent::dangerous_reason(command).unwrap_or("需要确认");
+                let _ = approve_app.emit(
+                    "run:event",
+                    RunEvent::ApprovalRequest {
+                        session: approve_id.clone(),
+                        step,
+                        kind: step_kind_label(kind).to_owned(),
+                        detail: format!("{command}  ·  {reason}"),
+                    },
+                );
+                let decided = rx.recv_timeout(Duration::from_secs(300)).unwrap_or(false);
+                drop(ticket);
+                decided
+            }
+        };
+
+        let record_id = args.id.clone();
+        let record_dir = args.dir.clone();
+        let record_runs = runs.clone();
+        let record_app = app.clone();
+        let mut seq = 0u32;
+        // id of the in-flight started step, if any
+        let mut open_id: Option<u32> = None;
+
+        let mut sink = move |event: SinkEvent| -> bool {
+            if !record_runs.is_live(&record_id) {
+                return false;
+            }
+            match event {
+                SinkEvent::Started { step } => {
+                    seq += 1;
+                    open_id = Some(seq);
+                    let at = session::now();
+                    let running_item = Item {
+                        id: seq,
+                        at,
+                        status: Status::Running,
+                        duration_ms: None,
+                        kind: to_item_kind(&step.running()),
+                    };
+                    if session::record_item(&record_dir, &record_id, &running_item, Phase::Started).is_err() {
+                        return false;
+                    }
+                    let _ = record_app.emit(
+                        "run:event",
+                        RunEvent::ItemStarted { session: record_id.clone(), item: ItemView::from(running_item) },
+                    );
+                    record_runs.is_live(&record_id)
+                }
+                SinkEvent::Finished { step, duration_ms, denied } => {
+                    let id = open_id.take().unwrap_or_else(|| {
+                        seq += 1;
+                        seq
+                    });
+                    let at = session::now();
+                    if denied {
+                        let failed = Item {
+                            id,
+                            at,
+                            status: Status::Failed,
+                            duration_ms: Some(duration_ms),
+                            kind: to_item_kind(&step),
+                        };
+                        if session::record_item(&record_dir, &record_id, &failed, Phase::Failed).is_err() {
+                            return false;
+                        }
+                        let _ = record_app.emit(
+                            "run:event",
+                            RunEvent::ItemCompleted { session: record_id.clone(), item: ItemView::from(failed) },
+                        );
+                        return record_runs.is_live(&record_id);
+                    }
+
+                    let finished_item = Item {
+                        id,
+                        at,
+                        status: Status::Done,
+                        duration_ms: Some(duration_ms),
+                        kind: to_item_kind(&step),
+                    };
+                    if session::record_item(&record_dir, &record_id, &finished_item, Phase::Completed).is_err() {
+                        return false;
+                    }
+                    let _ = record_app.emit(
+                        "run:event",
+                        RunEvent::ItemCompleted { session: record_id.clone(), item: ItemView::from(finished_item) },
+                    );
+                    record_runs.is_live(&record_id)
+                }
+            }
+        };
+
+        let request = agent::RunRequest {
+            project: args.project.clone(),
+            message: args.message.clone(),
+            provider: args.provider.clone(),
+            permission: args.permission,
+            fallback_to_local: args.fallback_to_local,
+            max_output_tokens: args.max_output_tokens,
+            extended_thinking: args.extended_thinking,
+        };
+
+        let result = agent::run(&request, &alive, &approve, &mut sink);
+        approvals.clear_session(&args.id);
+
+        match result {
+            Ok(()) => {
+                if !runs.is_live(&args.id) {
+                    let _ = session::record_stopped(&args.dir, &args.id, session::now());
+                    notify(RunEvent::Stopped { session: args.id.clone() });
+                } else if session::record_turn_complete(&args.dir, &args.id, session::now()).is_err() {
+                    notify(RunEvent::Error {
+                        session: args.id.clone(),
+                        message: "failed to mark the turn complete".to_owned(),
+                    });
+                } else {
+                    notify(RunEvent::TurnComplete { session: args.id.clone() });
+                }
+            }
+            Err(error) => {
+                let _ = session::record_error(&args.dir, &args.id, session::now(), &error);
+                notify(RunEvent::Error { session: args.id.clone(), message: error });
+            }
+        }
+        runs.cancel(&args.id);
+    });
+
+    Ok(())
+}
+
+/// Secure-by-default: missing or unknown permission means Ask.
+pub fn permission_from_settings(value: Option<String>) -> Permission {
+    value.map(|raw| Permission::parse(&raw)).unwrap_or(Permission::Ask)
+}

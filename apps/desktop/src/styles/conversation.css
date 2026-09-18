@@ -1,0 +1,432 @@
+.conv-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 64px;
+}
+
+.conv-head > svg {
+  color: var(--kodo-text-secondary);
+}
+
+.conv-title {
+  font-size: var(--kodo-font-title);
+  font-weight: 600;
+}
+
+/* The head row is sized by its text; the 36px avatar overflows it
+   symmetrically, which is what keeps the message blocks compact. */
+.msg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 18px;
+  margin-bottom: 8px;
+}
+
+.msg-author {
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+}
+
+.msg-time {
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-sm);
+}
+
+.msg-user {
+  margin-bottom: 14px;
+}
+
+.msg-bubble {
+  margin-left: 34px;
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-surface);
+  font-size: var(--kodo-font-chat);
+  line-height: 1.5;
+}
+
+.reply-working {
+  margin: 0 0 8px 34px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+}
+
+/* A run that stopped partway leaves a step started and never finished. Saying
+   so is the point: the alternative is a reply that looks complete or one that
+   claims to still be working. */
+.reply-interrupted {
+  margin: 0 0 8px 34px;
+  color: var(--kodo-warning);
+  font-size: var(--kodo-font-md);
+}
+
+/* ---------------------------------------------------------------- trace -- */
+
+/* `padding: 0` clears the ordered list's default 40px inline start, which
+   otherwise shifts every step to the right of the answer text. */
+.trace {
+  margin: 0 0 12px 22px;
+  padding: 0;
+  list-style: none;
+}
+
+.trace-row {
+  display: flex;
+}
+
+/* The row's own hit area. It wraps the gutter chevron and the step content so
+   that a click anywhere on the line opens the step, while the expanded block
+   stays a sibling flex item rather than being nested inside a control. */
+.trace-row-inner {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  border-radius: var(--kodo-radius);
+  cursor: pointer;
+}
+
+.trace-row-inner:hover .trace-toggle svg,
+.trace-row-inner:hover .trace-disclosure svg {
+  color: var(--kodo-text);
+}
+
+.trace-row-inner:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 2px;
+}
+
+/* The disclosure sits outside the step content, in the gutter left of the
+   status marks. The reference draws no rule between them. */
+.trace-toggle {
+  width: 22px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--kodo-text-muted);
+}
+
+.trace-line {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 0 8px 10px;
+}
+
+.trace-mark {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+}
+
+.trace-mark--done {
+  background: var(--kodo-success);
+  color: #fff;
+}
+
+.trace-mark--failed {
+  background: var(--kodo-error);
+}
+
+.trace-mark--running {
+  border: 2px solid var(--kodo-accent);
+  border-top-color: transparent;
+}
+
+/* The reference lets each step's content follow its own label rather than
+   aligning every row to a shared label column. */
+.trace-label {
+  flex: none;
+  font-size: var(--kodo-font-md);
+  font-weight: 500;
+}
+
+.trace-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.trace-detail {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trace-tokens {
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+}
+
+/* The reference stacks this console output on a 16px line box inside a filled
+   block. `max-width` is what keeps the reference's longest line unwrapped and
+   leaves the step's detail room to sit beside the box. */
+.trace-output {
+  flex: none;
+  max-width: 340px;
+  max-height: 72px;
+  overflow: hidden;
+  margin: 4px 0;
+  padding: 5px 10px;
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-hover);
+  color: var(--kodo-text-secondary);
+  font-family: var(--kodo-font-mono);
+  font-size: 9px;
+  line-height: 16px;
+  white-space: pre-wrap;
+}
+
+.trace-duration {
+  width: 42px;
+  flex: none;
+  text-align: right;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-sm);
+}
+
+.trace-disclosure {
+  width: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--kodo-text-muted);
+}
+
+/* --------------------------------------------------------------- answer -- */
+
+.final {
+  margin-left: 46px;
+}
+
+.final-text {
+  margin-bottom: 12px;
+  font-size: var(--kodo-font-chat);
+  line-height: 1.7;
+}
+
+.checks {
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+}
+
+.checks-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--kodo-success);
+  font-size: var(--kodo-font-chat);
+  font-weight: 600;
+}
+
+.checks-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--kodo-font-chat);
+  line-height: 1.5;
+}
+
+.disclosure {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+}
+
+.disclosure:hover {
+  background: var(--kodo-hover);
+}
+
+.changed-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 30px;
+  padding: 0 12px;
+  margin-top: 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+}
+
+.changed-summary > svg {
+  color: var(--kodo-text-secondary);
+}
+
+.changed-count {
+  font-size: var(--kodo-font-md);
+}
+
+.changed-summary .btn {
+  margin-left: auto;
+}
+
+/* ------------------------------------------------------------- composer -- */
+
+.composer {
+  flex: none;
+  padding: 8px 20px 16px;
+}
+
+.composer-box {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: var(--kodo-radius-popover);
+  background: var(--kodo-canvas);
+  overflow: hidden;
+}
+
+/* ── Row 1: textarea ─────────────────────────────────────────────────────── */
+
+.composer-row {
+  padding: 12px 14px 4px;
+}
+
+/* A textarea so a draft can hold more than one line. It grows with its content
+   up to `MAX_HEIGHT` in Composer.tsx and scrolls past that, which is what the
+   `resize: none` and the scrollbar-free default would otherwise fight. */
+.composer-input {
+  width: 100%;
+  min-height: 24px;
+  max-height: 160px;
+  border: 0;
+  outline: none;
+  background: none;
+  font: inherit;
+  font-size: var(--kodo-font-chat);
+  line-height: 1.5;
+  resize: none;
+  overflow-y: auto;
+}
+
+.composer-input::placeholder {
+  color: var(--kodo-text-muted);
+}
+
+/* ── Row 2: controls bar ─────────────────────────────────────────────────── */
+
+.composer-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px 8px;
+  min-height: 36px;
+}
+
+.composer-left,
+.composer-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── Permission trigger (dropdown style) ─────────────────────────────────── */
+
+.composer-perm-trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--kodo-radius-sm);
+  background: none;
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+
+.composer-perm-trigger:hover {
+  background: var(--kodo-hover);
+}
+
+/* ── Model picker ─────────────────────────────────────────────────────────── */
+
+/* The picker opens upward: the composer sits at the bottom of the window. */
+.composer-box .menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.composer-model {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text);
+  white-space: nowrap;
+  border-radius: var(--kodo-radius-sm);
+}
+
+.composer-model:hover {
+  background: var(--kodo-hover);
+}
+
+.composer-model svg:last-child {
+  color: var(--kodo-text-muted);
+}
+
+/* ── Menu separator ───────────────────────────────────────────────────────── */
+
+.menu-separator {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--kodo-border);
+}
+
+/* ── Menu item hint ───────────────────────────────────────────────────────── */
+
+.menu-item-hint {
+  margin-left: auto;
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-muted);
+  font-family: var(--kodo-font-mono);
+}
+
+/* ── Send / stop button ──────────────────────────────────────────────────── */
+
+.composer-send {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-accent);
+  color: #fff;
+}
+
+/* An empty draft cannot be sent, and the button should not look as if it can. */
+.composer-send:disabled {
+  background: var(--kodo-border-strong);
+  color: var(--kodo-canvas);
+  cursor: default;
+}
+
+.composer-send--stop {
+  background: var(--kodo-text);
+}

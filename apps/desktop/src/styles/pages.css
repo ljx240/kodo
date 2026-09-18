@@ -1,0 +1,542 @@
+/* -------------------------------------------------------- response trace -- */
+
+.reply-card {
+  margin: 28px 0 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+}
+
+.reply-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 21px 18px 10px;
+}
+
+.reply-mark {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  margin-right: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+.reply-card-title {
+  font-size: var(--kodo-font-title);
+  font-weight: 600;
+}
+
+/* The reference indents the metadata to the card title's left edge and sizes
+   the summary column against it, rather than splitting the row in half. */
+.reply-card-body {
+  display: grid;
+  grid-template-columns: 2fr 3fr;
+  gap: 19px;
+  padding: 2px 18px 18px 76px;
+}
+
+.reply-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+}
+
+/* The reference sets the metadata a step below the primary UI text and the
+   summary body a step below that, which is what holds the card to ~196px. */
+.reply-meta-row {
+  display: grid;
+  grid-template-columns: 71px minmax(0, 1fr);
+  gap: 0;
+  align-items: center;
+  min-height: 24px;
+  font-size: var(--kodo-font-sm);
+}
+
+.reply-meta-row dt {
+  color: var(--kodo-text-secondary);
+}
+
+.reply-meta-row dd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+}
+
+.copied-hint {
+  color: var(--kodo-success);
+  font-size: var(--kodo-font-xs);
+}
+
+.reply-summary {
+  padding: 12px 14px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-surface);
+}
+
+.reply-summary h4 {
+  margin-bottom: 8px;
+  font-size: var(--kodo-font-xs);
+  font-weight: 600;
+}
+
+.reply-summary p {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  line-height: 22px;
+}
+
+.page-tabs {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 15px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.page-tab {
+  height: 36px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  border-bottom: 2px solid transparent;
+}
+
+.artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.page-tab--active {
+  color: var(--kodo-text);
+  font-weight: 500;
+  border-bottom-color: var(--kodo-accent);
+}
+
+.timeline {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--kodo-font-md);
+}
+
+.timeline th {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--kodo-border);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  text-align: left;
+}
+
+/* The reference draws these rows on a 60px pitch. */
+.timeline td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--kodo-border);
+  vertical-align: middle;
+}
+
+.timeline .col-n {
+  width: 44px;
+  color: var(--kodo-text-muted);
+}
+
+.timeline .col-time {
+  width: 92px;
+}
+
+.timeline .col-duration {
+  width: 90px;
+}
+
+.timeline .col-type {
+  width: 134px;
+}
+
+.tl-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tl-note {
+  margin-top: 4px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.tl-ok {
+  display: grid;
+  place-items: center;
+  color: var(--kodo-success);
+}
+
+.type-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.type-pill svg {
+  color: var(--kodo-text-muted);
+}
+
+.type-pill--thinking svg,
+.type-pill--output svg,
+.type-pill--model svg {
+  color: var(--kodo-accent);
+}
+
+.type-pill--finalize svg {
+  color: var(--kodo-success);
+}
+
+/* --------------------------------------------------------------- archive -- */
+
+/* The reference leaves a 10px gap between the page header rule and the
+   archive search field. */
+.page-inner > .search-field:first-child {
+  margin-top: 10px;
+}
+
+.search-field + .filters {
+  margin-top: 14px;
+}
+
+.filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 201px;
+}
+
+.field-label {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+/* The reference draws a filled header band and rows on a 35px pitch. Its cells
+   carry no horizontal padding: the text starts on the column boundary and the
+   column widths are what hold the gaps. Columns are fixed so the conversation
+   title and summary truncate instead of wrapping the row taller. */
+.archive-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: var(--kodo-font-md);
+}
+
+.archive-table th {
+  height: 35px;
+  padding: 0;
+  border-bottom: 1px solid var(--kodo-border);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  text-align: left;
+}
+
+.archive-table td {
+  height: 35px;
+  padding: 0;
+  border-bottom: 1px solid #f2f4f7;
+  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.archive-table th:nth-child(1) { width: 42px; }
+.archive-table th:nth-child(2) { width: 194px; }
+.archive-table th:nth-child(3) { width: 210px; }
+.archive-table th:nth-child(4) { width: 112px; }
+.archive-table th:nth-child(5) { width: 100px; }
+.archive-table th:nth-child(6) { width: 98px; }
+.archive-table th:nth-child(7) { width: 107px; }
+.archive-table th:nth-child(8) { width: 33px; }
+
+.archive-table .row--selected {
+  background: var(--kodo-selected);
+}
+
+/* The reference colours the selected row's conversation title with the accent,
+   the same way the sidebar marks the open conversation. */
+.archive-table .row--selected .arc-title {
+  color: var(--kodo-accent);
+}
+
+.archive-table .row--selected .arc-title svg {
+  color: var(--kodo-accent);
+}
+
+.arc-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.arc-title svg {
+  flex: none;
+  color: var(--kodo-text-secondary);
+}
+
+.arc-summary {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.table-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 16px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.page-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  font-size: var(--kodo-font-sm);
+}
+
+.page-btn--active {
+  border-color: transparent;
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+/* -------------------------------------------------------------- settings -- */
+
+/* A category column and the detail beside it. The column is fixed so switching
+   categories never moves the text the user is reading. */
+.settings-layout {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.settings-nav {
+  flex: none;
+  width: 208px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 12px;
+  border-right: 1px solid var(--kodo-border);
+  overflow-y: auto;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--kodo-radius);
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  text-align: left;
+}
+
+.settings-nav-item svg {
+  flex: none;
+  color: var(--kodo-text-secondary);
+}
+
+.settings-nav-item:hover {
+  background: var(--kodo-hover);
+}
+
+.settings-nav-item--active {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-weight: 500;
+}
+
+.settings-nav-item--active svg {
+  color: var(--kodo-accent);
+}
+
+.settings-detail {
+  margin-top: 16px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+}
+
+.settings-section-head {
+  display: flex;
+  gap: 10px;
+  padding: 14px 16px 10px;
+}
+
+/* The reference colours both the card glyph and the per-row glyphs with the
+   accent rather than the muted UI grey. */
+.settings-card-icon {
+  margin-top: 1px;
+  color: var(--kodo-accent);
+}
+
+/* Measured off the reference, a step above the 13px UI text but below the
+   18px page title. */
+.settings-section-head h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+/* The reference sets the card subtitle at the UI text size, not a step below. */
+.settings-section-head p {
+  margin-top: 2px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+}
+
+.settings-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  padding: 2px 16px 16px;
+}
+
+.setting-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+}
+
+/* The reference puts the label above a control that spans the row, as it does
+   for the database path, and stacks the three lines tight against each other. */
+.setting-row--stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+.setting-row--stacked .setting-text {
+  flex: none;
+}
+
+.setting-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The reference sets setting labels at the UI text size. */
+.setting-label {
+  font-size: var(--kodo-font-md);
+}
+
+/* The reference sets these hints a step below the 11px metadata: its approval and
+   git hints measure 213px and 214px of ink against 233px and 235px rendered at
+   11px, which is what keeps them on one line beside their selects. */
+.setting-hint {
+  color: var(--kodo-text-muted);
+  font-size: 10px;
+}
+
+.setting-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--kodo-accent);
+}
+
+/* The control column hugs its content — that is what keeps the Tools &
+   Permissions hints, which sit beside it, on one line. The reference gives the
+   select and slider rows, whose hint sits underneath, a fixed column instead. */
+.setting-control {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.setting-control--wide {
+  width: 215px;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.slider {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--kodo-accent);
+}
+
+.slider-value {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.action-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.action-tile {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  text-align: left;
+}
+
+.action-tile svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--kodo-text-secondary);
+}
+
+.action-tile--danger svg {
+  color: var(--kodo-error);
+}
+
+.action-title {
+  display: block;
+  font-size: var(--kodo-font-md);
+}
+
+.action-tile--danger .action-title {
+  color: var(--kodo-error);
+}
+
+/* The reference sets this line below the 11px micro metadata. */
+.action-sub {
+  display: block;
+  color: var(--kodo-text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}

@@ -1,0 +1,402 @@
+.inspector {
+  flex: none;
+  display: flex;
+  border-left: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.ins-rail {
+  width: var(--kodo-inspector-rail-width);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 12px;
+  border-right: 1px solid var(--kodo-border);
+}
+
+.rail-btn {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--kodo-radius);
+  color: var(--kodo-text-secondary);
+}
+
+.rail-btn:hover {
+  background: var(--kodo-hover);
+}
+
+.rail-btn--active {
+  color: var(--kodo-accent);
+}
+
+/* The reference draws the active section as a filled accent disc with a
+   knocked-out glyph. */
+.rail-btn--active svg {
+  border-radius: 50%;
+  background: var(--kodo-accent);
+  color: #fff;
+}
+
+.ins-panel {
+  width: var(--kodo-inspector-width);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.ins-panel-head {
+  display: flex;
+  align-items: center;
+  height: 63px;
+  flex: none;
+  padding: 0 12px 0 16px;
+}
+
+/* The reference measures this title a step above the primary UI text. */
+.ins-panel-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.ins-tabs {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  height: 37px;
+  flex: none;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.ins-tab {
+  position: relative;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--kodo-radius-sm);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+}
+
+/* Active tabs carry both the pill and the bar the reference draws under it. */
+.ins-tab--active::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -3px;
+  left: 0;
+  height: 3px;
+  background: var(--kodo-accent);
+}
+
+.ins-tab:hover {
+  background: var(--kodo-hover);
+}
+
+/* Refs 02–04 set the section switcher as chips on the panel's title row, with no
+   rule under them; the conversation keeps the tab bar instead. */
+.ins-panel-head--chips {
+  height: 44px;
+  padding: 0 12px 0 10px;
+}
+
+.ins-tabs--chips {
+  height: auto;
+  gap: 10px;
+  padding: 0;
+  border-bottom: 0;
+}
+
+.ins-tabs--chips .ins-tab {
+  height: 28px;
+  border: 1px solid transparent;
+  color: var(--kodo-text);
+}
+
+.ins-tabs--chips .ins-tab--active {
+  background: var(--kodo-canvas);
+  border-color: var(--kodo-accent);
+}
+
+.ins-tabs--chips .ins-tab--active::after {
+  display: none;
+}
+
+.ins-tab--active {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-weight: 500;
+}
+
+.ins-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 14px 24px;
+}
+
+.ins-section {
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+}
+
+.ins-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 12px;
+}
+
+.ins-section-head--toggle {
+  cursor: pointer;
+}
+
+.ins-section-head h3 {
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+}
+
+.ins-section-icon {
+  display: grid;
+  place-items: center;
+  color: var(--kodo-text-secondary);
+}
+
+.ins-badge {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+}
+
+.ins-chevron {
+  color: var(--kodo-text-muted);
+}
+
+.ins-time {
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-sm);
+}
+
+.ins-body {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 3px 12px 11px;
+}
+
+.meta-row {
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  font-size: var(--kodo-font-sm);
+}
+
+.meta-label {
+  color: var(--kodo-text-secondary);
+}
+
+.meta-value {
+  min-width: 0;
+}
+
+.meta-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.meta-project svg {
+  color: var(--kodo-text-muted);
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--kodo-font-sm);
+}
+
+.file-icon {
+  flex: none;
+  color: var(--kodo-text-muted);
+}
+
+.file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+}
+
+.tool-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--kodo-font-sm);
+}
+
+.tool-icon {
+  flex: none;
+  color: var(--kodo-text-secondary);
+}
+
+.tool-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-count {
+  color: var(--kodo-text-muted);
+}
+
+.ins-link {
+  display: block;
+  width: 100%;
+  padding: 9px 12px;
+  border-top: 1px solid var(--kodo-border);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  text-align: left;
+}
+
+.ins-note {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.6;
+}
+
+.ins-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.ins-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+}
+
+.ins-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.llm-call {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.llm-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--kodo-font-sm);
+}
+
+.llm-icon {
+  color: var(--kodo-accent);
+}
+
+.llm-index {
+  color: var(--kodo-text-muted);
+}
+
+.llm-model {
+  flex: 1;
+  min-width: 0;
+}
+
+.llm-duration,
+.llm-time {
+  color: var(--kodo-text-muted);
+}
+
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-toolbar .select {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  font-size: var(--kodo-font-sm);
+}
+
+.terminal-exit {
+  color: var(--kodo-success);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+}
+
+.terminal-block {
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.terminal-block--tall {
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.project-name {
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+}
+
+.project-path {
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-xs);
+}
+
+.quick-action {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: var(--kodo-font-sm);
+}
+
+.quick-action svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--kodo-text-secondary);
+}
+
+.quick-action--danger svg {
+  color: var(--kodo-error);
+}
+
+.quick-title {
+  display: block;
+  color: var(--kodo-text);
+}
+
+.quick-sub {
+  display: block;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-xs);
+}

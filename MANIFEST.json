@@ -1,0 +1,26 @@
+{
+  "name": "Kodo UI Implementation Pack",
+  "version": "1.0",
+  "primary_viewport": "1586x992",
+  "references": [
+    "01-conversation-main.png",
+    "02-response-trace.png",
+    "03-archive.png",
+    "04-settings.png",
+    "05-conversation-alt.png"
+  ],
+  "documents": [
+    "CLAUDE.md",
+    "README.md",
+    "demo/conversation.fixture.json",
+    "docs/design/COMPONENTS.md",
+    "docs/design/DEMO_DATA.md",
+    "docs/design/DESIGN.md",
+    "docs/design/LAYOUT.md",
+    "docs/design/TOKENS.css",
+    "docs/design/UI_ACCEPTANCE.md",
+    "prompts/CLAUDE_UI_IMPLEMENTATION.md",
+    "skills/kodo-ui/SKILL.md",
+    "tests/visual/README.md"
+  ]
+}

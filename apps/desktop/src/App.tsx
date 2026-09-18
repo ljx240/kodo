@@ -1,0 +1,248 @@
+import { useCallback, useEffect, useState } from "react";
+import { coreInfo, gitBranch, setting, setSetting } from "./api";
+import { conversation, project as fixtureProject } from "./data/fixture";
+import { DEFAULT_MODEL, MODEL_SETTING, MODELS } from "./data/models";
+import { type ProviderConfig, loadProviders, loadActiveIndex, saveActiveIndex } from "./data/providers";
+import { useSetting } from "./data/useSetting";
+import type { LiveSnapshot } from "./data/liveContext";
+import { useWorkspace } from "./data/workspace";
+import { navigate, useRoute } from "./routes";
+import { Sidebar } from "./shell/Sidebar";
+import { Inspector, type InspectorTab } from "./inspector/Inspector";
+import type { ArchiveSelection } from "./inspector/ArchiveInspector";
+import { ArchivePage } from "./pages/ArchivePage";
+import { ConversationPage } from "./pages/ConversationPage";
+import { SettingsPage } from "./pages/SettingsPage";
+import { TracePage } from "./pages/TracePage";
+import { TopBar } from "./shell/TopBar";
+
+export function App() {
+  const route = useRoute();
+  const workspace = useWorkspace(route.demo);
+
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(() =>
+    route.demo ? conversation.id : null,
+  );
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(() =>
+    route.demo ? fixtureProject.id : null,
+  );
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("summary");
+  const [coreVersion, setCoreVersion] = useState<string | null>(null);
+  const [model, setModel] = useState(DEFAULT_MODEL);
+  const [branch, setBranch] = useState<string | null>(null);
+  const [archiveSelection, setArchiveSelection] = useState<ArchiveSelection>(null);
+  const [archiveReload, setArchiveReload] = useState(0);
+  const [liveSnapshot, setLiveSnapshot] = useState<LiveSnapshot | null>(null);
+
+  const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  const [activeProviderIndex, setActiveProviderIndex] = useState(0);
+  const [autoGitBranch] = useSetting("auto-detect-git-branch", "true");
+
+  const onSnapshot = useCallback((snapshot: LiveSnapshot | null) => {
+    setLiveSnapshot(snapshot);
+  }, []);
+
+  useEffect(() => {
+    setActiveConversationId(route.demo ? conversation.id : null);
+    setActiveProjectId(route.demo ? fixtureProject.id : null);
+  }, [route.demo]);
+
+  const reloadProviders = useCallback(() => {
+    void loadProviders().then((list) => {
+      setProviders(list);
+      void loadActiveIndex().then((idx) => {
+        const index = idx < list.length ? idx : 0;
+        setActiveProviderIndex(index);
+        const active = list[index];
+        if (active?.model) setModel(active.model);
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    void coreInfo()
+      .catch(() => null)
+      .then((info) => setCoreVersion(info ? `${info.name} ${info.version}` : null));
+
+    void setting(MODEL_SETTING).then((stored) => {
+      if (stored && MODELS.includes(stored)) setModel(stored);
+    });
+
+    reloadProviders();
+  }, [reloadProviders]);
+
+  const owner = workspace.projects.find((project) =>
+    project.conversations.some((item) => item.id === activeConversationId),
+  );
+  const activeProject =
+    owner ?? workspace.projects.find((project) => project.id === activeProjectId) ?? workspace.projects[0] ?? null;
+
+  useEffect(() => {
+    if (route.demo) {
+      setBranch(fixtureProject.branch);
+      return;
+    }
+    if (!activeProject?.path || autoGitBranch !== "true") {
+      setBranch(null);
+      return;
+    }
+
+    let alive = true;
+    void gitBranch(activeProject.path).then((found) => {
+      if (alive) setBranch(found);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [route.demo, activeProject?.path, autoGitBranch]);
+
+  const selectModel = (name: string) => {
+    setModel(name);
+    void setSetting(MODEL_SETTING, name);
+  };
+
+  const selectProvider = (index: number) => {
+    setActiveProviderIndex(index);
+    void saveActiveIndex(index);
+    const p = providers[index];
+    if (p?.model) {
+      setModel(p.model);
+      void setSetting(MODEL_SETTING, p.model);
+    }
+  };
+
+  const newChat = async (projectPath?: string) => {
+    const path = projectPath ?? activeProject?.path;
+    if (!path) return;
+    const id = await workspace.startSession(path);
+    if (id) {
+      setActiveConversationId(id);
+      setActiveProjectId(path);
+    }
+  };
+
+  const setInspectorOpen = (open: boolean) =>
+    navigate(open ? location.pathname : `${location.pathname}?inspector=closed`);
+
+  const openFiles = () => {
+    setInspectorTab("files");
+    setInspectorOpen(true);
+  };
+
+  const openTrace = () => {
+    navigate(workspace.live ? "/trace" : "/ui-demo/trace");
+  };
+
+  const restoreArchive = async (id: string) => {
+    await workspace.restore(id);
+    setArchiveSelection(null);
+    setArchiveReload((n) => n + 1);
+    await workspace.refresh();
+  };
+
+  const activeProvider = providers[activeProviderIndex] ?? null;
+  const projectName = activeProject?.name ?? (route.demo ? fixtureProject.name : "未选择项目");
+
+  return (
+    <div
+      className="app"
+      data-core={coreVersion ?? undefined}
+      data-density={undefined}
+    >
+      <Sidebar
+        route={route.name}
+        inspectorOpen={route.inspectorOpen}
+        activeConversationId={activeConversationId}
+        onSelectConversation={setActiveConversationId}
+        onStartConversation={(path) => void newChat(path)}
+        workspace={workspace}
+      />
+
+      <div className="content">
+        {route.name === "conversation" && (
+          <TopBar
+            projects={workspace.projects}
+            activeProjectId={activeProject?.id ?? null}
+            onSelectProject={setActiveProjectId}
+            projectName={projectName}
+            branch={branch}
+            provider={activeProvider}
+            onNewChat={(path) => void newChat(path)}
+            inspectorOpen={route.inspectorOpen}
+            onToggleInspector={() => setInspectorOpen(!route.inspectorOpen)}
+          />
+        )}
+
+        <div className="content-body">
+          {route.name === "conversation" && (
+            <ConversationPage
+              conversationId={activeConversationId}
+              provider={activeProvider}
+              providers={providers}
+              onSelectProvider={selectProvider}
+              onViewFiles={openFiles}
+              onOpenTrace={openTrace}
+              onSnapshot={onSnapshot}
+              projectName={projectName}
+              projectPath={activeProject?.path ?? ""}
+              onRetitle={async (id, title) => {
+                await workspace.retitle(id, title);
+              }}
+              onArchive={async (id) => {
+                await workspace.archive(id);
+                setActiveConversationId(null);
+                setArchiveReload((n) => n + 1);
+              }}
+            />
+          )}
+          {route.name === "trace" && (
+            <TracePage demo={route.demo} conversationId={activeConversationId} />
+          )}
+          {route.name === "archive" && (
+            <ArchivePage
+              demo={route.demo}
+              selectedId={archiveSelection?.id ?? null}
+              reloadToken={archiveReload}
+              onSelect={setArchiveSelection}
+            />
+          )}
+          {route.name === "settings" && (
+            <SettingsPage
+              model={model}
+              onSelectModel={selectModel}
+              onProvidersSaved={(list) => {
+                setProviders(list);
+                void loadActiveIndex().then((idx) => {
+                  const index = idx < list.length ? idx : 0;
+                  setActiveProviderIndex(index);
+                  const active = list[index];
+                  if (active?.model) {
+                    setModel(active.model);
+                    void setSetting(MODEL_SETTING, active.model);
+                  }
+                });
+              }}
+            />
+          )}
+
+          <Inspector
+            route={route.name}
+            open={route.inspectorOpen}
+            tab={inspectorTab}
+            onSelectTab={setInspectorTab}
+            onOpen={() => setInspectorOpen(true)}
+            onClose={() => setInspectorOpen(false)}
+            demo={route.demo}
+            live={liveSnapshot}
+            archiveSelection={archiveSelection}
+            onArchiveRestore={() => {
+              if (!archiveSelection) return;
+              void restoreArchive(archiveSelection.id);
+            }}
+            onOpenTrace={openTrace}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,48 @@
+:root {
+  --kodo-canvas: #ffffff;
+  --kodo-sidebar: #fafbfc;
+  --kodo-surface: #f7f8fa;
+  --kodo-hover: #f3f6fa;
+  --kodo-selected: #eef5ff;
+
+  --kodo-border: #e5e9f0;
+  --kodo-border-strong: #d7dee8;
+
+  --kodo-text: #172033;
+  --kodo-text-secondary: #667085;
+  --kodo-text-muted: #98a2b3;
+
+  --kodo-accent: #2563eb;
+  --kodo-accent-hover: #1d4ed8;
+  --kodo-success: #16a34a;
+  --kodo-warning: #d97706;
+  --kodo-error: #dc2626;
+
+  --kodo-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --kodo-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  --kodo-font-xs: 11px;
+  --kodo-font-sm: 12px;
+  --kodo-font-md: 13px;
+  --kodo-font-chat: 14px;
+  --kodo-font-title: 18px;
+
+  --kodo-radius-sm: 4px;
+  --kodo-radius: 6px;
+  --kodo-radius-popover: 8px;
+
+  --kodo-sidebar-width: 260px;
+  --kodo-inspector-width: 330px;
+  --kodo-inspector-rail-width: 40px;
+  --kodo-topbar-height: 44px;
+  --kodo-control-height: 32px;
+
+  --kodo-space-1: 2px;
+  --kodo-space-2: 4px;
+  --kodo-space-3: 6px;
+  --kodo-space-4: 8px;
+  --kodo-space-5: 12px;
+  --kodo-space-6: 16px;
+  --kodo-space-7: 20px;
+  --kodo-space-8: 24px;
+}

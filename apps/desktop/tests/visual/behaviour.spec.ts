@@ -1,0 +1,306 @@
+import { expect, test } from "@playwright/test";
+import { emit, project, sessionRef, stubShell } from "./shell";
+
+test("a step row opens from anywhere along it, not just its chevron", async ({ page }) => {
+  await page.goto("/ui-demo/conversation");
+  await page.waitForSelector(".trace-row");
+
+  const rows = page.locator(".trace-row");
+  await expect(rows).toHaveCount(7);
+
+  await expect(page.locator(".trace-output")).toHaveCount(2);
+
+  const first = rows.first();
+  await first.locator(".trace-label").click();
+  await expect(page.locator(".trace-output")).toHaveCount(3);
+
+  await first.locator(".trace-label").click();
+  await expect(page.locator(".trace-output")).toHaveCount(2);
+
+  await first.locator(".trace-row-inner").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".trace-output")).toHaveCount(3);
+
+  // Space toggles the row the same way Enter does.
+  await page.keyboard.press(" ");
+  await expect(page.locator(".trace-output")).toHaveCount(2);
+  await page.keyboard.press(" ");
+  await expect(page.locator(".trace-output")).toHaveCount(3);
+});
+
+test("every row reports whether it is open", async ({ page }) => {
+  await page.goto("/ui-demo/conversation");
+  await page.waitForSelector(".trace-row");
+
+  await expect(page.locator(".trace-row-inner[aria-expanded]")).toHaveCount(7);
+  await expect(page.locator('.trace-row-inner[aria-expanded="true"]')).toHaveCount(2);
+});
+
+test("the composer sends on Enter, clears, and stops claiming to be working", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: { id: "s1", project: "/tmp/ws/alpha", title: "修复路由", at: 1_700_000_000, archived: false, turns: [] },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+  await expect(page.locator(".conv-title")).toHaveText("修复路由");
+
+  await expect(page.locator(".empty-note")).toBeVisible();
+
+  const composer = page.locator(".composer-input");
+  await expect(page.locator(".composer-send")).toBeDisabled();
+
+  await composer.fill("帮我看一下未知表路由");
+  await expect(page.locator(".composer-send")).toBeEnabled();
+  await composer.press("Enter");
+
+  await expect(page.locator(".msg-bubble")).toHaveText("帮我看一下未知表路由");
+  await expect(composer).toHaveValue("");
+
+  await expect(page.locator(".reply-working")).toBeVisible();
+  await expect(page.locator(".composer-send--stop")).toBeVisible();
+
+  await page.locator(".composer-send--stop").click();
+});
+
+test("Shift+Enter inserts a newline instead of sending", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: { id: "s1", project: "/tmp/ws/alpha", title: "修复路由", at: 1_700_000_000, archived: false, turns: [] },
+  });
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+
+  const composer = page.locator(".composer-input");
+  await composer.click();
+  await composer.press("Shift+Enter");
+  await composer.type("line2");
+  await expect(composer).toHaveValue("\nline2");
+});
+
+test("a run draws itself in one step at a time, from the events", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: { id: "s1", project: "/tmp/ws/alpha", title: "修复路由", at: 1_700_000_000, archived: false, turns: [] },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+  await page.locator(".composer-input").fill("跑一下检查");
+  await page.locator(".composer-input").press("Enter");
+
+  const step = {
+    id: 1,
+    at: 1_700_000_000,
+    duration: null,
+    kind: "commandExecution",
+    command: "cargo check",
+    cwd: "/tmp/ws/alpha",
+    output: "",
+    exitCode: null,
+  };
+
+  await emit(page, { type: "itemStarted", session: "s1", item: { ...step, status: "running" } });
+
+  await expect(page.locator(".trace-row")).toHaveCount(1);
+  await expect(page.locator(".trace-mark--running")).toHaveCount(1);
+  await expect(page.locator(".trace-label")).toHaveText("Run command");
+
+  await emit(page, {
+    type: "itemCompleted",
+    session: "s1",
+    item: { ...step, status: "done", duration: 1500, output: "Finished dev profile", exitCode: 0 },
+  });
+
+  await expect(page.locator(".trace-mark--running")).toHaveCount(0);
+  await expect(page.locator(".trace-mark--done")).toHaveCount(1);
+  await expect(page.locator(".trace-duration")).toHaveText("1.5s");
+  await expect(page.locator(".trace-output")).toContainText("Finished dev profile");
+
+  await emit(page, { type: "turnComplete", session: "s1" });
+
+  await expect(page.locator(".reply-working")).toHaveCount(0);
+  await expect(page.locator(".reply-interrupted")).toHaveCount(0);
+});
+
+test("a killed run is reported as interrupted, not as finished or working", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "修复路由",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        {
+          ask: "跑一下检查",
+          items: [{ id: 1, at: 1_700_000_000, status: "running", duration: null, kind: "reasoning", summary: "先看目录" }],
+          done: false,
+          stopped: false,
+          error: null,
+        },
+      ],
+    },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+
+  await expect(page.locator(".trace-mark--running")).toHaveCount(1);
+  await expect(page.locator(".reply-interrupted")).toBeVisible();
+  await expect(page.locator(".reply-working")).toHaveCount(0);
+});
+
+test("the Trace page's three tabs swap the pane, none of them onto nothing", async ({ page }) => {
+  await page.goto("/ui-demo/trace");
+
+  await expect(page.locator(".timeline")).toBeVisible();
+  await expect(page.locator(".artifact-list")).toHaveCount(0);
+
+  await page.locator(".page-tab", { hasText: "Logs" }).click();
+  await expect(page.locator(".timeline")).toHaveCount(0);
+  await expect(page.locator(".page-inner > .terminal-block")).toContainText("10:24:32");
+  await expect(page.locator(".page-tab--active")).toHaveText("Logs");
+
+  await page.locator(".page-tab", { hasText: "Artifacts" }).click();
+  await expect(page.locator(".page-inner > .terminal-block")).toHaveCount(0);
+  await expect(page.locator(".artifact-list .file-row")).toHaveCount(7);
+  await expect(page.locator(".page-tab--active")).toHaveText("Artifacts");
+
+  await page.locator(".page-tab", { hasText: "Timeline" }).click();
+  await expect(page.locator(".timeline")).toBeVisible();
+});
+
+test("live Trace without a session shows empty state, not fixture", async ({ page }) => {
+  await stubShell(page, { workspace: { projects: [], sessions: [] } });
+  await page.goto("/trace");
+  await expect(page.locator(".empty-note")).toContainText("选择一个会话");
+  await expect(page.locator(".timeline")).toHaveCount(0);
+});
+
+test("an Inspector card's chevron opens and closes it", async ({ page }) => {
+  await page.goto("/ui-demo/conversation");
+  await page.locator(".rail-btn").first().click();
+
+  const card = page.locator(".ins-section", { hasText: "Changed files" });
+  const head = card.locator(".ins-section-head");
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  await expect(card.locator(".file-row").first()).toBeVisible();
+
+  await head.click();
+  await expect(head).toHaveAttribute("aria-expanded", "false");
+  await expect(card.locator(".file-row")).toHaveCount(0);
+
+  await head.click();
+  await expect(card.locator(".file-row").first()).toBeVisible();
+});
+
+test("each Settings category swaps the detail pane", async ({ page }) => {
+  await page.goto("/ui-demo/settings");
+
+  const categories = page.locator(".settings-nav-item");
+  await expect(categories).toHaveText([
+    "General",
+    "Models",
+    "AI Provider",
+    "Tools & Permissions",
+    "Projects",
+    "Archive & Storage",
+    "Appearance",
+  ]);
+
+  for (const name of ["Models", "AI Provider", "Tools & Permissions", "Projects", "Archive & Storage", "Appearance", "General"]) {
+    await page.locator(".settings-nav-item", { hasText: name }).click();
+    await expect(page.locator(".settings-detail h2")).toHaveText(name);
+    await expect(page.locator(".settings-detail").locator(".setting-row, .provider-row, .provider-editor, button").first()).toBeVisible();
+  }
+});
+
+test("an approval request is shown and can be allowed or denied", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: { id: "s1", project: "/tmp/ws/alpha", title: "修复路由", at: 1_700_000_000, archived: false, turns: [] },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+  await page.locator(".composer-input").fill("跑一下检查");
+  await page.locator(".composer-input").press("Enter");
+
+  await emit(page, {
+    type: "approvalRequest",
+    session: "s1",
+    step: 1,
+    kind: "run command",
+    detail: "rm -rf build  ·  删除文件",
+  });
+
+  const bar = page.locator(".approval-bar");
+  await expect(bar).toBeVisible();
+  await expect(bar).toContainText("rm -rf build");
+  await bar.locator(".btn:not(.btn--primary)").click();
+  await expect(bar).toHaveCount(0);
+
+  await emit(page, {
+    type: "approvalRequest",
+    session: "s1",
+    step: 2,
+    kind: "run command",
+    detail: "cargo test",
+  });
+  await expect(bar).toBeVisible();
+  await bar.locator(".btn--primary").click();
+  await expect(bar).toHaveCount(0);
+});
+
+test("settings toggles persist through the stubbed settings store", async ({ page }) => {
+  await stubShell(page, { settings: { "auto-detect-git-branch": "false" } });
+  await page.goto("/");
+
+  await page.locator(".sidebar-foot .nav-item").click();
+  await expect(page).toHaveURL(/\/settings$/);
+
+  await page.locator(".settings-nav-item", { hasText: "Projects" }).click();
+  const toggle = page.locator(".settings-detail .toggle").first();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+});
+
+test("archive restore is an Inspector action, not a row button", async ({ page }) => {
+  await stubShell(page, {
+    workspace: {
+      projects: [project("/tmp/ws/alpha", "alpha")],
+      sessions: [sessionRef("s1", "/tmp/ws/alpha", "已归档", 1_700_000_000, true)],
+    },
+    archived: [
+      {
+        id: "s1",
+        project: "/tmp/ws/alpha",
+        projectName: "alpha",
+        title: "已归档",
+        at: 1_700_000_000,
+        model: "Claude 3.5 Sonnet",
+        summary: "排查路由问题",
+        filesChanged: 2,
+        added: 10,
+        removed: 3,
+      },
+    ],
+  });
+
+  await page.goto("/archive");
+  await expect(page.locator(".archive-table .arc-title")).toContainText("已归档");
+  await expect(page.locator('.archive-table button[aria-label="Restore"]')).toHaveCount(0);
+
+  await page.locator(".archive-table tbody tr").first().click();
+  await page.locator(".rail-btn").first().click();
+  await expect(page.locator(".ins-actions .btn--primary")).toBeEnabled();
+});

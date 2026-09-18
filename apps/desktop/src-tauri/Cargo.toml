@@ -1,0 +1,27 @@
+[package]
+name = "kodo-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+kodo-core = { path = "../../../crates/core" }
+kodo-agent = { path = "../../../crates/agent" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+# Both are called from Rust inside our own commands, not from the webview, so
+# neither needs a `capabilities/default.json` entry: the ACL gates webview IPC,
+# and a Rust-to-Rust call never goes through it. Doing it this way also avoids
+# adding `@tauri-apps/plugin-dialog` to package.json.
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+[dev-dependencies]
+# Only to assert the exact JSON the GUI receives. The shape of a flattened,
+# internally tagged enum is the one thing here that is hard to be sure of by
+# reading it.
+serde_json = "1"

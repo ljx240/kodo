@@ -1,0 +1,228 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+/** Mirrors the `CoreInfo` command payload returned by the Tauri shell. */
+export type CoreInfo = {
+  name: string;
+  version: string;
+};
+
+/** False when the GUI runs in a plain browser (visual regression, `vite dev`). */
+export function isDesktop(): boolean {
+  return "__TAURI_INTERNALS__" in window;
+}
+
+/** Returns null outside the desktop shell, where there is no core to reach. */
+export function coreInfo(): Promise<CoreInfo | null> {
+  return isDesktop() ? invoke<CoreInfo>("core_info") : Promise.resolve(null);
+}
+
+/** A project the user registered by hand. There is no scan and no default root. */
+export type ProjectDto = {
+  path: string;
+  name: string;
+};
+
+/** A session as the sidebar needs it, without its events. */
+export type SessionRefDto = {
+  id: string;
+  project: string;
+  title: string;
+  at: number;
+  archived: boolean;
+};
+
+/** The project list and the session list in one payload, so they cannot disagree. */
+export type WorkspaceDto = {
+  projects: ProjectDto[];
+  sessions: SessionRefDto[];
+};
+
+export type StepStatusDto = "running" | "done" | "failed";
+
+export type ChangeDto = {
+  path: string;
+  added: number;
+  removed: number;
+};
+
+export type ItemDto = {
+  id: number;
+  at: number;
+  status: StepStatusDto;
+  duration: number | null;
+} & (
+  | { kind: "reasoning"; summary: string }
+  | { kind: "search"; query: string; detail: string }
+  | { kind: "fileRead"; path: string; detail: string }
+  | {
+      kind: "commandExecution";
+      command: string;
+      cwd: string;
+      output: string;
+      exitCode: number | null;
+    }
+  | { kind: "modelCall"; model: string; inputTokens: number; outputTokens: number }
+  | { kind: "fileChange"; changes: ChangeDto[] }
+  | { kind: "agentMessage"; text: string; checks: string[] }
+);
+
+export type ItemKindDto = ItemDto["kind"];
+
+export type TurnDto = {
+  ask: string;
+  items: ItemDto[];
+  done: boolean;
+  stopped: boolean;
+  error: string | null;
+};
+
+export type SessionDto = {
+  id: string;
+  project: string;
+  title: string;
+  at: number;
+  archived: boolean;
+  turns: TurnDto[];
+};
+
+export type ArchivedItemDto = {
+  id: string;
+  project: string;
+  projectName: string;
+  title: string;
+  at: number;
+  model: string;
+  summary: string;
+  filesChanged: number;
+  added: number;
+  removed: number;
+};
+
+export type RunEventDto =
+  | { type: "turnStarted"; session: string }
+  | { type: "itemStarted"; session: string; item: ItemDto }
+  | { type: "itemCompleted"; session: string; item: ItemDto }
+  | { type: "turnComplete"; session: string }
+  | { type: "stopped"; session: string }
+  | { type: "error"; session: string; message: string }
+  | { type: "approvalRequest"; session: string; step: number; kind: string; detail?: string };
+
+export const RUN_EVENT = "run:event";
+
+function read<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
+  if (!isDesktop()) return Promise.resolve(null);
+  return invoke<T>(command, args).catch((error: unknown) => {
+    console.warn(`kodo: ${command} failed:`, error);
+    return null;
+  });
+}
+
+function write<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
+  if (!isDesktop()) return Promise.resolve(null);
+  return invoke<T>(command, args);
+}
+
+export function workspace(): Promise<WorkspaceDto | null> {
+  return read<WorkspaceDto>("workspace");
+}
+
+export function addProject(path: string): Promise<WorkspaceDto | null> {
+  return write<WorkspaceDto>("add_project", { path });
+}
+
+export function createProject(parent: string, name: string): Promise<WorkspaceDto | null> {
+  return write<WorkspaceDto>("create_project", { parent, name });
+}
+
+export function removeProject(path: string): Promise<WorkspaceDto | null> {
+  return write<WorkspaceDto>("remove_project", { path });
+}
+
+export function renameProject(path: string, name: string): Promise<WorkspaceDto | null> {
+  return write<WorkspaceDto>("rename_project", { path, name });
+}
+
+export function reorderProject(path: string, index: number): Promise<WorkspaceDto | null> {
+  return write<WorkspaceDto>("reorder_project", { path, index });
+}
+
+export function pickFolder(): Promise<string | null> {
+  return read<string>("pick_folder");
+}
+
+export function setting(key: string): Promise<string | null> {
+  return read<string>("setting", { key });
+}
+
+export function setSetting(key: string, value: string): Promise<void | null> {
+  return write<void>("set_setting", { key, value });
+}
+
+export function gitBranch(path: string): Promise<string | null> {
+  return read<string>("git_branch", { path });
+}
+
+export function revealProject(path: string): Promise<void | null> {
+  return write<void>("reveal_project", { path });
+}
+
+export function openSession(project: string, title: string): Promise<SessionDto | null> {
+  return write<SessionDto>("open_session", { project, title });
+}
+
+export function loadSession(id: string): Promise<SessionDto | null> {
+  return read<SessionDto>("load_session", { id });
+}
+
+export function retitleSession(id: string, title: string): Promise<SessionDto | null> {
+  return write<SessionDto>("retitle_session", { id, title });
+}
+
+export function archiveSession(id: string): Promise<WorkspaceDto | null> {
+  return write<WorkspaceDto>("archive_session", { id });
+}
+
+export function restoreSession(id: string): Promise<WorkspaceDto | null> {
+  return write<WorkspaceDto>("restore_session", { id });
+}
+
+export function listArchived(): Promise<ArchivedItemDto[] | null> {
+  return read<ArchivedItemDto[]>("list_archived");
+}
+
+export type ProviderDto = {
+  id: string;
+  name: string;
+  template: string;
+  /** Masked when loaded (`••••abcd`). Empty means no secret stored. */
+  apiKey: string;
+  endpoint: string;
+  model: string;
+  hasKey?: boolean;
+};
+
+export function loadProvidersCommand(): Promise<ProviderDto[] | null> {
+  return read<ProviderDto[]>("load_providers");
+}
+
+export function saveProvidersCommand(providers: ProviderDto[]): Promise<ProviderDto[] | null> {
+  return write<ProviderDto[]>("save_providers", { providers });
+}
+
+export function sendMessage(id: string, text: string): Promise<void | null> {
+  return write<void>("send_message", { id, text });
+}
+
+export function stopRun(id: string): Promise<void | null> {
+  return write<void>("stop_run", { id });
+}
+
+export function respondApproval(id: string, step: number, approved: boolean): Promise<void | null> {
+  return write<void>("respond_approval", { id, step, approved });
+}
+
+export function onRunEvent(handler: (event: RunEventDto) => void): Promise<() => void> {
+  if (!isDesktop()) return Promise.resolve(() => {});
+  return listen<RunEventDto>(RUN_EVENT, (event) => handler(event.payload));
+}

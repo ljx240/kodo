@@ -1,0 +1,46 @@
+:root {
+  --kodo-canvas: #ffffff;
+  --kodo-text: #172033;
+  --kodo-text-muted: #98a2b3;
+  --kodo-error: #dc2626;
+  --kodo-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  color-scheme: light;
+  font-family: var(--kodo-font-ui);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+}
+
+.boot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 24px;
+}
+
+.boot-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.boot-line {
+  margin: 0;
+  color: var(--kodo-text-muted);
+}
+
+.boot-line--error {
+  color: var(--kodo-error);
+}

@@ -1,0 +1,30 @@
+# Build artifacts
+/target/
+**/target/
+node_modules/
+dist/
+apps/desktop/src-tauri/gen/
+
+# Test output (local baselines are machine-specific)
+apps/desktop/test-results/
+apps/desktop/tests/**/*-snapshots/*-darwin.png
+playwright-report/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local runtime state (never commit secrets or machine logs)
+*.log
+credentials.log
+settings.log
+projects.log
+sessions/
+
+# Env / keys
+.env
+.env.*
+*.pem
+*.key
