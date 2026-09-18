@@ -129,6 +129,8 @@ pub struct StartArgs {
     pub id: String,
     pub project: PathBuf,
     pub message: String,
+    /// Project-relative context paths pinned for this turn.
+    pub context: Vec<String>,
     pub provider: Option<agent::Provider>,
     pub permission: Permission,
     pub fallback_to_local: bool,
@@ -267,6 +269,7 @@ pub fn start(app: &AppHandle, runs: &Runs, approvals: &Approvals, args: StartArg
         let request = agent::RunRequest {
             project: args.project.clone(),
             message: args.message.clone(),
+            pinned_context: args.context.clone(),
             provider: args.provider.clone(),
             permission: args.permission,
             fallback_to_local: args.fallback_to_local,

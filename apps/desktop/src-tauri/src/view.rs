@@ -69,6 +69,8 @@ pub struct SessionView {
 #[derive(serde::Serialize)]
 pub struct TurnView {
     pub ask: String,
+    /// Project-relative paths attached as context for this turn.
+    pub context: Vec<String>,
     pub items: Vec<ItemView>,
     pub done: bool,
     pub stopped: bool,
@@ -184,6 +186,7 @@ impl From<session::Session> for SessionView {
                 .into_iter()
                 .map(|turn| TurnView {
                     ask: turn.ask,
+                    context: turn.context,
                     items: turn.items.into_iter().map(Into::into).collect(),
                     done: turn.done,
                     stopped: turn.stopped,
@@ -356,6 +359,7 @@ mod tests {
             archived: false,
             turns: vec![kodo_core::session::Turn {
                 ask: "帮我看一下".to_owned(),
+                context: vec!["src/lib.rs".to_owned()],
                 items: vec![item(ItemKind::Reasoning { summary: "s".to_owned() })],
                 done: true,
                 stopped: false,
@@ -367,6 +371,7 @@ mod tests {
         assert_eq!(value["id"], json!("abc"));
         assert_eq!(value["project"], json!("/p"));
         assert_eq!(value["turns"][0]["ask"], json!("帮我看一下"));
+        assert_eq!(value["turns"][0]["context"], json!(["src/lib.rs"]));
         assert_eq!(value["turns"][0]["done"], json!(true));
         assert_eq!(value["turns"][0]["items"][0]["kind"], json!("reasoning"));
     }

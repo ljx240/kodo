@@ -112,12 +112,20 @@ export function useWorkspace(demo: boolean): WorkspaceState {
     },
     retitle: async (sessionId, title) => {
       if (!live) return;
-      await retitleSession(sessionId, title);
+      try {
+        await retitleSession(sessionId, title);
+      } catch (error) {
+        throw error instanceof Error ? error : new Error(String(error));
+      }
       await refresh();
     },
     archive: async (sessionId) => {
       if (!live) return;
-      apply(await archiveSession(sessionId));
+      try {
+        apply(await archiveSession(sessionId));
+      } catch (error) {
+        throw error instanceof Error ? error : new Error(String(error));
+      }
     },
     restore: async (sessionId) => {
       if (!live) return;

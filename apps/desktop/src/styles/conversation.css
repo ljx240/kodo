@@ -30,7 +30,7 @@
 }
 
 .msg-time {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
 }
 
@@ -59,7 +59,7 @@
    claims to still be working. */
 .reply-interrupted {
   margin: 0 0 8px 34px;
-  color: var(--kodo-warning);
+  color: var(--kodo-warning-text);
   font-size: var(--kodo-font-md);
 }
 
@@ -107,6 +107,7 @@
   flex: none;
   display: grid;
   place-items: center;
+  /* Decorative gutter chevron. */
   color: var(--kodo-text-muted);
 }
 
@@ -167,7 +168,7 @@
 }
 
 .trace-tokens {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
   white-space: nowrap;
 }
@@ -195,7 +196,7 @@
   width: 42px;
   flex: none;
   text-align: right;
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
 }
 
@@ -204,6 +205,7 @@
   flex: none;
   display: grid;
   place-items: center;
+  /* Decorative gutter chevron. */
   color: var(--kodo-text-muted);
 }
 
@@ -231,7 +233,7 @@
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
-  color: var(--kodo-success);
+  color: var(--kodo-success-text);
   font-size: var(--kodo-font-chat);
   font-weight: 600;
 }
@@ -287,6 +289,7 @@
 .composer {
   flex: none;
   padding: 8px 20px 16px;
+  min-width: 0;
 }
 
 .composer-box {
@@ -321,8 +324,16 @@
   overflow-y: auto;
 }
 
+/* Keyboard focus must remain visible on the draft box (outline:none above
+   only quiets mouse focus). */
+.composer-input:focus-visible {
+  outline: var(--kodo-focus-width) solid var(--kodo-focus-ring);
+  outline-offset: var(--kodo-focus-offset);
+  border-radius: var(--kodo-radius-sm);
+}
+
 .composer-input::placeholder {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 /* ── Row 2: controls bar ─────────────────────────────────────────────────── */
@@ -333,6 +344,8 @@
   justify-content: space-between;
   padding: 4px 8px 8px;
   min-height: 36px;
+  min-width: 0;
+  gap: 4px;
 }
 
 .composer-left,
@@ -340,6 +353,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
 }
 
 /* ── Permission trigger (dropdown style) ─────────────────────────────────── */
@@ -356,6 +370,7 @@
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  min-width: 0;
   transition: background 0.1s;
 }
 
@@ -387,6 +402,7 @@
 }
 
 .composer-model svg:last-child {
+  /* Decorative chevron. */
   color: var(--kodo-text-muted);
 }
 
@@ -403,7 +419,7 @@
 .menu-item-hint {
   margin-left: auto;
   font-size: var(--kodo-font-xs);
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-family: var(--kodo-font-mono);
 }
 
@@ -429,4 +445,217 @@
 
 .composer-send--stop {
   background: var(--kodo-text);
+}
+
+/* ── Pinned context chips (paths only) ───────────────────────────────────── */
+
+.composer-contexts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 14px 6px;
+}
+
+.chip--context {
+  height: 24px;
+  max-width: 240px;
+  padding: 0 4px 0 8px;
+  font-size: var(--kodo-font-xs);
+}
+
+.chip--context .chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kodo-font-mono);
+}
+
+.chip-remove {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: var(--kodo-radius-sm);
+  background: transparent;
+  color: var(--kodo-text-secondary);
+  cursor: pointer;
+}
+
+.chip-remove:hover {
+  background: var(--kodo-hover);
+  color: var(--kodo-error);
+}
+
+/* ── Add context file picker ─────────────────────────────────────────────── */
+
+.context-picker {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  border-top: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.context-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--kodo-border);
+  color: var(--kodo-text-secondary);
+}
+
+.context-picker-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  font: inherit;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text);
+}
+
+.context-picker-input:focus-visible {
+  outline: var(--kodo-focus-width) solid var(--kodo-focus-ring);
+  outline-offset: var(--kodo-focus-offset);
+  border-radius: var(--kodo-radius-sm);
+}
+
+.context-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.context-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--kodo-radius-sm);
+  background: none;
+  font-size: var(--kodo-font-sm);
+  font-family: var(--kodo-font-mono);
+  color: var(--kodo-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-picker-item:hover {
+  background: var(--kodo-hover);
+}
+
+.context-picker-empty,
+.context-picker-error {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+}
+
+.context-picker-error {
+  color: var(--kodo-error);
+}
+
+/* ── Provider / recovery alert under the composer ────────────────────────── */
+
+.composer-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface, var(--kodo-secondary));
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+}
+
+/* ── Composer at narrow widths ──────────────────────────────────────────── */
+
+@media (max-width: 1199px) {
+  .composer {
+    padding: 8px 12px 12px;
+    min-width: 0;
+  }
+
+  .composer-controls {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .composer-left,
+  .composer-right {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .composer-perm-trigger span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 42vw;
+  }
+
+  .composer-model {
+    max-width: 40vw;
+    overflow: hidden;
+  }
+
+  .composer-model span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .composer-box .menu {
+    max-width: calc(100vw - 24px);
+  }
+}
+
+/* ── Action error banner (send / rename / archive / approval / context) ──── */
+
+.action-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--kodo-error) 35%, var(--kodo-border));
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-error-bg);
+  font-size: var(--kodo-font-sm);
+}
+
+.action-error-msg {
+  flex: 1;
+  min-width: 0;
+  color: var(--kodo-error);
+  word-break: break-word;
+}
+
+.action-error-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.msg-contexts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.msg-contexts .chip--static {
+  height: 22px;
+  font-size: var(--kodo-font-xs);
+  font-family: var(--kodo-font-mono);
 }

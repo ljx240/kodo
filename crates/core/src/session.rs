@@ -60,6 +60,8 @@ pub struct Session {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
     pub ask: String,
+    /// Relative project paths pinned as context for this turn (not file bodies).
+    pub context: Vec<String>,
     pub items: Vec<Item>,
     /// Set by `turn.complete`. A turn that never got one was interrupted.
     pub done: bool,
@@ -211,6 +213,16 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
             }
             ("ask", [_at, text]) => session.turns.push(Turn {
                 ask: text.clone(),
+                context: Vec::new(),
+                items: Vec::new(),
+                done: false,
+                stopped: false,
+                error: None,
+            }),
+            // `ask <at> <text> <context-json>` — optional trailing field.
+            ("ask", [_at, text, context]) => session.turns.push(Turn {
+                ask: text.clone(),
+                context: parse_context_field(context),
                 items: Vec::new(),
                 done: false,
                 stopped: false,
@@ -256,6 +268,31 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
 /// this is what opens one.
 pub fn record_ask(dir: &Path, id: &str, at: u64, text: &str) -> io::Result<()> {
     append(dir, id, &["ask", &at.to_string(), text])
+}
+
+/// Records the user's message plus pinned context paths (project-relative).
+/// Paths are stored newline-separated in a trailing field — never file bodies.
+pub fn record_ask_with_context(
+    dir: &Path,
+    id: &str,
+    at: u64,
+    text: &str,
+    context: &[String],
+) -> io::Result<()> {
+    if context.is_empty() {
+        return record_ask(dir, id, at, text);
+    }
+    let joined = context.join("\n");
+    append(dir, id, &["ask", &at.to_string(), text, &joined])
+}
+
+/// Parses the optional trailing `ask` context field (newline-separated paths).
+fn parse_context_field(raw: &str) -> Vec<String> {
+    raw.split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Records a step of work under the given envelope.
@@ -598,6 +635,17 @@ mod tests {
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
 
         record_ask(&dir, &id, 10, "帮我看一下这个报错").expect("ask");
+        // context round-trip: with context field
+        record_ask_with_context(&dir, &id, 20, "再看这个", &["src/lib.rs".to_owned(), "a b.md".to_owned()])
+            .expect("ask+ctx");
+        let loaded = load(&dir, &id).expect("load");
+        assert_eq!(loaded.turns.len(), 2);
+        assert!(loaded.turns[0].context.is_empty());
+        assert_eq!(
+            loaded.turns[1].context,
+            vec!["src/lib.rs".to_owned(), "a b.md".to_owned()]
+        );
+        assert_eq!(loaded.turns[1].ask, "再看这个");
         let session = load(&dir, &id).expect("load");
         assert_eq!(session.turns.len(), 1);
         assert_eq!(session.turns[0].ask, "帮我看一下这个报错");

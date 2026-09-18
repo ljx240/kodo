@@ -308,9 +308,21 @@ fn send_message(
     approvals: State<'_, Approvals>,
     id: String,
     text: String,
+    context: Option<Vec<String>>,
 ) -> Result<(), String> {
     let dir = sessions()?;
-    session::record_ask(&dir, &id, session::now(), &text).map_err(|error| error.to_string())?;
+    let context_paths: Vec<String> = context.unwrap_or_default();
+    // Reject paths that try to leave the project before any I/O.
+    for path in &context_paths {
+        if path.trim().is_empty()
+            || path.contains("..")
+            || std::path::Path::new(path).is_absolute()
+        {
+            return Err(format!("context path must stay inside the project: {path}"));
+        }
+    }
+    session::record_ask_with_context(&dir, &id, session::now(), &text, &context_paths)
+        .map_err(|error| error.to_string())?;
     let found = session::load(&dir, &id).map_err(|error| error.to_string())?;
 
     let settings_path = settings::settings_path();
@@ -353,6 +365,7 @@ fn send_message(
             id,
             project: found.project,
             message: text,
+            context: context_paths,
             provider,
             permission,
             fallback_to_local,
@@ -360,6 +373,57 @@ fn send_message(
             extended_thinking,
         },
     )
+}
+
+/// Lists project-relative files for the composer's Add context picker.
+/// Honors the same ignore set as the agent's ContextManager (no node_modules, etc.).
+#[tauri::command]
+fn list_project_files(project: String, query: Option<String>) -> Result<Vec<String>, String> {
+    let root = std::path::Path::new(&project);
+    if !root.is_dir() {
+        return Err(format!("project is not a directory: {project}"));
+    }
+    let mut manager = kodo_agent::ContextManager::new(
+        root.to_path_buf(),
+        kodo_agent::TurnContextBudget::default(),
+    );
+    manager.scan(&|| true).map_err(|_| "cancelled while listing project files".to_owned())?;
+    let query = query.unwrap_or_default();
+    let mut paths: Vec<String> = if query.trim().is_empty() {
+        manager.file_map().iter().map(|entry| entry.path.clone()).collect()
+    } else {
+        manager
+            .file_map()
+            .iter()
+            .filter(|entry| entry.path.to_ascii_lowercase().contains(&query.to_ascii_lowercase()))
+            .map(|entry| entry.path.clone())
+            .collect()
+    };
+    paths.sort();
+    paths.truncate(200);
+    Ok(paths)
+}
+
+/// Validates that a context path is inside the project and returns a short preview.
+/// Never returns file bodies to the React layer beyond this bounded preview.
+#[tauri::command]
+fn read_context_file(project: String, path: String) -> Result<String, String> {
+    let root = std::path::Path::new(&project);
+    if !root.is_dir() {
+        return Err(format!("project is not a directory: {project}"));
+    }
+    if path.trim().is_empty() || path.contains("..") || std::path::Path::new(&path).is_absolute() {
+        return Err(format!("path must stay inside the project: {path}"));
+    }
+    let manager = kodo_agent::ContextManager::new(
+        root.to_path_buf(),
+        kodo_agent::TurnContextBudget::default(),
+    );
+    // Range-read a small preview; agent pins the fuller range later.
+    manager
+        .read_range(&path, 1, 40, "context preview")
+        .map(|span| span.snippet)
+        .map_err(|error| error)
 }
 
 #[tauri::command]
@@ -425,6 +489,8 @@ fn main() {
             send_message,
             stop_run,
             respond_approval,
+            list_project_files,
+            read_context_file,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Kodo");
