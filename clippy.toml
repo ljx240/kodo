@@ -1,0 +1,3 @@
+# Style thresholds — correctness lints stay at deny via CLI -D warnings.
+too-many-arguments-threshold = 12
+type-complexity-threshold = 500

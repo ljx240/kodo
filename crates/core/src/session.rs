@@ -104,13 +104,35 @@ pub enum Phase {
 pub enum ItemKind {
     /// A summary only. The model's actual reasoning is deliberately not a field
     /// here, so no renderer can show what must stay hidden.
-    Reasoning { summary: String },
-    Search { query: String, detail: String },
-    FileRead { path: String, detail: String },
-    CommandExecution { command: String, cwd: String, output: String, exit_code: Option<i32> },
-    ModelCall { model: String, input_tokens: u32, output_tokens: u32 },
-    FileChange { changes: Vec<Change> },
-    AgentMessage { text: String, checks: Vec<String> },
+    Reasoning {
+        summary: String,
+    },
+    Search {
+        query: String,
+        detail: String,
+    },
+    FileRead {
+        path: String,
+        detail: String,
+    },
+    CommandExecution {
+        command: String,
+        cwd: String,
+        output: String,
+        exit_code: Option<i32>,
+    },
+    ModelCall {
+        model: String,
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+    FileChange {
+        changes: Vec<Change>,
+    },
+    AgentMessage {
+        text: String,
+        checks: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +149,10 @@ pub fn dir() -> Option<PathBuf> {
 
 /// Seconds since the Unix epoch, or 0 if the clock reads before it.
 pub fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|since| since.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
 }
 
 /// Starts a session and returns its id.
@@ -143,7 +168,11 @@ pub fn open(dir: &Path, project: &Path, title: &str, at: u64) -> io::Result<Stri
         let path = dir.join(format!("{id}.log"));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
-                writeln!(file, "{}", line::join(&["open", &project.to_string_lossy(), title, &at.to_string()]))?;
+                writeln!(
+                    file,
+                    "{}",
+                    line::join(&["open", &project.to_string_lossy(), title, &at.to_string()])
+                )?;
                 return Ok(id);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -183,7 +212,7 @@ pub fn list(dir: &Path) -> io::Result<Vec<SessionRef>> {
         }
     }
 
-    found.sort_by(|left, right| right.at.cmp(&left.at));
+    found.sort_by_key(|item| std::cmp::Reverse(item.at));
     Ok(found)
 }
 
@@ -429,7 +458,13 @@ fn summarize(id: &str, lines: &[String]) -> Option<SessionRef> {
     }
 
     // No `open` line means the file was never a session.
-    project.map(|project| SessionRef { id: id.to_owned(), project, title, at, archived })
+    project.map(|project| SessionRef {
+        id: id.to_owned(),
+        project,
+        title,
+        at,
+        archived,
+    })
 }
 
 /// Replaces an item already present under the same id, else appends it. This is
@@ -440,7 +475,11 @@ fn upsert_item(session: &mut Session, item: Item) {
         // damaged line, and is skipped the same way.
         return;
     };
-    match turn.items.iter_mut().find(|existing| existing.id == item.id) {
+    match turn
+        .items
+        .iter_mut()
+        .find(|existing| existing.id == item.id)
+    {
         Some(existing) => *existing = item,
         None => turn.items.push(item),
     }
@@ -464,7 +503,9 @@ fn encode_item(item: &Item) -> Vec<String> {
     let mut fields = vec![
         item.id.to_string(),
         item.at.to_string(),
-        item.duration_ms.map(|ms| ms.to_string()).unwrap_or_default(),
+        item.duration_ms
+            .map(|ms| ms.to_string())
+            .unwrap_or_default(),
         kind_name(&item.kind).to_owned(),
     ];
 
@@ -478,13 +519,22 @@ fn encode_item(item: &Item) -> Vec<String> {
             fields.push(path.clone());
             fields.push(detail.clone());
         }
-        ItemKind::CommandExecution { command, cwd, output, exit_code } => {
+        ItemKind::CommandExecution {
+            command,
+            cwd,
+            output,
+            exit_code,
+        } => {
             fields.push(command.clone());
             fields.push(cwd.clone());
             fields.push(output.clone());
             fields.push(exit_code.map(|code| code.to_string()).unwrap_or_default());
         }
-        ItemKind::ModelCall { model, input_tokens, output_tokens } => {
+        ItemKind::ModelCall {
+            model,
+            input_tokens,
+            output_tokens,
+        } => {
             fields.push(model.clone());
             fields.push(input_tokens.to_string());
             fields.push(output_tokens.to_string());
@@ -515,7 +565,9 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
     let duration_ms = duration.parse().ok();
 
     let kind = match (kind.as_str(), payload) {
-        ("reasoning", [summary]) => ItemKind::Reasoning { summary: summary.clone() },
+        ("reasoning", [summary]) => ItemKind::Reasoning {
+            summary: summary.clone(),
+        },
         ("search", [query, detail]) => ItemKind::Search {
             query: query.clone(),
             detail: detail.clone(),
@@ -556,7 +608,13 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
         _ => return None,
     };
 
-    Some(Item { id, at, status, duration_ms, kind })
+    Some(Item {
+        id,
+        at,
+        status,
+        duration_ms,
+        kind,
+    })
 }
 
 fn kind_name(kind: &ItemKind) -> &'static str {
@@ -577,7 +635,13 @@ mod tests {
     use crate::test_support::TempDir;
 
     fn item(id: u32, kind: ItemKind) -> Item {
-        Item { id, at: 1_700_000_000, status: Status::Done, duration_ms: Some(1_200), kind }
+        Item {
+            id,
+            at: 1_700_000_000,
+            status: Status::Done,
+            duration_ms: Some(1_200),
+            kind,
+        }
     }
 
     #[test]
@@ -624,7 +688,10 @@ mod tests {
 
         for id in ["../escape", "..", ".", "", "a/b"] {
             assert!(load(&dir, id).is_err(), "{id:?} should have been refused");
-            assert!(record_ask(&dir, id, 1, "hi").is_err(), "{id:?} should have been refused");
+            assert!(
+                record_ask(&dir, id, 1, "hi").is_err(),
+                "{id:?} should have been refused"
+            );
         }
     }
 
@@ -679,7 +746,12 @@ mod tests {
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
-        let mut running = item(1, ItemKind::Reasoning { summary: "先看看目录结构".to_owned() });
+        let mut running = item(
+            1,
+            ItemKind::Reasoning {
+                summary: "先看看目录结构".to_owned(),
+            },
+        );
         running.status = Status::Running;
         running.duration_ms = None;
         record_item(&dir, &id, &running, Phase::Started).expect("started");
@@ -687,13 +759,25 @@ mod tests {
         let after_start = load(&dir, &id).expect("load");
         assert_eq!(after_start.turns[0].items.len(), 1);
         assert_eq!(after_start.turns[0].items[0].status, Status::Running);
-        assert_eq!(after_start.turns[0].items[0].duration_ms, None, "a running step has no duration yet");
+        assert_eq!(
+            after_start.turns[0].items[0].duration_ms, None,
+            "a running step has no duration yet"
+        );
 
         // The completion carries the duration the start could not know.
-        let finished = item(1, ItemKind::Reasoning { summary: "先看看目录结构".to_owned() });
+        let finished = item(
+            1,
+            ItemKind::Reasoning {
+                summary: "先看看目录结构".to_owned(),
+            },
+        );
         record_item(&dir, &id, &finished, Phase::Completed).expect("completed");
         let after_done = load(&dir, &id).expect("load");
-        assert_eq!(after_done.turns[0].items.len(), 1, "the item was duplicated");
+        assert_eq!(
+            after_done.turns[0].items.len(),
+            1,
+            "the item was duplicated"
+        );
         assert_eq!(after_done.turns[0].items[0].status, Status::Done);
         assert_eq!(after_done.turns[0].items[0].duration_ms, Some(1_200));
     }
@@ -706,12 +790,25 @@ mod tests {
         let dir = tmp.dir("sessions");
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
-        record_item(&dir, &id, &item(1, ItemKind::Reasoning { summary: "s".to_owned() }), Phase::Started)
-            .expect("started");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "s".to_owned(),
+                },
+            ),
+            Phase::Started,
+        )
+        .expect("started");
 
         let session = load(&dir, &id).expect("load");
         assert_eq!(session.turns[0].items[0].status, Status::Running);
-        assert!(!session.turns[0].done, "an interrupted turn must not read as finished");
+        assert!(
+            !session.turns[0].done,
+            "an interrupted turn must not read as finished"
+        );
     }
 
     #[test]
@@ -739,7 +836,10 @@ mod tests {
         // The payload survived: the exit code is how the UI explains it.
         assert!(matches!(
             session.turns[0].items[0].kind,
-            ItemKind::CommandExecution { exit_code: Some(101), .. },
+            ItemKind::CommandExecution {
+                exit_code: Some(101),
+                ..
+            },
         ));
     }
 
@@ -751,7 +851,9 @@ mod tests {
         record_ask(&dir, &id, 10, "go").expect("ask");
 
         let kinds = vec![
-            ItemKind::Reasoning { summary: "看目录\n再决定".to_owned() },
+            ItemKind::Reasoning {
+                summary: "看目录\n再决定".to_owned(),
+            },
             ItemKind::Search {
                 query: "unknown table".to_owned(),
                 detail: "12 处匹配".to_owned(),
@@ -773,8 +875,16 @@ mod tests {
             },
             ItemKind::FileChange {
                 changes: vec![
-                    Change { path: "src/a.rs".to_owned(), added: 12, removed: 3 },
-                    Change { path: "src/b\t.rs".to_owned(), added: 0, removed: 8 },
+                    Change {
+                        path: "src/a.rs".to_owned(),
+                        added: 12,
+                        removed: 3,
+                    },
+                    Change {
+                        path: "src/b\t.rs".to_owned(),
+                        added: 0,
+                        removed: 8,
+                    },
                 ],
             },
             ItemKind::AgentMessage {
@@ -801,7 +911,13 @@ mod tests {
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
-        let step = item(1, ItemKind::AgentMessage { text: "done".to_owned(), checks: Vec::new() });
+        let step = item(
+            1,
+            ItemKind::AgentMessage {
+                text: "done".to_owned(),
+                checks: Vec::new(),
+            },
+        );
         record_item(&dir, &id, &step, Phase::Completed).expect("record");
 
         assert_eq!(load(&dir, &id).expect("load").turns[0].items[0], step);
@@ -815,8 +931,14 @@ mod tests {
 
         retitle(&dir, &id, "修复 k2k-rust 未知表路由").expect("retitle");
 
-        assert_eq!(load(&dir, &id).expect("load").title, "修复 k2k-rust 未知表路由");
-        assert!(dir.join(format!("{id}.log")).is_file(), "the file was renamed");
+        assert_eq!(
+            load(&dir, &id).expect("load").title,
+            "修复 k2k-rust 未知表路由"
+        );
+        assert!(
+            dir.join(format!("{id}.log")).is_file(),
+            "the file was renamed"
+        );
     }
 
     #[test]
@@ -841,7 +963,11 @@ mod tests {
         let new = open(&dir, Path::new("/p"), "new", 300).expect("open");
         let middle = open(&dir, Path::new("/p"), "middle", 200).expect("open");
 
-        let ids: Vec<String> = list(&dir).expect("list").into_iter().map(|entry| entry.id).collect();
+        let ids: Vec<String> = list(&dir)
+            .expect("list")
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
         assert_eq!(ids, vec![new, middle, old]);
     }
 
@@ -881,15 +1007,34 @@ mod tests {
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
-        let good = item(1, ItemKind::Reasoning { summary: "kept".to_owned() });
+        let good = item(
+            1,
+            ItemKind::Reasoning {
+                summary: "kept".to_owned(),
+            },
+        );
         record_item(&dir, &id, &good, Phase::Completed).expect("record");
         line::append(&dir.join(format!("{id}.log")), "item.completed\tnonsense").expect("junk");
         line::append(&dir.join(format!("{id}.log")), "a verb nobody knows\tx").expect("junk");
-        record_item(&dir, &id, &item(2, ItemKind::Reasoning { summary: "also kept".to_owned() }), Phase::Completed)
-            .expect("record");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                2,
+                ItemKind::Reasoning {
+                    summary: "also kept".to_owned(),
+                },
+            ),
+            Phase::Completed,
+        )
+        .expect("record");
 
         let session = load(&dir, &id).expect("load");
-        assert_eq!(session.turns[0].items.len(), 2, "a damaged line ate a good one");
+        assert_eq!(
+            session.turns[0].items.len(),
+            2,
+            "a damaged line ate a good one"
+        );
         assert_eq!(session.turns[0].items[0], good);
     }
 
@@ -899,11 +1044,24 @@ mod tests {
         let dir = tmp.dir("sessions");
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
 
-        record_item(&dir, &id, &item(1, ItemKind::Reasoning { summary: "s".to_owned() }), Phase::Completed)
-            .expect("record");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "s".to_owned(),
+                },
+            ),
+            Phase::Completed,
+        )
+        .expect("record");
 
         let session = load(&dir, &id).expect("load");
-        assert!(session.turns.is_empty(), "an item with no turn should not invent one");
+        assert!(
+            session.turns.is_empty(),
+            "an item with no turn should not invent one"
+        );
     }
 
     #[test]

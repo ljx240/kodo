@@ -212,7 +212,12 @@ export type ProviderDto = {
   /** Masked when loaded (`••••abcd`). Empty means no secret stored. */
   apiKey: string;
   endpoint: string;
+  /** Legacy field — display name or model id. */
   model: string;
+  /** Backend API model id. */
+  modelId?: string;
+  /** UI display label. */
+  displayName?: string;
   hasKey?: boolean;
 };
 

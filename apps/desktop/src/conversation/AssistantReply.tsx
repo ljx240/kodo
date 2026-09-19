@@ -1,5 +1,4 @@
-import { ChevronRight, CircleCheck } from "lucide-react";
-import { followUps } from "../data/demo";
+import { CircleCheck } from "lucide-react";
 import { AgentTrace } from "./AgentTrace";
 import { ChangedFilesSummary } from "./ChangedFilesSummary";
 import type { Reply } from "./trace";
@@ -18,13 +17,9 @@ export function AssistantReply({ time, reply, running, onViewFiles }: Props) {
       <div className="msg-head">
         <span className="avatar avatar--kodo">K</span>
         <span className="msg-author">Kodo</span>
-        {/* A real session's turns carry no timestamp yet, so the span is only
-            drawn when there is one to draw. */}
         {time && <span className="msg-time">{time}</span>}
       </div>
 
-      {/* Only while it is actually running. Shown unconditionally it claimed a
-          finished conversation was still being worked on. */}
       {running && <p className="reply-working">正在处理您的请求...</p>}
       {reply.interrupted && <p className="reply-interrupted">这次运行中断了，最后一步没有完成。</p>}
 
@@ -47,11 +42,6 @@ export function AssistantReply({ time, reply, running, onViewFiles }: Props) {
               </ul>
             </section>
           )}
-
-          <button type="button" className="disclosure">
-            <ChevronRight size={14} strokeWidth={1.9} />
-            <span>后续建议（{followUps.length} 条）</span>
-          </button>
         </div>
       )}
 

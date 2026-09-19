@@ -25,7 +25,9 @@ pub struct Runs(Arc<Mutex<HashSet<String>>>);
 
 impl Runs {
     fn lock(&self) -> MutexGuard<'_, HashSet<String>> {
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn begin(&self, id: &str) -> bool {
@@ -41,18 +43,28 @@ impl Runs {
     }
 }
 
+#[allow(clippy::type_complexity)]
 #[derive(Default, Clone)]
 pub struct Approvals(Arc<Mutex<HashMap<(String, u32), Sender<bool>>>>);
 
 impl Approvals {
     fn lock(&self) -> MutexGuard<'_, HashMap<(String, u32), Sender<bool>>> {
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn wait_point(&self, session: &str, step: u32) -> (ApprovalTicket, Receiver<bool>) {
         let (tx, rx) = mpsc::channel();
         self.lock().insert((session.to_owned(), step), tx);
-        (ApprovalTicket { session: session.to_owned(), step, map: self.clone() }, rx)
+        (
+            ApprovalTicket {
+                session: session.to_owned(),
+                step,
+                map: self.clone(),
+            },
+            rx,
+        )
     }
 
     pub fn resolve(&self, session: &str, step: u32, approved: bool) -> bool {
@@ -93,16 +105,33 @@ fn step_kind_label(kind: StepKind) -> &'static str {
 
 fn to_item_kind(step: &Step) -> ItemKind {
     match step {
-        Step::Reasoning { summary } => ItemKind::Reasoning { summary: summary.clone() },
-        Step::Search { query, detail } => ItemKind::Search { query: query.clone(), detail: detail.clone() },
-        Step::FileRead { path, detail } => ItemKind::FileRead { path: path.clone(), detail: detail.clone() },
-        Step::Command { command, cwd, output, exit_code } => ItemKind::CommandExecution {
+        Step::Reasoning { summary } => ItemKind::Reasoning {
+            summary: summary.clone(),
+        },
+        Step::Search { query, detail } => ItemKind::Search {
+            query: query.clone(),
+            detail: detail.clone(),
+        },
+        Step::FileRead { path, detail } => ItemKind::FileRead {
+            path: path.clone(),
+            detail: detail.clone(),
+        },
+        Step::Command {
+            command,
+            cwd,
+            output,
+            exit_code,
+        } => ItemKind::CommandExecution {
             command: command.clone(),
             cwd: cwd.clone(),
             output: output.clone(),
             exit_code: *exit_code,
         },
-        Step::ModelCall { model, input_tokens, output_tokens } => ItemKind::ModelCall {
+        Step::ModelCall {
+            model,
+            input_tokens,
+            output_tokens,
+        } => ItemKind::ModelCall {
             model: model.clone(),
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
@@ -110,11 +139,17 @@ fn to_item_kind(step: &Step) -> ItemKind {
         Step::FileChange { changes } => ItemKind::FileChange {
             changes: changes
                 .iter()
-                .map(|FileDelta { path, added, removed }| session::Change {
-                    path: path.clone(),
-                    added: *added,
-                    removed: *removed,
-                })
+                .map(
+                    |FileDelta {
+                         path,
+                         added,
+                         removed,
+                     }| session::Change {
+                        path: path.clone(),
+                        added: *added,
+                        removed: *removed,
+                    },
+                )
                 .collect(),
         },
         Step::AgentMessage { text, checks } => ItemKind::AgentMessage {
@@ -138,7 +173,12 @@ pub struct StartArgs {
     pub extended_thinking: bool,
 }
 
-pub fn start(app: &AppHandle, runs: &Runs, approvals: &Approvals, args: StartArgs) -> Result<(), String> {
+pub fn start(
+    app: &AppHandle,
+    runs: &Runs,
+    approvals: &Approvals,
+    args: StartArgs,
+) -> Result<(), String> {
     if !runs.begin(&args.id) {
         return Err("this session already has a run in flight".to_owned());
     }
@@ -152,7 +192,9 @@ pub fn start(app: &AppHandle, runs: &Runs, approvals: &Approvals, args: StartArg
             let _ = app.emit("run:event", event);
         };
 
-        notify(RunEvent::TurnStarted { session: args.id.clone() });
+        notify(RunEvent::TurnStarted {
+            session: args.id.clone(),
+        });
 
         let alive_id = args.id.clone();
         let alive_runs = runs.clone();
@@ -214,16 +256,25 @@ pub fn start(app: &AppHandle, runs: &Runs, approvals: &Approvals, args: StartArg
                         duration_ms: None,
                         kind: to_item_kind(&step.running()),
                     };
-                    if session::record_item(&record_dir, &record_id, &running_item, Phase::Started).is_err() {
+                    if session::record_item(&record_dir, &record_id, &running_item, Phase::Started)
+                        .is_err()
+                    {
                         return false;
                     }
                     let _ = record_app.emit(
                         "run:event",
-                        RunEvent::ItemStarted { session: record_id.clone(), item: ItemView::from(running_item) },
+                        RunEvent::ItemStarted {
+                            session: record_id.clone(),
+                            item: ItemView::from(running_item),
+                        },
                     );
                     record_runs.is_live(&record_id)
                 }
-                SinkEvent::Finished { step, duration_ms, denied } => {
+                SinkEvent::Finished {
+                    step,
+                    duration_ms,
+                    denied,
+                } => {
                     let id = open_id.take().unwrap_or_else(|| {
                         seq += 1;
                         seq
@@ -237,12 +288,17 @@ pub fn start(app: &AppHandle, runs: &Runs, approvals: &Approvals, args: StartArg
                             duration_ms: Some(duration_ms),
                             kind: to_item_kind(&step),
                         };
-                        if session::record_item(&record_dir, &record_id, &failed, Phase::Failed).is_err() {
+                        if session::record_item(&record_dir, &record_id, &failed, Phase::Failed)
+                            .is_err()
+                        {
                             return false;
                         }
                         let _ = record_app.emit(
                             "run:event",
-                            RunEvent::ItemCompleted { session: record_id.clone(), item: ItemView::from(failed) },
+                            RunEvent::ItemCompleted {
+                                session: record_id.clone(),
+                                item: ItemView::from(failed),
+                            },
                         );
                         return record_runs.is_live(&record_id);
                     }
@@ -254,12 +310,22 @@ pub fn start(app: &AppHandle, runs: &Runs, approvals: &Approvals, args: StartArg
                         duration_ms: Some(duration_ms),
                         kind: to_item_kind(&step),
                     };
-                    if session::record_item(&record_dir, &record_id, &finished_item, Phase::Completed).is_err() {
+                    if session::record_item(
+                        &record_dir,
+                        &record_id,
+                        &finished_item,
+                        Phase::Completed,
+                    )
+                    .is_err()
+                    {
                         return false;
                     }
                     let _ = record_app.emit(
                         "run:event",
-                        RunEvent::ItemCompleted { session: record_id.clone(), item: ItemView::from(finished_item) },
+                        RunEvent::ItemCompleted {
+                            session: record_id.clone(),
+                            item: ItemView::from(finished_item),
+                        },
                     );
                     record_runs.is_live(&record_id)
                 }
@@ -284,19 +350,28 @@ pub fn start(app: &AppHandle, runs: &Runs, approvals: &Approvals, args: StartArg
             Ok(()) => {
                 if !runs.is_live(&args.id) {
                     let _ = session::record_stopped(&args.dir, &args.id, session::now());
-                    notify(RunEvent::Stopped { session: args.id.clone() });
-                } else if session::record_turn_complete(&args.dir, &args.id, session::now()).is_err() {
+                    notify(RunEvent::Stopped {
+                        session: args.id.clone(),
+                    });
+                } else if session::record_turn_complete(&args.dir, &args.id, session::now())
+                    .is_err()
+                {
                     notify(RunEvent::Error {
                         session: args.id.clone(),
                         message: "failed to mark the turn complete".to_owned(),
                     });
                 } else {
-                    notify(RunEvent::TurnComplete { session: args.id.clone() });
+                    notify(RunEvent::TurnComplete {
+                        session: args.id.clone(),
+                    });
                 }
             }
             Err(error) => {
                 let _ = session::record_error(&args.dir, &args.id, session::now(), &error);
-                notify(RunEvent::Error { session: args.id.clone(), message: error });
+                notify(RunEvent::Error {
+                    session: args.id.clone(),
+                    message: error,
+                });
             }
         }
         runs.cancel(&args.id);
@@ -307,5 +382,7 @@ pub fn start(app: &AppHandle, runs: &Runs, approvals: &Approvals, args: StartArg
 
 /// Secure-by-default: missing or unknown permission means Ask.
 pub fn permission_from_settings(value: Option<String>) -> Permission {
-    value.map(|raw| Permission::parse(&raw)).unwrap_or(Permission::Ask)
+    value
+        .map(|raw| Permission::parse(&raw))
+        .unwrap_or(Permission::Ask)
 }

@@ -12,7 +12,7 @@ use crate::classify::TaskType;
 use crate::context::ContextBudget;
 use crate::plan::SubtaskKind;
 use crate::protocol::{ToolCallId, ToolError, ToolName, ToolRegistry, ToolResult};
-use crate::verify::{VerifyCommand, VerifyKind, VerificationRunner};
+use crate::verify::{VerificationRunner, VerifyCommand, VerifyKind};
 
 /// How a skill wants project context gathered and the plan ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,9 +59,15 @@ impl ContextStrategy {
     pub fn budget(self) -> ContextBudget {
         match self {
             // Docs updates need a light touch: fewer, shorter spans.
-            Self::DocsFocused => ContextBudget { max_spans: 4, ..ContextBudget::default() },
+            Self::DocsFocused => ContextBudget {
+                max_spans: 4,
+                ..ContextBudget::default()
+            },
             // Reviews target the named files; slightly tighter packing.
-            Self::ReviewOnly => ContextBudget { max_spans: 6, ..ContextBudget::default() },
+            Self::ReviewOnly => ContextBudget {
+                max_spans: 6,
+                ..ContextBudget::default()
+            },
             _ => ContextBudget::default(),
         }
     }
@@ -132,7 +138,9 @@ impl SkillSpec {
     }
 
     pub fn allows_label(&self, label: &str) -> bool {
-        ToolName::parse(label).map(|t| self.allows(t)).unwrap_or(false)
+        ToolName::parse(label)
+            .map(|t| self.allows(t))
+            .unwrap_or(false)
     }
 
     /// Gate one tool call. Returns a structured failure for disallowed tools —
@@ -221,7 +229,9 @@ fn parse_workflow(body: &[&str]) -> Result<Vec<WorkflowStep>, String> {
         // Format: `id | kind | title`
         let parts: Vec<&str> = raw.splitn(3, '|').map(str::trim).collect();
         if parts.len() != 3 {
-            return Err(format!("workflow step must be `id | kind | title`, got: {raw}"));
+            return Err(format!(
+                "workflow step must be `id | kind | title`, got: {raw}"
+            ));
         }
         let kind = match parts[1].to_ascii_lowercase().as_str() {
             "read" => SubtaskKind::Read,
@@ -252,9 +262,7 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
 
     let task_types: Vec<TaskType> = bullets(&section_body(&lines, "applicable_task_types"))
         .into_iter()
-        .map(|raw| {
-            TaskType::parse(&raw).ok_or_else(|| format!("unknown task_type `{raw}`"))
-        })
+        .map(|raw| TaskType::parse(&raw).ok_or_else(|| format!("unknown task_type `{raw}`")))
         .collect::<Result<_, _>>()?;
     if task_types.is_empty() {
         return Err(format!("skill `{name}` has no applicable_task_types"));
@@ -325,9 +333,7 @@ impl SkillRegistry {
         ];
         let skills = SOURCES
             .iter()
-            .map(|src| {
-                parse_skill(src).expect("built-in SKILL.md must parse")
-            })
+            .map(|src| parse_skill(src).expect("built-in SKILL.md must parse"))
             .collect();
         Self { skills }
     }
@@ -391,7 +397,12 @@ mod tests {
             assert!(!skill.guidance.is_empty());
             let ids: Vec<_> = skill.workflow.iter().map(|w| w.id.as_str()).collect();
             let unique: std::collections::HashSet<_> = ids.iter().copied().collect();
-            assert_eq!(ids.len(), unique.len(), "workflow ids unique in {}", skill.name);
+            assert_eq!(
+                ids.len(),
+                unique.len(),
+                "workflow ids unique in {}",
+                skill.name
+            );
         }
     }
 
@@ -435,7 +446,9 @@ mod tests {
             Some(crate::protocol::ToolErrorCode::PermissionDenied)
         );
         assert!(denied.error.unwrap().message.contains("code-review"));
-        assert!(skill.gate(ToolCallId::new("g2"), "read_file", "src/lib.rs").is_none());
+        assert!(skill
+            .gate(ToolCallId::new("g2"), "read_file", "src/lib.rs")
+            .is_none());
     }
 
     #[test]
@@ -443,7 +456,9 @@ mod tests {
         // Skill allows the write…
         let skill = skill_of(TaskType::BugFix);
         assert!(skill.allows(ToolName::WriteFile));
-        assert!(skill.gate(ToolCallId::new("p"), "write_file", "a.rs").is_none());
+        assert!(skill
+            .gate(ToolCallId::new("p"), "write_file", "a.rs")
+            .is_none());
         // …but Ask mode still requires human approval for file changes.
         let ask = crate::Permission::Ask;
         assert!(ask.needs_approval(crate::StepKind::FileChange, Some("write a.rs")));
@@ -472,8 +487,11 @@ mod tests {
         // Project markers: cargo present so Full/TestsOnly have something to pick.
         let dir = std::env::temp_dir().join(format!("kodo_skill_verify_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"t\"\nversion=\"0.1.0\"\n")
-            .expect("cargo toml");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname=\"t\"\nversion=\"0.1.0\"\n",
+        )
+        .expect("cargo toml");
         std::fs::create_dir_all(dir.join("src")).expect("src");
         std::fs::write(dir.join("src/lib.rs"), "").expect("lib");
 
@@ -481,7 +499,10 @@ mod tests {
 
         let docs = skill_of(TaskType::Docs);
         let cmds = docs.verification_commands(&runner, &dir);
-        assert!(cmds.is_empty(), "docs must not run a full compile: {cmds:?}");
+        assert!(
+            cmds.is_empty(),
+            "docs must not run a full compile: {cmds:?}"
+        );
 
         let review = skill_of(TaskType::CodeReview);
         assert!(review.verification_commands(&runner, &dir).is_empty());
@@ -519,9 +540,6 @@ mod tests {
     fn context_strategy_budget_is_smaller_for_docs() {
         let docs = skill_of(TaskType::Docs);
         let bug = skill_of(TaskType::BugFix);
-        assert!(
-            docs.context_strategy.budget().max_spans
-                < bug.context_strategy.budget().max_spans
-        );
+        assert!(docs.context_strategy.budget().max_spans < bug.context_strategy.budget().max_spans);
     }
 }

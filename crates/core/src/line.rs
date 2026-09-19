@@ -72,7 +72,11 @@ pub fn split(line: &str) -> Vec<String> {
 
 /// Joins already-raw fields into one escaped line body (no trailing newline).
 pub fn join(fields: &[&str]) -> String {
-    fields.iter().map(|field| escape(field)).collect::<Vec<_>>().join("\t")
+    fields
+        .iter()
+        .map(|field| escape(field))
+        .collect::<Vec<_>>()
+        .join("\t")
 }
 
 /// Appends one line, creating the parent directory when it is missing.
@@ -103,7 +107,11 @@ mod tests {
     fn round_trip(field: &str) {
         let line = join(&["verb", field, "tail"]);
         let parsed = split(&line);
-        assert_eq!(parsed, vec!["verb".to_owned(), field.to_owned(), "tail".to_owned()], "line was {line:?}");
+        assert_eq!(
+            parsed,
+            vec!["verb".to_owned(), field.to_owned(), "tail".to_owned()],
+            "line was {line:?}"
+        );
         assert_eq!(parsed.len(), 3, "a field was cut in two: {line:?}");
     }
 
@@ -130,7 +138,11 @@ mod tests {
     fn chained_replacement_would_have_double_unescaped() {
         // A literal `\n` (backslash, n) must stay two characters.
         assert_eq!(unescape(&escape("\\n")), "\\n");
-        assert_eq!(unescape("\\n").len(), 1, "a real newline is produced for the escape");
+        assert_eq!(
+            unescape("\\n").len(),
+            1,
+            "a real newline is produced for the escape"
+        );
     }
 
     #[test]

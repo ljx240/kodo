@@ -43,8 +43,8 @@ const IGNORE_DIRS: &[&str] = &[
 
 const IGNORE_EXTS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "tar", "gz", "tgz", "bz2", "xz",
-    "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "webm", "bin", "exe",
-    "dll", "so", "dylib", "class", "jar", "wasm", "lock", "min.js", "min.css", "map",
+    "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "webm", "bin", "exe", "dll",
+    "so", "dylib", "class", "jar", "wasm", "lock", "min.js", "min.css", "map",
 ];
 
 /// How a span was chosen — stored for the model and for tests.
@@ -106,7 +106,10 @@ impl Default for ContextBudget {
 
 impl ContextBudget {
     pub fn new(max_chars: usize) -> Self {
-        Self { max_chars, ..Self::default() }
+        Self {
+            max_chars,
+            ..Self::default()
+        }
     }
 }
 
@@ -166,7 +169,8 @@ impl ContextManager {
     pub fn pin(&mut self, span: ContextSpan) {
         let mut span = span;
         span.pinned = true;
-        self.pinned.retain(|p| p.path != span.path || p.start_line != span.start_line);
+        self.pinned
+            .retain(|p| p.path != span.path || p.start_line != span.start_line);
         self.pinned.push(span);
     }
 
@@ -203,7 +207,11 @@ impl ContextManager {
             }
             let from_git = from_git_paths.contains(&e.path);
             if from_git || should_index_path(&e.path) {
-                self.file_map.push(FileEntry { path: e.path, size: e.size, from_git });
+                self.file_map.push(FileEntry {
+                    path: e.path,
+                    size: e.size,
+                    from_git,
+                });
             }
             if self.file_map.len() >= MAX_INDEXED_FILES {
                 break;
@@ -219,7 +227,11 @@ impl ContextManager {
             }
             let full = self.root.join(&rel);
             let size = fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
-            self.file_map.push(FileEntry { path: rel, size, from_git: true });
+            self.file_map.push(FileEntry {
+                path: rel,
+                size,
+                from_git: true,
+            });
             if self.file_map.len() >= MAX_INDEXED_FILES {
                 break;
             }
@@ -227,7 +239,9 @@ impl ContextManager {
 
         // Stable order: git first, then path.
         self.file_map.sort_by(|a, b| {
-            b.from_git.cmp(&a.from_git).then_with(|| a.path.cmp(&b.path))
+            b.from_git
+                .cmp(&a.from_git)
+                .then_with(|| a.path.cmp(&b.path))
         });
         self.scan_complete = true;
         Ok(())
@@ -354,7 +368,11 @@ impl ContextManager {
     }
 
     /// Rank and pack context for one turn under the character budget.
-    pub fn collect(&mut self, query: &str, alive: &dyn Fn() -> bool) -> Result<Vec<ContextSpan>, ScanCancelled> {
+    pub fn collect(
+        &mut self,
+        query: &str,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<Vec<ContextSpan>, ScanCancelled> {
         if !self.scan_complete {
             self.scan(alive)?;
         }
@@ -386,7 +404,7 @@ impl ContextManager {
         }
 
         // Dedupe by (path, start_line): keep higher score.
-        candidates.sort_by(|a, b| b.score.cmp(&a.score));
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
         let mut seen: HashSet<(String, usize)> = HashSet::new();
         let mut unique = Vec::new();
         for c in candidates {
@@ -444,7 +462,7 @@ impl ContextManager {
 
     /// Pack a list of spans (already chosen) under budget — used by tests / callers.
     pub fn pack(&self, mut spans: Vec<ContextSpan>) -> Vec<ContextSpan> {
-        spans.sort_by(|a, b| b.score.cmp(&a.score));
+        spans.sort_by_key(|s| std::cmp::Reverse(s.score));
         let mut out = Vec::new();
         let mut used = 0usize;
         for mut s in spans {
@@ -511,11 +529,16 @@ fn walk_collect(
     if out.len() >= MAX_INDEXED_FILES {
         return Ok(true);
     }
-    let depth = dir.strip_prefix(root).map(|p| p.components().count()).unwrap_or(0);
+    let depth = dir
+        .strip_prefix(root)
+        .map(|p| p.components().count())
+        .unwrap_or(0);
     if depth > MAX_SCAN_DEPTH {
         return Ok(true);
     }
-    let Ok(rd) = fs::read_dir(dir) else { return Ok(true) };
+    let Ok(rd) = fs::read_dir(dir) else {
+        return Ok(true);
+    };
     for entry in rd.flatten() {
         if !alive() {
             return Err(ScanCancelled);
@@ -545,7 +568,11 @@ fn walk_collect(
                 continue;
             }
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            out.push(FileEntry { path: rel, size, from_git: false });
+            out.push(FileEntry {
+                path: rel,
+                size,
+                from_git: false,
+            });
         }
     }
     Ok(true)
@@ -560,7 +587,10 @@ fn should_index_path(rel: &str) -> bool {
     }
     if let Some(ext) = extension_of(&normalized) {
         let e = ext.to_ascii_lowercase();
-        if IGNORE_EXTS.iter().any(|x| *x == e || normalized.ends_with(x)) {
+        if IGNORE_EXTS
+            .iter()
+            .any(|x| *x == e || normalized.ends_with(x))
+        {
             return false;
         }
     }
@@ -579,10 +609,42 @@ fn is_probably_text_path(path: &str) -> bool {
     // Known texty extensions or extensionless scripts / rust / ts etc.
     matches!(
         extension_of(&lower).unwrap_or(""),
-        "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "kt" | "c" | "h" | "cpp"
-            | "hpp" | "cs" | "rb" | "php" | "swift" | "md" | "txt" | "json" | "toml" | "yaml"
-            | "yml" | "css" | "scss" | "html" | "sh" | "sql" | "proto" | "graphql" | "vue"
-            | "svelte" | "xml" | "properties" | "env.example" | "lock" | ""
+        "rs" | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "py"
+            | "go"
+            | "java"
+            | "kt"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "cs"
+            | "rb"
+            | "php"
+            | "swift"
+            | "md"
+            | "txt"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "css"
+            | "scss"
+            | "html"
+            | "sh"
+            | "sql"
+            | "proto"
+            | "graphql"
+            | "vue"
+            | "svelte"
+            | "xml"
+            | "properties"
+            | "env.example"
+            | "lock"
+            | ""
     ) || !lower.contains('.')
 }
 
@@ -606,8 +668,23 @@ fn tokenize(query: &str) -> Vec<String> {
     raw.retain(|t| {
         !matches!(
             t.as_str(),
-            "the" | "and" | "for" | "with" | "that" | "this" | "from" | "into" | "如何" | "什么"
-                | "一下" | "检查" | "进行" | "是否" | "please" | "find" | "where"
+            "the"
+                | "and"
+                | "for"
+                | "with"
+                | "that"
+                | "this"
+                | "from"
+                | "into"
+                | "如何"
+                | "什么"
+                | "一下"
+                | "检查"
+                | "进行"
+                | "是否"
+                | "please"
+                | "find"
+                | "where"
         )
     });
     raw.dedup();
@@ -648,7 +725,12 @@ fn score_path(path: &str, tokens: &[String], from_git: bool) -> Option<i64> {
 }
 
 /// Grep one file; build a ±context line window around the best match cluster.
-fn grep_file(root: &Path, entry: &FileEntry, tokens: &[String], query: &str) -> Option<ContextSpan> {
+fn grep_file(
+    root: &Path,
+    entry: &FileEntry,
+    tokens: &[String],
+    query: &str,
+) -> Option<ContextSpan> {
     let full = root.join(&entry.path);
     let text = fs::read_to_string(&full).ok()?;
     if text.bytes().take(4096).any(|b| b == 0) {
@@ -663,7 +745,8 @@ fn grep_file(root: &Path, entry: &FileEntry, tokens: &[String], query: &str) -> 
     let mut match_lines: Vec<usize> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let ll = line.to_ascii_lowercase();
-        if tokens.iter().any(|t| ll.contains(t.as_str())) || (!q_lower.is_empty() && ll.contains(&q_lower))
+        if tokens.iter().any(|t| ll.contains(t.as_str()))
+            || (!q_lower.is_empty() && ll.contains(&q_lower))
         {
             match_lines.push(i);
         }
@@ -716,8 +799,12 @@ fn grep_file(root: &Path, entry: &FileEntry, tokens: &[String], query: &str) -> 
         let l = lines[i];
         if tokens.iter().any(|t| l.contains(t.as_str())) {
             score += 5;
-            if l.contains("fn ") || l.contains("function ") || l.contains("def ")
-                || l.contains("class ") || l.contains("pub fn") || l.contains("async fn")
+            if l.contains("fn ")
+                || l.contains("function ")
+                || l.contains("def ")
+                || l.contains("class ")
+                || l.contains("pub fn")
+                || l.contains("async fn")
             {
                 score += 25;
             }
@@ -774,7 +861,11 @@ mod tests {
     const UNIQUE: &str = "kodo_tax_rate_v2";
 
     fn make_fixture() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kodo-ctx-{}-{}", std::process::id(), unique_suffix()));
+        let dir = std::env::temp_dir().join(format!(
+            "kodo-ctx-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::create_dir_all(dir.join("vendor/legacy")).unwrap();
@@ -820,7 +911,10 @@ mod tests {
         .unwrap();
 
         // git init so git ls-files can see tracked files (best effort).
-        let _ = Command::new("git").args(["init", "-q"]).current_dir(&dir).output();
+        let _ = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .output();
         let _ = Command::new("git")
             .args(["add", "-A"])
             .current_dir(&dir)
@@ -846,14 +940,23 @@ mod tests {
         let mut m = manager(&root);
         m.scan(&|| true).expect("scan");
         let paths: Vec<&str> = m.file_map().iter().map(|e| e.path.as_str()).collect();
-        assert!(paths.iter().any(|p| p.starts_with("src/big_calc.rs")), "tracked source missing: {paths:?}");
-        assert!(paths.iter().any(|p| *p == "README.md"));
+        assert!(
+            paths.iter().any(|p| p.starts_with("src/big_calc.rs")),
+            "tracked source missing: {paths:?}"
+        );
+        assert!(paths.contains(&"README.md"));
         assert!(
             !paths.iter().any(|p| p.contains("node_modules")),
             "node_modules must be ignored"
         );
-        assert!(!paths.iter().any(|p| p.contains("target/")), "target must be ignored");
-        assert!(!paths.iter().any(|p| p.contains(".git/")), ".git must be ignored");
+        assert!(
+            !paths.iter().any(|p| p.contains("target/")),
+            "target must be ignored"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains(".git/")),
+            ".git must be ignored"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -862,19 +965,26 @@ mod tests {
         let root = make_fixture();
         let m = manager(&root);
         // Line 700 should be the UNIQUE function line (699 fillers + 1).
-        let span = m.read_range("src/big_calc.rs", 700, 704, "target range").expect("read");
+        let span = m
+            .read_range("src/big_calc.rs", 700, 704, "target range")
+            .expect("read");
         assert_eq!(span.start_line, 700);
         assert_eq!(span.end_line, 704);
         assert!(span.snippet.contains(UNIQUE), "snippet={}", span.snippet);
         assert!(!span.truncated);
 
         // Huge range → truncated flag.
-        let wide = m.read_range("src/big_calc.rs", 1, 1000, "full file").expect("read");
+        let wide = m
+            .read_range("src/big_calc.rs", 1, 1000, "full file")
+            .expect("read");
         assert!(wide.truncated || wide.snippet.chars().count() <= DEFAULT_SPAN_CHARS);
         assert!(wide.total_lines >= 999, "total_lines={}", wide.total_lines);
         if wide.truncated {
             let block = wide.to_prompt_block();
-            assert!(block.contains("truncated"), "must announce truncation: {block}");
+            assert!(
+                block.contains("truncated"),
+                "must announce truncation: {block}"
+            );
         }
         let _ = fs::remove_dir_all(&root);
     }
@@ -902,27 +1012,40 @@ mod tests {
         assert!(!results.is_empty(), "expected context hits");
 
         // Top results must include the real implementation file + line range covering ~700.
-        let hit = results.iter().find(|s| s.path.contains("src/big_calc.rs") && s.path.contains("vendor") == false)
+        let hit = results
+            .iter()
+            .find(|s| s.path.contains("src/big_calc.rs") && !s.path.contains("vendor"))
             .or_else(|| results.iter().find(|s| s.path == "src/big_calc.rs"));
-        let hit = hit.expect(&format!(
-            "src/big_calc.rs not in top: {:?}",
-            results.iter().map(|r| (&r.path, r.score, r.start_line)).collect::<Vec<_>>()
-        ));
+        let hit = hit.unwrap_or_else(|| panic!("src/big_calc.rs not in top: {:?}",
+            results
+                .iter()
+                .map(|r| (&r.path, r.score, r.start_line))
+                .collect::<Vec<_>>()));
         assert!(
             hit.start_line <= 700 && hit.end_line >= 700,
             "expected span covering line 700, got {}-{}",
             hit.start_line,
             hit.end_line
         );
-        assert!(hit.snippet.contains(UNIQUE), "snippet missing symbol: {}", hit.snippet);
+        assert!(
+            hit.snippet.contains(UNIQUE),
+            "snippet missing symbol: {}",
+            hit.snippet
+        );
         assert!(hit.score > 0);
         assert!(!hit.reason.is_empty());
 
         // node_modules noise must not rank above the real source for this query.
         let nm_rank = results.iter().position(|s| s.path.contains("node_modules"));
-        let real_rank = results.iter().position(|s| s.path == "src/big_calc.rs").unwrap();
+        let real_rank = results
+            .iter()
+            .position(|s| s.path == "src/big_calc.rs")
+            .unwrap();
         if let Some(nm) = nm_rank {
-            assert!(nm > real_rank, "noise ranked higher: nm={nm} real={real_rank}");
+            assert!(
+                nm > real_rank,
+                "noise ranked higher: nm={nm} real={real_rank}"
+            );
         }
 
         // README (no answer) should not be the sole/top hit over code.
@@ -966,12 +1089,12 @@ mod tests {
         m.scan(&|| true).expect("scan");
         let results = m.collect(UNIQUE, &|| true).expect("collect");
         assert!(results.len() <= 3, "span cap exceeded: {}", results.len());
-        let total: usize = results.iter().map(|s| s.snippet.chars().count() + s.path.len() + 80).sum();
+        let total: usize = results
+            .iter()
+            .map(|s| s.snippet.chars().count() + s.path.len() + 80)
+            .sum();
         // Soft check: we never massively exceed max_chars (pinned may push slightly).
-        assert!(
-            total <= 500 + 400,
-            "budget blown: {total} for max 500"
-        );
+        assert!(total <= 500 + 400, "budget blown: {total} for max 500");
         for s in &results {
             assert!(s.snippet.chars().count() <= 200 || s.truncated);
         }
@@ -981,11 +1104,14 @@ mod tests {
     #[test]
     fn pack_respects_max_spans() {
         let root = make_fixture();
-        let m = ContextManager::new(&root, ContextBudget {
-            max_chars: 100_000,
-            max_span_chars: 500,
-            max_spans: 2,
-        });
+        let m = ContextManager::new(
+            &root,
+            ContextBudget {
+                max_chars: 100_000,
+                max_span_chars: 500,
+                max_spans: 2,
+            },
+        );
         let spans = vec![
             ContextSpan {
                 path: "a.rs".into(),
@@ -1011,7 +1137,10 @@ mod tests {
         let mut m = manager(&root);
         m.scan(&|| true).expect("scan");
         let hits = m.search_paths("big_calc", 10);
-        assert!(hits.iter().any(|(p, _, _)| p.contains("big_calc")), "{hits:?}");
+        assert!(
+            hits.iter().any(|(p, _, _)| p.contains("big_calc")),
+            "{hits:?}"
+        );
         assert!(hits[0].1 > 0);
         let _ = fs::remove_dir_all(&root);
     }
@@ -1033,7 +1162,9 @@ mod tests {
         let root = make_fixture();
         let mut m = manager(&root);
         m.scan(&|| true).expect("scan");
-        let pin = m.read_range("README.md", 1, 5, "pinned by user").expect("read");
+        let pin = m
+            .read_range("README.md", 1, 5, "pinned by user")
+            .expect("read");
         m.pin(pin);
         let out = m.collect(UNIQUE, &|| true).expect("collect");
         assert!(out.iter().any(|s| s.pinned && s.path == "README.md"));
@@ -1046,7 +1177,9 @@ mod tests {
         // prefer code matches over forcing README head as a default fixture read.
         let root = make_fixture();
         let mut m = manager(&root);
-        let results = m.collect("progressive tax rate calculation", &|| true).expect("collect");
+        let results = m
+            .collect("progressive tax rate calculation", &|| true)
+            .expect("collect");
         // Must find code, and must not be "only README first 24 lines".
         assert!(
             results.iter().any(|s| s.path.ends_with(".rs")),

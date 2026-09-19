@@ -234,37 +234,55 @@ mod tests {
     // Two representative tasks per task_type — both must classify correctly.
     #[test]
     fn classifies_bug_fix_examples() {
-        assert_eq!(classify("Fix the panic when opening an empty project"), TaskType::BugFix);
+        assert_eq!(
+            classify("Fix the panic when opening an empty project"),
+            TaskType::BugFix
+        );
         assert_eq!(classify("修复登录接口 500 报错"), TaskType::BugFix);
     }
 
     #[test]
     fn classifies_feature_examples() {
-        assert_eq!(classify("Add a dark mode toggle to settings"), TaskType::Feature);
+        assert_eq!(
+            classify("Add a dark mode toggle to settings"),
+            TaskType::Feature
+        );
         assert_eq!(classify("实现导出 CSV 的功能"), TaskType::Feature);
     }
 
     #[test]
     fn classifies_test_examples() {
-        assert_eq!(classify("Add unit tests for the task classifier"), TaskType::Test);
+        assert_eq!(
+            classify("Add unit tests for the task classifier"),
+            TaskType::Test
+        );
         assert_eq!(classify("给 plan 模块补测试用例"), TaskType::Test);
     }
 
     #[test]
     fn classifies_refactor_examples() {
-        assert_eq!(classify("Refactor the verify module into smaller functions"), TaskType::Refactor);
+        assert_eq!(
+            classify("Refactor the verify module into smaller functions"),
+            TaskType::Refactor
+        );
         assert_eq!(classify("重构上下文扫描逻辑"), TaskType::Refactor);
     }
 
     #[test]
     fn classifies_code_review_examples() {
-        assert_eq!(classify("Please review the patch in crates/agent"), TaskType::CodeReview);
+        assert_eq!(
+            classify("Please review the patch in crates/agent"),
+            TaskType::CodeReview
+        );
         assert_eq!(classify("审查一下这个 PR 的改动"), TaskType::CodeReview);
     }
 
     #[test]
     fn classifies_docs_examples() {
-        assert_eq!(classify("Update the README installation section"), TaskType::Docs);
+        assert_eq!(
+            classify("Update the README installation section"),
+            TaskType::Docs
+        );
         assert_eq!(classify("补充 API 使用文档"), TaskType::Docs);
     }
 
