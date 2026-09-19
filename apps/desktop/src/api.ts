@@ -108,7 +108,18 @@ export type RunEventDto =
   | { type: "turnComplete"; session: string }
   | { type: "stopped"; session: string }
   | { type: "error"; session: string; message: string }
-  | { type: "approvalRequest"; session: string; step: number; kind: string; detail?: string };
+  | {
+      type: "approvalRequest";
+      session: string;
+      step: number;
+      kind: string;
+      detail?: string;
+      cwd?: string;
+      riskCategory?: string;
+      reason?: string;
+    }
+  | { type: "textDelta"; session: string; text: string }
+  | { type: "progress"; session: string; phase: string; detail: string };
 
 export const RUN_EVENT = "run:event";
 
@@ -135,6 +146,22 @@ export function stopRun(id: string): Promise<void | null> {
 
 export function respondApproval(id: string, step: number, approved: boolean): Promise<void> {
   return invoke<void>("respond_approval", { id, step, approved });
+}
+
+export type TurnChangeDto = {
+  path: string;
+  diff: string;
+  userPreexisting: boolean;
+};
+
+/** Per-file unified diffs of Kodo's changes for this session. */
+export function turnChanges(project: string, id: string): Promise<TurnChangeDto[] | null> {
+  return read<TurnChangeDto[]>("turn_changes", { project, id });
+}
+
+/** Undo only Kodo's changes; user-only edits are never touched. */
+export function undoTurn(project: string, id: string): Promise<string[] | null> {
+  return write<string[]>("undo_turn", { project, id });
 }
 
 export function workspace(): Promise<WorkspaceDto | null> {

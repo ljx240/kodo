@@ -1548,28 +1548,28 @@ fn anthropic_sse(
                             if value
                                 .pointer("/content_block/type")
                                 .and_then(|v| v.as_str())
-                                == Some("tool_use")
-                            => {
-                                let id = value
-                                    .pointer("/content_block/id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_owned();
-                                let name = value
-                                    .pointer("/content_block/name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_owned();
-                                let _ = on_event(ProviderEvent::ToolCallStart {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                });
-                                pending_tool = Some(NativeToolCall {
-                                    id,
-                                    name,
-                                    arguments: Value::Object(Default::default()),
-                                });
-                            }
+                                == Some("tool_use") =>
+                        {
+                            let id = value
+                                .pointer("/content_block/id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_owned();
+                            let name = value
+                                .pointer("/content_block/name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_owned();
+                            let _ = on_event(ProviderEvent::ToolCallStart {
+                                id: id.clone(),
+                                name: name.clone(),
+                            });
+                            pending_tool = Some(NativeToolCall {
+                                id,
+                                name,
+                                arguments: Value::Object(Default::default()),
+                            });
+                        }
                         "content_block_delta" => {
                             if let Some(delta) = value
                                 .pointer("/delta/text")

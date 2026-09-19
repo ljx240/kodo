@@ -132,6 +132,8 @@ pub struct ContextManager {
     file_map: Vec<FileEntry>,
     pinned: Vec<ContextSpan>,
     scan_complete: bool,
+    /// Paths modified this turn — prior observations of these are stale.
+    stale_paths: std::collections::BTreeSet<String>,
 }
 
 impl ContextManager {
@@ -142,7 +144,31 @@ impl ContextManager {
             file_map: Vec::new(),
             pinned: Vec::new(),
             scan_complete: false,
+            stale_paths: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Mark a path's earlier observations stale (file was modified).
+    pub fn invalidate(&mut self, relative: &str) {
+        let rel = relative.trim().trim_start_matches("./").to_owned();
+        self.stale_paths.insert(rel.clone());
+        self.pinned.retain(|p| p.path != rel);
+    }
+
+    /// True when this path was modified after its content was observed.
+    pub fn is_stale(&self, relative: &str) -> bool {
+        let rel = relative.trim().trim_start_matches("./");
+        self.stale_paths.contains(rel)
+    }
+
+    pub fn stale_paths(&self) -> &std::collections::BTreeSet<String> {
+        &self.stale_paths
+    }
+
+    /// Clear the stale marker (after a fresh read of the path).
+    pub fn refresh(&mut self, relative: &str) {
+        let rel = relative.trim().trim_start_matches("./");
+        self.stale_paths.remove(rel);
     }
 
     pub fn root(&self) -> &Path {
@@ -1016,11 +1042,15 @@ mod tests {
             .iter()
             .find(|s| s.path.contains("src/big_calc.rs") && !s.path.contains("vendor"))
             .or_else(|| results.iter().find(|s| s.path == "src/big_calc.rs"));
-        let hit = hit.unwrap_or_else(|| panic!("src/big_calc.rs not in top: {:?}",
-            results
-                .iter()
-                .map(|r| (&r.path, r.score, r.start_line))
-                .collect::<Vec<_>>()));
+        let hit = hit.unwrap_or_else(|| {
+            panic!(
+                "src/big_calc.rs not in top: {:?}",
+                results
+                    .iter()
+                    .map(|r| (&r.path, r.score, r.start_line))
+                    .collect::<Vec<_>>()
+            )
+        });
         assert!(
             hit.start_line <= 700 && hit.end_line >= 700,
             "expected span covering line 700, got {}-{}",

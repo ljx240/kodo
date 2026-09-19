@@ -2,8 +2,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 /// Category of a verification command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +77,11 @@ pub struct VerifyOutcome {
     pub exit_code: Option<i32>,
     pub ok: bool,
     pub timed_out: bool,
+    pub cancelled: bool,
+    /// Working directory the command ran in.
+    pub cwd: String,
+    /// Wall-clock duration of the run.
+    pub duration_ms: u64,
     /// Truncated raw output (for notes only).
     pub output_tail: String,
     pub failure: Option<FailureReport>,
@@ -91,6 +94,12 @@ pub enum FinalStatus {
     PartiallyVerified,
     VerificationFailed,
     NotVerified,
+    /// User stop / alive() went false — never reported as Completed.
+    Cancelled,
+    /// Budget or denial exhausted without a verified result.
+    Blocked,
+    /// Provider-level failure ended the turn before verification.
+    ProviderError,
 }
 
 impl FinalStatus {
@@ -100,6 +109,9 @@ impl FinalStatus {
             Self::PartiallyVerified => "Partially verified",
             Self::VerificationFailed => "Verification failed",
             Self::NotVerified => "Not verified",
+            Self::Cancelled => "Cancelled",
+            Self::Blocked => "Blocked",
+            Self::ProviderError => "Provider error",
         }
     }
 }
@@ -124,6 +136,12 @@ impl VerificationRunner {
 
     /// Infer candidate commands from project layout and package scripts.
     pub fn infer(&self, project: &Path) -> Vec<VerifyCommand> {
+        self.infer_targeted(project, &[])
+    }
+
+    /// Infer verification commands, narrowing to changed files' packages when
+    /// possible (targeted first, then package-level, then workspace).
+    pub fn infer_targeted(&self, project: &Path, changed_files: &[String]) -> Vec<VerifyCommand> {
         let mut cmds: Vec<VerifyCommand> = Vec::new();
         let push = |cmds: &mut Vec<VerifyCommand>, kind: VerifyKind, command: String| {
             if !cmds.iter().any(|c| c.command == command) {
@@ -135,17 +153,68 @@ impl VerificationRunner {
             }
         };
 
-        if project.join("Cargo.toml").is_file() {
-            push(&mut cmds, VerifyKind::Build, "cargo check --quiet".into());
-            push(
-                &mut cmds,
-                VerifyKind::Test,
-                "cargo test --workspace --quiet".into(),
-            );
+        // Map changed paths → cargo package / npm package for targeted runs.
+        let mut crates_changed: Vec<String> = Vec::new();
+        let mut web_changed = false;
+        for path in changed_files {
+            if let Some(rest) = path.strip_prefix("crates/") {
+                if let Some(pkg) = rest.split('/').next() {
+                    let name =
+                        std::fs::read_to_string(project.join(format!("crates/{pkg}/Cargo.toml")))
+                            .ok()
+                            .and_then(|text| {
+                                text.lines()
+                                    .find_map(|l| l.trim().strip_prefix("name = "))
+                                    .map(|n| n.trim_matches('"').to_owned())
+                            })
+                            .unwrap_or_else(|| pkg.to_owned());
+                    if !crates_changed.contains(&name) {
+                        crates_changed.push(name);
+                    }
+                }
+            }
+            if path.starts_with("apps/desktop/") {
+                web_changed = true;
+            }
         }
 
-        if project.join("package.json").is_file() {
-            let text = fs::read_to_string(project.join("package.json")).unwrap_or_default();
+        if project.join("Cargo.toml").is_file() {
+            if !crates_changed.is_empty() {
+                for pkg in crates_changed.iter().take(3) {
+                    push(
+                        &mut cmds,
+                        VerifyKind::Test,
+                        format!("cargo test -p {pkg} --quiet"),
+                    );
+                }
+                push(&mut cmds, VerifyKind::Build, "cargo check --quiet".into());
+            } else {
+                push(&mut cmds, VerifyKind::Build, "cargo check --quiet".into());
+                push(
+                    &mut cmds,
+                    VerifyKind::Test,
+                    "cargo test --workspace --quiet".into(),
+                );
+            }
+        }
+
+        let web_manifest = if web_changed {
+            ["apps/desktop/package.json", "package.json"]
+                .iter()
+                .map(|p| project.join(p))
+                .find(|p| p.is_file())
+        } else if project.join("package.json").is_file() {
+            Some(project.join("package.json"))
+        } else {
+            None
+        };
+        if let Some(manifest) = web_manifest {
+            let text = fs::read_to_string(&manifest).unwrap_or_default();
+            let npm_prefix = if manifest.ends_with("apps/desktop/package.json") {
+                "npm --prefix apps/desktop run "
+            } else {
+                "npm run "
+            };
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(scripts) = value.get("scripts").and_then(|s| s.as_object()) {
                     // Prefer explicit script names.
@@ -159,7 +228,7 @@ impl VerificationRunner {
                     ];
                     for (name, kind) in mapping {
                         if scripts.contains_key(name) {
-                            push(&mut cmds, kind, format!("npm run {name}"));
+                            push(&mut cmds, kind, format!("{npm_prefix}{name}"));
                         }
                     }
                 }
@@ -185,90 +254,19 @@ impl VerificationRunner {
         cmds
     }
 
-    /// Run one command with timeout. `alive` can cancel earlier.
+    /// Run one command with timeout + process-tree kill. `alive` can cancel earlier.
     pub fn run_one(
         &self,
         project: &Path,
         cmd: &VerifyCommand,
         alive: &dyn Fn() -> bool,
     ) -> VerifyOutcome {
-        let timeout = Duration::from_millis(cmd.timeout_ms.max(1_000));
-        let shell = if cfg!(windows) { "cmd" } else { "/bin/sh" };
-        let mut child = Command::new(shell);
-        if cfg!(windows) {
-            child.arg("/C").arg(&cmd.command);
-        } else {
-            child.arg("-c").arg(&cmd.command);
-        }
-        let child = child
-            .current_dir(project)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let began = Instant::now();
-        let mut proc = match child.spawn() {
-            Ok(p) => p,
-            Err(e) => {
-                let report = FailureReport {
-                    command: cmd.command.clone(),
-                    exit_code: Some(127),
-                    primary_error: format!("spawn failed: {e}"),
-                    relevant_files: vec![],
-                };
-                return VerifyOutcome {
-                    command: cmd.clone(),
-                    exit_code: Some(127),
-                    ok: false,
-                    timed_out: false,
-                    output_tail: report.primary_error.clone(),
-                    failure: Some(report),
-                };
-            }
-        };
-
-        let mut timed_out = false;
-        let mut cancelled = false;
-        loop {
-            if !alive() {
-                let _ = proc.kill();
-                cancelled = true;
-                break;
-            }
-            if began.elapsed() > timeout {
-                let _ = proc.kill();
-                timed_out = true;
-                break;
-            }
-            match proc.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => break,
-            }
-        }
-
-        let output = proc.wait_with_output().ok();
-        let (stdout, stderr, code) = match output {
-            Some(o) => {
-                let so = String::from_utf8_lossy(&o.stdout).into_owned();
-                let se = String::from_utf8_lossy(&o.stderr).into_owned();
-                (so, se, o.status.code())
-            }
-            None => (String::new(), String::new(), None),
-        };
-        let mut combined = stdout;
-        if !stderr.trim().is_empty() {
-            if !combined.is_empty() {
-                combined.push('\n');
-            }
-            combined.push_str(stderr.trim());
-        }
-        if timed_out {
-            combined.push_str(&format!("\n[timed out after {}ms]", cmd.timeout_ms));
-        }
-        if cancelled {
-            combined.push_str("\n[cancelled]");
-        }
-        let ok = !timed_out && !cancelled && code == Some(0);
+        let timeout_secs = (cmd.timeout_ms.max(1_000)).div_ceil(1_000);
+        // Reuse the agent command runner: process-group kill covers children.
+        let outcome = crate::tools::command_run(project, &cmd.command, alive, timeout_secs);
+        let combined = crate::tools::redact_secrets(&outcome.output);
+        let code = outcome.exit_code;
+        let ok = outcome.kind == crate::tools::CommandOutcomeKind::Success;
         let output_tail = tail_chars(&combined, 2500);
         let failure = if ok {
             None
@@ -279,7 +277,10 @@ impl VerificationRunner {
             command: cmd.clone(),
             exit_code: code,
             ok,
-            timed_out,
+            timed_out: outcome.timed_out,
+            cancelled: outcome.cancelled,
+            cwd: project.display().to_string(),
+            duration_ms: outcome.duration_ms,
             output_tail,
             failure,
         }
@@ -587,12 +588,81 @@ error[E0308]: mismatched types
     }
 
     #[test]
+    fn final_status_includes_cancelled_and_blocked() {
+        assert_eq!(FinalStatus::Cancelled.label(), "Cancelled");
+        assert_eq!(FinalStatus::Blocked.label(), "Blocked");
+        assert_eq!(FinalStatus::ProviderError.label(), "Provider error");
+        assert_ne!(
+            FinalStatus::Cancelled.label(),
+            FinalStatus::Verified.label()
+        );
+    }
+
+    #[test]
+    fn targeted_infer_narrows_to_changed_crate() {
+        let dir = std::env::temp_dir().join(format!("kodo-tgt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("crates/agent")).unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/agent\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("crates/agent/Cargo.toml"),
+            "[package]\nname = \"kodo-agent\"\n",
+        )
+        .unwrap();
+        let runner = VerificationRunner::new(5_000);
+        let cmds = runner.infer_targeted(&dir, &["crates/agent/src/lib.rs".into()]);
+        assert!(
+            cmds.iter()
+                .any(|c| c.command.contains("cargo test -p kodo-agent")),
+            "cmds={:?}",
+            cmds.iter().map(|c| &c.command).collect::<Vec<_>>()
+        );
+        assert!(
+            !cmds.iter().any(|c| c.command.contains("--workspace")),
+            "targeted run must not fall back to workspace tests first: {:?}",
+            cmds
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_timeout_kills_process_tree() {
+        let dir = std::env::temp_dir().join(format!("kodo-vto-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let marker = dir.join("v.marker");
+        // Grandchild would write at t=3s; timeout at ~1s must kill the group first.
+        let script = format!("(sleep 3; echo x > '{}') & sleep 10", marker.display());
+        let runner = VerificationRunner::new(5_000);
+        let cmd = VerifyCommand {
+            kind: VerifyKind::Test,
+            command: script,
+            timeout_ms: 400,
+        };
+        let outcome = runner.run_one(&dir, &cmd, &|| true);
+        assert!(outcome.timed_out || outcome.cancelled, "{outcome:?}");
+        assert!(!outcome.ok);
+        std::thread::sleep(std::time::Duration::from_millis(3500));
+        assert!(
+            !marker.exists(),
+            "verify timeout must kill the process tree"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn final_status_classification() {
         let pass = VerifyOutcome {
             command: VerifyCommand::test("true"),
             exit_code: Some(0),
             ok: true,
             timed_out: false,
+            cancelled: false,
+            cwd: ".".into(),
+            duration_ms: 1,
             output_tail: String::new(),
             failure: None,
         };
@@ -601,6 +671,9 @@ error[E0308]: mismatched types
             exit_code: Some(1),
             ok: false,
             timed_out: false,
+            cancelled: false,
+            cwd: ".".into(),
+            duration_ms: 1,
             output_tail: String::new(),
             failure: None,
         };
@@ -621,6 +694,9 @@ error[E0308]: mismatched types
             exit_code: Some(1),
             ok: false,
             timed_out: false,
+            cancelled: false,
+            cwd: ".".into(),
+            duration_ms: 1,
             output_tail: String::new(),
             failure: None,
         };

@@ -46,9 +46,10 @@ pub fn dangerous_reason(command: &str) -> Option<&'static str> {
         return Some("重定向到绝对路径");
     }
     if (first == "sh" || first == "bash" || first == "zsh")
-        && (lower.contains(" -c ") || lower.starts_with("sh -c") || lower.starts_with("bash -c")) {
-            return Some("嵌套 shell");
-        }
+        && (lower.contains(" -c ") || lower.starts_with("sh -c") || lower.starts_with("bash -c"))
+    {
+        return Some("嵌套 shell");
+    }
     None
 }
 
@@ -160,6 +161,103 @@ pub struct CommandOutcome {
 pub const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60;
 /// Hard cap so a mis-set timeout cannot run forever.
 pub const MAX_COMMAND_TIMEOUT_SECS: u64 = 600;
+
+/// Redact secret-looking material from command output before it reaches the
+/// model, the session log, or the trace UI. Never prints raw env dumps.
+pub fn redact_secrets(text: &str) -> String {
+    if text.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = text.to_owned();
+    // Known token prefixes: keep prefix, mask the body.
+    for pattern in [
+        "sk-ant-",
+        "sk-proj-",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "glpat-",
+        "AIza",
+        "sk-",
+    ] {
+        let mut search_from = 0;
+        while let Some(rel) = out[search_from..].find(pattern) {
+            let pos = search_from + rel;
+            // Skip prefixes already masked (e.g. sk-ant-•••).
+            let after = pos + pattern.len();
+            if out[after..].starts_with('•') {
+                search_from = after;
+                continue;
+            }
+            let mut end = after;
+            let bytes = out.as_bytes();
+            while end < bytes.len()
+                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-' || bytes[end] == b'_')
+            {
+                end += 1;
+            }
+            if end > after {
+                out.replace_range(after..end, "•••");
+                search_from = after + "•••".len();
+            } else {
+                search_from = after;
+            }
+        }
+    }
+    // Bearer <token>
+    let mut search_from = 0;
+    while let Some(rel) = out[search_from..].find("Bearer ") {
+        let pos = search_from + rel + 7;
+        if out[pos..].starts_with('•') {
+            search_from = pos;
+            continue;
+        }
+        let mut end = pos;
+        let bytes = out.as_bytes();
+        while end < bytes.len() && !bytes[end].is_ascii_whitespace() && bytes[end] != b'"' {
+            end += 1;
+        }
+        if end > pos {
+            out.replace_range(pos..end, "•••");
+            search_from = pos + "•••".len();
+        } else {
+            search_from = pos;
+        }
+    }
+    redact_env_assignments(&out)
+}
+
+fn redact_env_assignments(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            if let Some(eq) = line.find('=') {
+                let name = &line[..eq];
+                let upper = name.to_ascii_uppercase();
+                let sensitive = upper.ends_with("_TOKEN")
+                    || upper.ends_with("_KEY")
+                    || upper.ends_with("_SECRET")
+                    || upper.ends_with("_PASSWORD")
+                    || upper.ends_with("_CREDENTIAL")
+                    || upper.ends_with("_CREDENTIALS")
+                    || upper.contains("PASSWORD")
+                    || upper.contains("AUTHORIZATION")
+                    || upper.contains("APIKEY")
+                    || upper.contains("API_KEY")
+                    || upper == "TOKEN";
+                if sensitive && line[eq + 1..].trim().len() > 3 {
+                    format!("{name}=•••")
+                } else {
+                    line.to_owned()
+                }
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Kill a process tree. Unix: process-group SIGKILL when the child was
 /// started as group leader; Windows: taskkill /T /F.
@@ -354,13 +452,25 @@ pub fn command_run(
     if text.trim().is_empty() {
         text = "(无输出)".to_owned();
     }
+    let mut text = redact_secrets(&text);
     if text.len() > 4000 {
-        let mut cut = 4000;
-        while cut > 0 && !text.is_char_boundary(cut) {
-            cut -= 1;
+        // Head/tail strategy: keep head and tail so the model knows it truncated.
+        let head_cap = 2800;
+        let mut head_end = head_cap;
+        while head_end > 0 && !text.is_char_boundary(head_end) {
+            head_end -= 1;
         }
-        text.truncate(cut);
-        text.push_str("\n…");
+        let tail_start_candidates = text.len().saturating_sub(1000);
+        let mut tail_start = tail_start_candidates;
+        while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        let head = &text[..head_end];
+        let tail = &text[tail_start..];
+        text = format!(
+            "{head}\n… [output truncated: {} bytes total; showing head+tail] …\n{tail}",
+            text.len()
+        );
     }
 
     let exit_code = if cancelled {
@@ -703,6 +813,35 @@ mod tests {
         assert_eq!(outcome.kind, CommandOutcomeKind::Failed);
         assert_eq!(outcome.exit_code, Some(3));
         assert!(!outcome.timed_out && !outcome.cancelled);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn redact_secrets_masks_tokens_and_env() {
+        let raw = "Authorization: Bearer sk-abcdef1234567890\nMY_API_TOKEN=supersecretval\nGITHUB_TOKEN=ghp_abcdefghij\npassword=hunter2\nGREETING=hello";
+        let clean = redact_secrets(raw);
+        assert!(!clean.contains("supersecretval"), "{clean}");
+        assert!(!clean.contains("ghp_abcdefghij"), "{clean}");
+        assert!(!clean.contains("hunter2"), "{clean}");
+        assert!(clean.contains("GREETING=hello"), "{clean}");
+        assert!(clean.contains("•••"), "{clean}");
+    }
+
+    #[test]
+    fn output_truncation_notices_the_model() {
+        let dir = std::env::temp_dir().join(format!("kodo_trunc_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let outcome = command_run(&dir, "seq 1 5000", &|| true, 10);
+        assert!(
+            outcome.output.contains("output truncated"),
+            "missing truncation notice: len={}",
+            outcome.output.len()
+        );
+        assert!(
+            outcome.output.len() < 6000,
+            "cap failed: {}",
+            outcome.output.len()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

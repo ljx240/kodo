@@ -33,7 +33,14 @@ type Props = {
   projectPath?: string;
 };
 
-type Approval = { step: number; kind: string; detail: string };
+type Approval = {
+  step: number;
+  kind: string;
+  detail: string;
+  cwd?: string;
+  riskCategory?: string;
+  reason?: string;
+};
 
 /** Recoverable failure: message + optional retry / recovery action. */
 type ActionErrorState = {
@@ -77,6 +84,8 @@ export function ConversationPage({
   const [contexts, setContexts] = useState<string[]>([]);
   const [pageError, setPageError] = useState<ActionErrorState | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [streamText, setStreamText] = useState("");
+  const [progress, setProgress] = useState<{ phase: string; detail: string } | null>(null);
 
   const providerWarning = useMemo(() => {
     if (isFixture) return null;
@@ -94,6 +103,8 @@ export function ConversationPage({
     setPageError(null);
     setContexts([]);
     setApprovalError(null);
+    setStreamText("");
+    setProgress(null);
     if (!conversationId || isFixture) {
       setTurns([]);
       setTitle("");
@@ -126,13 +137,37 @@ export function ConversationPage({
     void onRunEvent((event) => {
       if (event.session !== conversationId) return;
       if (event.type === "approvalRequest") {
-        setApproval({ step: event.step, kind: event.kind, detail: event.detail ?? "" });
+        setApproval({
+          step: event.step,
+          kind: event.kind,
+          detail: event.detail ?? "",
+          cwd: event.cwd,
+          riskCategory: event.riskCategory,
+          reason: event.reason,
+        });
         return;
+      }
+      if (event.type === "textDelta") {
+        setStreamText((current) => current + event.text);
+        return;
+      }
+      if (event.type === "progress") {
+        setProgress({ phase: event.phase, detail: event.detail });
+        return;
+      }
+      if (event.type === "itemCompleted" && event.item.kind === "agentMessage") {
+        setStreamText("");
+      }
+      if (event.type === "turnStarted") {
+        setStreamText("");
+        setProgress(null);
       }
       setTurns((current) => reduce(current, event));
       if (event.type === "turnComplete" || event.type === "stopped" || event.type === "error") {
         setRunning(false);
         setApproval(null);
+        setStreamText("");
+        setProgress(null);
       }
     }).then((off) => {
       if (alive) stop = off;
@@ -362,6 +397,8 @@ export function ConversationPage({
                     time=""
                     reply={toReply(turn, running && last)}
                     running={running && last}
+                    streamText={running && last ? streamText : ""}
+                    progress={running && last ? progress : null}
                     onViewFiles={onViewFiles}
                   />
                 </Fragment>
@@ -373,8 +410,13 @@ export function ConversationPage({
           {liveSession && approval && (
             <div className="approval-bar" role="alertdialog" aria-label="审批工具步骤">
               <div className="approval-text">
-                <strong>需要批准 · {approval.kind}</strong>
+                <strong>
+                  需要批准 · {approval.kind}
+                  {approval.riskCategory ? ` · ${approval.riskCategory}` : ""}
+                </strong>
                 <code>{approval.detail || "继续执行该步骤"}</code>
+                {approval.reason && <span className="approval-reason">原因：{approval.reason}</span>}
+                {approval.cwd && <span className="approval-cwd">cwd: {approval.cwd}</span>}
               </div>
               <div className="approval-actions">
                 <button type="button" className="btn" onClick={() => decide(false)}>

@@ -242,10 +242,9 @@ pub fn replace_range(project: &Path, args: &ReplaceRangeArgs) -> Result<PatchOut
     }
 
     let mut new_content = new_lines.join("\n");
-    if (old_content.ends_with('\n') || !new_content.is_empty())
-        && !new_content.ends_with('\n') {
-            new_content.push('\n');
-        }
+    if (old_content.ends_with('\n') || !new_content.is_empty()) && !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
 
     let (added, removed) = line_diff_counts(&old_content, &new_content);
     write_checked(&full, &new_content)?;

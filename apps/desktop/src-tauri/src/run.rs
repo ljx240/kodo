@@ -203,6 +203,7 @@ pub fn start(
         let approve_id = args.id.clone();
         let approve_approvals = approvals.clone();
         let approve_app = app.clone();
+        let approve_project = args.project.clone();
         let permission = args.permission;
         let approve_seq = Arc::new(Mutex::new(0u32));
         let approve = {
@@ -216,7 +217,20 @@ pub fn start(
                 let step = *seq;
                 drop(seq);
                 let (ticket, rx) = approve_approvals.wait_point(&approve_id, step);
-                let reason = agent::dangerous_reason(command).unwrap_or("需要确认");
+                let risk = kodo_agent::tools::classify_command_risk(command);
+                let reason = agent::dangerous_reason(command).unwrap_or(risk.reason);
+                let risk_category = if risk.destructive_git {
+                    "DestructiveGit"
+                } else if risk.dangerous {
+                    "Dangerous"
+                } else if risk.network_sensitive {
+                    "Network"
+                } else if matches!(kind, StepKind::FileChange) {
+                    "FilesystemWrite"
+                } else {
+                    "Safe"
+                };
+                let cwd = approve_project.to_string_lossy().into_owned();
                 let _ = approve_app.emit(
                     "run:event",
                     RunEvent::ApprovalRequest {
@@ -224,6 +238,9 @@ pub fn start(
                         step,
                         kind: step_kind_label(kind).to_owned(),
                         detail: format!("{command}  ·  {reason}"),
+                        cwd,
+                        risk_category: risk_category.to_owned(),
+                        reason: reason.to_owned(),
                     },
                 );
                 let decided = rx.recv_timeout(Duration::from_secs(300)).unwrap_or(false);
@@ -245,6 +262,27 @@ pub fn start(
                 return false;
             }
             match event {
+                SinkEvent::TextDelta { text } => {
+                    let _ = record_app.emit(
+                        "run:event",
+                        RunEvent::TextDelta {
+                            session: record_id.clone(),
+                            text,
+                        },
+                    );
+                    record_runs.is_live(&record_id)
+                }
+                SinkEvent::Progress { phase, detail } => {
+                    let _ = record_app.emit(
+                        "run:event",
+                        RunEvent::Progress {
+                            session: record_id.clone(),
+                            phase,
+                            detail,
+                        },
+                    );
+                    record_runs.is_live(&record_id)
+                }
                 SinkEvent::Started { step } => {
                     seq += 1;
                     open_id = Some(seq);
@@ -341,6 +379,7 @@ pub fn start(
             fallback_to_local: args.fallback_to_local,
             max_output_tokens: args.max_output_tokens,
             extended_thinking: args.extended_thinking,
+            session_id: Some(args.id.clone()),
         };
 
         let result = agent::run(&request, &alive, &approve, &mut sink);

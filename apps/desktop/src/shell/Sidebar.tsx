@@ -12,7 +12,6 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
-  Search,
   Settings,
   Sparkles,
   Trash2,
@@ -106,11 +105,7 @@ export function Sidebar({ route, inspectorOpen, activeConversationId, onSelectCo
     <aside className="sidebar" id="kodo-sidebar">
       {/* The window draws its title bar over this strip, so the space beside the
           traffic lights has to carry the drag region itself. */}
-      <div className="sidebar-strip" data-tauri-drag-region>
-        <button type="button" className="icon-btn" aria-label="Search">
-          <Search size={17} strokeWidth={1.7} />
-        </button>
-      </div>
+      <div className="sidebar-strip" data-tauri-drag-region />
 
       <div className="brand">
         <span className="brand-mark">K</span>
@@ -119,12 +114,6 @@ export function Sidebar({ route, inspectorOpen, activeConversationId, onSelectCo
           <span className="brand-tagline">Get code done.</span>
         </span>
       </div>
-
-      <button type="button" className="sidebar-search">
-        <Search size={15} strokeWidth={1.7} />
-        <span>Search...</span>
-        <kbd>⌘ K</kbd>
-      </button>
 
       <nav className="nav">{NAV.map(({ name, label, Icon }) => navItem(name, label, Icon))}</nav>
 

@@ -15,8 +15,7 @@ pub struct FileSnapshot {
     pub bytes: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TurnChangeSet {
     /// Paths dirty *before* Kodo touched anything (user-owned).
     pub baseline_dirty: BTreeSet<String>,
@@ -27,7 +26,6 @@ pub struct TurnChangeSet {
     pub diffs: BTreeMap<String, String>,
     pub verified: Option<bool>,
 }
-
 
 impl TurnChangeSet {
     /// Capture git status --porcelain baseline before any Kodo mutation.

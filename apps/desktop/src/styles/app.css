@@ -1082,3 +1082,17 @@ p {
 .btn--ghost:hover {
   background: var(--kodo-hover);
 }
+
+.app[data-density="comfortable"] {
+  --kodo-space-1: 6px;
+  --kodo-space-2: 10px;
+  --kodo-space-3: 16px;
+}
+
+.app--system-font {
+  --kodo-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.app[data-line-numbers="false"] .line-no {
+  display: none;
+}

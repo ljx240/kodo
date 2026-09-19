@@ -114,11 +114,6 @@ export const timeline: TimelineRow[] = [
 ];
 
 /** Rendered as the collapsed "后续建议" disclosure under the final answer. */
-export const followUps = [
-  "建议为未知表路由补充集成测试，覆盖静态路由优先的场景",
-  "建议在 README 中补充 topic 首次投递前需创建的前置说明",
-];
-
 export const responseMeta = {
   replyId: "rep_01J8F4QZ7Y9K3V6M2N8P",
   startedAt: "2024-12-26 10:24:32",
@@ -127,26 +122,6 @@ export const responseMeta = {
   totalSteps: 10,
   workspace: "/projects/realtime-lakehouse",
   model: "Claude 3.5 Sonnet",
-};
-
-export const terminalOutput = {
-  command: "docker build",
-  exitCode: 0,
-  lines: [
-    "[+] Building 42.3s (12/12) FINISHED",
-    " => [internal] load build context                                     0.5s",
-    " => [1/8] FROM rust:1.75 as builder                                   2.1s",
-    " => [2/8] WORKDIR /app                                                0.1s",
-    " => [3/8] COPY . .                                                    0.4s",
-    " => [4/8] RUN cargo build --release                                  38.7s",
-    " => [5/8] FROM debian:bookworm-slim                                   0.8s",
-    " => [6/8] COPY --from=builder /app/target/...                         0.2s",
-    " => [7/8] RUN useradd -m k2k                                          0.1s",
-    " => [8/8] CMD [\"/usr/local/bin/k2k-rust\"]                            0.2s",
-    " => exporting to image                                                0.2s",
-    " => => writing image sha256:9f2c...:72ad7                             0.2s",
-    "Successfully built k2k-rust:latest",
-  ],
 };
 
 export const llmCalls = [

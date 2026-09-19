@@ -7,9 +7,7 @@ import {
   Pencil,
   Play,
   Search,
-  Share2,
   Sparkles,
-  MoreHorizontal,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { loadSession, type SessionDto } from "../api";
@@ -229,13 +227,6 @@ export function TracePage({
           <span className="crumb-current">Response Trace</span>
         </nav>
         <span className="spacer" />
-        <button type="button" className="btn" disabled title="Coming later">
-          <Share2 size={15} strokeWidth={1.9} />
-          <span>Share</span>
-        </button>
-        <button type="button" className="icon-btn" aria-label="More" disabled title="Coming later">
-          <MoreHorizontal size={16} strokeWidth={1.7} />
-        </button>
       </header>
 
       <div className="scroll">

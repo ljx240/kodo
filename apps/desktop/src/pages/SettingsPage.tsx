@@ -8,7 +8,6 @@ import {
   Palette,
   Pencil,
   Plus,
-  Search,
   Settings,
   SlidersHorizontal,
   SquareTerminal,
@@ -157,11 +156,6 @@ export function SettingsPage({ model, onSelectModel, onProvidersSaved }: Props) 
           <p>Customize Kodo to fit your workflow</p>
         </div>
         <span className="spacer" />
-        <div className="search-field search-field--inline">
-          <Search size={15} strokeWidth={1.7} />
-          <input placeholder="Search settings..." />
-          <kbd>⌘F</kbd>
-        </div>
       </header>
 
       <div className="settings-layout">
@@ -448,12 +442,6 @@ function ToolsBody() {
 function StorageBody() {
   return (
     <>
-      <SwitchRow
-        label="Keep full traces"
-        hint="归档统计尽量保留 tools/commands/file changes（已接 list_archived 派生）"
-        trailing
-        settingKey="keep-full-traces"
-      />
       <Field
         label="Local state"
         hint="项目、会话与设置使用 append-only 日志；API Key 在 credentials.log"
@@ -473,20 +461,20 @@ function AppearanceBody() {
   const [density, setDensity] = useSetting("density", "compact");
   return (
     <>
-      <Field label="Theme" hint="V1 仅浅色；选择会保存供后续主题使用" hintBelow wide>
+      <Field label="Theme" hint="当前版本为浅色；System 跟随浅色" hintBelow wide>
         <select className="select" value={theme} onChange={(e) => setTheme(e.target.value)}>
           <option value="light">Light</option>
           <option value="system">System (仅浅色生效)</option>
         </select>
       </Field>
-      <Field label="Interface density" hint="compact 为设计默认密度" hintBelow wide>
+      <Field label="Interface density" hint="应用到 app 的 data-density" hintBelow wide>
         <select className="select" value={density} onChange={(e) => setDensity(e.target.value)}>
           <option value="compact">Compact</option>
           <option value="comfortable">Comfortable</option>
         </select>
       </Field>
-      <SwitchRow label="Show line numbers" hint="代码块展示偏好（已保存）" trailing settingKey="show-line-numbers" />
-      <SwitchRow label="Use system font" hint="使用系统 UI 字体（设计默认）" trailing settingKey="use-system-font" />
+      <SwitchRow label="Show line numbers" hint="应用到 data-line-numbers 属性" trailing settingKey="show-line-numbers" />
+      <SwitchRow label="Use system font" hint="应用 app--system-font 类" trailing settingKey="use-system-font" />
     </>
   );
 }
@@ -544,8 +532,6 @@ function GeneralBody({ model, onSelectModel }: { model: string; onSelectModel: (
       <Field label="Fallback behavior" hint="If the selected model is unavailable" hintBelow wide>
         <FallbackSelect />
       </Field>
-      <SwitchRow label="Show inline citations" hint="Link to source files, commands and tools" settingKey="show-inline-citations" />
-      <SwitchRow label="Auto-save conversations" hint="会话日志始终追加写入" trailing settingKey="auto-save-conversations" />
     </>
   );
 }

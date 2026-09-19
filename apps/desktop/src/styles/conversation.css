@@ -659,3 +659,30 @@
   font-size: var(--kodo-font-xs);
   font-family: var(--kodo-font-mono);
 }
+
+/* Live model stream preview (batched TextDelta). */
+.stream-preview {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--kodo-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--kodo-canvas) 92%, white);
+}
+
+.stream-preview .final-text {
+  white-space: pre-wrap;
+  margin: 0;
+}
+
+/* Structured approval risk context. */
+.approval-reason,
+.approval-cwd {
+  display: block;
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-ink-muted, #5b6570);
+  margin-top: 4px;
+}
+
+.approval-cwd {
+  font-family: var(--kodo-font-mono);
+}

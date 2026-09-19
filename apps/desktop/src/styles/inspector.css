@@ -425,3 +425,19 @@
     width: min(var(--kodo-inspector-width), calc(100vw - var(--kodo-inspector-rail-width)));
   }
 }
+
+.turn-change-head {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+  padding: 4px 0;
+}
+
+.diff-block {
+  max-height: 280px;
+  overflow: auto;
+  font-size: 11px;
+  margin: 4px 0 10px;
+}
