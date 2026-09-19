@@ -571,6 +571,28 @@ pub fn evidence_from_tool_result(
                 }
             }
         }
+        ToolName::ListFiles | ToolName::FindSymbol | ToolName::FindReferences => {
+            if !result.ok {
+                return None;
+            }
+            EvidenceKind::SearchHit {
+                query: result.input.clone(),
+                hits: result
+                    .output
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count()
+                    .max(1),
+            }
+        }
+        ToolName::ReadRange => {
+            if !result.ok {
+                return None;
+            }
+            EvidenceKind::FileRead {
+                path: result.input.clone(),
+            }
+        }
     };
     Some(EvidenceItem { id, source, kind })
 }

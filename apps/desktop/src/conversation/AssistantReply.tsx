@@ -8,10 +8,21 @@ type Props = {
   reply: Reply;
   /** True while this turn is the one being generated. */
   running: boolean;
+  /** Live assistant text accumulated from provider stream deltas. */
+  streamText?: string;
+  /** Structured progress phase from the agent (not chain-of-thought). */
+  progress?: { phase: string; detail: string } | null;
   onViewFiles: () => void;
 };
 
-export function AssistantReply({ time, reply, running, onViewFiles }: Props) {
+export function AssistantReply({
+  time,
+  reply,
+  running,
+  streamText = "",
+  progress = null,
+  onViewFiles,
+}: Props) {
   return (
     <article className="reply">
       <div className="msg-head">
@@ -20,7 +31,16 @@ export function AssistantReply({ time, reply, running, onViewFiles }: Props) {
         {time && <span className="msg-time">{time}</span>}
       </div>
 
-      {running && <p className="reply-working">正在处理您的请求...</p>}
+      {running && (
+        <p className="reply-working" data-testid="agent-progress">
+          {progress ? `${progress.phase} · ${progress.detail}` : "正在处理您的请求..."}
+        </p>
+      )}
+      {running && streamText && (
+        <div className="final stream-preview" data-testid="stream-preview">
+          <p className="final-text">{streamText}</p>
+        </div>
+      )}
       {reply.interrupted && <p className="reply-interrupted">这次运行中断了，最后一步没有完成。</p>}
 
       <AgentTrace steps={reply.steps} />

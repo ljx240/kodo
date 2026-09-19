@@ -38,6 +38,9 @@ export function App() {
   const [activeProviderIndex, setActiveProviderIndex] = useState(0);
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [autoGitBranch] = useSetting("auto-detect-git-branch", "true");
+  const [density] = useSetting("density", "compact");
+  const [lineNumbers] = useSetting("show-line-numbers", "true");
+  const [systemFont] = useSetting("use-system-font", "true");
 
   const onSnapshot = useCallback((snapshot: LiveSnapshot | null) => {
     setLiveSnapshot(snapshot);
@@ -146,9 +149,12 @@ export function App() {
 
   return (
     <div
-      className={`app${sidebarVisible ? "" : " app--sidebar-hidden"}`}
+      className={`app${sidebarVisible ? "" : " app--sidebar-hidden"}${
+        systemFont === "true" ? " app--system-font" : ""
+      }`}
       data-core={coreVersion ?? undefined}
-      data-density={undefined}
+      data-density={density}
+      data-line-numbers={lineNumbers}
     >
       <Sidebar
         route={route.name}

@@ -42,6 +42,10 @@ pub enum ToolName {
     ReplaceRange,
     CreateFile,
     DeleteFile,
+    ListFiles,
+    FindSymbol,
+    FindReferences,
+    ReadRange,
 }
 
 impl ToolName {
@@ -55,6 +59,10 @@ impl ToolName {
             Self::ReplaceRange => "replace_range",
             Self::CreateFile => "create_file",
             Self::DeleteFile => "delete_file",
+            Self::ListFiles => "list_files",
+            Self::FindSymbol => "find_symbol",
+            Self::FindReferences => "find_references",
+            Self::ReadRange => "read_range",
         }
     }
 
@@ -68,6 +76,10 @@ impl ToolName {
             "replace_range" | "replace" => Some(Self::ReplaceRange),
             "create_file" | "create" => Some(Self::CreateFile),
             "delete_file" | "delete" => Some(Self::DeleteFile),
+            "list_files" => Some(Self::ListFiles),
+            "find_symbol" => Some(Self::FindSymbol),
+            "find_references" => Some(Self::FindReferences),
+            "read_range" => Some(Self::ReadRange),
             _ => None,
         }
     }
@@ -120,6 +132,20 @@ pub enum ToolArgs {
     DeleteFile {
         path: String,
     },
+    ListFiles {
+        prefix: Option<String>,
+    },
+    FindSymbol {
+        name: String,
+    },
+    FindReferences {
+        name: String,
+    },
+    ReadRange {
+        path: String,
+        start_line: usize,
+        end_line: usize,
+    },
 }
 
 impl ToolArgs {
@@ -159,6 +185,20 @@ impl ToolArgs {
             ToolName::DeleteFile => Ok(Self::DeleteFile {
                 path: require_string(args, "path")?,
             }),
+            ToolName::ListFiles => Ok(Self::ListFiles {
+                prefix: optional_string(args, "prefix")?,
+            }),
+            ToolName::FindSymbol => Ok(Self::FindSymbol {
+                name: require_string(args, "name")?,
+            }),
+            ToolName::FindReferences => Ok(Self::FindReferences {
+                name: require_string(args, "name")?,
+            }),
+            ToolName::ReadRange => Ok(Self::ReadRange {
+                path: require_string(args, "path")?,
+                start_line: require_usize(args, "start_line")?,
+                end_line: require_usize(args, "end_line")?,
+            }),
         }
     }
 
@@ -175,6 +215,17 @@ impl ToolArgs {
                 start_line,
                 end_line,
                 ..
+            } => {
+                format!("{path}:{start_line}-{end_line}")
+            }
+            Self::ListFiles { prefix } => {
+                format!("list:{}", prefix.as_deref().unwrap_or("*"))
+            }
+            Self::FindSymbol { name } | Self::FindReferences { name } => name.clone(),
+            Self::ReadRange {
+                path,
+                start_line,
+                end_line,
             } => {
                 format!("{path}:{start_line}-{end_line}")
             }
@@ -566,6 +617,55 @@ impl ToolRegistry {
                             "path": { "type": "string" }
                         },
                         "required": ["path"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolDefinition {
+                    name: "list_files",
+                    description: "List project files from the repo map (fast orientation). Optional path prefix filter.",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "prefix": { "type": "string", "description": "Optional path prefix like `crates/`" }
+                        },
+                        "additionalProperties": false
+                    }),
+                },
+                ToolDefinition {
+                    name: "find_symbol",
+                    description: "Find struct/fn/enum/trait/class definitions by name substring in the repo map.",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Symbol name or substring" }
+                        },
+                        "required": ["name"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolDefinition {
+                    name: "find_references",
+                    description: "Find references to a symbol via word-boundary text search across the project.",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Symbol name" }
+                        },
+                        "required": ["name"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolDefinition {
+                    name: "read_range",
+                    description: "Read inclusive 1-based lines [start_line, end_line] of a project file (cheaper than full read).",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "start_line": { "type": "integer" },
+                            "end_line": { "type": "integer" }
+                        },
+                        "required": ["path", "start_line", "end_line"],
                         "additionalProperties": false
                     }),
                 },

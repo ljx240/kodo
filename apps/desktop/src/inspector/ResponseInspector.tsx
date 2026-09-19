@@ -1,4 +1,6 @@
-import { BarChart3, Check, Folder, History, Sparkles, Terminal } from "lucide-react";
+import { BarChart3, Check, Folder, History, Sparkles, Terminal, Undo2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { turnChanges, undoTurn, type TurnChangeDto } from "../api";
 import { changedFiles, conversation, project, summary } from "../data/fixture";
 import type { LiveSnapshot } from "../data/liveContext";
 import { changesFromReply, commandsFromTurn, llmFromTurn, toolsFromTurn } from "../data/liveContext";
@@ -16,6 +18,82 @@ function EmptyBody({ note }: { note: string }) {
     <div className="ins-body">
       <p className="ins-note">{note}</p>
     </div>
+  );
+}
+
+/** Real per-file diffs + safe undo for the open session's Kodo changes. */
+function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectPath: string }) {
+  const [changes, setChanges] = useState<TurnChangeDto[] | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const reload = useCallback(() => {
+    if (!projectPath || !sessionId) return;
+    void turnChanges(projectPath, sessionId).then(setChanges);
+  }, [projectPath, sessionId]);
+
+  useEffect(() => {
+    setChanges(null);
+    setOpen(null);
+    setMessage(null);
+    reload();
+  }, [reload]);
+
+  const undo = () => {
+    if (!projectPath || !sessionId) return;
+    setMessage(null);
+    void undoTurn(projectPath, sessionId)
+      .then((restored) => {
+        if (restored && restored.length >= 0) {
+          setMessage(restored.length ? `已撤销 ${restored.length} 个 Kodo 修改` : "没有可撤销的 Kodo 修改");
+          reload();
+        }
+      })
+      .catch((error: unknown) => setMessage(`撤销失败：${String(error)}`));
+  };
+
+  if (!projectPath || !sessionId) return null;
+  if (!changes) {
+    return (
+      <div className="ins-body">
+        <p className="ins-note">加载本轮 diff…</p>
+      </div>
+    );
+  }
+  if (changes.length === 0) {
+    return (
+      <div className="ins-body">
+        <p className="ins-note">本轮没有 Kodo 文件修改。</p>
+      </div>
+    );
+  }
+  return (
+    <>
+      <div className="ins-body">
+        {changes.map((change) => (
+          <div key={change.path} className="turn-change">
+            <button
+              type="button"
+              className="ins-link turn-change-head"
+              onClick={() => setOpen((cur) => (cur === change.path ? null : change.path))}
+            >
+              {change.path}
+              {change.userPreexisting ? " · (user dirty before)" : ""}
+            </button>
+            {open === change.path && (
+              <pre className="terminal-block diff-block">{change.diff || "(no diff)"}</pre>
+            )}
+          </div>
+        ))}
+        {message && <p className="ins-note">{message}</p>}
+      </div>
+      <div className="ins-body">
+        <button type="button" className="btn btn--sm" data-testid="undo-kodo" onClick={undo}>
+          <Undo2 size={13} strokeWidth={1.8} />
+          <span>撤销 Kodo 修改</span>
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -85,15 +163,25 @@ export function ChangedFilesSection({ demo, live, limit }: InspectorData & { lim
 
   return (
     <Section icon={<BarChart3 size={14} strokeWidth={1.7} />} title="Changed files" count={total}>
-      <div className="ins-body">
-        {!demo && files.length === 0 ? (
-          <p className="ins-note">本轮没有记录到文件变更。</p>
-        ) : (
-          shown.map((file) => <FileRow key={file.path} file={file} />)
-        )}
-      </div>
+      {!demo && live?.conversationId && live.projectPath ? (
+        <LiveDiffPanel sessionId={live.conversationId} projectPath={live.projectPath} />
+      ) : (
+        <div className="ins-body">
+          {!demo && files.length === 0 ? (
+            <p className="ins-note">本轮没有记录到文件变更。</p>
+          ) : (
+            shown.map((file) => <FileRow key={file.path} file={file} />)
+          )}
+        </div>
+      )}
       {limit && demo && (
-        <button type="button" className="ins-link">
+        <button
+          type="button"
+          className="ins-link"
+          onClick={() => {
+            /* demo overview only: full list lives on the files tab */
+          }}
+        >
           Show all {summary.files_changed} files →
         </button>
       )}

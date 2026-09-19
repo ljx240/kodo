@@ -176,10 +176,10 @@ impl TaskPlan {
             .to_owned();
         let lower = message.to_ascii_lowercase();
         let mutating = [
-                "write", "edit", "fix", "create", "update", "修改", "修复", "创建", "更新", "添加"
-            ]
-            .iter()
-            .any(|k| lower.contains(k));
+            "write", "edit", "fix", "create", "update", "修改", "修复", "创建", "更新", "添加",
+        ]
+        .iter()
+        .any(|k| lower.contains(k));
         // Narrow bug-fix detection: "fix tests" / "fix docs" are edit tasks,
         // not bug reproductions.
         let looks_like_bug = lower.contains("bug")

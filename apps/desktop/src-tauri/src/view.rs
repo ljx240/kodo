@@ -134,6 +134,15 @@ pub struct ChangeView {
     pub removed: u32,
 }
 
+/// One Kodo-touched file with its unified diff for the inspector.
+#[derive(serde::Serialize, Clone)]
+pub struct TurnChangeView {
+    pub path: String,
+    pub diff: String,
+    #[serde(rename = "userPreexisting")]
+    pub user_preexisting: bool,
+}
+
 impl From<session::Item> for ItemView {
     fn from(item: session::Item) -> Self {
         let detail = match item.kind {
@@ -253,6 +262,27 @@ pub enum RunEvent {
         step: u32,
         kind: String,
         /// Command or short detail when the step has one.
+        detail: String,
+        /// Working directory the command would run in.
+        #[serde(default)]
+        cwd: String,
+        /// Structured risk: Safe | FilesystemWrite | Network | PackageInstall |
+        /// DestructiveGit | ProcessControl | SensitiveData | Dangerous.
+        #[serde(default)]
+        risk_category: String,
+        /// Human-readable reason for the risk.
+        #[serde(default)]
+        reason: String,
+    },
+    /// Incremental assistant text while the model streams (not persisted).
+    TextDelta {
+        session: String,
+        text: String,
+    },
+    /// Structured agent progress phase (never chain-of-thought).
+    Progress {
+        session: String,
+        phase: String,
         detail: String,
     },
 }

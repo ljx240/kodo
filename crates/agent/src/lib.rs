@@ -217,6 +217,16 @@ pub enum SinkEvent {
         duration_ms: u64,
         denied: bool,
     },
+    /// Incremental assistant text from the provider stream (batched by caller
+    /// if needed). Not persisted as a step — the finished ModelCall/AgentMessage is.
+    TextDelta {
+        text: String,
+    },
+    /// Structured progress phase for the UI (never chain-of-thought).
+    Progress {
+        phase: String,
+        detail: String,
+    },
 }
 
 pub type Emit<'a> = dyn FnMut(SinkEvent) -> bool + 'a;
@@ -233,6 +243,47 @@ pub struct RunRequest {
     pub fallback_to_local: bool,
     pub max_output_tokens: u32,
     pub extended_thinking: bool,
+    /// Session id for changeset persistence (undo/diff UI). Optional for tests.
+    pub session_id: Option<String>,
+}
+
+/// Where per-turn change sets are persisted for the diff/undo UI.
+pub fn changeset_path(project: &Path, session_id: &str) -> PathBuf {
+    project
+        .join(".kodo")
+        .join(format!("changeset-{session_id}.json"))
+}
+
+fn persist_changeset(
+    project: &Path,
+    session_id: Option<&str>,
+    changeset: &TurnChangeSet,
+) -> Result<(), String> {
+    let Some(session_id) = session_id else {
+        return Ok(());
+    };
+    if session_id.trim().is_empty() {
+        return Ok(());
+    }
+    let path = changeset_path(project, session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(changeset).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// Load a persisted turn changeset (for UI diff view / undo).
+pub fn load_changeset(project: &Path, session_id: &str) -> Result<TurnChangeSet, String> {
+    let path = changeset_path(project, session_id);
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+/// Undo only Kodo's changes for a session; refuses when the changeset is missing.
+pub fn undo_session_changes(project: &Path, session_id: &str) -> Result<Vec<String>, String> {
+    let changeset = load_changeset(project, session_id)?;
+    changeset.undo_kodo_changes(project)
 }
 
 fn run_step(step: Step, alive: &Alive, emit: &mut Emit) -> bool {
@@ -279,17 +330,18 @@ fn command_step(
     if request
         .permission
         .needs_approval(StepKind::Command, Some(command))
-        && !approve(StepKind::Command, command) {
-            notes.push(format!("用户拒绝了 `{command}`"));
-            let keep = finish_step(provisional, 0, true, emit);
-            let result = ToolResult::failure(
-                call_id,
-                ToolName::RunCommand.label(),
-                command,
-                ToolError::permission_denied("用户拒绝了该命令"),
-            );
-            return Ok((keep, Some(result)));
-        }
+        && !approve(StepKind::Command, command)
+    {
+        notes.push(format!("用户拒绝了 `{command}`"));
+        let keep = finish_step(provisional, 0, true, emit);
+        let result = ToolResult::failure(
+            call_id,
+            ToolName::RunCommand.label(),
+            command,
+            ToolError::permission_denied("用户拒绝了该命令"),
+        );
+        return Ok((keep, Some(result)));
+    }
 
     if !run_step(provisional.clone(), alive, emit) {
         return Ok((false, None));
@@ -371,24 +423,25 @@ fn write_step(
     if request
         .permission
         .needs_approval(StepKind::FileChange, Some(&label))
-        && !approve(StepKind::FileChange, &label) {
-            notes.push(format!("用户拒绝写入 `{path}`"));
-            let denied = Step::FileChange {
-                changes: vec![FileDelta {
-                    path: path.to_owned(),
-                    added: 0,
-                    removed: 0,
-                }],
-            };
-            let keep = finish_step(denied, 0, true, emit);
-            let result = ToolResult::failure(
-                call_id,
-                ToolName::WriteFile.label(),
-                path,
-                ToolError::permission_denied("用户拒绝了写入"),
-            );
-            return Ok((keep, Some(result)));
-        }
+        && !approve(StepKind::FileChange, &label)
+    {
+        notes.push(format!("用户拒绝写入 `{path}`"));
+        let denied = Step::FileChange {
+            changes: vec![FileDelta {
+                path: path.to_owned(),
+                added: 0,
+                removed: 0,
+            }],
+        };
+        let keep = finish_step(denied, 0, true, emit);
+        let result = ToolResult::failure(
+            call_id,
+            ToolName::WriteFile.label(),
+            path,
+            ToolError::permission_denied("用户拒绝了写入"),
+        );
+        return Ok((keep, Some(result)));
+    }
 
     let provisional = Step::FileChange {
         changes: vec![FileDelta {
@@ -662,6 +715,191 @@ fn execute_tool_call(
             |project| delete_file(project, path),
             alive,
         ),
+        (ToolName::ListFiles, ToolArgs::ListFiles { prefix }) => {
+            if !alive() {
+                return Ok((false, None));
+            }
+            let step = Step::Search {
+                query: format!("list:{}", prefix.as_deref().unwrap_or("*")),
+                detail: String::new(),
+            };
+            if !run_step(step, alive, emit) {
+                return Ok((false, None));
+            }
+            let began = Instant::now();
+            let map = crate::repomap::RepoMap::build(project, alive).unwrap_or_default();
+            let entries = map.list_files(prefix.as_deref(), 80);
+            let detail = if entries.is_empty() {
+                "0 files".to_owned()
+            } else {
+                entries
+                    .iter()
+                    .map(|f| format!("{} ({}, {} lines)", f.path, f.language, f.lines))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let duration_ms = began.elapsed().as_millis() as u64;
+            let keep = finish_step(
+                Step::Search {
+                    query: format!("list:{}", prefix.as_deref().unwrap_or("*")),
+                    detail: detail.clone(),
+                },
+                duration_ms,
+                false,
+                emit,
+            );
+            notes.push(format!("list_files → {} entries", entries.len()));
+            Ok((
+                keep,
+                Some(ToolResult::success(
+                    call.id.clone(),
+                    ToolName::ListFiles.label(),
+                    prefix.clone().unwrap_or_default(),
+                    detail,
+                )),
+            ))
+        }
+        (ToolName::FindSymbol, ToolArgs::FindSymbol { name }) => {
+            if !alive() {
+                return Ok((false, None));
+            }
+            let step = Step::Search {
+                query: format!("symbol:{name}"),
+                detail: String::new(),
+            };
+            if !run_step(step, alive, emit) {
+                return Ok((false, None));
+            }
+            let began = Instant::now();
+            let map = crate::repomap::RepoMap::build(project, alive).unwrap_or_default();
+            let hits = map.find_symbol(name);
+            let detail = if hits.is_empty() {
+                "0 symbol matches".to_owned()
+            } else {
+                hits.iter()
+                    .map(|s| format!("{} {} at {}:{}", s.kind, s.name, s.path, s.line))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let duration_ms = began.elapsed().as_millis() as u64;
+            let keep = finish_step(
+                Step::Search {
+                    query: format!("symbol:{name}"),
+                    detail: detail.clone(),
+                },
+                duration_ms,
+                false,
+                emit,
+            );
+            notes.push(format!("find_symbol `{name}` → {}", hits.len()));
+            Ok((
+                keep,
+                Some(ToolResult::success(
+                    call.id.clone(),
+                    ToolName::FindSymbol.label(),
+                    name.clone(),
+                    detail,
+                )),
+            ))
+        }
+        (ToolName::FindReferences, ToolArgs::FindReferences { name }) => {
+            if !alive() {
+                return Ok((false, None));
+            }
+            let step = Step::Search {
+                query: format!("refs:{name}"),
+                detail: String::new(),
+            };
+            if !run_step(step, alive, emit) {
+                return Ok((false, None));
+            }
+            let began = Instant::now();
+            // Word-ish search: rg -n with the symbol, fall back to walk search.
+            let detail = search_files(project, name);
+            let duration_ms = began.elapsed().as_millis() as u64;
+            let keep = finish_step(
+                Step::Search {
+                    query: format!("refs:{name}"),
+                    detail: detail.clone(),
+                },
+                duration_ms,
+                false,
+                emit,
+            );
+            notes.push(format!("find_references `{name}`"));
+            Ok((
+                keep,
+                Some(ToolResult::success(
+                    call.id.clone(),
+                    ToolName::FindReferences.label(),
+                    name.clone(),
+                    detail,
+                )),
+            ))
+        }
+        (
+            ToolName::ReadRange,
+            ToolArgs::ReadRange {
+                path,
+                start_line,
+                end_line,
+            },
+        ) => {
+            if !alive() {
+                return Ok((false, None));
+            }
+            let step = Step::FileRead {
+                path: path.clone(),
+                detail: format!("{start_line}-{end_line}"),
+            };
+            if !run_step(step, alive, emit) {
+                return Ok((false, None));
+            }
+            let began = Instant::now();
+            let (detail, result) = match tools::resolve_in_project(project, path) {
+                Err(error) => (
+                    format!("路径错误：{error}"),
+                    ToolResult::failure(
+                        call.id.clone(),
+                        ToolName::ReadRange.label(),
+                        path.clone(),
+                        ToolError::path_escape(error),
+                    ),
+                ),
+                Ok(full) => match tools::read_text_range(&full, *start_line, *end_line, 6000) {
+                    Ok(text) => (
+                        text.clone(),
+                        ToolResult::success(
+                            call.id.clone(),
+                            ToolName::ReadRange.label(),
+                            path.clone(),
+                            text,
+                        ),
+                    ),
+                    Err(error) => (
+                        format!("读取失败：{error}"),
+                        ToolResult::failure(
+                            call.id.clone(),
+                            ToolName::ReadRange.label(),
+                            path.clone(),
+                            ToolError::execution(error),
+                        ),
+                    ),
+                },
+            };
+            let duration_ms = began.elapsed().as_millis() as u64;
+            let keep = finish_step(
+                Step::FileRead {
+                    path: path.clone(),
+                    detail,
+                },
+                duration_ms,
+                !result.ok,
+                emit,
+            );
+            notes.push(format!("读取范围 `{path}`"));
+            Ok((keep, Some(result)))
+        }
         // Defensive: name/args mismatch should not crash the session.
         (name, args) => Ok((
             true,
@@ -696,26 +934,27 @@ fn patch_approval_step(
     if request
         .permission
         .needs_approval(StepKind::FileChange, Some(&label))
-        && !approve(StepKind::FileChange, &label) {
-            notes.push(format!("用户拒绝 `{label}`"));
-            let denied = Step::FileChange {
-                changes: vec![FileDelta {
-                    path: path.to_owned(),
-                    added: 0,
-                    removed: 0,
-                }],
-            };
-            let keep = finish_step(denied, 0, true, emit);
-            return Ok((
-                keep,
-                Some(ToolResult::failure(
-                    call_id,
-                    name.label(),
-                    path.to_owned(),
-                    ToolError::permission_denied("用户拒绝了写入"),
-                )),
-            ));
-        }
+        && !approve(StepKind::FileChange, &label)
+    {
+        notes.push(format!("用户拒绝 `{label}`"));
+        let denied = Step::FileChange {
+            changes: vec![FileDelta {
+                path: path.to_owned(),
+                added: 0,
+                removed: 0,
+            }],
+        };
+        let keep = finish_step(denied, 0, true, emit);
+        return Ok((
+            keep,
+            Some(ToolResult::failure(
+                call_id,
+                name.label(),
+                path.to_owned(),
+                ToolError::permission_denied("用户拒绝了写入"),
+            )),
+        ));
+    }
 
     let provisional = Step::FileChange {
         changes: vec![FileDelta {
@@ -883,6 +1122,10 @@ fn call_model(
     let use_native = caps.native_tools;
     let tool_list: &[ToolSchema] = if use_native { tools } else { &[] };
 
+    // Batch deltas so the UI gets frequent-but-not-per-token updates.
+    let mut delta_buf = String::new();
+    let mut last_flush = Instant::now();
+
     let result = provider::chat_stream(
         provider,
         history,
@@ -891,7 +1134,17 @@ fn call_model(
         alive,
         |event| {
             match event {
-                ProviderEvent::TextDelta { text: delta } => text.push_str(&delta),
+                ProviderEvent::TextDelta { text: delta } => {
+                    text.push_str(&delta);
+                    delta_buf.push_str(&delta);
+                    if last_flush.elapsed().as_millis() >= 50 || delta_buf.chars().count() >= 24 {
+                        let chunk = std::mem::take(&mut delta_buf);
+                        last_flush = Instant::now();
+                        if !emit(SinkEvent::TextDelta { text: chunk }) {
+                            return false;
+                        }
+                    }
+                }
                 ProviderEvent::ToolCallComplete { call } => native_calls.push(call),
                 ProviderEvent::Usage {
                     input_tokens,
@@ -910,6 +1163,10 @@ fn call_model(
             alive()
         },
     );
+    if !delta_buf.is_empty() {
+        let chunk = std::mem::take(&mut delta_buf);
+        let _ = emit(SinkEvent::TextDelta { text: chunk });
+    }
     let duration_ms = began.elapsed().as_millis() as u64;
     if !alive() {
         return Ok(None);
@@ -1068,6 +1325,10 @@ pub fn run(
 
     // Plan (skill-shaped or heuristic; model JSON may refine later).
     machine.handle(AgentEvent::PlanReady);
+    let _ = emit(SinkEvent::Progress {
+        phase: "Planning".into(),
+        detail: machine.plan().progress_summary("locked"),
+    });
     if !simple_step(
         Step::Reasoning {
             summary: format!("Plan · {}", machine.plan().progress_summary("locked")),
@@ -1086,6 +1347,9 @@ pub fn run(
         .map(|sk| sk.context_strategy.budget())
         .unwrap_or_else(ContextBudget::default);
     let mut context_mgr = ContextManager::new(project, context_budget);
+
+    // Repo map for orientation — injected into the system prompt (not proof).
+    let repo_map = crate::repomap::RepoMap::build(project, alive).ok();
 
     // User-pinned context paths: validate inside the project and pin spans first.
     for rel in &request.pinned_context {
@@ -1255,6 +1519,10 @@ pub fn run(
 
     // Context gathered → Execute (or stay ready for model).
     machine.handle(AgentEvent::ContextGathered);
+    let _ = emit(SinkEvent::Progress {
+        phase: "Searching repository".into(),
+        detail: format!("{} context spans · repo map ready", pre_observations.len()),
+    });
     machine.handle(AgentEvent::ToolsFinished {
         results: pre_observations.clone(),
     });
@@ -1279,6 +1547,7 @@ pub fn run(
     let mut checks: Vec<String> = Vec::new();
     let mut wrote_files = false;
     let mut verified = false;
+    let mut provider_error_seen = false;
     let mut changeset = TurnChangeSet::capture_baseline(project);
     let mut active_tool = String::from("—");
     let mut repair_attempts = 0usize;
@@ -1291,6 +1560,13 @@ pub fn run(
             // Keep going without inventing offline "success"; still no fake pass.
         }
         let mut system = system_prompt(project, &registry);
+        if let Some(map) = &repo_map {
+            system.push('\n');
+            system.push_str(&map.to_prompt_block());
+            system.push_str(
+                "Use list_files/find_symbol/find_references/read_range to orient before deep reads.\n",
+            );
+        }
         if let Some(sk) = &skill {
             system.push_str(&format!(
                 "\nActive skill: {} (task_type={}, strategy={}, verify_policy={}). \
@@ -1327,10 +1603,22 @@ pub fn run(
             }
 
             if machine.state() == &AgentState::Verify {
+                let _ = emit(SinkEvent::Progress {
+                    phase: "Final verification".into(),
+                    detail: format!(
+                        "repair attempt {repair_attempts}/{}",
+                        machine.budget().max_repairs
+                    ),
+                });
                 let verifier = VerificationRunner::new(90_000);
+                let changed: Vec<String> = changeset
+                    .kodo_changes()
+                    .iter()
+                    .map(|p| (*p).clone())
+                    .collect();
                 let commands = match &skill {
                     Some(sk) => sk.verification_commands(&verifier, project),
-                    None => verifier.infer(project),
+                    None => verifier.infer_targeted(project, &changed),
                 };
                 if !alive() {
                     machine.handle(AgentEvent::Cancel);
@@ -1374,6 +1662,7 @@ pub fn run(
 
                 if all_ok {
                     verified = true;
+                    changeset.verified = Some(true);
                     let cmds = commands
                         .iter()
                         .map(|c| c.command.clone())
@@ -1386,6 +1675,7 @@ pub fn run(
                     history.push(ProviderMessage::user("All verification commands passed."));
                 } else {
                     verified = any_ok;
+                    changeset.verified = Some(false);
                     repair_attempts += 1;
                     if !repair_hint.is_empty() {
                         history.push(ProviderMessage::user(format!(
@@ -1403,6 +1693,10 @@ pub fn run(
             }
 
             if machine.state() == &AgentState::Repair {
+                let _ = emit(SinkEvent::Progress {
+                    phase: "Repairing".into(),
+                    detail: format!("attempt {repair_attempts}/{}", machine.budget().max_repairs),
+                });
                 if !simple_step(
                     Step::Reasoning {
                         summary: format!(
@@ -1498,6 +1792,22 @@ pub fn run(
                                             "end_line": end_line,
                                             "new_text": new_text
                                         }),
+                                        ToolArgs::ListFiles { prefix } => {
+                                            serde_json::json!({ "prefix": prefix })
+                                        }
+                                        ToolArgs::FindSymbol { name }
+                                        | ToolArgs::FindReferences { name } => {
+                                            serde_json::json!({ "name": name })
+                                        }
+                                        ToolArgs::ReadRange {
+                                            path,
+                                            start_line,
+                                            end_line,
+                                        } => serde_json::json!({
+                                            "path": path,
+                                            "start_line": start_line,
+                                            "end_line": end_line
+                                        }),
                                     },
                                 }),
                                 _ => None,
@@ -1574,6 +1884,14 @@ pub fn run(
                                 .unwrap_or(false)
                         {
                             changeset.record_kodo_change(project, &result.input);
+                            // Invalidate prior context observations for this path
+                            // so the model does not treat stale content as fact.
+                            context_mgr.invalidate(&result.input);
+                            history.push(ProviderMessage::user(format!(
+                                "STALE context: `{}` was modified this turn. \
+                                 Earlier reads of this file are outdated — re-read before relying on them.",
+                                result.input
+                            )));
                         }
                     }
 
@@ -1662,13 +1980,16 @@ pub fn run(
                                 continue;
                             }
                             Err(failover_err) => {
-                                return Err(format!(
-                                    "model call failed after failover: {failover_err}"
-                                ));
+                                provider_error_seen = true;
+                                notes.push(format!("failover 也失败：{failover_err}"));
+                                break;
                             }
                         }
+                    } else {
+                        provider_error_seen = true;
+                        notes.push(format!("model call failed: {error}"));
+                        break;
                     }
-                    return Err(format!("model call failed: {error}"));
                 }
             }
         }
@@ -1720,19 +2041,49 @@ pub fn run(
         checks = vec![format!("{reason}，本轮基于本地扫描")];
     }
 
+    // Persist the turn changeset so the UI can show real diffs and undo.
+    if !changeset.kodo_touched.is_empty() || !changeset.baseline_dirty.is_empty() {
+        if let Err(error) = persist_changeset(project, request.session_id.as_deref(), &changeset) {
+            notes.push(format!("changeset persist failed: {error}"));
+        }
+    }
+
     if alive() {
-        let changes = summarize_git_changes(project);
+        // Prefer Kodo-tracked changes; fall back to git summary for visibility.
+        let kodo_step_changes: Vec<FileDelta> = changeset
+            .kodo_changes()
+            .iter()
+            .map(|path| {
+                let diff = changeset.diffs.get(*path).map(|d| d.as_str()).unwrap_or("");
+                let added = diff
+                    .lines()
+                    .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+                    .count() as u32;
+                let removed = diff
+                    .lines()
+                    .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+                    .count() as u32;
+                FileDelta {
+                    path: (*path).clone(),
+                    added,
+                    removed,
+                }
+            })
+            .collect();
+        let changes = if !kodo_step_changes.is_empty() {
+            kodo_step_changes
+        } else {
+            summarize_git_changes(project)
+                .into_iter()
+                .map(|(path, added, removed)| FileDelta {
+                    path,
+                    added,
+                    removed,
+                })
+                .collect()
+        };
         if !changes.is_empty() {
-            let step = Step::FileChange {
-                changes: changes
-                    .into_iter()
-                    .map(|(path, added, removed)| FileDelta {
-                        path,
-                        added,
-                        removed,
-                    })
-                    .collect(),
-            };
+            let step = Step::FileChange { changes };
             if !simple_step(step, alive, emit) {
                 return Ok(());
             }
@@ -1741,23 +2092,26 @@ pub fn run(
 
     if alive() {
         // Explicit verification status — never silent about verify state.
-        let status = if verified {
-            FinalStatus::Verified
-        } else if wrote_files {
-            FinalStatus::NotVerified
-        } else if machine.state() == &AgentState::Finish {
-            // Read-only tasks that reached Finish without a verify command.
-            FinalStatus::PartiallyVerified
-        } else {
-            FinalStatus::NotVerified
-        };
-        // Prefer machine-driven status when verification actually ran this turn.
-        let status = if matches!(machine.state(), AgentState::Failed { .. }) {
-            FinalStatus::VerificationFailed
-        } else if matches!(machine.state(), AgentState::Cancelled) {
-            FinalStatus::NotVerified
-        } else {
-            status
+        let status = match machine.state() {
+            AgentState::Cancelled => FinalStatus::Cancelled,
+            AgentState::Failed { reason } => match reason {
+                FailReason::Unrecoverable => FinalStatus::Blocked,
+                _ => FinalStatus::VerificationFailed,
+            },
+            _ => {
+                if verified {
+                    FinalStatus::Verified
+                } else if provider_error_seen {
+                    FinalStatus::ProviderError
+                } else if wrote_files {
+                    FinalStatus::NotVerified
+                } else if machine.state() == &AgentState::Finish {
+                    // Read-only tasks that reached Finish without a verify command.
+                    FinalStatus::PartiallyVerified
+                } else {
+                    FinalStatus::NotVerified
+                }
+            }
         };
 
         if verified {
@@ -1933,6 +2287,7 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            session_id: None,
         }
     }
 

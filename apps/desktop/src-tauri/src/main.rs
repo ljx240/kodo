@@ -175,9 +175,10 @@ fn list_archived() -> Result<Vec<ArchivedItemView>, String> {
                         }
                     }
                     kodo_core::session::ItemKind::AgentMessage { text, .. }
-                        if !text.trim().is_empty() => {
-                            summary = text.clone();
-                        }
+                        if !text.trim().is_empty() =>
+                    {
+                        summary = text.clone();
+                    }
                     _ => {}
                 }
             }
@@ -351,23 +352,37 @@ fn send_message(
             .get(active)
             .cloned()
             .or_else(|| list.iter().find(|p| p.has_key).cloned());
-        chosen.and_then(|p| {
-            // Keys live only in credentials; the shell re-reads them here.
-            let creds = settings::credentials_path()?;
+        let creds = settings::credentials_path()?;
+        let build = |p: &ProviderView| -> Option<AgentProvider> {
             let api_key = settings::read_credential(&creds, &p.id).unwrap_or_default();
             if api_key.is_empty() {
                 return None;
             }
             Some(AgentProvider::new(
-                p.template,
+                p.template.clone(),
                 api_key,
-                p.endpoint,
+                p.endpoint.clone(),
                 p.model_id
                     .clone()
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(p.model),
+                    .unwrap_or_else(|| p.model.clone()),
             ))
-        })
+        };
+        let primary = chosen.as_ref().and_then(build);
+        let mut primary = primary?;
+        // Populate the failover chain when the user asked to try the next best
+        // model (fallback-behavior != fail). Auth/invalid-model never failover.
+        if read_setting("fallback-behavior").as_deref() != Some("fail") {
+            for p in &list {
+                if Some(&p.id) == chosen.as_ref().map(|c| &c.id) {
+                    continue;
+                }
+                if let Some(fb) = build(p) {
+                    primary.fallbacks.push(fb);
+                }
+            }
+        }
+        Some(primary)
     });
 
     let max_output_tokens = read_setting("max-output-tokens")
@@ -468,6 +483,29 @@ fn respond_approval(approvals: State<'_, Approvals>, id: String, step: u32, appr
     approvals.resolve(&id, step, approved);
 }
 
+/// Per-file unified diffs for the turn's Kodo changes (empty when none).
+#[tauri::command]
+fn turn_changes(project: String, id: String) -> Result<Vec<view::TurnChangeView>, String> {
+    let root = Path::new(&project);
+    let changeset = kodo_agent::load_changeset(root, &id)?;
+    let mut out = Vec::new();
+    for path in changeset.kodo_changes() {
+        let user_preexisting = changeset.was_pre_existing(path);
+        out.push(view::TurnChangeView {
+            path: path.clone(),
+            diff: changeset.diffs.get(path).cloned().unwrap_or_default(),
+            user_preexisting,
+        });
+    }
+    Ok(out)
+}
+
+/// Undo only Kodo's changes for this session. Never touches user-only edits.
+#[tauri::command]
+fn undo_turn(project: String, id: String) -> Result<Vec<String>, String> {
+    kodo_agent::undo_session_changes(Path::new(&project), &id)
+}
+
 fn log() -> Result<PathBuf, String> {
     workspace::log_path()
         .ok_or_else(|| "HOME is not set, so there is nowhere to keep the project list".to_owned())
@@ -524,6 +562,8 @@ fn main() {
             respond_approval,
             list_project_files,
             read_context_file,
+            turn_changes,
+            undo_turn,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Kodo");
