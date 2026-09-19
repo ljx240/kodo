@@ -53,7 +53,8 @@ pub use context::{
 };
 pub use evidence::{
     AcceptanceCriterion, CommandExpectation, EvidenceItem as AgentEvidenceItem,
-    EvidenceKind as AgentEvidenceKind, EvidenceRequirement, SubtaskRequirement,
+    EvidenceKind as AgentEvidenceKind, EvidenceRequirement, FailureExpectation, ReproductionRecord,
+    SubtaskRequirement,
 };
 pub use patch::PatchOutcome;
 pub use plan::{Evidence, Subtask, SubtaskKind, SubtaskStatus};

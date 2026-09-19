@@ -12,7 +12,7 @@ use std::time::Instant;
 use kodo_agent::checkpoint::TurnChangeSet;
 use kodo_agent::evidence::{
     CommandExpectation, EvidenceBag, EvidenceItem, EvidenceKind, EvidenceRequirement,
-    SubtaskRequirement,
+    FailureExpectation, SubtaskRequirement,
 };
 use kodo_agent::plan::{AcceptanceEvidence, Subtask, SubtaskKind, TaskPlan};
 use kodo_agent::protocol::{ToolCallId, ToolError, ToolResult};
@@ -158,11 +158,11 @@ fn read_ok(path: &str) -> ToolResult {
 }
 
 fn run_deterministic(report: &mut EvalReport) {
-    // 1) failing reproduction can be successful ReproductionEvidence
+    // 1) failing reproduction can be successful ReproductionSucceeded evidence
     {
-        let expectation = CommandExpectation::ExpectedFailureSignature {
-            signature: "assertion failed".into(),
-        };
+        let expectation = CommandExpectation::Reproduction(
+            FailureExpectation::default().with_output("assertion failed"),
+        );
         let mut bag = EvidenceBag::default();
         bag.absorb_tool_result(
             &cmd_fail("cargo test auth", "assertion failed left=1"),
@@ -175,7 +175,12 @@ fn run_deterministic(report: &mut EvalReport) {
         report.check(
             "failing_reproduction_is_success_evidence",
             bag.satisfies(&req),
-            "expected CommandFailedAsExpected to satisfy reproduction requirement",
+            "expected ReproductionSucceeded to satisfy reproduction requirement",
+        );
+        report.check(
+            "repro_commands_separate_from_verify",
+            !bag.repro_commands.is_empty() && bag.verify_commands.is_empty(),
+            "repro ledger must not mix with verify commands",
         );
     }
 
@@ -188,14 +193,63 @@ fn run_deterministic(report: &mut EvalReport) {
         );
         let req = EvidenceRequirement::CommandOutcome {
             command_contains: "cargo test".into(),
-            expectation: CommandExpectation::ExpectedFailureSignature {
-                signature: "assertion failed".into(),
-            },
+            expectation: CommandExpectation::Reproduction(
+                FailureExpectation::default().with_output("assertion failed"),
+            ),
         };
         report.check(
             "git_status_is_not_reproduction",
             !bag.satisfies(&req),
             "git status must not satisfy reproduction criterion",
+        );
+    }
+
+    // 2b) bare non-zero is failure, not reproduction
+    {
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail("unrelated", "some failure"),
+            Some(&CommandExpectation::ExpectedFailure),
+        );
+        report.check(
+            "bare_nonzero_is_not_reproduction",
+            bag.items
+                .iter()
+                .any(|i| matches!(i.kind, EvidenceKind::CommandFailed { .. }))
+                && !bag.satisfies(&EvidenceRequirement::SemanticProof {
+                    target: kodo_agent::evidence::SemanticTarget::Reproduction,
+                }),
+            "ExpectedFailure must not become ReproductionSucceeded",
+        );
+    }
+
+    // 2c) generic "fail" fingerprint rejected; named test proves reproduction
+    {
+        let generic =
+            CommandExpectation::Reproduction(FailureExpectation::default().with_output("fail"));
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(&cmd_fail("npm test", "fail"), Some(&generic));
+        report.check(
+            "generic_fail_token_is_not_reproduction",
+            !bag.satisfies(&EvidenceRequirement::SemanticProof {
+                target: kodo_agent::evidence::SemanticTarget::Reproduction,
+            }),
+            "generic-only fingerprint must fail closed",
+        );
+
+        let named =
+            CommandExpectation::Reproduction(FailureExpectation::with_test_name("test_root"));
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail("cargo test", "test test_root ... FAILED"),
+            Some(&named),
+        );
+        report.check(
+            "matching_named_test_is_reproduction",
+            bag.satisfies(&EvidenceRequirement::SemanticProof {
+                target: kodo_agent::evidence::SemanticTarget::Reproduction,
+            }),
+            "named failing test should reproduce",
         );
     }
 

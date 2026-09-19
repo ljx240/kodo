@@ -407,6 +407,45 @@ mod tests {
     }
 
     #[test]
+    fn skill_bugfix_reproduction_requires_fingerprint_not_any_nonzero() {
+        use crate::evidence::{CommandExpectation, EvidenceRequirement};
+        use crate::plan::TaskPlan;
+
+        let skill = skill_of(TaskType::BugFix);
+        let plan = TaskPlan::from_skill(&skill, "fix the panic when opening a project");
+        let first = &plan.subtasks[0];
+        match &first.effective_requirement().evidence {
+            EvidenceRequirement::CommandOutcome {
+                expectation: CommandExpectation::Reproduction(fe),
+                ..
+            } => {
+                assert!(
+                    fe.capture_on_first_failure || fe.has_specific_fingerprint(),
+                    "repro step must use FailureExpectation, got {:?}",
+                    fe
+                );
+            }
+            other => panic!("bug-fix s1 must be Reproduction expectation, got {other:?}"),
+        }
+        // Completion criterion for reproduction is SemanticProof, not bare failure.
+        let repro_criterion = plan
+            .criteria
+            .iter()
+            .find(|c| c.description.to_ascii_lowercase().contains("reproduc"))
+            .expect("reproduction criterion");
+        assert!(
+            matches!(
+                repro_criterion.requirement,
+                EvidenceRequirement::SemanticProof { .. }
+            ),
+            "got {:?}",
+            repro_criterion.requirement
+        );
+        // Repro and verify use separate ledger fields (never mixed at init).
+        assert!(plan.repro_commands.is_empty() && plan.verify_commands.is_empty());
+    }
+
+    #[test]
     fn code_review_skill_is_read_only() {
         let skill = skill_of(TaskType::CodeReview);
         for mutation in [

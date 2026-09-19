@@ -7,7 +7,7 @@
 
 use crate::evidence::{
     evidence_from_tool_result, AcceptanceCriterion, CommandExpectation, EvidenceBag, EvidenceItem,
-    EvidenceKind, EvidenceRequirement, SemanticTarget, SubtaskRequirement,
+    EvidenceKind, EvidenceRequirement, FailureExpectation, SemanticTarget, SubtaskRequirement,
 };
 use crate::protocol::{ToolErrorCode, ToolName, ToolResult};
 use crate::skill::SkillSpec;
@@ -159,6 +159,9 @@ pub struct TaskPlan {
     pub current_subtask: usize,
     /// Whether Finish requires a passing verify run.
     pub requires_verify: bool,
+    /// Commands that successfully reproduced the target bug.
+    /// Never mixed with [`Self::verify_commands`].
+    pub repro_commands: Vec<String>,
     /// Command labels to record as verification evidence on the next
     /// `mark_verify_done` (set by the loop from the real runner outcomes).
     pub verify_commands: Vec<String>,
@@ -211,7 +214,9 @@ impl TaskPlan {
                     .with_requirement(SubtaskRequirement::strict(
                         EvidenceRequirement::CommandOutcome {
                             command_contains: String::new(),
-                            expectation: CommandExpectation::ExpectedFailure,
+                            expectation: CommandExpectation::Reproduction(
+                                FailureExpectation::capture(),
+                            ),
                         },
                     )),
                 );
@@ -283,6 +288,7 @@ impl TaskPlan {
             criteria,
             current_subtask: 0,
             requires_verify: mutating,
+            repro_commands: Vec::new(),
             verify_commands: Vec::new(),
         }
     }
@@ -406,6 +412,7 @@ impl TaskPlan {
             criteria,
             current_subtask: current_subtask.min(subtask_count),
             requires_verify,
+            repro_commands: Vec::new(),
             verify_commands: Vec::new(),
         })
     }
@@ -526,6 +533,11 @@ impl TaskPlan {
             };
 
             if let Some(item) = maybe_item.clone() {
+                if let EvidenceKind::ReproductionSucceeded { command, .. } = &item.kind {
+                    if !self.repro_commands.contains(command) {
+                        self.repro_commands.push(command.clone());
+                    }
+                }
                 flipped += self.mark_first_accepting(&item);
                 if result.ok
                     && ToolName::parse(&result.name)
@@ -560,12 +572,12 @@ impl TaskPlan {
                     .as_ref()
                     .map(|e| e.code == ToolErrorCode::PermissionDenied)
                     .unwrap_or(false);
-                // Expected-failure evidence (if produced) already counted; do not
+                // Reproduction evidence (if produced) already counted; do not
                 // then mark the same Command subtask Failed.
                 let accepted_as_expected = maybe_item
                     .as_ref()
                     .map(|i| {
-                        matches!(i.kind, EvidenceKind::CommandFailedAsExpected { .. })
+                        matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. })
                             && self.subtasks.iter().any(|s| {
                                 s.is_done()
                                     && s.evidence
@@ -707,6 +719,11 @@ impl TaskPlan {
 
     /// Absorb typed evidence into structured criteria.
     pub fn absorb_evidence_item(&mut self, item: &EvidenceItem) {
+        if let EvidenceKind::ReproductionSucceeded { command, .. } = &item.kind {
+            if !self.repro_commands.contains(command) {
+                self.repro_commands.push(command.clone());
+            }
+        }
         for criterion in &mut self.criteria {
             criterion.absorb(item);
         }
@@ -923,12 +940,10 @@ fn _unused_criterion_helper(c: &str) -> bool {
 pub fn requirement_for_skill_step(title: &str, kind: SubtaskKind) -> SubtaskRequirement {
     let lower = title.to_ascii_lowercase();
     if lower.contains("reproduc") || lower.contains("复现") || lower.contains("failing test") {
-        // Subtask-level: expectation-aware failure outcome (not a success wildcard).
+        // Subtask-level: fingerprint-gated reproduction — never bare non-zero.
         return SubtaskRequirement::strict(EvidenceRequirement::CommandOutcome {
             command_contains: String::new(),
-            expectation: CommandExpectation::ExpectedFailureSignature {
-                signature: "fail".into(),
-            },
+            expectation: CommandExpectation::Reproduction(FailureExpectation::capture()),
         });
     }
     // Root cause needs a real search hit — not any FileRead/command.
@@ -1112,6 +1127,8 @@ impl AcceptanceEvidence {
     }
 
     pub fn mark_verify(&mut self, ok: bool, commands: Vec<String>) {
+        // Regression fingerprint reappearance fails verification.
+        let ok = ok && !self.bag.regression_failed;
         self.verify_ok = Some(ok);
         self.bag.mark_verify(ok, commands);
     }
@@ -1560,5 +1577,85 @@ mod tests {
         assert!(!criterion.absorb(&read));
         assert!(!criterion.absorb(&git));
         assert!(!criterion.is_met());
+    }
+
+    // -----------------------------------------------------------------------
+    // reproduction — separate ledgers + first-class ReproductionSucceeded
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reproduction_commands_are_recorded_separately_from_verify() {
+        let mut plan = TaskPlan::from_task("Fix the panic in the loader");
+        assert!(plan.repro_commands.is_empty());
+        assert!(plan.verify_commands.is_empty());
+
+        let repro_fail = ToolResult::failure(
+            ToolCallId::new("rp"),
+            ToolName::RunCommand.label(),
+            "cargo test repro_panic",
+            crate::protocol::ToolError::execution(
+                "test repro_panic ... FAILED\nassertion failed left=1\nexit=101",
+            ),
+        );
+        // Expectation comes from the unfinished Command subtask (Reproduction).
+        plan.absorb_tool_results(&[repro_fail]);
+        assert!(
+            !plan.repro_commands.is_empty(),
+            "reproduction command must be ledgered: {:?}",
+            plan.repro_commands
+        );
+        assert!(
+            plan.verify_commands.is_empty(),
+            "verify ledger stays empty until mark_verify_done"
+        );
+
+        plan.verify_commands.push("cargo test --workspace".into());
+        plan.mark_verify_done();
+        assert!(
+            plan.verify_commands.is_empty(),
+            "verify commands are consumed by mark_verify_done"
+        );
+        // repro ledger is not cleared by verify.
+        assert!(!plan.repro_commands.is_empty());
+    }
+
+    #[test]
+    fn reproduction_bare_command_failure_does_not_complete_semantic_criterion() {
+        let mut plan = TaskPlan::from_skill(
+            &crate::skill::SkillRegistry::builtin()
+                .select(crate::classify::TaskType::BugFix)
+                .cloned()
+                .expect("bug-fix"),
+            "Fix the panic when opening an empty project",
+        );
+        // Force a bare ExpectedFailure on the first command subtask (legacy path).
+        if let Some(sub) = plan.subtasks.first_mut() {
+            if sub.kind == SubtaskKind::Command {
+                sub.requirement = Some(SubtaskRequirement::strict(
+                    EvidenceRequirement::CommandOutcome {
+                        command_contains: String::new(),
+                        expectation: CommandExpectation::ExpectedFailure,
+                    },
+                ));
+            }
+        }
+        let fail = ToolResult::failure(
+            ToolCallId::new("b1"),
+            ToolName::RunCommand.label(),
+            "something",
+            crate::protocol::ToolError::execution("failed for unrelated reasons"),
+        );
+        plan.absorb_tool_results(&[fail]);
+        let repro = plan
+            .criteria
+            .iter()
+            .find(|c| c.description.to_ascii_lowercase().contains("reproduc"));
+        if let Some(c) = repro {
+            assert!(
+                !c.is_met(),
+                "bare non-zero must not satisfy reproduction criterion"
+            );
+        }
+        assert!(plan.repro_commands.is_empty());
     }
 }

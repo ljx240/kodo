@@ -1,17 +1,340 @@
 //! Criterion-specific evidence. Tool success alone never proves a criterion.
+//!
+//! "Command failed" and "successfully reproduced the target bug" are two
+//! different concepts: only [`EvidenceKind::ReproductionSucceeded`] (a
+//! fingerprint-matched [`CommandExpectation::Reproduction`]) counts as
+//! reproduction. Bare non-zero exits never do.
 
 use crate::protocol::{ToolErrorCode, ToolName, ToolResult};
 use serde::{Deserialize, Serialize};
+
+/// Tokens that are too generic to fingerprint a target bug on their own
+/// (unless the user task explicitly opts in via
+/// [`FailureExpectation::allow_generic_fingerprint`]).
+pub fn is_generic_failure_token(token: &str) -> bool {
+    matches!(
+        token.trim().to_ascii_lowercase().as_str(),
+        "fail"
+            | "failed"
+            | "failure"
+            | "failing"
+            | "error"
+            | "errors"
+            | "err"
+            | "non-zero"
+            | "nonzero"
+            | "non zero"
+            | "exit"
+    )
+}
+
+/// Task-specific fingerprint for a **successful** bug reproduction.
+///
+/// `ReproductionSucceeded` requires the command to have executed, failed in
+/// the expected way, and matched at least one of: `expected_exit`,
+/// `output_contains`, `stderr_contains`, `test_name` (combinable; at least
+/// one constraint must be present). Generic-only needles such as `"fail"` /
+/// `"error"` are rejected unless explicitly allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FailureExpectation {
+    /// Exact non-zero exit code required when set.
+    #[serde(default)]
+    pub expected_exit: Option<i32>,
+    /// Substrings that must appear in combined stdout+stderr.
+    #[serde(default)]
+    pub output_contains: Vec<String>,
+    /// Substrings that must appear in stderr (or the error message).
+    #[serde(default)]
+    pub stderr_contains: Vec<String>,
+    /// Named failing test that must appear in the output.
+    #[serde(default)]
+    pub test_name: Option<String>,
+    /// Explicit user opt-in: allow `"fail"`/`"error"` as the sole fingerprint.
+    #[serde(default)]
+    pub allow_generic_fingerprint: bool,
+    /// When no specific fingerprint fields are set, mint a stable fingerprint
+    /// from the first observed failure (exit + extracted test/assertion).
+    #[serde(default)]
+    pub capture_on_first_failure: bool,
+}
+
+impl FailureExpectation {
+    /// Capture-on-first-failure: fingerprint is minted from the first
+    /// application-level failure (never from command-not-found / auth noise).
+    pub fn capture() -> Self {
+        Self {
+            capture_on_first_failure: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_test_name(name: impl Into<String>) -> Self {
+        Self {
+            test_name: Some(name.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_exit(code: i32) -> Self {
+        Self {
+            expected_exit: Some(code),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_output(mut self, needle: impl Into<String>) -> Self {
+        self.output_contains.push(needle.into());
+        self
+    }
+
+    pub fn with_stderr(mut self, needle: impl Into<String>) -> Self {
+        self.stderr_contains.push(needle.into());
+        self
+    }
+
+    /// User explicitly asked for a generic token fingerprint.
+    pub fn allowing_generic(mut self) -> Self {
+        self.allow_generic_fingerprint = true;
+        self
+    }
+
+    /// At least one fingerprint field is present (constraint exists).
+    pub fn has_any_constraint(&self) -> bool {
+        self.expected_exit.is_some()
+            || self.test_name.is_some()
+            || !self.output_contains.is_empty()
+            || !self.stderr_contains.is_empty()
+    }
+
+    /// At least one constraint is specific (not merely `"fail"`/`"error"`).
+    pub fn has_specific_fingerprint(&self) -> bool {
+        if self.expected_exit.is_some() || self.test_name.is_some() {
+            return true;
+        }
+        self.output_contains
+            .iter()
+            .chain(&self.stderr_contains)
+            .any(|s| !is_generic_failure_token(s))
+    }
+
+    pub fn label(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(code) = self.expected_exit {
+            parts.push(format!("exit={code}"));
+        }
+        if let Some(name) = &self.test_name {
+            parts.push(format!("test={name}"));
+        }
+        for n in &self.output_contains {
+            parts.push(format!("out=/{n}/"));
+        }
+        for n in &self.stderr_contains {
+            parts.push(format!("err=/{n}/"));
+        }
+        if parts.is_empty() {
+            if self.capture_on_first_failure {
+                "capture-on-first-failure".into()
+            } else {
+                "empty-fingerprint".into()
+            }
+        } else {
+            parts.join(" & ")
+        }
+    }
+
+    /// ReproductionSucceeded = executed AND failed as expected AND fingerprint
+    /// matched. Returns false for success exits, missing constraints, or
+    /// generic-only fingerprints without explicit opt-in.
+    pub fn evaluate(&self, exit_code: Option<i32>, stdout: &str, stderr: &str) -> bool {
+        let failed_ok = match self.expected_exit {
+            Some(code) => exit_code == Some(code),
+            None => matches!(exit_code, Some(c) if c != 0),
+        };
+        if !failed_ok {
+            return false;
+        }
+        if !self.has_any_constraint() {
+            return false;
+        }
+        if !self.allow_generic_fingerprint && !self.has_specific_fingerprint() {
+            // Empty or generic-only ("fail"/"error") fingerprint.
+            return false;
+        }
+
+        let combined = format!("{stdout}\n{stderr}");
+        if let Some(name) = &self.test_name {
+            if !combined
+                .to_ascii_lowercase()
+                .contains(&name.to_ascii_lowercase())
+            {
+                return false;
+            }
+        }
+        for needle in &self.output_contains {
+            if !combined.contains(needle.as_str())
+                && !combined
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase())
+            {
+                return false;
+            }
+        }
+        for needle in &self.stderr_contains {
+            if !stderr.contains(needle.as_str())
+                && !stderr
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase())
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Mint a stable fingerprint from the first real failure.
+    ///
+    /// Rejects command-not-found / environmental noise and anything that
+    /// cannot produce a specific application-level fingerprint.
+    pub fn mint_from_observation(
+        exit_code: Option<i32>,
+        stdout: &str,
+        stderr: &str,
+        command: &str,
+    ) -> Option<Self> {
+        // Shell cannot-executable codes are never an application bug.
+        if matches!(exit_code, Some(126) | Some(127)) {
+            return None;
+        }
+        let raw = format!("{command}\n{stdout}\n{stderr}");
+        let lower = raw.to_ascii_lowercase();
+
+        const ENV: &[&str] = &[
+            "command not found",
+            "no such file or directory",
+            "permission denied",
+            "connection refused",
+            "econnrefused",
+            "network is unreachable",
+            "could not resolve host",
+            "temporary failure in name resolution",
+        ];
+        let looks_env = ENV.iter().any(|m| lower.contains(m));
+        let test_name = extract_test_name(&raw);
+        let assertion = extract_assertion_marker(&raw);
+        let app_level = test_name.is_some()
+            || assertion.is_some()
+            || lower.contains("assertion failed")
+            || lower.contains("panicked at")
+            || lower.contains("assertionerror");
+        if looks_env && !app_level {
+            return None;
+        }
+
+        // Auth/network-only failures without a target test/assertion cannot
+        // prove the target regression.
+        let auth_only = (lower.contains("unauthorized")
+            || lower.contains("401 ")
+            || lower.contains("403 ")
+            || lower.contains("forbidden"))
+            && !app_level;
+        if auth_only {
+            return None;
+        }
+
+        let mut fe = Self {
+            expected_exit: exit_code,
+            ..Self::default()
+        };
+        if let Some(name) = test_name {
+            fe.test_name = Some(name);
+        }
+        if let Some(marker) = assertion {
+            fe.output_contains.push(marker);
+        }
+        // Minted fingerprints must be specific (bare exit code alone is too
+        // weak without a test name or assertion marker).
+        if fe.test_name.is_none() && fe.output_contains.is_empty() {
+            return None;
+        }
+        if !fe.evaluate(exit_code, stdout, stderr) {
+            return None;
+        }
+        Some(fe)
+    }
+}
+
+/// Extract a named failing test from harness output (cargo / node styles).
+fn extract_test_name(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let t = line.trim();
+        // cargo: `test module::name ... FAILED` / `test name ... ok`
+        if let Some(rest) = t.strip_prefix("test ") {
+            if let Some(idx) = rest.find(" ...") {
+                let name = rest[..idx].trim();
+                if !name.is_empty() && name != "result" && !name.eq_ignore_ascii_case("ignored") {
+                    // Only FAILED-style lines are failures; callers only mint on fail.
+                    return Some(name.to_owned());
+                }
+            }
+        }
+        // `running 1 test` is not a name; skip.
+        // node/custom: `FAIL test_login_panic` / `✗ test_login_panic`
+        for prefix in ["FAIL ", "fail ", "✗ ", "x "] {
+            if let Some(rest) = t.strip_prefix(prefix) {
+                let name = rest.trim().trim_end_matches(':');
+                if !name.is_empty()
+                    && !name.contains(' ')
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == ':')
+                {
+                    return Some(name.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract a stable assertion/panic marker from failure output.
+fn extract_assertion_marker(raw: &str) -> Option<String> {
+    const MARKERS: &[&str] = &[
+        "assertion failed",
+        "assertionerror",
+        "panicked at",
+        "left=",
+        "expected outcome",
+    ];
+    let lower = raw.to_ascii_lowercase();
+    for marker in MARKERS {
+        if lower.contains(marker) {
+            // Prefer the full source line when it is distinctive enough.
+            for line in raw.lines() {
+                if line.to_ascii_lowercase().contains(marker) {
+                    let trimmed = line.trim();
+                    if trimmed.chars().count() >= marker.chars().count() + 4 {
+                        let capped: String = trimmed.chars().take(120).collect();
+                        return Some(capped);
+                    }
+                }
+            }
+            return Some((*marker).to_owned());
+        }
+    }
+    None
+}
 
 /// How a command result is interpreted for evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandExpectation {
     /// Command must exit 0.
     ExpectedSuccess,
-    /// Command must exit non-zero (bug reproduction).
+    /// Command must exit non-zero. Yields [`EvidenceKind::CommandFailed`]
+    /// only — never reproduction proof.
     ExpectedFailure,
-    /// Command must exit non-zero AND output must contain the signature.
-    ExpectedFailureSignature { signature: String },
+    /// Successful bug reproduction: failed **and** matched a task-specific
+    /// [`FailureExpectation`] fingerprint.
+    Reproduction(FailureExpectation),
     /// Command must exit 0 AND output must contain the needle.
     ExpectedOutputMatch { needle: String },
 }
@@ -20,26 +343,22 @@ impl CommandExpectation {
     pub fn label(&self) -> String {
         match self {
             Self::ExpectedSuccess => "exit 0".into(),
-            Self::ExpectedFailure => "non-zero exit".into(),
-            Self::ExpectedFailureSignature { signature } => format!("fail + /{signature}/"),
+            Self::ExpectedFailure => "non-zero exit (not reproduction)".into(),
+            Self::Reproduction(fe) => format!("reproduce({})", fe.label()),
             Self::ExpectedOutputMatch { needle } => format!("pass + /{needle}/"),
         }
     }
 
-    /// Evaluate a command outcome against this expectation.
+    pub fn is_reproduction(&self) -> bool {
+        matches!(self, Self::Reproduction(_))
+    }
+
+    /// Evaluate a command outcome against this expectation (non-capture).
     pub fn evaluate(&self, exit_code: Option<i32>, output: &str) -> bool {
         match self {
             Self::ExpectedSuccess => exit_code == Some(0),
-            Self::ExpectedFailure => exit_code.map(|c| c != 0).unwrap_or(true),
-            Self::ExpectedFailureSignature { signature } => {
-                // Signature match alone can prove reproduction when the test
-                // harness already failed (non-zero) OR when the output shows
-                // the failure signature even if exit metadata is missing.
-                output
-                    .to_ascii_lowercase()
-                    .contains(&signature.to_ascii_lowercase())
-                    || signature.eq_ignore_ascii_case("fail")
-            }
+            Self::ExpectedFailure => matches!(exit_code, Some(c) if c != 0),
+            Self::Reproduction(fe) => fe.evaluate(exit_code, output, ""),
             Self::ExpectedOutputMatch { needle } => {
                 exit_code == Some(0) && output.contains(needle.as_str())
             }
@@ -61,11 +380,18 @@ pub enum EvidenceKind {
         command: String,
         exit_code: i32,
     },
-    CommandFailedAsExpected {
+    /// Bare command failure (non-zero). **Not** reproduction proof.
+    CommandFailed {
         command: String,
         exit_code: Option<i32>,
-        expectation: String,
-        signature_matched: bool,
+    },
+    /// First-class: the target bug was successfully reproduced — command
+    /// executed, failed as expected, and matched the task fingerprint.
+    ReproductionSucceeded {
+        command: String,
+        exit_code: Option<i32>,
+        /// Concrete fingerprint that matched (stable across fix/regression).
+        expectation: FailureExpectation,
     },
     FileChanged {
         path: String,
@@ -106,7 +432,8 @@ pub const REUSABLE_CRITERION: &str = "*";
 pub enum SemanticTarget {
     /// Root cause located — needs a real search hit, not any read/command.
     RootCause,
-    /// Failure reproduced — needs an expected-failure command outcome.
+    /// Failure reproduced — needs a fingerprint-matched
+    /// [`EvidenceKind::ReproductionSucceeded`], never a bare non-zero exit.
     Reproduction,
     /// Behavior implemented — needs a real file change / patch.
     BehaviorImplemented,
@@ -181,16 +508,22 @@ impl EvidenceItem {
             EvidenceKind::CommandSucceeded { command, exit_code } => {
                 format!("cmd-ok:{command}#{exit_code}")
             }
-            EvidenceKind::CommandFailedAsExpected {
-                command,
-                exit_code,
-                expectation,
-                ..
-            } => format!(
-                "cmd-expected-fail:{command}#{} ({expectation})",
+            EvidenceKind::CommandFailed { command, exit_code } => format!(
+                "cmd-fail:{command}#{}",
                 exit_code
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "?".into())
+            ),
+            EvidenceKind::ReproductionSucceeded {
+                command,
+                exit_code,
+                expectation,
+            } => format!(
+                "reproduced:{command}#{} ({})",
+                exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                expectation.label()
             ),
             EvidenceKind::FileChanged { path } => format!("changed:{path}"),
             EvidenceKind::PatchApplied { path } => format!("patch:{path}"),
@@ -303,7 +636,8 @@ impl EvidenceRequirement {
                         | EvidenceKind::TestPassed { .. }
                         | EvidenceKind::BuildPassed { .. }
                         | EvidenceKind::LintPassed { .. }
-                        | EvidenceKind::CommandFailedAsExpected { .. }
+                        | EvidenceKind::CommandFailed { .. }
+                        | EvidenceKind::ReproductionSucceeded { .. }
                 )
             }
             (Self::FileChanged { path_contains }, EvidenceKind::FileChanged { path })
@@ -322,11 +656,9 @@ impl EvidenceRequirement {
                 },
                 EvidenceKind::CommandSucceeded { command, exit_code },
             ) => {
-                if matches!(
-                    expectation,
-                    CommandExpectation::ExpectedFailure
-                        | CommandExpectation::ExpectedFailureSignature { .. }
-                ) {
+                if expectation.is_reproduction()
+                    || matches!(expectation, CommandExpectation::ExpectedFailure)
+                {
                     false
                 } else if command_contains.is_empty() {
                     expectation.evaluate(Some(*exit_code), command)
@@ -335,39 +667,25 @@ impl EvidenceRequirement {
                         && expectation.evaluate(Some(*exit_code), command)
                 }
             }
+            // Bare failure satisfies ExpectedFailure only — not Reproduction.
             (
                 Self::CommandOutcome {
                     command_contains,
-                    expectation,
+                    expectation: CommandExpectation::ExpectedFailure,
                 },
-                EvidenceKind::CommandFailedAsExpected {
-                    command,
-                    exit_code,
-                    signature_matched,
-                    ..
+                EvidenceKind::CommandFailed { command, .. },
+            ) => command_contains.is_empty() || command.contains(command_contains.as_str()),
+            // Fingerprint-matched reproduction evidence.
+            (
+                Self::CommandOutcome {
+                    command_contains,
+                    expectation: CommandExpectation::Reproduction(_),
                 },
-            ) => {
-                let cmd_ok =
-                    command_contains.is_empty() || command.contains(command_contains.as_str());
-                if !cmd_ok {
-                    return false;
-                }
-                match expectation {
-                    CommandExpectation::ExpectedFailure => true,
-                    CommandExpectation::ExpectedFailureSignature { signature } => {
-                        *signature_matched
-                            && expectation.evaluate(
-                                *exit_code,
-                                if *signature_matched {
-                                    signature.as_str()
-                                } else {
-                                    ""
-                                },
-                            )
-                    }
-                    _ => false,
-                }
-            }
+                EvidenceKind::ReproductionSucceeded { command, .. },
+            ) => command_contains.is_empty() || command.contains(command_contains.as_str()),
+            // Wrong expectation class never matches.
+            (Self::CommandOutcome { .. }, EvidenceKind::CommandFailed { .. }) => false,
+            (Self::CommandOutcome { .. }, EvidenceKind::ReproductionSucceeded { .. }) => false,
             // SearchHit: only real search observations. Empty `query_contains`
             // is NOT a wildcard over FileRead / CommandSucceeded — those were
             // the false-completion holes for root-cause evidence.
@@ -386,9 +704,7 @@ impl EvidenceRequirement {
                 (SemanticTarget::RootCause, EvidenceKind::SearchHit { query, hits }) => {
                     *hits > 0 && !query.trim().is_empty()
                 }
-                (SemanticTarget::Reproduction, EvidenceKind::CommandFailedAsExpected { .. }) => {
-                    true
-                }
+                (SemanticTarget::Reproduction, EvidenceKind::ReproductionSucceeded { .. }) => true,
                 (
                     SemanticTarget::BehaviorImplemented,
                     EvidenceKind::FileChanged { .. } | EvidenceKind::PatchApplied { .. },
@@ -564,6 +880,29 @@ impl SubtaskRequirement {
     }
 }
 
+/// Parse `exit=N` from a failed run_command error message (or default 1).
+fn parse_exit_code(result: &ToolResult) -> Option<i32> {
+    result
+        .error
+        .as_ref()
+        .and_then(|e| {
+            e.message.lines().find_map(|l| {
+                l.strip_prefix("exit=")
+                    .and_then(|v| v.trim().parse::<i32>().ok())
+                    .or_else(|| {
+                        e.message.rsplit("exit=").next().and_then(|tail| {
+                            tail.chars()
+                                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                                .collect::<String>()
+                                .parse::<i32>()
+                                .ok()
+                        })
+                    })
+            })
+        })
+        .or(Some(1))
+}
+
 /// Infer a typed evidence item from a tool result + command expectation.
 pub fn evidence_from_tool_result(
     result: &ToolResult,
@@ -664,64 +1003,47 @@ pub fn evidence_from_tool_result(
                     }
                 }
             } else {
-                let exit_code = result
-                    .error
-                    .as_ref()
-                    .and_then(|e| {
-                        e.message.lines().find_map(|l| {
-                            l.strip_prefix("exit=")
-                                .and_then(|v| v.trim().parse::<i32>().ok())
-                                .or_else(|| {
-                                    e.message.rsplit("exit=").next().and_then(|tail| {
-                                        tail.chars()
-                                            .take_while(|c| c.is_ascii_digit() || *c == '-')
-                                            .collect::<String>()
-                                            .parse::<i32>()
-                                            .ok()
-                                    })
-                                })
-                        })
-                    })
-                    .or(Some(1));
-                let expectation = expectation
-                    .cloned()
-                    .unwrap_or(CommandExpectation::ExpectedSuccess);
+                let exit_code = parse_exit_code(result);
                 let err_text = result
                     .error
                     .as_ref()
                     .map(|e| e.message.as_str())
                     .unwrap_or("");
-                let signature_matched = match &expectation {
-                    CommandExpectation::ExpectedFailureSignature { signature } => {
-                        err_text
-                            .to_ascii_lowercase()
-                            .contains(&signature.to_ascii_lowercase())
-                            || result
-                                .output
-                                .to_ascii_lowercase()
-                                .contains(&signature.to_ascii_lowercase())
+                let stdout = result.output.as_str();
+                match expectation.unwrap_or(&CommandExpectation::ExpectedSuccess) {
+                    // Successful reproduction: fingerprint must match.
+                    CommandExpectation::Reproduction(fe) => {
+                        let concrete =
+                            if fe.capture_on_first_failure && !fe.has_specific_fingerprint() {
+                                // None → not an application-level failure; stay unresolved.
+                                FailureExpectation::mint_from_observation(
+                                    exit_code, stdout, err_text, &command,
+                                )?
+                            } else {
+                                fe.clone()
+                            };
+                        if !concrete.evaluate(exit_code, stdout, err_text) {
+                            // Wrong signature — stay unresolved, never "reproduced".
+                            return None;
+                        }
+                        EvidenceKind::ReproductionSucceeded {
+                            command: command.clone(),
+                            exit_code,
+                            expectation: concrete,
+                        }
                     }
-                    CommandExpectation::ExpectedFailure => true,
-                    _ => false,
-                };
-                let expects_failure = matches!(
-                    expectation,
-                    CommandExpectation::ExpectedFailure
-                        | CommandExpectation::ExpectedFailureSignature { .. }
-                );
-                let signature_ok = match &expectation {
-                    CommandExpectation::ExpectedFailureSignature { .. } => signature_matched,
-                    _ => true,
-                };
-                if !expects_failure || !signature_ok {
-                    // Unexpected failure, or failed without the expected signature.
-                    return None;
-                }
-                EvidenceKind::CommandFailedAsExpected {
-                    command: command.clone(),
-                    exit_code,
-                    expectation: expectation.label(),
-                    signature_matched,
+                    // Bare non-zero: failure only, never reproduction.
+                    CommandExpectation::ExpectedFailure => {
+                        if !matches!(exit_code, Some(c) if c != 0) {
+                            return None;
+                        }
+                        EvidenceKind::CommandFailed {
+                            command: command.clone(),
+                            exit_code,
+                        }
+                    }
+                    // Unexpected failure under a success/output expectation.
+                    _ => return None,
                 }
             }
         }
@@ -765,10 +1087,24 @@ pub fn context_observation(path: impl Into<String>, id: impl Into<String>) -> Ev
 pub struct EvidenceBag {
     pub items: Vec<EvidenceItem>,
     pub verify_ok: Option<bool>,
+    /// Commands that passed project verification (never mixed with repro).
     pub verify_commands: Vec<String>,
+    /// Commands that successfully reproduced the target bug.
+    pub repro_commands: Vec<String>,
+    /// Active reproduction fingerprints (cleared when the command passes).
+    pub reproduction: Vec<ReproductionRecord>,
+    /// Set when a recorded reproduction fingerprint reappears after the fix.
+    pub regression_failed: bool,
     pub model_claimed_done: bool,
     pub denied: Vec<String>,
     pub files_written: Vec<String>,
+}
+
+/// One successful reproduction, kept so a later reappearance fails regression.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReproductionRecord {
+    pub command: String,
+    pub expectation: FailureExpectation,
 }
 
 impl EvidenceBag {
@@ -783,12 +1119,21 @@ impl EvidenceBag {
         result: &ToolResult,
         expectation: Option<&CommandExpectation>,
     ) {
+        let is_run = ToolName::parse(&result.name) == Some(ToolName::RunCommand);
         if result.ok {
             if ToolName::parse(&result.name)
                 .map(|n| n.is_mutation())
                 .unwrap_or(false)
             {
                 self.files_written.push(result.input.clone());
+            }
+            if is_run {
+                // Reproduced command now passes — fixed; drop its fingerprint.
+                let had = self.reproduction.iter().any(|r| r.command == result.input);
+                self.reproduction.retain(|r| r.command != result.input);
+                if had && self.reproduction.is_empty() {
+                    self.regression_failed = false;
+                }
             }
         } else if result
             .error
@@ -799,12 +1144,46 @@ impl EvidenceBag {
             self.denied
                 .push(format!("{}: {}", result.name, result.input));
         }
+
+        // After a fix has started, the same fingerprint reappearing is a
+        // regression and must fail verification (not "reproduced again").
+        if !result.ok && is_run && !self.files_written.is_empty() {
+            if let Some(rec) = self.reproduction.iter().find(|r| r.command == result.input) {
+                let exit = parse_exit_code(result);
+                let err = result
+                    .error
+                    .as_ref()
+                    .map(|e| e.message.as_str())
+                    .unwrap_or("");
+                if rec.expectation.evaluate(exit, &result.output, err) {
+                    self.regression_failed = true;
+                }
+            }
+        }
+
         if let Some(item) = evidence_from_tool_result(result, expectation) {
+            if let EvidenceKind::ReproductionSucceeded {
+                command,
+                expectation: fe,
+                ..
+            } = &item.kind
+            {
+                self.reproduction.retain(|r| r.command != *command);
+                self.reproduction.push(ReproductionRecord {
+                    command: command.clone(),
+                    expectation: fe.clone(),
+                });
+                if !self.repro_commands.contains(command) {
+                    self.repro_commands.push(command.clone());
+                }
+            }
             self.push(item);
         }
     }
 
     pub fn mark_verify(&mut self, ok: bool, commands: Vec<String>) {
+        // A reappeared reproduction fingerprint always fails regression verify.
+        let ok = ok && !self.regression_failed;
         self.verify_ok = Some(ok);
         if ok {
             self.verify_commands = commands.clone();
@@ -949,9 +1328,9 @@ mod tests {
     fn git_status_cannot_prove_bug_reproduction() {
         let requirement = EvidenceRequirement::CommandOutcome {
             command_contains: "cargo test".into(),
-            expectation: CommandExpectation::ExpectedFailureSignature {
-                signature: "assertion failed".into(),
-            },
+            expectation: CommandExpectation::Reproduction(
+                FailureExpectation::default().with_output("assertion failed"),
+            ),
         };
         let bag_ok = {
             let mut bag = EvidenceBag::default();
@@ -964,20 +1343,20 @@ mod tests {
         assert!(!bag_ok.satisfies(&requirement));
 
         // Generic success is also not reproduction.
-        let expectation = CommandExpectation::ExpectedFailureSignature {
-            signature: "assertion failed".into(),
-        };
+        let expectation = CommandExpectation::Reproduction(
+            FailureExpectation::default().with_output("assertion failed"),
+        );
         let mut bag = EvidenceBag::default();
         bag.absorb_tool_result(&cmd_ok("cargo test"), Some(&expectation));
-        // ok command + expected failure → no CommandFailedAsExpected evidence
+        // ok command + expected failure → no ReproductionSucceeded evidence
         assert!(!bag.satisfies(&requirement), "bag={:?}", bag.items);
     }
 
     #[test]
     fn failing_reproduction_can_be_successful_evidence() {
-        let expectation = CommandExpectation::ExpectedFailureSignature {
-            signature: "assertion failed".into(),
-        };
+        let expectation = CommandExpectation::Reproduction(
+            FailureExpectation::default().with_output("assertion failed"),
+        );
         let requirement = EvidenceRequirement::CommandOutcome {
             command_contains: "cargo test".into(),
             expectation: expectation.clone(),
@@ -994,7 +1373,9 @@ mod tests {
         assert!(bag
             .items
             .iter()
-            .any(|i| matches!(i.kind, EvidenceKind::CommandFailedAsExpected { .. })));
+            .any(|i| matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. })));
+        assert!(bag.repro_commands.iter().any(|c| c.contains("cargo test")));
+        assert!(bag.verify_commands.is_empty(), "repro ≠ verify");
     }
 
     #[test]
@@ -1097,9 +1478,9 @@ mod tests {
 
     #[test]
     fn failure_without_matching_signature_is_not_reproduction() {
-        let expectation = CommandExpectation::ExpectedFailureSignature {
-            signature: "NullPointerException".into(),
-        };
+        let expectation = CommandExpectation::Reproduction(
+            FailureExpectation::default().with_output("NullPointerException"),
+        );
         let mut bag = EvidenceBag::default();
         bag.absorb_tool_result(
             &cmd_fail("npm test", "FAIL empty suite"),
@@ -1110,6 +1491,10 @@ mod tests {
             expectation,
         };
         assert!(!bag.satisfies(&requirement));
+        assert!(bag
+            .items
+            .iter()
+            .all(|i| !matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. })));
     }
 
     // -----------------------------------------------------------------------
@@ -1333,13 +1718,13 @@ mod tests {
 
     #[test]
     fn semantic_completion_reproduction_and_regression_semantic_kinds() {
-        // Reproduction: only expected-failure outcomes.
+        // Reproduction: only fingerprint-matched ReproductionSucceeded.
         let repro = EvidenceRequirement::SemanticProof {
             target: SemanticTarget::Reproduction,
         };
-        let expectation = CommandExpectation::ExpectedFailureSignature {
-            signature: "assertion failed".into(),
-        };
+        let expectation = CommandExpectation::Reproduction(
+            FailureExpectation::default().with_output("assertion failed"),
+        );
         let mut bag = EvidenceBag::default();
         bag.absorb_tool_result(&cmd_ok("git status --short"), Some(&expectation));
         assert!(!bag.satisfies(&repro));
@@ -1364,5 +1749,287 @@ mod tests {
             None,
         );
         assert!(bag.satisfies(&behavior));
+    }
+
+    // -----------------------------------------------------------------------
+    // reproduction — "failed" vs "successfully reproduced target bug"
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reproduction_unrelated_failing_test_cannot_prove() {
+        let expectation = CommandExpectation::Reproduction(FailureExpectation::with_test_name(
+            "test_root_cause_panic",
+        ));
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail(
+                "cargo test",
+                "test unrelated_helper ... FAILED\nfailures: unrelated_helper",
+            ),
+            Some(&expectation),
+        );
+        assert!(
+            !bag.items
+                .iter()
+                .any(|i| matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. })),
+            "unrelated failing test must not reproduce the target"
+        );
+        assert!(!bag.satisfies(&EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::Reproduction
+        }));
+        assert!(bag.repro_commands.is_empty());
+    }
+
+    #[test]
+    fn reproduction_command_not_found_cannot_prove_application_bug() {
+        // Capture mode must refuse exit 127 / "command not found".
+        let expectation = CommandExpectation::Reproduction(FailureExpectation::capture());
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &ToolResult::failure(
+                ToolCallId::new("nf"),
+                "run_command",
+                "my-repro-binary --bug",
+                ToolError::execution("my-repro-binary: command not found\nexit=127"),
+            ),
+            Some(&expectation),
+        );
+        assert!(bag
+            .items
+            .iter()
+            .all(|i| !matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. })));
+
+        // Explicit wrong-exit fingerprint also rejects 127.
+        let explicit = CommandExpectation::Reproduction(
+            FailureExpectation::with_exit(101).with_output("panic"),
+        );
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &ToolResult::failure(
+                ToolCallId::new("nf2"),
+                "run_command",
+                "cargo test repro",
+                ToolError::execution("bash: cargo: command not found\nexit=127"),
+            ),
+            Some(&explicit),
+        );
+        assert!(bag
+            .items
+            .iter()
+            .all(|i| !matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. })));
+    }
+
+    #[test]
+    fn reproduction_auth_network_failure_cannot_prove_target_regression() {
+        // Target is a named test panic — auth/network noise must not match.
+        let expectation = CommandExpectation::Reproduction(
+            FailureExpectation::with_test_name("test_login_panic").with_output("panicked at"),
+        );
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail(
+                "npm test -- auth",
+                "HTTP 401 Unauthorized\nECONNREFUSED 127.0.0.1",
+            ),
+            Some(&expectation),
+        );
+        assert!(bag
+            .items
+            .iter()
+            .all(|i| !matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. })));
+
+        // Capture mode also refuses pure auth failures without app-level markers.
+        let capture = CommandExpectation::Reproduction(FailureExpectation::capture());
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail("curl -s /login", "HTTP/1.1 401 Unauthorized"),
+            Some(&capture),
+        );
+        assert!(bag
+            .items
+            .iter()
+            .all(|i| !matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. })));
+    }
+
+    #[test]
+    fn reproduction_matching_named_failing_test_can_prove() {
+        let expectation = CommandExpectation::Reproduction(FailureExpectation::with_test_name(
+            "test_login_panic",
+        ));
+        let requirement = EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::Reproduction,
+        };
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail(
+                "cargo test login",
+                "test auth::test_login_panic ... FAILED\npanicked at src/auth.rs:10",
+            ),
+            Some(&expectation),
+        );
+        assert!(
+            bag.items
+                .iter()
+                .any(|i| matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. })),
+            "bag={:?}",
+            bag.items
+        );
+        assert!(bag.satisfies(&requirement));
+        assert!(!bag.repro_commands.is_empty());
+        assert!(bag.verify_commands.is_empty());
+
+        let mut criterion = AcceptanceCriterion::new(
+            "skill_c1",
+            "The failure was reproduced before the fix",
+            requirement.clone(),
+        );
+        let item = bag
+            .items
+            .iter()
+            .find(|i| matches!(i.kind, EvidenceKind::ReproductionSucceeded { .. }))
+            .expect("repro item")
+            .clone();
+        assert!(criterion.absorb(&item));
+        assert!(criterion.is_met());
+    }
+
+    #[test]
+    fn reproduction_after_fix_same_regression_command_must_pass() {
+        let fe = FailureExpectation::default().with_output("assertion failed");
+        let expectation = CommandExpectation::Reproduction(fe.clone());
+        let mut bag = EvidenceBag::default();
+
+        // 1) First failure reproduces the bug.
+        bag.absorb_tool_result(
+            &cmd_fail("cargo test auth", "assertion failed left=1"),
+            Some(&expectation),
+        );
+        assert_eq!(bag.repro_commands, vec!["cargo test auth".to_owned()]);
+        assert!(!bag.regression_failed);
+
+        // 2) Fix starts (file written), same fingerprint reappears → regression.
+        bag.absorb_tool_result(
+            &ToolResult::success(ToolCallId::new("w"), "write_file", "src/auth.rs", "wrote"),
+            None,
+        );
+        bag.absorb_tool_result(
+            &cmd_fail("cargo test auth", "assertion failed left=1"),
+            Some(&expectation),
+        );
+        assert!(
+            bag.regression_failed,
+            "same fingerprint after fix must fail regression"
+        );
+        bag.mark_verify(true, vec!["cargo test auth".into()]);
+        assert_eq!(
+            bag.verify_ok,
+            Some(false),
+            "regression_failed forces verify failure"
+        );
+
+        // 3) After a real fix the same command passes → regression cleared.
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail("cargo test auth", "assertion failed left=1"),
+            Some(&expectation),
+        );
+        bag.absorb_tool_result(
+            &ToolResult::success(ToolCallId::new("w2"), "write_file", "src/auth.rs", "wrote"),
+            None,
+        );
+        bag.absorb_tool_result(
+            &cmd_fail("cargo test auth", "assertion failed left=1"),
+            Some(&expectation),
+        );
+        assert!(bag.regression_failed);
+        bag.absorb_tool_result(
+            &cmd_ok("cargo test auth"),
+            Some(&CommandExpectation::ExpectedSuccess),
+        );
+        assert!(!bag.regression_failed, "passing repro command clears it");
+        assert!(bag.reproduction.is_empty());
+        bag.mark_verify(true, vec!["cargo test auth".into()]);
+        assert_eq!(bag.verify_ok, Some(true));
+        assert!(bag.verify_commands.contains(&"cargo test auth".to_owned()));
+        // repro_commands remain a separate ledger.
+        assert_eq!(bag.repro_commands, vec!["cargo test auth".to_owned()]);
+    }
+
+    #[test]
+    fn reproduction_expected_failure_with_wrong_signature_remains_unresolved() {
+        let expectation = CommandExpectation::Reproduction(
+            FailureExpectation::default().with_output("NullPointerException"),
+        );
+        let requirement = EvidenceRequirement::CommandOutcome {
+            command_contains: String::new(),
+            expectation: expectation.clone(),
+        };
+        let semantic = EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::Reproduction,
+        };
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail("npm test", "FAIL auth_login expected NullPointer"),
+            Some(&expectation),
+        );
+        assert!(!bag.satisfies(&requirement));
+        assert!(!bag.satisfies(&semantic));
+        assert!(bag.repro_commands.is_empty());
+
+        let mut criterion = AcceptanceCriterion::new("rc", "failure reproduced", semantic);
+        assert!(!criterion.is_met());
+        // CommandFailed (bare) must never complete a Reproduction criterion.
+        let bare = CommandExpectation::ExpectedFailure;
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail("something", "failed for other reasons"),
+            Some(&bare),
+        );
+        assert!(bag
+            .items
+            .iter()
+            .any(|i| matches!(i.kind, EvidenceKind::CommandFailed { .. })));
+        assert!(!bag.satisfies(&EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::Reproduction
+        }));
+        assert!(!criterion.absorb(
+            bag.items
+                .iter()
+                .find(|i| matches!(i.kind, EvidenceKind::CommandFailed { .. }))
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn reproduction_generic_fail_token_cannot_be_sole_fingerprint() {
+        let generic_only = FailureExpectation::default().with_output("fail");
+        assert!(!generic_only.has_specific_fingerprint());
+        assert!(!generic_only.evaluate(Some(1), "test x ... fail", ""));
+
+        // Explicit user opt-in allows it.
+        let allowed = FailureExpectation::default()
+            .with_output("fail")
+            .allowing_generic();
+        assert!(allowed.evaluate(Some(1), "test x ... fail", ""));
+
+        // capture mint refuses generic-only / environmental outcomes.
+        assert!(
+            FailureExpectation::mint_from_observation(Some(1), "something failed", "", "ls")
+                .is_none()
+        );
+        let minted = FailureExpectation::mint_from_observation(
+            Some(101),
+            "test auth ... FAILED\nassertion failed left=1",
+            "exit=101",
+            "cargo test auth",
+        );
+        assert!(minted.is_some(), "application failure should mint");
+        let minted = minted.unwrap();
+        assert!(minted.test_name.is_some() || !minted.output_contains.is_empty());
+        assert!(minted.evaluate(
+            Some(101),
+            "test auth ... FAILED\nassertion failed left=1",
+            "exit=101"
+        ));
     }
 }
