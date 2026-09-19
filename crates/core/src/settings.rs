@@ -30,7 +30,9 @@ const HEADER: &str = "# Kodo settings. Append-only: the last value of a key wins
 /// `~/Library/Application Support/Kodo` the settings screen already shows.
 pub fn config_dir(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
-        home.join("Library").join("Application Support").join("Kodo")
+        home.join("Library")
+            .join("Application Support")
+            .join("Kodo")
     } else {
         home.join(".config").join("kodo")
     }
@@ -103,7 +105,7 @@ pub fn read(path: &Path, key: &str) -> Option<String> {
         .filter_map(parse_line)
         .filter(|(candidate, _)| *candidate == key)
         .map(|(_, value)| value.to_owned())
-        .last()
+        .next_back()
 }
 
 /// Appends `key=value`, creating the config directory when it is missing.
@@ -178,7 +180,11 @@ mod tests {
     #[test]
     fn append_creates_the_parent_directory_and_a_header() {
         let tmp = TempDir::new("settings-parent");
-        let path = tmp.path().join("nested").join("deeper").join("settings.log");
+        let path = tmp
+            .path()
+            .join("nested")
+            .join("deeper")
+            .join("settings.log");
         append(&path, KEY, "/tmp/ws").expect("append should create the parents");
 
         assert_eq!(read(&path, KEY).as_deref(), Some("/tmp/ws"));
@@ -194,8 +200,16 @@ mod tests {
         append(&path, KEY, "/second").expect("second append");
 
         let text = fs::read_to_string(&path).expect("the file should exist");
-        assert_eq!(text.matches("example=").count(), 2, "the file was rewritten: {text:?}");
-        assert_eq!(text.matches(HEADER).count(), 1, "the header was written twice: {text:?}");
+        assert_eq!(
+            text.matches("example=").count(),
+            2,
+            "the file was rewritten: {text:?}"
+        );
+        assert_eq!(
+            text.matches(HEADER).count(),
+            1,
+            "the header was written twice: {text:?}"
+        );
         assert_eq!(read(&path, KEY).as_deref(), Some("/second"));
     }
 
@@ -215,7 +229,11 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = fs::metadata(&path).expect("meta").permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "credentials must not be world-readable");
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "credentials must not be world-readable"
+            );
         }
     }
 

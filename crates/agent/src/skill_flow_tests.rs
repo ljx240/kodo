@@ -10,8 +10,8 @@ use std::collections::VecDeque;
 use crate::classify::{classify, TaskType};
 use crate::plan::{Evidence, SubtaskKind, SubtaskStatus, TaskPlan};
 use crate::protocol::{
-    parse_model_turn, ModelTurn, ToolArgs, ToolCall, ToolErrorCode, ToolInvocation, ToolName,
-    ToolRegistry, ToolResult,
+    parse_model_turn, ModelTurn, ToolArgs, ToolCall, ToolError, ToolErrorCode, ToolInvocation,
+    ToolName, ToolRegistry, ToolResult,
 };
 use crate::skill::{SkillRegistry, SkillSpec, VerificationPolicy};
 use crate::state::{AgentEvent, AgentMachine, AgentState, Budget};
@@ -46,15 +46,61 @@ fn fake_execute(call: &ToolCall) -> ToolResult {
         | (ToolName::CreateFile, ToolArgs::CreateFile { path, .. }) => {
             ToolResult::success(call.id.clone(), call.name.label(), path.clone(), "wrote")
         }
-        (name, args) if name.is_mutation() => ToolResult::success(
-            call.id.clone(),
-            name.label(),
-            args.label(),
-            "patched",
-        ),
-        (name, args) => {
-            ToolResult::success(call.id.clone(), name.label(), args.label(), "ok")
+        (name, args) if name.is_mutation() => {
+            ToolResult::success(call.id.clone(), name.label(), args.label(), "patched")
         }
+        (ToolName::RunCommand, ToolArgs::RunCommand { command }) => {
+            let lower = command.to_ascii_lowercase();
+            // Reproduction / failing-test / error probes are scripted to fail
+            // with a signature. That is what "reproduced the bug" means.
+            let is_repro = lower.contains("repro")
+                || lower.contains("failing")
+                || lower.contains("npm test -- --bug")
+                || lower.contains("cargo test repro")
+                || lower.contains("500")
+                || lower.contains("panic")
+                || lower.contains("bug")
+                || lower.contains("error")
+                || lower.contains("curl login")
+                || (lower.contains("cargo test")
+                    && !lower.contains("workspace")
+                    && !lower.contains("suite"))
+                || (lower.contains("npm test")
+                    && !lower.contains("suite")
+                    && !lower.contains("--pass"));
+            if is_repro {
+                ToolResult::failure(
+                    call.id.clone(),
+                    call.name.label(),
+                    command.clone(),
+                    ToolError::execution(
+                        "running test auth ... assertion failed left=1 right=0\nexit=101",
+                    ),
+                )
+            } else if lower.contains("search") || lower.contains("rg ") {
+                ToolResult::success(
+                    call.id.clone(),
+                    call.name.label(),
+                    command.clone(),
+                    "2 files match:\nsrc/auth.rs\nsrc/router.rs",
+                )
+            } else {
+                ToolResult::success(call.id.clone(), call.name.label(), command.clone(), "ok")
+            }
+        }
+        (ToolName::Search, ToolArgs::Search { query }) => ToolResult::success(
+            call.id.clone(),
+            call.name.label(),
+            query.clone(),
+            "2 files match:\nsrc/auth.rs\nsrc/router.rs",
+        ),
+        (ToolName::ReadFile, ToolArgs::ReadFile { path }) => ToolResult::success(
+            call.id.clone(),
+            call.name.label(),
+            path.clone(),
+            "fn auth() {}\n// relevant code",
+        ),
+        (name, args) => ToolResult::success(call.id.clone(), name.label(), args.label(), "ok"),
     }
 }
 
@@ -237,18 +283,32 @@ fn bug_fix_fake_provider_1_classifies_and_reproduces_first() {
     assert_eq!(out.task_type, TaskType::BugFix);
     assert_eq!(out.skill.name, "bug-fix");
     assert_eq!(out.skill.verification_policy, VerificationPolicy::Full);
-    assert!(out.plan.requires_verify, "bug-fix must require verification");
+    assert!(
+        out.plan.requires_verify,
+        "bug-fix must require verification"
+    );
     // Workflow: reproduce (command) before anything else.
     assert_eq!(out.plan.subtasks[0].kind, SubtaskKind::Command);
     assert!(
-        out.plan.subtasks[0].title.to_lowercase().contains("reproduce"),
+        out.plan.subtasks[0]
+            .title
+            .to_lowercase()
+            .contains("reproduce"),
         "first step should reproduce: {}",
         out.plan.subtasks[0].title
     );
     // Claim without fix/verification must never Finish.
-    assert_ne!(out.state, AgentState::Finish, "claim without fix must not finish");
+    assert_ne!(
+        out.state,
+        AgentState::Finish,
+        "claim without fix must not finish"
+    );
     assert!(out.terminated, "scenario must reach a terminal state");
-    assert!(!out.acceptance_ok, "acceptance must reject the bare claim: {:?}", out.failures);
+    assert!(
+        !out.acceptance_ok,
+        "acceptance must reject the bare claim: {:?}",
+        out.failures
+    );
     assert_done_evidence(&out.plan);
 }
 
@@ -267,18 +327,26 @@ fn bug_fix_fake_provider_2_repro_fix_verify_finishes_with_evidence() {
     assert_eq!(out.skill.name, "bug-fix");
     assert_eq!(out.state, AgentState::Finish, "failures={:?}", out.failures);
     assert!(out.acceptance_ok, "failures={:?}", out.failures);
-    assert!(out.verify_entered, "bug-fix must pass through the Verify gate");
+    assert!(
+        out.verify_entered,
+        "bug-fix must pass through the Verify gate"
+    );
     assert!(out.plan.subtasks.iter().all(|s| s.is_done()));
     assert_done_evidence(&out.plan);
     // Evidence kinds: changed file for the fix, passed verification for the gate.
-    let evidence: Vec<&Evidence> = out.plan.subtasks.iter().flat_map(|s| s.evidence.iter()).collect();
-    assert!(evidence.iter().any(|e| matches!(e, Evidence::ChangedFile { path } if path == "src/login.rs")));
-    assert!(
-        evidence.iter().any(|e| matches!(
-            e,
-            Evidence::PassedVerification { command } if command.contains("cargo test")
-        ))
-    );
+    let evidence: Vec<&Evidence> = out
+        .plan
+        .subtasks
+        .iter()
+        .flat_map(|s| s.evidence.iter())
+        .collect();
+    assert!(evidence
+        .iter()
+        .any(|e| matches!(e, Evidence::ChangedFile { path } if path == "src/login.rs")));
+    assert!(evidence.iter().any(|e| matches!(
+        e,
+        Evidence::PassedVerification { command } if command.contains("cargo test")
+    )));
     assert!(out.files_written.iter().any(|p| p == "src/login.rs"));
 }
 
@@ -337,9 +405,18 @@ fn feature_fake_provider_2_implements_and_verifies_to_finish() {
     assert!(out.verify_entered);
     assert!(out.files_written.contains(&"src/export.rs".to_owned()));
     assert_done_evidence(&out.plan);
-    let evidence: Vec<&Evidence> = out.plan.subtasks.iter().flat_map(|s| s.evidence.iter()).collect();
-    assert!(evidence.iter().any(|e| matches!(e, Evidence::ChangedFile { .. })));
-    assert!(evidence.iter().any(|e| matches!(e, Evidence::PassedVerification { .. })));
+    let evidence: Vec<&Evidence> = out
+        .plan
+        .subtasks
+        .iter()
+        .flat_map(|s| s.evidence.iter())
+        .collect();
+    assert!(evidence
+        .iter()
+        .any(|e| matches!(e, Evidence::ChangedFile { .. })));
+    assert!(evidence
+        .iter()
+        .any(|e| matches!(e, Evidence::PassedVerification { .. })));
 }
 
 // ---------------------------------------------------------------------------
@@ -385,16 +462,24 @@ fn test_fake_provider_2_adds_tests_and_suite_passes() {
     assert_eq!(out.task_type, TaskType::Test);
     assert_eq!(out.state, AgentState::Finish, "failures={:?}", out.failures);
     assert!(out.acceptance_ok);
-    assert!(out.verify_entered, "test skill runs the suite via the Verify gate");
-    assert_done_evidence(&out.plan);
-    let evidence: Vec<&Evidence> = out.plan.subtasks.iter().flat_map(|s| s.evidence.iter()).collect();
     assert!(
-        evidence.iter().any(|e| matches!(
-            e,
-            Evidence::PassedVerification { command } if command.contains("cargo test plan")
-        ))
+        out.verify_entered,
+        "test skill runs the suite via the Verify gate"
     );
-    assert!(evidence.iter().any(|e| matches!(e, Evidence::ChangedFile { path } if path == "tests/plan_spec.rs")));
+    assert_done_evidence(&out.plan);
+    let evidence: Vec<&Evidence> = out
+        .plan
+        .subtasks
+        .iter()
+        .flat_map(|s| s.evidence.iter())
+        .collect();
+    assert!(evidence.iter().any(|e| matches!(
+        e,
+        Evidence::PassedVerification { command } if command.contains("cargo test plan")
+    )));
+    assert!(evidence
+        .iter()
+        .any(|e| matches!(e, Evidence::ChangedFile { path } if path == "tests/plan_spec.rs")));
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +498,10 @@ fn refactor_fake_provider_1_classifies_minimal_change_plan() {
     assert_eq!(out.task_type, TaskType::Refactor);
     assert_eq!(out.skill.name, "refactor");
     assert_eq!(out.skill.context_strategy.label(), "minimal-change");
-    assert!(out.plan.requires_verify, "refactor must prove tests still pass");
+    assert!(
+        out.plan.requires_verify,
+        "refactor must prove tests still pass"
+    );
     assert_eq!(
         out.plan.subtasks.iter().map(|s| s.kind).collect::<Vec<_>>(),
         vec![SubtaskKind::Read, SubtaskKind::Edit, SubtaskKind::Verify]
@@ -466,19 +554,28 @@ fn code_review_fake_provider_1_read_only_plan_finishes_without_writes() {
     assert_eq!(out.task_type, TaskType::CodeReview);
     assert_eq!(out.skill.name, "code-review");
     assert_eq!(out.skill.verification_policy, VerificationPolicy::None);
-    assert!(!out.plan.requires_verify, "review must not run project verification");
     assert!(
-        !out.plan.subtasks.iter().any(|s| s.kind == SubtaskKind::Edit),
+        !out.plan.requires_verify,
+        "review must not run project verification"
+    );
+    assert!(
+        !out.plan
+            .subtasks
+            .iter()
+            .any(|s| s.kind == SubtaskKind::Edit),
         "review plan must contain no edit steps"
     );
     assert!(
-        !out.executed.iter().any(|t| {
-            ToolName::parse(t).map(|n| n.is_mutation()).unwrap_or(false)
-        }),
+        !out.executed
+            .iter()
+            .any(|t| { ToolName::parse(t).map(|n| n.is_mutation()).unwrap_or(false) }),
         "no mutation tool may execute under code-review: {:?}",
         out.executed
     );
-    assert!(!out.verify_entered, "review must never enter the Verify gate");
+    assert!(
+        !out.verify_entered,
+        "review must never enter the Verify gate"
+    );
     assert_eq!(out.state, AgentState::Finish, "failures={:?}", out.failures);
     assert!(out.acceptance_ok);
     assert!(out.files_written.is_empty());
@@ -494,7 +591,10 @@ fn code_review_fake_provider_2_write_attempt_is_gated_and_review_still_completes
             // Model misbehaves: tries to edit under a read-only skill.
             tools(serde_json::json!([write_call("w1", "src/lib.rs")])),
             tools(serde_json::json!([read_call("r1", "src/lib.rs")])),
-            tools(serde_json::json!([command_call("c1", "git status --short")])),
+            tools(serde_json::json!([command_call(
+                "c1",
+                "git status --short"
+            )])),
             Reply::Claim,
         ],
     );
@@ -505,10 +605,18 @@ fn code_review_fake_provider_2_write_attempt_is_gated_and_review_still_completes
     assert_eq!(out.rejections[0].0, "write_file");
     assert_eq!(out.rejections[0].1, ToolErrorCode::PermissionDenied);
     assert!(!out.executed.contains(&"write_file".to_owned()));
-    assert!(out.files_written.is_empty(), "no file may be written: {:?}", out.files_written);
+    assert!(
+        out.files_written.is_empty(),
+        "no file may be written: {:?}",
+        out.files_written
+    );
     assert!(!out.verify_entered);
     assert_eq!(out.state, AgentState::Finish, "failures={:?}", out.failures);
-    assert!(out.acceptance_ok, "read-only review can still complete honestly: {:?}", out.failures);
+    assert!(
+        out.acceptance_ok,
+        "read-only review can still complete honestly: {:?}",
+        out.failures
+    );
     assert_done_evidence(&out.plan);
 }
 
@@ -531,14 +639,26 @@ fn docs_fake_provider_1_updates_docs_without_running_compile() {
     assert_eq!(out.skill.name, "docs");
     assert_eq!(out.skill.verification_policy, VerificationPolicy::None);
     assert!(!out.skill.verification_policy.needs_run());
-    assert!(!out.plan.requires_verify, "docs must not require a full verify run");
     assert!(
-        out.plan.subtasks[0].title.to_lowercase().contains("documentation"),
+        !out.plan.requires_verify,
+        "docs must not require a full verify run"
+    );
+    assert!(
+        out.plan.subtasks[0]
+            .title
+            .to_lowercase()
+            .contains("documentation"),
         "first step locates docs: {}",
         out.plan.subtasks[0].title
     );
-    assert!(!out.skill.allows(ToolName::RunCommand), "docs skill forbids shell commands");
-    assert!(!out.verify_entered, "docs task must never run a full compile");
+    assert!(
+        !out.skill.allows(ToolName::RunCommand),
+        "docs skill forbids shell commands"
+    );
+    assert!(
+        !out.verify_entered,
+        "docs task must never run a full compile"
+    );
     assert_eq!(out.state, AgentState::Finish, "failures={:?}", out.failures);
     assert!(out.acceptance_ok);
     assert!(out.files_written.contains(&"README.md".to_owned()));
@@ -551,7 +671,10 @@ fn docs_fake_provider_2_shell_attempt_is_gated_and_no_fake_success() {
         "补充 API 使用文档",
         vec![
             // Model tries to compile — the skill forbids run_command entirely.
-            tools(serde_json::json!([command_call("c1", "cargo test --workspace")])),
+            tools(serde_json::json!([command_call(
+                "c1",
+                "cargo test --workspace"
+            )])),
             Reply::Claim,
         ],
     );

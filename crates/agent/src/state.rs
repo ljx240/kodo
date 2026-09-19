@@ -196,6 +196,10 @@ impl AgentMachine {
         &self.evidence
     }
 
+    pub fn evidence_mut(&mut self) -> Option<&mut AcceptanceEvidence> {
+        Some(&mut self.evidence)
+    }
+
     pub fn last_acceptance(&self) -> Option<&AcceptanceReport> {
         self.last_acceptance.as_ref()
     }
@@ -213,34 +217,48 @@ impl AgentMachine {
     /// Feed one event. Budget is re-checked after successful handling.
     pub fn handle(&mut self, event: AgentEvent) -> Transition {
         if self.state.is_terminal() {
-            return Transition::AlreadyTerminal { state: self.state.clone() };
+            return Transition::AlreadyTerminal {
+                state: self.state.clone(),
+            };
         }
 
         // Cancel wins from any non-terminal state.
         if matches!(event, AgentEvent::Cancel) {
             let from = std::mem::replace(&mut self.state, AgentState::Cancelled);
-            return Transition::Advanced { from, to: AgentState::Cancelled };
+            return Transition::Advanced {
+                from,
+                to: AgentState::Cancelled,
+            };
         }
 
         let from = self.state.clone();
         let next = match self.step(event) {
             Ok(next) => next,
             Err(reason) => {
-                return Transition::Rejected { state: self.state.clone(), reason };
+                return Transition::Rejected {
+                    state: self.state.clone(),
+                    reason,
+                };
             }
         };
 
         // Budget trip after applying the event (except when already failing/cancel).
-        if !matches!(next, AgentState::Failed { .. } | AgentState::Cancelled | AgentState::Finish)
-            && self.budget.any_exhausted()
+        if !matches!(
+            next,
+            AgentState::Failed { .. } | AgentState::Cancelled | AgentState::Finish
+        ) && self.budget.any_exhausted()
         {
-            let to = AgentState::Failed { reason: FailReason::BudgetExhausted };
+            let to = AgentState::Failed {
+                reason: FailReason::BudgetExhausted,
+            };
             self.state = to.clone();
             return Transition::Advanced { from, to };
         }
 
         if next == self.state {
-            Transition::Stayed { state: self.state.clone() }
+            Transition::Stayed {
+                state: self.state.clone(),
+            }
         } else {
             self.state = next.clone();
             Transition::Advanced { from, to: next }
@@ -265,7 +283,9 @@ impl AgentMachine {
             // --- GatherContext ---
             (S::GatherContext, ModelRequestedTools { count }) => {
                 if self.budget.tools_exhausted() {
-                    return Ok(S::Failed { reason: FailReason::BudgetExhausted });
+                    return Ok(S::Failed {
+                        reason: FailReason::BudgetExhausted,
+                    });
                 }
                 self.pending_tool_count = count;
                 self.plan.mark_current_running();
@@ -284,7 +304,9 @@ impl AgentMachine {
             // --- Execute ---
             (S::Execute, ModelRequestedTools { count }) => {
                 if self.budget.tools_exhausted() {
-                    return Ok(S::Failed { reason: FailReason::BudgetExhausted });
+                    return Ok(S::Failed {
+                        reason: FailReason::BudgetExhausted,
+                    });
                 }
                 self.pending_tool_count = count;
                 self.plan.mark_current_running();
@@ -360,14 +382,20 @@ impl AgentMachine {
             }
 
             // --- Budget / explicit fail ---
-            (_, BudgetExceeded) => Ok(S::Failed { reason: FailReason::BudgetExhausted }),
+            (_, BudgetExceeded) => Ok(S::Failed {
+                reason: FailReason::BudgetExhausted,
+            }),
 
             // --- Terminal-adjacent rejections ---
             (S::Finish | S::Failed { .. } | S::Cancelled, _) => {
                 unreachable!("terminal handled above")
             }
 
-            (state, event) => Err(format!("illegal transition {:?} + {:?}", state.name(), event)),
+            (state, event) => Err(format!(
+                "illegal transition {:?} + {:?}",
+                state.name(),
+                event
+            )),
         }
     }
 
@@ -379,11 +407,27 @@ impl AgentMachine {
             .max(self.budget.tool_calls_used);
         // Charge at least pending_tool_count if results shorter (rejections collapsed).
         if results.is_empty() && self.pending_tool_count > 0 {
-            self.budget.tool_calls_used =
-                self.budget.tool_calls_used.saturating_add(self.pending_tool_count);
+            self.budget.tool_calls_used = self
+                .budget
+                .tool_calls_used
+                .saturating_add(self.pending_tool_count);
         }
+        // Use the active Command subtask's expectation so expected-failure
+        // reproduction commands become typed evidence, not silent noise.
+        let expectation = self
+            .plan
+            .subtasks
+            .iter()
+            .find(|s| !s.is_done() && matches!(s.kind, crate::plan::SubtaskKind::Command))
+            .and_then(|s| match &s.effective_requirement().evidence {
+                crate::evidence::EvidenceRequirement::CommandOutcome { expectation, .. } => {
+                    Some(expectation.clone())
+                }
+                _ => None,
+            });
         self.plan.absorb_tool_results(&results);
-        self.evidence.absorb_results(&results);
+        self.evidence
+            .absorb_results_with_expectation(&results, expectation.as_ref());
         self.pending_tool_count = 0;
     }
 
@@ -395,7 +439,9 @@ impl AgentMachine {
                 // Back to Plan so the loop can re-plan around the denial.
                 return Ok(AgentState::Plan);
             }
-            return Ok(AgentState::Failed { reason: FailReason::Unrecoverable });
+            return Ok(AgentState::Failed {
+                reason: FailReason::Unrecoverable,
+            });
         }
 
         if self.plan.requires_verify && self.evidence.verify_ok != Some(true) {
@@ -423,7 +469,9 @@ impl AgentMachine {
         if report.ok {
             Ok(AgentState::Finish)
         } else if self.budget.rounds_exhausted() {
-            Ok(AgentState::Failed { reason: FailReason::BudgetExhausted })
+            Ok(AgentState::Failed {
+                reason: FailReason::BudgetExhausted,
+            })
         } else {
             // Not enough evidence — stay so the loop can gather more.
             // If we were forced to finish-like claim, caller may BudgetExceeded.
@@ -434,7 +482,9 @@ impl AgentMachine {
 
     fn begin_repair(&mut self, from: AgentState) -> Result<AgentState, String> {
         if self.budget.repairs_exhausted() {
-            return Ok(AgentState::Failed { reason: FailReason::BudgetExhausted });
+            return Ok(AgentState::Failed {
+                reason: FailReason::BudgetExhausted,
+            });
         }
         self.budget.repairs_used += 1;
         let _ = from;
@@ -460,6 +510,7 @@ fn evidence_summary(e: &AcceptanceEvidence) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use crate::protocol::{ToolArgs, ToolCall, ToolCallId, ToolError, ToolName, ToolRegistry};
@@ -478,7 +529,9 @@ mod tests {
 
     impl FakeProvider {
         fn new(script: Vec<FakeReply>) -> Self {
-            Self { script: script.into() }
+            Self {
+                script: script.into(),
+            }
         }
 
         fn next(&mut self) -> FakeReply {
@@ -507,11 +560,17 @@ mod tests {
         }
 
         fn verify_fails() -> Self {
-            Self { verify_ok: false, ..Self::ok() }
+            Self {
+                verify_ok: false,
+                ..Self::ok()
+            }
         }
 
         fn deny_writes() -> Self {
-            Self { deny_write: true, ..Self::ok() }
+            Self {
+                deny_write: true,
+                ..Self::ok()
+            }
         }
 
         fn execute(&self, call: &ToolCall) -> ToolResult {
@@ -557,19 +616,14 @@ mod tests {
                         )
                     }
                 }
-                (name, args) => ToolResult::success(
-                    call.id.clone(),
-                    name.label(),
-                    args.label(),
-                    "ok",
-                ),
+                (name, args) => {
+                    ToolResult::success(call.id.clone(), name.label(), args.label(), "ok")
+                }
             }
         }
     }
 
-    fn parse_tools_json(
-        json: &serde_json::Value,
-    ) -> Option<Vec<crate::protocol::ToolInvocation>> {
+    fn parse_tools_json(json: &serde_json::Value) -> Option<Vec<crate::protocol::ToolInvocation>> {
         let text = json.to_string();
         let turn = crate::protocol::parse_model_turn(&text, &ToolRegistry::standard());
         match turn {
@@ -586,10 +640,7 @@ mod tests {
 
     #[test]
     fn simple_read_only_task_finishes_directly() {
-        let mut m = AgentMachine::new(
-            "Summarize the repository layout for me",
-            Budget::default(),
-        );
+        let mut m = AgentMachine::new("Summarize the repository layout for me", Budget::default());
         m.handle(AgentEvent::TaskReceived);
         m.handle(AgentEvent::PlanReady);
         m.handle(AgentEvent::ContextGathered);
@@ -630,7 +681,9 @@ mod tests {
 
         // Model asks tools → Execute
         let reply = p.next();
-        let FakeReply::Tools(json) = reply else { panic!("expected tools") };
+        let FakeReply::Tools(json) = reply else {
+            panic!("expected tools")
+        };
         let calls = parse_tools_json(&json).expect("calls");
         m.handle(AgentEvent::ModelRequestedTools { count: calls.len() });
         assert_eq!(m.state(), &AgentState::Execute);
@@ -646,7 +699,12 @@ mod tests {
         assert_eq!(m.state(), &AgentState::Verify, "writes require verify");
 
         m.handle(AgentEvent::VerifyFinished { ok: true });
-        assert_eq!(m.state(), &AgentState::Finish, "failures={:?}", m.last_acceptance());
+        assert_eq!(
+            m.state(),
+            &AgentState::Finish,
+            "failures={:?}",
+            m.last_acceptance()
+        );
         assert!(m.last_acceptance().map(|r| r.ok).unwrap_or(false));
     }
 
@@ -678,7 +736,10 @@ mod tests {
 
     #[test]
     fn repair_limit_yields_failed_budget() {
-        let budget = Budget { max_repairs: 2, ..Budget::default() };
+        let budget = Budget {
+            max_repairs: 2,
+            ..Budget::default()
+        };
         let mut m = AgentMachine::new("Please update the README file", budget);
         m.handle(AgentEvent::TaskReceived);
         m.handle(AgentEvent::PlanReady);
@@ -715,7 +776,9 @@ mod tests {
 
         assert_eq!(
             m.state(),
-            &AgentState::Failed { reason: FailReason::BudgetExhausted },
+            &AgentState::Failed {
+                reason: FailReason::BudgetExhausted
+            },
             "state={:?} repairs={}",
             m.state(),
             m.budget().repairs_used
@@ -786,7 +849,13 @@ mod tests {
             assert_eq!(m.state(), &setup, "setup reached for {setup:?}");
             let t = m.handle(AgentEvent::Cancel);
             assert!(
-                matches!(t, Transition::Advanced { to: AgentState::Cancelled, .. }),
+                matches!(
+                    t,
+                    Transition::Advanced {
+                        to: AgentState::Cancelled,
+                        ..
+                    }
+                ),
                 "cancel from {setup:?} → {t:?}"
             );
             assert_eq!(m.state(), &AgentState::Cancelled);
@@ -836,7 +905,12 @@ mod tests {
                 )],
             });
         }
-        assert_eq!(m.state(), &AgentState::Failed { reason: FailReason::Unrecoverable });
+        assert_eq!(
+            m.state(),
+            &AgentState::Failed {
+                reason: FailReason::Unrecoverable
+            }
+        );
     }
 
     #[test]
@@ -847,12 +921,19 @@ mod tests {
         m.handle(AgentEvent::ContextGathered);
         // No writes, no verify — model claims done.
         m.handle(AgentEvent::ModelClaimedDone);
-        assert_ne!(m.state(), &AgentState::Finish, "claim without evidence must not Finish");
+        assert_ne!(
+            m.state(),
+            &AgentState::Finish,
+            "claim without evidence must not Finish"
+        );
     }
 
     #[test]
     fn tool_budget_exhaustion_fails_explicitly() {
-        let budget = Budget { max_tool_calls: 2, ..Budget::default() };
+        let budget = Budget {
+            max_tool_calls: 2,
+            ..Budget::default()
+        };
         let mut m = AgentMachine::new("touch many files", budget);
         m.handle(AgentEvent::TaskReceived);
         m.handle(AgentEvent::PlanReady);
@@ -868,18 +949,28 @@ mod tests {
             matches!(
                 t,
                 Transition::Advanced {
-                    to: AgentState::Failed { reason: FailReason::BudgetExhausted },
+                    to: AgentState::Failed {
+                        reason: FailReason::BudgetExhausted
+                    },
                     ..
                 }
             ),
             "got {t:?}"
         );
-        assert_eq!(m.state(), &AgentState::Failed { reason: FailReason::BudgetExhausted });
+        assert_eq!(
+            m.state(),
+            &AgentState::Failed {
+                reason: FailReason::BudgetExhausted
+            }
+        );
     }
 
     #[test]
     fn round_budget_exhaustion_fails_explicitly() {
-        let budget = Budget { max_rounds: 0, ..Budget::default() };
+        let budget = Budget {
+            max_rounds: 0,
+            ..Budget::default()
+        };
         let mut m = AgentMachine::new("read only", budget);
         m.handle(AgentEvent::TaskReceived);
         m.handle(AgentEvent::PlanReady);
@@ -895,7 +986,9 @@ mod tests {
         // rounds_used is 0; max 0 → any_exhausted after absorb? rounds_used still 0, max 0 → 0>=0 true
         assert_eq!(
             m.state(),
-            &AgentState::Failed { reason: FailReason::BudgetExhausted }
+            &AgentState::Failed {
+                reason: FailReason::BudgetExhausted
+            }
         );
     }
 
@@ -933,7 +1026,9 @@ mod tests {
         m.handle(AgentEvent::ContextGathered);
 
         let reply = p.next();
-        let FakeReply::Tools(json) = reply else { panic!() };
+        let FakeReply::Tools(json) = reply else {
+            panic!()
+        };
         let calls = parse_tools_json(&json).unwrap();
         m.handle(AgentEvent::ModelRequestedTools { count: calls.len() });
         let results: Vec<ToolResult> = calls
@@ -945,7 +1040,9 @@ mod tests {
             .collect();
         m.handle(AgentEvent::ToolsFinished { results });
         assert_eq!(m.state(), &AgentState::Verify);
-        m.handle(AgentEvent::VerifyFinished { ok: tools.verify_ok });
+        m.handle(AgentEvent::VerifyFinished {
+            ok: tools.verify_ok,
+        });
         assert_eq!(m.state(), &AgentState::Finish);
     }
 

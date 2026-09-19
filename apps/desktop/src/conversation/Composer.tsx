@@ -270,7 +270,14 @@ export function Composer({
                           key={p.id}
                           icon={<Sparkles size={14} strokeWidth={1.8} />}
                           label={p.name}
-                          hint={p.model || t.models[0] || ""}
+                          hint={
+                            p.displayName ||
+                            p.modelId ||
+                            p.model ||
+                            t.models[0]?.display_name ||
+                            t.models[0]?.model_id ||
+                            ""
+                          }
                           onSelect={() => {
                             close();
                             onSelectProvider(i);

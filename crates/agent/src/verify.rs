@@ -34,7 +34,11 @@ pub struct VerifyCommand {
 
 impl VerifyCommand {
     pub fn test(cmd: impl Into<String>) -> Self {
-        Self { kind: VerifyKind::Test, command: cmd.into(), timeout_ms: 120_000 }
+        Self {
+            kind: VerifyKind::Test,
+            command: cmd.into(),
+            timeout_ms: 120_000,
+        }
     }
 }
 
@@ -52,7 +56,9 @@ impl FailureReport {
         format!(
             "command: {}\nexit_code: {}\nprimary_error: {}\nrelevant_files:\n{}\n",
             self.command,
-            self.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "none".into()),
+            self.exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "none".into()),
             self.primary_error,
             if self.relevant_files.is_empty() {
                 "  (none)".to_owned()
@@ -105,7 +111,9 @@ pub struct VerificationRunner {
 
 impl Default for VerificationRunner {
     fn default() -> Self {
-        Self { default_timeout_ms: 90_000 }
+        Self {
+            default_timeout_ms: 90_000,
+        }
     }
 }
 
@@ -119,13 +127,21 @@ impl VerificationRunner {
         let mut cmds: Vec<VerifyCommand> = Vec::new();
         let push = |cmds: &mut Vec<VerifyCommand>, kind: VerifyKind, command: String| {
             if !cmds.iter().any(|c| c.command == command) {
-                cmds.push(VerifyCommand { kind, command, timeout_ms: self.default_timeout_ms });
+                cmds.push(VerifyCommand {
+                    kind,
+                    command,
+                    timeout_ms: self.default_timeout_ms,
+                });
             }
         };
 
         if project.join("Cargo.toml").is_file() {
             push(&mut cmds, VerifyKind::Build, "cargo check --quiet".into());
-            push(&mut cmds, VerifyKind::Test, "cargo test --workspace --quiet".into());
+            push(
+                &mut cmds,
+                VerifyKind::Test,
+                "cargo test --workspace --quiet".into(),
+            );
         }
 
         if project.join("package.json").is_file() {
@@ -244,13 +260,10 @@ impl VerificationRunner {
             if !combined.is_empty() {
                 combined.push('\n');
             }
-            combined.push_str(&stderr.trim());
+            combined.push_str(stderr.trim());
         }
         if timed_out {
-            combined.push_str(&format!(
-                "\n[timed out after {}ms]",
-                cmd.timeout_ms
-            ));
+            combined.push_str(&format!("\n[timed out after {}ms]", cmd.timeout_ms));
         }
         if cancelled {
             combined.push_str("\n[cancelled]");
@@ -379,7 +392,8 @@ fn relevant_files(output: &str) -> Vec<String> {
     for line in output.lines() {
         // path-like tokens with an extension
         for token in line.split_whitespace() {
-            let clean = token.trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == ':' || c == ',');
+            let clean =
+                token.trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == ':' || c == ',');
             if looks_like_source_path(clean) && !files.iter().any(|f: &String| f == clean) {
                 files.push(clean.to_owned());
             }
@@ -439,13 +453,17 @@ fn tail_chars(s: &str, max: usize) -> String {
     }
     let skip = s.chars().count() - max;
     let mut out: String = s.chars().skip(skip).collect();
-    out.insert_str(0, "…");
+    out.insert(0, '…');
     out
 }
 
 /// Failure report helper re-export used by callers that only need detect.
+#[allow(dead_code)]
 pub fn detect_verify_command(project: &Path) -> Option<String> {
-    VerificationRunner::default().infer(project).first().map(|c| c.command.clone())
+    VerificationRunner::default()
+        .infer(project)
+        .first()
+        .map(|c| c.command.clone())
 }
 
 #[cfg(test)]
@@ -480,7 +498,9 @@ mod tests {
         let root = fixture_with_failing_test();
         let runner = VerificationRunner::new(5_000);
         let cmds = runner.infer(&root);
-        assert!(cmds.iter().any(|c| c.kind == VerifyKind::Test && c.command.contains("test")));
+        assert!(cmds
+            .iter()
+            .any(|c| c.kind == VerifyKind::Test && c.command.contains("test")));
         assert!(cmds.iter().any(|c| c.kind == VerifyKind::Typecheck));
         assert!(cmds.iter().any(|c| c.kind == VerifyKind::Build));
         assert!(cmds.iter().any(|c| c.kind == VerifyKind::Lint));
@@ -513,9 +533,16 @@ error[E0308]: mismatched types
         let report = FailureAnalyzer::analyze("cargo check --quiet", Some(101), out);
         assert_eq!(report.exit_code, Some(101));
         assert_eq!(report.command, "cargo check --quiet");
-        assert!(report.primary_error.contains("error[E0308]"), "{}", report.primary_error);
         assert!(
-            report.relevant_files.iter().any(|f| f.contains("src/lib.rs")),
+            report.primary_error.contains("error[E0308]"),
+            "{}",
+            report.primary_error
+        );
+        assert!(
+            report
+                .relevant_files
+                .iter()
+                .any(|f| f.contains("src/lib.rs")),
             "files={:?}",
             report.relevant_files
         );
@@ -548,7 +575,11 @@ error[E0308]: mismatched types
         let dir = std::env::temp_dir().join(format!("kodo-to-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let runner = VerificationRunner::new(50);
-        let cmd = VerifyCommand { kind: VerifyKind::Test, command: "sleep 2".into(), timeout_ms: 100 };
+        let cmd = VerifyCommand {
+            kind: VerifyKind::Test,
+            command: "sleep 2".into(),
+            timeout_ms: 100,
+        };
         let outcome = runner.run_one(&dir, &cmd, &|| true);
         assert!(outcome.timed_out || !outcome.ok);
         assert!(!outcome.ok);
@@ -573,9 +604,12 @@ error[E0308]: mismatched types
             output_tail: String::new(),
             failure: None,
         };
-        assert_eq!(VerificationRunner::final_status(&[]), FinalStatus::NotVerified);
         assert_eq!(
-            VerificationRunner::final_status(&[pass.clone()]),
+            VerificationRunner::final_status(&[]),
+            FinalStatus::NotVerified
+        );
+        assert_eq!(
+            VerificationRunner::final_status(std::slice::from_ref(&pass)),
             FinalStatus::Verified
         );
         assert_eq!(

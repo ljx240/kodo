@@ -1,5 +1,6 @@
 import { BarChart3, Copy, Sparkles } from "lucide-react";
 import { useEffect, useState } from "react";
+import { formatDuration } from "../conversation/trace";
 import { llmCalls, responseMeta } from "../data/demo";
 import type { LiveSnapshot } from "../data/liveContext";
 import { llmFromTurn } from "../data/liveContext";
@@ -78,10 +79,28 @@ export function ReplyMeta({
     return () => window.clearTimeout(timer);
   }, [copied]);
 
+  const turn = live?.turn ?? null;
+  const modelCalls = turn ? llmFromTurn(turn) : [];
+  const lastModel = modelCalls[modelCalls.length - 1];
+  const firstAt = turn?.items[0]?.at ?? null;
+  const lastAt = turn?.items[turn.items.length - 1]?.at ?? null;
+  const durationMs =
+    firstAt != null && lastAt != null && lastAt >= firstAt ? (lastAt - firstAt) * 1000 : null;
+
   const replyId = demo ? responseMeta.replyId : live?.conversationId ?? "—";
-  const startedAt = demo ? responseMeta.startedAt : "—";
-  const duration = demo ? responseMeta.duration : live?.running ? "进行中" : "—";
-  const model = demo ? responseMeta.model : "—";
+  const startedAt = demo
+    ? responseMeta.startedAt
+    : firstAt != null
+      ? new Date(firstAt * 1000).toLocaleString()
+      : "—";
+  const duration = demo
+    ? responseMeta.duration
+    : live?.running
+      ? "进行中"
+      : durationMs != null
+        ? formatDuration(durationMs)
+        : "—";
+  const model = demo ? responseMeta.model : lastModel?.model ?? "—";
 
   return (
     <dl className="reply-meta">
@@ -93,7 +112,13 @@ export function ReplyMeta({
             type="button"
             className="icon-btn icon-btn--sm"
             aria-label="Copy reply id"
-            onClick={() => setCopied(true)}
+            onClick={() => {
+              const value = replyId;
+              if (navigator.clipboard?.writeText) {
+                void navigator.clipboard.writeText(value);
+              }
+              setCopied(true);
+            }}
           >
             <Copy size={13} strokeWidth={1.8} />
           </button>

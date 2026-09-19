@@ -26,6 +26,8 @@ import {
   saveProviders,
   uid,
   maskApiKey,
+  migrateProviderConfig,
+  providerModelLabel,
 } from "../data/providers";
 import { useSetting, useSettingBool } from "../data/useSetting";
 
@@ -257,7 +259,7 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
             <div className="provider-row-info">
               <span className="provider-row-name">{p.name}</span>
               <span className="code-chip">{t.name}</span>
-              {p.model && <span className="provider-row-model">{p.model}</span>}
+              {p.model && <span className="provider-row-model">{providerModelLabel(p) || p.model}</span>}
               <span className="provider-row-model">{maskApiKey(p.apiKey, p.hasKey)}</span>
             </div>
             <div className="provider-row-actions">
@@ -298,19 +300,24 @@ function ProviderEditor({
   const [name, setName] = useState(initial?.name ?? "");
   const [apiKey, setApiKey] = useState(initial?.apiKey ?? "");
   const [endpoint, setEndpoint] = useState(initial?.endpoint ?? "");
-  const [model, setModel] = useState(initial?.model ?? "");
+  const [modelId, setModelId] = useState(initial?.modelId || initial?.model || "");
+  const [displayName, setDisplayName] = useState(initial?.displayName || "");
 
   const tmpl = templateById(templateId);
 
   const save = () => {
-    onSave({
+    const selected = tmpl.models.find((m) => m.model_id === modelId);
+    const migrated = migrateProviderConfig({
       id: initial?.id ?? uid(),
       name: name || tmpl.name,
       template: templateId,
       apiKey,
       endpoint,
-      model: model || tmpl.models[0] || "",
+      model: modelId || tmpl.models[0]?.model_id || "",
+      modelId: modelId || tmpl.models[0]?.model_id || "",
+      displayName: displayName || selected?.display_name || tmpl.models[0]?.display_name || "",
     });
+    onSave(migrated);
   };
 
   return (
@@ -350,17 +357,39 @@ function ProviderEditor({
           <input className="input" placeholder="https://api.example.com/v1" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
         </Field>
       )}
-      <Field label="Model" wide>
+      <Field
+        label="Model"
+        hint={tmpl.models.length > 0 ? "界面显示名称；后端发送 model_id" : "请直接填写 API model id，例如 gpt-4o"}
+        hintBelow
+        wide
+      >
         {tmpl.models.length > 0 ? (
-          <select className="select" value={model || tmpl.models[0]} onChange={(e) => setModel(e.target.value)}>
+          <select
+            className="select"
+            value={modelId || tmpl.models[0].model_id}
+            onChange={(e) => {
+              const next = e.target.value;
+              setModelId(next);
+              const opt = tmpl.models.find((m) => m.model_id === next);
+              if (opt) setDisplayName(opt.display_name);
+            }}
+          >
             {tmpl.models.map((m) => (
-              <option key={m} value={m}>
-                {m}
+              <option key={m.model_id} value={m.model_id}>
+                {m.display_name} — {m.model_id}
               </option>
             ))}
           </select>
         ) : (
-          <input className="input" placeholder="model-id" value={model} onChange={(e) => setModel(e.target.value)} />
+          <input
+            className="input"
+            placeholder="model-id"
+            value={modelId}
+            onChange={(e) => {
+              setModelId(e.target.value);
+              setDisplayName(e.target.value);
+            }}
+          />
         )}
       </Field>
       <div className="provider-row-actions" style={{ marginTop: 8 }}>

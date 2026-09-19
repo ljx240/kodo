@@ -14,7 +14,7 @@ use run::{Approvals, Runs, StartArgs};
 mod run;
 mod view;
 
-use view::{ArchivedItemView, ProviderView, ProjectView, SessionRefView, SessionView, Workspace};
+use view::{ArchivedItemView, ProjectView, ProviderView, SessionRefView, SessionView, Workspace};
 
 #[derive(serde::Serialize)]
 struct CoreInfo {
@@ -25,7 +25,10 @@ struct CoreInfo {
 #[tauri::command]
 fn core_info() -> CoreInfo {
     let info = kodo_core::info();
-    CoreInfo { name: info.name, version: info.version }
+    CoreInfo {
+        name: info.name,
+        version: info.version,
+    }
 }
 
 #[tauri::command]
@@ -96,7 +99,9 @@ fn git_branch(path: String) -> Option<String> {
 
 #[tauri::command]
 fn reveal_project(app: AppHandle, path: String) -> Result<(), String> {
-    app.opener().reveal_item_in_dir(Path::new(&path)).map_err(|error| error.to_string())
+    app.opener()
+        .reveal_item_in_dir(Path::new(&path))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -169,11 +174,10 @@ fn list_archived() -> Result<Vec<ArchivedItemView>, String> {
                             }
                         }
                     }
-                    kodo_core::session::ItemKind::AgentMessage { text, .. } => {
-                        if !text.trim().is_empty() {
+                    kodo_core::session::ItemKind::AgentMessage { text, .. }
+                        if !text.trim().is_empty() => {
                             summary = text.clone();
                         }
-                    }
                     _ => {}
                 }
             }
@@ -270,7 +274,12 @@ fn save_providers(providers: Vec<ProviderView>) -> Result<Vec<ProviderView>, Str
             template: provider.template,
             api_key: String::new(),
             endpoint: provider.endpoint,
-            model: provider.model,
+            model: provider.model.clone(),
+            model_id: provider
+                .model_id
+                .clone()
+                .or_else(|| Some(provider.model.clone())),
+            display_name: provider.display_name.clone(),
             has_key: !secret.is_empty(),
         });
     }
@@ -287,6 +296,8 @@ fn save_providers(providers: Vec<ProviderView>) -> Result<Vec<ProviderView>, Str
                 "apiKey": "",
                 "endpoint": p.endpoint,
                 "model": p.model,
+                "modelId": p.model_id,
+                "displayName": p.display_name,
             })
         })
         .collect();
@@ -314,9 +325,7 @@ fn send_message(
     let context_paths: Vec<String> = context.unwrap_or_default();
     // Reject paths that try to leave the project before any I/O.
     for path in &context_paths {
-        if path.trim().is_empty()
-            || path.contains("..")
-            || std::path::Path::new(path).is_absolute()
+        if path.trim().is_empty() || path.contains("..") || std::path::Path::new(path).is_absolute()
         {
             return Err(format!("context path must stay inside the project: {path}"));
         }
@@ -326,13 +335,22 @@ fn send_message(
     let found = session::load(&dir, &id).map_err(|error| error.to_string())?;
 
     let settings_path = settings::settings_path();
-    let read_setting = |key: &str| settings_path.as_ref().and_then(|path| settings::read(path, key));
+    let read_setting = |key: &str| {
+        settings_path
+            .as_ref()
+            .and_then(|path| settings::read(path, key))
+    };
 
     let permission = run::permission_from_settings(read_setting("permission"));
 
     let provider = load_providers().ok().and_then(|list| {
-        let active = read_setting("active-provider").and_then(|raw| raw.parse::<usize>().ok()).unwrap_or(0);
-        let chosen = list.get(active).cloned().or_else(|| list.iter().find(|p| p.has_key).cloned());
+        let active = read_setting("active-provider")
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(0);
+        let chosen = list
+            .get(active)
+            .cloned()
+            .or_else(|| list.iter().find(|p| p.has_key).cloned());
         chosen.and_then(|p| {
             // Keys live only in credentials; the shell re-reads them here.
             let creds = settings::credentials_path()?;
@@ -340,12 +358,15 @@ fn send_message(
             if api_key.is_empty() {
                 return None;
             }
-            Some(AgentProvider {
-                template: p.template,
+            Some(AgentProvider::new(
+                p.template,
                 api_key,
-                endpoint: p.endpoint,
-                model: p.model,
-            })
+                p.endpoint,
+                p.model_id
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(p.model),
+            ))
         })
     });
 
@@ -387,15 +408,26 @@ fn list_project_files(project: String, query: Option<String>) -> Result<Vec<Stri
         root.to_path_buf(),
         kodo_agent::TurnContextBudget::default(),
     );
-    manager.scan(&|| true).map_err(|_| "cancelled while listing project files".to_owned())?;
+    manager
+        .scan(&|| true)
+        .map_err(|_| "cancelled while listing project files".to_owned())?;
     let query = query.unwrap_or_default();
     let mut paths: Vec<String> = if query.trim().is_empty() {
-        manager.file_map().iter().map(|entry| entry.path.clone()).collect()
+        manager
+            .file_map()
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect()
     } else {
         manager
             .file_map()
             .iter()
-            .filter(|entry| entry.path.to_ascii_lowercase().contains(&query.to_ascii_lowercase()))
+            .filter(|entry| {
+                entry
+                    .path
+                    .to_ascii_lowercase()
+                    .contains(&query.to_ascii_lowercase())
+            })
             .map(|entry| entry.path.clone())
             .collect()
     };
@@ -423,7 +455,6 @@ fn read_context_file(project: String, path: String) -> Result<String, String> {
     manager
         .read_range(&path, 1, 40, "context preview")
         .map(|span| span.snippet)
-        .map_err(|error| error)
 }
 
 #[tauri::command]
@@ -447,7 +478,9 @@ fn sessions() -> Result<PathBuf, String> {
 }
 
 fn load(dir: &Path, id: &str) -> Result<SessionView, String> {
-    session::load(dir, id).map(SessionView::from).map_err(|error| error.to_string())
+    session::load(dir, id)
+        .map(SessionView::from)
+        .map_err(|error| error.to_string())
 }
 
 fn snapshot() -> Result<Workspace, String> {
