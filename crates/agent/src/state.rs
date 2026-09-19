@@ -929,6 +929,80 @@ mod tests {
     }
 
     #[test]
+    fn semantic_completion_model_done_plus_unrelated_tool_cannot_finish() {
+        let mut m = AgentMachine::new("Please update README with badges", Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        // Unrelated successful command (git status) is not acceptance evidence.
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("git"),
+                ToolName::RunCommand.label(),
+                "git status --short",
+                " M notes.md",
+            )],
+        });
+        m.handle(AgentEvent::ModelClaimedDone);
+        assert_ne!(
+            m.state(),
+            &AgentState::Finish,
+            "model claim + unrelated tool must not Finish: {:?}",
+            m.last_acceptance()
+        );
+        assert!(m.last_acceptance().map(|r| !r.ok).unwrap_or(true));
+        // Claim never injects evidence items.
+        assert!(m.evidence().bag.items.iter().all(|i| i.source != "model"));
+    }
+
+    #[test]
+    fn semantic_completion_claim_with_tests_but_unresolved_criterion_not_finish() {
+        // Build a plan with an unresolvable free-form criterion alongside verify.
+        let mut plan = TaskPlan::from_task("Please update README with badges");
+        plan.criteria
+            .push(crate::evidence::AcceptanceCriterion::new(
+                "m_cX",
+                "Make the experience feel magical",
+                crate::plan::infer_criterion_req("Make the experience feel magical"),
+            ));
+        assert!(plan.criteria.iter().any(|c| c.is_unresolved()));
+        let mut m =
+            AgentMachine::with_plan("Please update README with badges", plan, Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w"),
+                ToolName::WriteFile.label(),
+                "README.md",
+                "wrote",
+            )],
+        });
+        assert_eq!(m.state(), &AgentState::Verify);
+        m.handle(AgentEvent::VerifyFinished { ok: true });
+        // Tests passed + model claim, but functional criterion unresolved.
+        m.handle(AgentEvent::ModelClaimedDone);
+        assert_ne!(
+            m.state(),
+            &AgentState::Finish,
+            "unresolved criterion must block Finish: {:?}",
+            m.last_acceptance()
+        );
+        assert!(m.evidence().model_claimed_done || m.last_acceptance().is_some());
+        assert!(
+            m.last_acceptance()
+                .map(|r| r
+                    .failures
+                    .iter()
+                    .any(|f| f.contains("unresolved") || f.contains("m_cX")))
+                .unwrap_or(true)
+                || m.state() != &AgentState::Finish
+        );
+    }
+
+    #[test]
     fn tool_budget_exhaustion_fails_explicitly() {
         let budget = Budget {
             max_tool_calls: 2,

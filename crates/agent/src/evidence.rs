@@ -96,16 +96,86 @@ pub enum EvidenceKind {
     },
 }
 
+/// Sentinel `criterion_id` meaning the evidence is explicitly reusable
+/// across every acceptance criterion.
+pub const REUSABLE_CRITERION: &str = "*";
+
+/// Semantic acceptance targets that must never fall back to empty-string
+/// wildcard matchers or bare `AnyToolSuccess`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticTarget {
+    /// Root cause located — needs a real search hit, not any read/command.
+    RootCause,
+    /// Failure reproduced — needs an expected-failure command outcome.
+    Reproduction,
+    /// Behavior implemented — needs a real file change / patch.
+    BehaviorImplemented,
+    /// Regression prevented — needs passing test/build/lint evidence.
+    RegressionPrevented,
+}
+
+impl SemanticTarget {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RootCause => "root-cause",
+            Self::Reproduction => "reproduction",
+            Self::BehaviorImplemented => "behavior-implemented",
+            Self::RegressionPrevented => "regression-prevented",
+        }
+    }
+}
+
+/// One proven observation: provenance (`source`), optional semantic target
+/// binding (`criterion_id`), structural observation (`kind`), and — when the
+/// requirement carries an expectation — that expectation lives on the
+/// requirement side. Never produced from model prose.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceItem {
     pub id: String,
+    /// Provenance: which tool / pipeline produced this observation.
     pub source: String,
     pub kind: EvidenceKind,
+    /// Optional binding to one acceptance criterion id (see
+    /// [`REUSABLE_CRITERION`] for the explicit cross-criterion sentinel).
+    /// `None` = unbound observation.
+    #[serde(default)]
+    pub criterion_id: Option<String>,
 }
 
 impl EvidenceItem {
+    pub fn new(id: impl Into<String>, source: impl Into<String>, kind: EvidenceKind) -> Self {
+        Self {
+            id: id.into(),
+            source: source.into(),
+            kind,
+            criterion_id: None,
+        }
+    }
+
+    /// Bind this observation to a specific criterion id.
+    pub fn bound_to(mut self, criterion_id: impl Into<String>) -> Self {
+        self.criterion_id = Some(criterion_id.into());
+        self
+    }
+
+    /// Mark this observation explicitly reusable across criteria.
+    pub fn reusable(mut self) -> Self {
+        self.criterion_id = Some(REUSABLE_CRITERION.to_owned());
+        self
+    }
+
+    /// May this item be considered by `criterion_id`?
+    /// Unbound items are generally allowed (matcher decides); items bound to
+    /// another criterion are rejected unless bound to [`REUSABLE_CRITERION`].
+    pub fn binding_allows(&self, criterion_id: &str) -> bool {
+        match self.criterion_id.as_deref() {
+            None => true,
+            Some(bound) => bound == REUSABLE_CRITERION || bound == criterion_id,
+        }
+    }
+
     pub fn describe(&self) -> String {
-        match &self.kind {
+        let base = match &self.kind {
             EvidenceKind::FileRead { path } => format!("read:{path}"),
             EvidenceKind::SearchHit { query, hits } => format!("search:{query}#{hits}"),
             EvidenceKind::CommandSucceeded { command, exit_code } => {
@@ -131,6 +201,10 @@ impl EvidenceItem {
             EvidenceKind::UserApproval { detail } => format!("approval:{detail}"),
             EvidenceKind::DiffReviewed { paths } => format!("diff:{}", paths.join(",")),
             EvidenceKind::ContextObservation { path } => format!("ctx:{path}"),
+        };
+        match &self.criterion_id {
+            Some(id) => format!("{base} -> criterion:{id}"),
+            None => base,
         }
     }
 }
@@ -152,7 +226,21 @@ pub enum EvidenceRequirement {
         expectation: CommandExpectation,
     },
     /// Search returned at least one hit for this query substring.
+    /// Only real [`EvidenceKind::SearchHit`] observations match — never an
+    /// arbitrary FileRead or successful command (empty query is not a
+    /// wildcard over reads/commands).
     SearchHit { query_contains: String },
+    /// Explicit source inspection: a successful project file read or search hit.
+    /// Used for read/locate subtasks that are not root-cause criteria.
+    FileInspected { path_contains: String },
+    /// Semantic proof for criteria that must not degrade to `AnyToolSuccess`
+    /// or empty-string wildcard matchers (root cause, reproduction,
+    /// behavior implemented, regression prevented).
+    SemanticProof { target: SemanticTarget },
+    /// Fail-closed marker for free-form criteria that could not be structured
+    /// reliably. Only evidence explicitly bound to the criterion id (or
+    /// [`REUSABLE_CRITERION`]) can satisfy this — never bare tool success.
+    RequiresExplicitEvidence,
     /// A specific tool must have succeeded (e.g. apply_patch).
     ToolSucceeded { tool: String },
     /// Explicit user approval of a dangerous/write step.
@@ -177,11 +265,25 @@ impl EvidenceRequirement {
                 format!("command:{command_contains} ({})", expectation.label())
             }
             Self::SearchHit { query_contains } => format!("search:{query_contains}"),
+            Self::FileInspected { path_contains } => format!("file-inspected:{path_contains}"),
+            Self::SemanticProof { target } => format!("semantic:{}", target.label()),
+            Self::RequiresExplicitEvidence => "requires-explicit-evidence".into(),
             Self::ToolSucceeded { tool } => format!("tool-ok:{tool}"),
             Self::UserApproval => "user-approval".into(),
             Self::DiffReviewed { path_contains } => format!("diff-reviewed:{path_contains}"),
             Self::ContextRead { path_contains } => format!("context-read:{path_contains}"),
         }
+    }
+
+    /// True when the criterion could not be structured and must stay
+    /// unresolved until explicitly bound evidence arrives.
+    pub fn is_unresolved(&self) -> bool {
+        matches!(self, Self::RequiresExplicitEvidence)
+    }
+
+    /// True when only criterion-bound evidence may satisfy this requirement.
+    pub fn requires_explicit_binding(&self) -> bool {
+        matches!(self, Self::RequiresExplicitEvidence)
     }
 
     pub fn matches(&self, item: &EvidenceItem) -> bool {
@@ -266,21 +368,45 @@ impl EvidenceRequirement {
                     _ => false,
                 }
             }
-            // Locate/root-cause: search hit OR model-initiated read/command.
+            // SearchHit: only real search observations. Empty `query_contains`
+            // is NOT a wildcard over FileRead / CommandSucceeded — those were
+            // the false-completion holes for root-cause evidence.
             (Self::SearchHit { query_contains }, EvidenceKind::SearchHit { query, hits }) => {
                 *hits > 0 && (query_contains.is_empty() || query.contains(query_contains.as_str()))
             }
-            (Self::SearchHit { query_contains }, EvidenceKind::FileRead { path }) => {
-                query_contains.is_empty() || path.contains(query_contains.as_str())
+            // Explicit inspection (read/locate subtasks): file read or search.
+            (Self::FileInspected { path_contains }, EvidenceKind::FileRead { path }) => {
+                path_contains.is_empty() || path.contains(path_contains.as_str())
             }
-            (
-                Self::SearchHit { query_contains },
-                EvidenceKind::CommandSucceeded { command, .. },
-            ) => {
-                command.contains("search")
-                    || command.contains("rg ")
-                    || command.contains("grep")
-                    || query_contains.is_empty()
+            (Self::FileInspected { path_contains }, EvidenceKind::SearchHit { hits, .. }) => {
+                *hits > 0 && path_contains.is_empty()
+            }
+            // Semantic criteria — strict structural kinds only, no wildcards.
+            (Self::SemanticProof { target }, kind) => match (target, kind) {
+                (SemanticTarget::RootCause, EvidenceKind::SearchHit { query, hits }) => {
+                    *hits > 0 && !query.trim().is_empty()
+                }
+                (SemanticTarget::Reproduction, EvidenceKind::CommandFailedAsExpected { .. }) => {
+                    true
+                }
+                (
+                    SemanticTarget::BehaviorImplemented,
+                    EvidenceKind::FileChanged { .. } | EvidenceKind::PatchApplied { .. },
+                ) => true,
+                (
+                    SemanticTarget::RegressionPrevented,
+                    EvidenceKind::TestPassed { .. }
+                    | EvidenceKind::BuildPassed { .. }
+                    | EvidenceKind::LintPassed { .. },
+                ) => true,
+                _ => false,
+            },
+            // Unresolved free-form: only criterion-bound structural evidence
+            // passes; bare unbound tool success is never enough.
+            (Self::RequiresExplicitEvidence, kind) => {
+                !is_context_obs
+                    && !matches!(kind, EvidenceKind::ContextObservation { .. })
+                    && item.criterion_id.is_some()
             }
             (Self::ToolSucceeded { tool }, kind) => match kind {
                 EvidenceKind::CommandSucceeded { command, .. } => {
@@ -356,10 +482,33 @@ impl AcceptanceCriterion {
         }
     }
 
+    /// Binding + matcher gate. Evidence bound to another criterion never
+    /// satisfies this one unless explicitly reusable; unresolved requirements
+    /// only accept already-bound evidence for this id.
+    pub fn accepts(&self, item: &EvidenceItem) -> bool {
+        if !item.binding_allows(&self.id) {
+            return false;
+        }
+        if self.requirement.requires_explicit_binding() {
+            let bound_ok = match item.criterion_id.as_deref() {
+                Some(bound) => bound == REUSABLE_CRITERION || bound == self.id,
+                None => false,
+            };
+            if !bound_ok {
+                return false;
+            }
+        }
+        self.requirement.matches(item)
+    }
+
     pub fn absorb(&mut self, item: &EvidenceItem) -> bool {
-        if self.requirement.matches(item) {
-            if !self.evidence.iter().any(|e| e.id == item.id) {
-                self.evidence.push(item.clone());
+        if self.accepts(item) {
+            let mut bound = item.clone();
+            if bound.criterion_id.is_none() {
+                bound.criterion_id = Some(self.id.clone());
+            }
+            if !self.evidence.iter().any(|e| e.id == bound.id) {
+                self.evidence.push(bound);
             }
             self.status = CriterionStatus::Met;
             return true;
@@ -369,6 +518,11 @@ impl AcceptanceCriterion {
 
     pub fn is_met(&self) -> bool {
         self.status == CriterionStatus::Met && !self.evidence.is_empty()
+    }
+
+    /// Free-form criterion that never received explicit bound evidence.
+    pub fn is_unresolved(&self) -> bool {
+        !self.is_met() && self.requirement.is_unresolved()
     }
 }
 
@@ -423,13 +577,13 @@ pub fn evidence_from_tool_result(
         || result.id.as_str().starts_with("pre_")
         || result.id.as_str().starts_with("pin_")
     {
-        return Some(EvidenceItem {
+        return Some(EvidenceItem::new(
             id,
-            source: "context".into(),
-            kind: EvidenceKind::ContextObservation {
+            "context",
+            EvidenceKind::ContextObservation {
                 path: result.input.clone(),
             },
-        });
+        ));
     }
     let kind = match tool {
         ToolName::Search => {
@@ -594,16 +748,16 @@ pub fn evidence_from_tool_result(
             }
         }
     };
-    Some(EvidenceItem { id, source, kind })
+    Some(EvidenceItem::new(id, source, kind))
 }
 
 /// Build a contextual pre-scan evidence item (never proves extraction/root-cause).
 pub fn context_observation(path: impl Into<String>, id: impl Into<String>) -> EvidenceItem {
-    EvidenceItem {
-        id: id.into(),
-        source: "context".into(),
-        kind: EvidenceKind::ContextObservation { path: path.into() },
-    }
+    EvidenceItem::new(
+        id,
+        "context",
+        EvidenceKind::ContextObservation { path: path.into() },
+    )
 }
 
 /// Accumulator for a turn's evidence bag.
@@ -669,34 +823,71 @@ impl EvidenceBag {
                         command: command.clone(),
                     }
                 };
-                self.push(EvidenceItem {
-                    id: format!("verify_{command}"),
-                    source: "verify".into(),
+                self.push(EvidenceItem::new(
+                    format!("verify_{command}"),
+                    "verify",
                     kind,
-                });
+                ));
             }
         }
     }
 
+    /// Does any observation satisfy `requirement` (no criterion binding)?
     pub fn satisfies(&self, requirement: &EvidenceRequirement) -> bool {
+        self.satisfies_for(None, requirement)
+    }
+
+    /// Binding-aware satisfaction: when `criterion_id` is set, evidence bound
+    /// to a different criterion never counts; unresolved requirements need
+    /// evidence bound to this id (or [`REUSABLE_CRITERION`]).
+    pub fn satisfies_for(
+        &self,
+        criterion_id: Option<&str>,
+        requirement: &EvidenceRequirement,
+    ) -> bool {
         if matches!(requirement, EvidenceRequirement::VerificationPassed)
             && self.verify_ok == Some(true)
         {
             return true;
         }
-        self.items.iter().any(|item| requirement.matches(item))
+        if matches!(
+            requirement,
+            EvidenceRequirement::SemanticProof {
+                target: SemanticTarget::RegressionPrevented
+            }
+        ) && self.verify_ok == Some(true)
+        {
+            return true;
+        }
+        self.items.iter().any(|item| match criterion_id {
+            None => requirement.matches(item),
+            Some(cid) => {
+                if !item.binding_allows(cid) {
+                    return false;
+                }
+                if requirement.requires_explicit_binding() {
+                    let bound_ok = match item.criterion_id.as_deref() {
+                        Some(bound) => bound == REUSABLE_CRITERION || bound == cid,
+                        None => false,
+                    };
+                    bound_ok && requirement.matches(item)
+                } else {
+                    requirement.matches(item)
+                }
+            }
+        })
     }
 }
 
 /// Default requirement heuristic from free-text criterion / subtask title.
+///
+/// Unknown free-form text never degrades to [`EvidenceRequirement::AnyToolSuccess`]
+/// — it becomes [`EvidenceRequirement::RequiresExplicitEvidence`] (fail closed).
 pub fn infer_requirement(description: &str) -> EvidenceRequirement {
     let lower = description.to_ascii_lowercase();
     if lower.contains("reproduc") || lower.contains("复现") {
-        return EvidenceRequirement::CommandOutcome {
-            command_contains: String::new(),
-            expectation: CommandExpectation::ExpectedFailureSignature {
-                signature: "fail".into(),
-            },
+        return EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::Reproduction,
         };
     }
     if lower.contains("verif")
@@ -706,12 +897,19 @@ pub fn infer_requirement(description: &str) -> EvidenceRequirement {
     {
         return EvidenceRequirement::VerificationPassed;
     }
-    if lower.contains("write")
+    if lower.contains("regression") {
+        return EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::RegressionPrevented,
+        };
+    }
+    if lower.contains("writ")
         || lower.contains("edit")
         || lower.contains("修复")
         || lower.contains("修改")
     {
-        return EvidenceRequirement::AnyFileChange;
+        return EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::BehaviorImplemented,
+        };
     }
     if lower.contains("criteria") || lower.contains("acceptance") || lower.contains("验收") {
         return EvidenceRequirement::ToolSucceeded {
@@ -719,14 +917,14 @@ pub fn infer_requirement(description: &str) -> EvidenceRequirement {
         };
     }
     if lower.contains("locate") || lower.contains("root cause") || lower.contains("定位") {
-        return EvidenceRequirement::SearchHit {
-            query_contains: String::new(),
+        return EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::RootCause,
         };
     }
     if lower.contains("context") || lower.contains("gather") || lower.contains("上下文") {
         return EvidenceRequirement::AnyToolSuccess;
     }
-    EvidenceRequirement::AnyToolSuccess
+    EvidenceRequirement::RequiresExplicitEvidence
 }
 
 #[cfg(test)]
@@ -808,24 +1006,24 @@ mod tests {
                 tool: "extract_criteria".into(),
             },
         );
-        let read = EvidenceItem {
-            id: "ev_read".into(),
-            source: "read_file".into(),
-            kind: EvidenceKind::FileRead {
+        let read = EvidenceItem::new(
+            "ev_read",
+            "read_file",
+            EvidenceKind::FileRead {
                 path: "src/auth.rs".into(),
             },
-        };
+        );
         assert!(!criterion.absorb(&read));
         assert!(!criterion.is_met());
 
-        let extract = EvidenceItem {
-            id: "ev_extract".into(),
-            source: "extract_criteria".into(),
-            kind: EvidenceKind::CommandSucceeded {
+        let extract = EvidenceItem::new(
+            "ev_extract",
+            "extract_criteria",
+            EvidenceKind::CommandSucceeded {
                 command: "extract_criteria".into(),
                 exit_code: 0,
             },
-        };
+        );
         // ToolSucceeded matches command == tool name
         assert!(criterion.absorb(&extract) || !criterion.requirement.matches(&extract));
         // Explicitly: FileRead never matches ToolSucceeded{tool:"extract_criteria"}
@@ -840,15 +1038,14 @@ mod tests {
         let ctx = context_observation("src/auth.rs", "ctx_1");
         assert!(!strict.matches(&ctx));
 
-        let hit = EvidenceItem {
-            id: "ev_hit".into(),
-            source: "search".into(),
-            kind: EvidenceKind::SearchHit {
+        let hit = EvidenceItem::new(
+            "ev_hit",
+            "search",
+            EvidenceKind::SearchHit {
                 query: "auth".into(),
                 hits: 2,
             },
-        };
-        // AnyToolSuccess path for search hit works when requirement is SearchHit empty...
+        );
         let strict_search = SubtaskRequirement::strict(EvidenceRequirement::SearchHit {
             query_contains: "auth".into(),
         });
@@ -874,18 +1071,12 @@ mod tests {
         );
         assert!(!bag.satisfies(&criterion.requirement));
         assert!(!criterion.is_met());
-        // Even "tests pass" claim without verify bag entry:
-        bag.push(EvidenceItem {
-            id: "fake".into(),
-            source: "model".into(),
-            kind: EvidenceKind::TestPassed {
-                command: "claimed".into(),
-            },
-        });
-        // This one IS TestPassed — but it must come from verify runner, not model prose.
         // Model prose never creates EvidenceItem in production; simulate empty bag:
         let empty = EvidenceBag::default();
         assert!(!empty.satisfies(&criterion.requirement));
+        // A claim flag alone is never structural proof.
+        assert!(bag.model_claimed_done);
+        assert!(!empty.model_claimed_done || !empty.satisfies(&criterion.requirement));
     }
 
     #[test]
@@ -919,5 +1110,259 @@ mod tests {
             expectation,
         };
         assert!(!bag.satisfies(&requirement));
+    }
+
+    // -----------------------------------------------------------------------
+    // semantic_completion regressions — false-completion holes must stay shut
+    // -----------------------------------------------------------------------
+
+    fn root_cause_requirement() -> EvidenceRequirement {
+        EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::RootCause,
+        }
+    }
+
+    #[test]
+    fn semantic_completion_arbitrary_read_cannot_prove_root_cause() {
+        let mut criterion =
+            AcceptanceCriterion::new("rc", "root cause located", root_cause_requirement());
+        let read = EvidenceItem::new(
+            "ev_read",
+            "read_file",
+            EvidenceKind::FileRead {
+                path: "src/auth.rs".into(),
+            },
+        );
+        // Even the legacy SearchHit{""} wildcard must not accept FileRead.
+        let legacy = EvidenceRequirement::SearchHit {
+            query_contains: String::new(),
+        };
+        assert!(!legacy.matches(&read));
+        assert!(!criterion.absorb(&read));
+        assert!(!criterion.is_met());
+
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &ToolResult::success(
+                ToolCallId::new("r"),
+                "read_file",
+                "src/auth.rs",
+                "fn auth() {}",
+            ),
+            None,
+        );
+        assert!(!bag.satisfies(&root_cause_requirement()));
+        assert!(!bag.satisfies_for(Some("rc"), &root_cause_requirement()));
+    }
+
+    #[test]
+    fn semantic_completion_git_status_cannot_prove_root_cause() {
+        let mut criterion =
+            AcceptanceCriterion::new("rc", "root cause located", root_cause_requirement());
+        let git = EvidenceItem::new(
+            "ev_git",
+            "run_command",
+            EvidenceKind::CommandSucceeded {
+                command: "git status --short".into(),
+                exit_code: 0,
+            },
+        );
+        assert!(!criterion.absorb(&git));
+        assert!(!criterion.is_met());
+
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_ok("git status --short"),
+            Some(&CommandExpectation::ExpectedSuccess),
+        );
+        assert!(!bag.satisfies(&root_cause_requirement()));
+        // Empty SearchHit wildcard must not accept the command either.
+        let legacy = EvidenceRequirement::SearchHit {
+            query_contains: String::new(),
+        };
+        assert!(!legacy.matches(&git));
+        for item in &bag.items {
+            assert!(!legacy.matches(item), "legacy matched {:?}", item.kind);
+        }
+    }
+
+    #[test]
+    fn semantic_completion_generic_success_command_cannot_prove_root_cause() {
+        let mut criterion =
+            AcceptanceCriterion::new("rc", "root cause located", root_cause_requirement());
+        let ok = EvidenceItem::new(
+            "ev_cmd",
+            "run_command",
+            EvidenceKind::CommandSucceeded {
+                command: "cargo check".into(),
+                exit_code: 0,
+            },
+        );
+        assert!(!criterion.absorb(&ok));
+        assert!(!criterion.is_met());
+
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_ok("cargo check"),
+            Some(&CommandExpectation::ExpectedSuccess),
+        );
+        assert!(!bag.satisfies(&root_cause_requirement()));
+        let legacy = EvidenceRequirement::SearchHit {
+            query_contains: String::new(),
+        };
+        assert!(!legacy.matches(&ok));
+
+        // A real search hit is the structural proof.
+        let hit = EvidenceItem::new(
+            "ev_search",
+            "search",
+            EvidenceKind::SearchHit {
+                query: "root_cause_site".into(),
+                hits: 3,
+            },
+        );
+        let mut criterion =
+            AcceptanceCriterion::new("rc", "root cause located", root_cause_requirement());
+        assert!(criterion.absorb(&hit));
+        assert!(criterion.is_met());
+        // Bound provenance recorded on the stored evidence.
+        assert_eq!(criterion.evidence[0].criterion_id.as_deref(), Some("rc"));
+    }
+
+    #[test]
+    fn semantic_completion_unknown_freeform_criterion_not_any_tool_success() {
+        let unknown = "Ship it with the usual polish";
+        let req = infer_requirement(unknown);
+        assert!(
+            matches!(req, EvidenceRequirement::RequiresExplicitEvidence),
+            "unknown free-form must not degrade, got {:?}",
+            req
+        );
+        assert!(!matches!(req, EvidenceRequirement::AnyToolSuccess));
+
+        let mut criterion = AcceptanceCriterion::new("m_c1", unknown, req.clone());
+        // Unbound generic tool success cannot finish an unresolved criterion.
+        let ok = EvidenceItem::new(
+            "ev_cmd",
+            "run_command",
+            EvidenceKind::CommandSucceeded {
+                command: "git status --short".into(),
+                exit_code: 0,
+            },
+        );
+        assert!(!criterion.absorb(&ok));
+        assert!(!criterion.is_met());
+        assert!(criterion.is_unresolved());
+
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_ok("git status --short"),
+            Some(&CommandExpectation::ExpectedSuccess),
+        );
+        assert!(!bag.satisfies(&req));
+        assert!(!bag.satisfies_for(Some("m_c1"), &req));
+
+        // Explicit bound evidence can complete it.
+        let bound = EvidenceItem::new(
+            "ev_bound",
+            "extract_criteria",
+            EvidenceKind::CommandSucceeded {
+                command: "extract_criteria".into(),
+                exit_code: 0,
+            },
+        )
+        .bound_to("m_c1");
+        assert!(criterion.absorb(&bound));
+        assert!(criterion.is_met());
+        assert!(!criterion.is_unresolved());
+    }
+
+    #[test]
+    fn semantic_completion_bound_evidence_cannot_satisfy_other_criterion() {
+        let mut c1 = AcceptanceCriterion::new(
+            "c1",
+            "verification passes",
+            EvidenceRequirement::VerificationPassed,
+        );
+        let mut c2 = AcceptanceCriterion::new(
+            "c2",
+            "regression prevented",
+            EvidenceRequirement::SemanticProof {
+                target: SemanticTarget::RegressionPrevented,
+            },
+        );
+        let bound_to_c1 = EvidenceItem::new(
+            "ev_t",
+            "verify",
+            EvidenceKind::TestPassed {
+                command: "cargo test".into(),
+            },
+        )
+        .bound_to("c1");
+
+        assert!(c1.absorb(&bound_to_c1));
+        assert!(c1.is_met());
+        assert!(
+            !c2.accepts(&bound_to_c1),
+            "evidence bound to c1 must not satisfy c2"
+        );
+        assert!(!c2.absorb(&bound_to_c1));
+        assert!(!c2.is_met());
+
+        // Explicitly reusable evidence may satisfy both.
+        let reusable = EvidenceItem::new(
+            "ev_r",
+            "verify",
+            EvidenceKind::TestPassed {
+                command: "cargo test".into(),
+            },
+        )
+        .reusable();
+        assert!(c1.accepts(&reusable));
+        assert!(c2.accepts(&reusable));
+
+        // satisfies_for also enforces binding.
+        let mut bag = EvidenceBag::default();
+        bag.push(bound_to_c1.clone());
+        assert!(bag.satisfies_for(Some("c1"), &c1.requirement));
+        assert!(
+            !bag.satisfies_for(Some("c2"), &c2.requirement),
+            "bound evidence must not leak across criteria"
+        );
+    }
+
+    #[test]
+    fn semantic_completion_reproduction_and_regression_semantic_kinds() {
+        // Reproduction: only expected-failure outcomes.
+        let repro = EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::Reproduction,
+        };
+        let expectation = CommandExpectation::ExpectedFailureSignature {
+            signature: "assertion failed".into(),
+        };
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(&cmd_ok("git status --short"), Some(&expectation));
+        assert!(!bag.satisfies(&repro));
+        bag.absorb_tool_result(
+            &cmd_fail("cargo test auth", "assertion failed left=1"),
+            Some(&expectation),
+        );
+        assert!(bag.satisfies(&repro));
+
+        // Behavior implemented: file change only.
+        let behavior = EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::BehaviorImplemented,
+        };
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &ToolResult::success(ToolCallId::new("r"), "read_file", "src/a.rs", "…"),
+            None,
+        );
+        assert!(!bag.satisfies(&behavior));
+        bag.absorb_tool_result(
+            &ToolResult::success(ToolCallId::new("w"), "write_file", "src/a.rs", "wrote"),
+            None,
+        );
+        assert!(bag.satisfies(&behavior));
     }
 }

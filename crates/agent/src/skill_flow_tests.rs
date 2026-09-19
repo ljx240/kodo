@@ -318,7 +318,10 @@ fn bug_fix_fake_provider_2_repro_fix_verify_finishes_with_evidence() {
         "修复登录接口 500 报错",
         vec![
             tools(serde_json::json!([command_call("c1", "curl login → 500")])),
-            tools(serde_json::json!([read_call("r1", "src/login.rs")])),
+            tools(serde_json::json!([
+                {"id":"s1","name":"search","arguments":{"query":"login 500 root cause"}},
+                read_call("r1", "src/login.rs")
+            ])),
             tools(serde_json::json!([write_call("w1", "src/login.rs")])),
         ],
         Some("cargo test --workspace --quiet"),

@@ -501,6 +501,7 @@ fn run_deterministic(report: &mut EvalReport) {
             kind: EvidenceKind::FileRead {
                 path: "src/a.rs".into(),
             },
+            criterion_id: None,
         };
         report.check(
             "subtask_requirement_blocks_arbitrary_read",

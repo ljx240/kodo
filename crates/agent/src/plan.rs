@@ -7,7 +7,7 @@
 
 use crate::evidence::{
     evidence_from_tool_result, AcceptanceCriterion, CommandExpectation, EvidenceBag, EvidenceItem,
-    EvidenceKind, EvidenceRequirement, SubtaskRequirement,
+    EvidenceKind, EvidenceRequirement, SemanticTarget, SubtaskRequirement,
 };
 use crate::protocol::{ToolErrorCode, ToolName, ToolResult};
 use crate::skill::SkillSpec;
@@ -222,8 +222,8 @@ impl TaskPlan {
                         SubtaskKind::Read,
                     )
                     .with_requirement(SubtaskRequirement::strict(
-                        EvidenceRequirement::SearchHit {
-                            query_contains: String::new(),
+                        EvidenceRequirement::SemanticProof {
+                            target: SemanticTarget::RootCause,
                         },
                     )),
                 );
@@ -536,10 +536,10 @@ impl TaskPlan {
                 }
             } else if result.ok {
                 if let Some(kind) = kind_for_result {
-                    let synthetic = EvidenceItem {
-                        id: format!("ev_{}", result.id),
-                        source: result.name.clone(),
-                        kind: match kind {
+                    let synthetic = EvidenceItem::new(
+                        format!("ev_{}", result.id),
+                        result.name.clone(),
+                        match kind {
                             SubtaskKind::Edit => EvidenceKind::FileChanged {
                                 path: result.input.clone(),
                             },
@@ -551,7 +551,7 @@ impl TaskPlan {
                                 path: result.input.clone(),
                             },
                         },
-                    };
+                    );
                     flipped += self.mark_first_accepting(&synthetic);
                 }
             } else if let Some(kind) = kind_for_result {
@@ -600,8 +600,11 @@ impl TaskPlan {
                 | EvidenceRequirement::FileChanged { .. }
                 | EvidenceRequirement::VerificationPassed
                 | EvidenceRequirement::CommandOutcome { .. }
-                | EvidenceRequirement::ToolSucceeded { .. } => 3,
+                | EvidenceRequirement::ToolSucceeded { .. }
+                | EvidenceRequirement::SemanticProof { .. }
+                | EvidenceRequirement::RequiresExplicitEvidence => 3,
                 EvidenceRequirement::SearchHit { .. }
+                | EvidenceRequirement::FileInspected { .. }
                 | EvidenceRequirement::DiffReviewed { .. } => 2,
                 _ => 1,
             }
@@ -655,11 +658,14 @@ impl TaskPlan {
             if matches!(
                 criterion.requirement,
                 EvidenceRequirement::VerificationPassed
+                    | EvidenceRequirement::SemanticProof {
+                        target: SemanticTarget::RegressionPrevented
+                    }
             ) {
-                let item = EvidenceItem {
-                    id: format!("verify_{command}"),
-                    source: "verify".into(),
-                    kind: if command.contains("test") {
+                let item = EvidenceItem::new(
+                    format!("verify_{command}"),
+                    "verify",
+                    if command.contains("test") {
                         EvidenceKind::TestPassed {
                             command: command.clone(),
                         }
@@ -672,7 +678,7 @@ impl TaskPlan {
                             command: command.clone(),
                         }
                     },
-                };
+                );
                 criterion.absorb(&item);
             }
         }
@@ -707,10 +713,22 @@ impl TaskPlan {
         flipped_unused(item);
     }
 
-    /// Criterion-specific acceptance evaluation. Model text is never an input.
+    /// Completion gate for Finish / `model_claimed_done` evaluation.
+    ///
+    /// Passes only when **all** hold:
+    /// - every required criterion is `Met`
+    /// - required verification passed
+    /// - no unresolved criterion
+    /// - no unresolved critical failure
+    ///
+    /// `model_claimed_done` never creates evidence — it only triggers this
+    /// evaluation. Model prose is never converted into TestPassed/FileChanged.
     pub fn evaluate_acceptance(&self, evidence: &AcceptanceEvidence) -> AcceptanceReport {
         let mut failures = Vec::new();
         let mut passed = Vec::new();
+
+        // Claim flags are evaluation triggers, not observations.
+        let _claimed = evidence.model_claimed_done;
 
         for s in &self.subtasks {
             if s.is_done() && s.evidence.is_empty() {
@@ -724,26 +742,43 @@ impl TaskPlan {
                 Some(false) => failures.push("verification failed".to_owned()),
                 Some(true) => passed.push("verification passed".to_owned()),
             }
+        } else if evidence.verify_ok == Some(false) {
+            // Unresolved critical failure even when the skill skips verify.
+            failures.push("verification failed".to_owned());
         }
 
         // Evaluate structured criteria when present (strict), else legacy strings.
         if !self.criteria.is_empty() {
             for criterion in &self.criteria {
                 let mut met = criterion.is_met()
-                    || evidence.bag.satisfies(&criterion.requirement)
-                    || (matches!(criterion.requirement, EvidenceRequirement::AnyFileChange)
-                        && !evidence.files_written.is_empty())
+                    || evidence
+                        .bag
+                        .satisfies_for(Some(&criterion.id), &criterion.requirement)
+                    || (matches!(
+                        criterion.requirement,
+                        EvidenceRequirement::AnyFileChange
+                            | EvidenceRequirement::SemanticProof {
+                                target: SemanticTarget::BehaviorImplemented
+                            }
+                    ) && !evidence.files_written.is_empty())
                     || (matches!(criterion.requirement, EvidenceRequirement::AnyToolSuccess)
                         && evidence.had_tool_success)
                     || (matches!(
                         criterion.requirement,
                         EvidenceRequirement::VerificationPassed
+                            | EvidenceRequirement::SemanticProof {
+                                target: SemanticTarget::RegressionPrevented
+                            }
                     ) && evidence.verify_ok == Some(true))
                     || (matches!(
                         criterion.requirement,
                         EvidenceRequirement::ContextRead { .. }
                     ) && evidence.had_tool_success);
-                // Criterion can also be met by subtask-typed evidence.
+                // Unresolved free-form criteria never fall back to tool success.
+                if criterion.requirement.is_unresolved() {
+                    met = criterion.is_met();
+                }
+                // Criterion can also be met by subtask-typed evidence (binding-aware).
                 if !met {
                     for sub in &self.subtasks {
                         if !sub.is_done() {
@@ -751,7 +786,7 @@ impl TaskPlan {
                         }
                         for ev in &sub.evidence {
                             if let Evidence::Typed(item) = ev {
-                                if criterion.requirement.matches(item) {
+                                if criterion.accepts(item) {
                                     met = true;
                                     break;
                                 }
@@ -762,17 +797,19 @@ impl TaskPlan {
                         }
                     }
                 }
-                // Verify pass + any successful tool can satisfy reproduction
-                // criteria when the plan's Command subtask already recorded
-                // expected-failure evidence (skill_c1 "failure was reproduced").
+                // Expected-failure / semantic reproduction evidence from the bag.
                 if !met
                     && matches!(
                         criterion.requirement,
                         EvidenceRequirement::CommandOutcome { .. }
+                            | EvidenceRequirement::SemanticProof {
+                                target: SemanticTarget::Reproduction
+                            }
                     )
                 {
                     for item in &evidence.bag.items {
-                        if criterion.requirement.matches(item) {
+                        if item.binding_allows(&criterion.id) && criterion.requirement.matches(item)
+                        {
                             met = true;
                             break;
                         }
@@ -781,11 +818,32 @@ impl TaskPlan {
                 if met {
                     passed.push(criterion.description.clone());
                 } else {
+                    let label = if criterion.is_unresolved() {
+                        format!(
+                            "unresolved criterion {}: {} (need {})",
+                            criterion.id,
+                            criterion.description,
+                            criterion.requirement.label()
+                        )
+                    } else {
+                        format!(
+                            "unmet criterion {}: {} (need {})",
+                            criterion.id,
+                            criterion.description,
+                            criterion.requirement.label()
+                        )
+                    };
+                    failures.push(label);
+                }
+            }
+            // Completion gate: no unresolved criterion may open Finish.
+            for criterion in &self.criteria {
+                if criterion.is_unresolved()
+                    && !failures.iter().any(|f| f.contains(criterion.id.as_str()))
+                {
                     failures.push(format!(
-                        "unmet criterion {}: {} (need {})",
-                        criterion.id,
-                        criterion.description,
-                        criterion.requirement.label()
+                        "unresolved criterion {}: free-form evidence required",
+                        criterion.id
                     ));
                 }
             }
@@ -828,7 +886,12 @@ impl TaskPlan {
         }
 
         AcceptanceReport {
-            ok: failures.is_empty() && !self.acceptance_criteria.is_empty(),
+            ok: failures.is_empty()
+                && !self.acceptance_criteria.is_empty()
+                && self
+                    .criteria
+                    .iter()
+                    .all(|c| c.is_met() || !c.is_unresolved()),
             passed,
             failures,
         }
@@ -860,6 +923,7 @@ fn _unused_criterion_helper(c: &str) -> bool {
 pub fn requirement_for_skill_step(title: &str, kind: SubtaskKind) -> SubtaskRequirement {
     let lower = title.to_ascii_lowercase();
     if lower.contains("reproduc") || lower.contains("复现") || lower.contains("failing test") {
+        // Subtask-level: expectation-aware failure outcome (not a success wildcard).
         return SubtaskRequirement::strict(EvidenceRequirement::CommandOutcome {
             command_contains: String::new(),
             expectation: CommandExpectation::ExpectedFailureSignature {
@@ -867,9 +931,10 @@ pub fn requirement_for_skill_step(title: &str, kind: SubtaskKind) -> SubtaskRequ
             },
         });
     }
-    if lower.contains("locate") || lower.contains("root cause") || lower.contains("定位") {
-        return SubtaskRequirement::strict(EvidenceRequirement::SearchHit {
-            query_contains: String::new(),
+    // Root cause needs a real search hit — not any FileRead/command.
+    if lower.contains("root cause") || lower.contains("定位") {
+        return SubtaskRequirement::strict(EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::RootCause,
         });
     }
     if lower.contains("verif") || lower.contains("regression") || lower.contains("验证") {
@@ -899,8 +964,10 @@ pub fn requirement_for_skill_step(title: &str, kind: SubtaskKind) -> SubtaskRequ
             if lower.contains("context") || lower.contains("gather") || lower.contains("scan") {
                 SubtaskRequirement::contextual(EvidenceRequirement::AnyToolSuccess)
             } else {
-                SubtaskRequirement::strict(EvidenceRequirement::SearchHit {
-                    query_contains: String::new(),
+                // Locate/inspect: an explicit file read or search hit — never
+                // git status / arbitrary successful commands.
+                SubtaskRequirement::strict(EvidenceRequirement::FileInspected {
+                    path_contains: String::new(),
                 })
             }
         }
@@ -913,6 +980,9 @@ pub fn requirement_from_label(label: &str) -> SubtaskRequirement {
 }
 
 /// Free-text acceptance criterion → requirement.
+///
+/// Unknown free-form text becomes [`EvidenceRequirement::RequiresExplicitEvidence`]
+/// (fail closed) — never a silent [`EvidenceRequirement::AnyToolSuccess`] pass.
 pub fn infer_criterion_req(description: &str) -> EvidenceRequirement {
     let lower = description.to_ascii_lowercase();
     // Grounded/tool-observation language must win over generic "review".
@@ -932,35 +1002,51 @@ pub fn infer_criterion_req(description: &str) -> EvidenceRequirement {
         || lower.contains("failure was reproduced")
         || lower.contains("复现")
     {
-        return EvidenceRequirement::CommandOutcome {
-            command_contains: String::new(),
-            expectation: CommandExpectation::ExpectedFailure,
+        return EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::Reproduction,
+        };
+    }
+    if lower.contains("regression") {
+        return EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::RegressionPrevented,
+        };
+    }
+    if lower.contains("root cause") || lower.contains("定位") {
+        return EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::RootCause,
         };
     }
     if lower.contains("verif")
         || lower.contains("test")
         || lower.contains("验证")
         || lower.contains("测试")
+        || lower.contains("intact")
     {
         return EvidenceRequirement::VerificationPassed;
     }
+    // Negation / absence language before write-shaped patterns:
+    // "No project files were modified" must not become a change requirement.
+    if lower.contains("modified") {
+        return EvidenceRequirement::AnyToolSuccess;
+    }
     if lower.contains("changed file")
-        || lower.contains("write")
+        || lower.contains("writ") // write / written / writing
         || lower.contains("修复")
         || lower.contains("写入")
+        || lower.contains("project files")
+        || lower.contains("restructuring")
+        || lower.contains("behavior implemented")
     {
-        return EvidenceRequirement::AnyFileChange;
-    }
-    if lower.contains("modified") {
-        // "No project files were modified" — satisfied by read-only tool work.
-        return EvidenceRequirement::AnyToolSuccess;
+        return EvidenceRequirement::SemanticProof {
+            target: SemanticTarget::BehaviorImplemented,
+        };
     }
     if lower.contains("diff") || lower.contains("review") {
         return EvidenceRequirement::DiffReviewed {
             path_contains: String::new(),
         };
     }
-    EvidenceRequirement::AnyToolSuccess
+    EvidenceRequirement::RequiresExplicitEvidence
 }
 
 fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
@@ -1325,5 +1411,154 @@ mod tests {
         let s = plan.progress_summary("Execute");
         assert!(!s.contains('\n'));
         assert!(s.starts_with("Execute"));
+    }
+
+    // -----------------------------------------------------------------------
+    // semantic_completion — CompletionGate false-completion regressions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn semantic_completion_model_done_plus_unrelated_tool_cannot_finish() {
+        let mut plan = TaskPlan::from_task("Please update README with badges");
+        plan.absorb_tool_results(&[ToolResult::success(
+            ToolCallId::new("g"),
+            ToolName::RunCommand.label(),
+            "git status --short",
+            " M other.rs",
+        )]);
+        let evidence = AcceptanceEvidence {
+            had_tool_success: true,
+            model_claimed_done: true,
+            ..Default::default()
+        };
+        let report = plan.evaluate_acceptance(&evidence);
+        assert!(
+            !report.ok,
+            "claim + unrelated tool must not open the gate: {:?}",
+            report.failures
+        );
+    }
+
+    #[test]
+    fn semantic_completion_tests_pass_with_unresolved_functional_cannot_verify() {
+        // Free-form functional criterion stays unresolved even when verify passes.
+        let mut plan = TaskPlan::from_task("Please update README with badges");
+        plan.criteria.push(AcceptanceCriterion::new(
+            "m_cX",
+            "Ship the delightful polish users expect",
+            infer_criterion_req("Ship the delightful polish users expect"),
+        ));
+        assert!(
+            plan.criteria
+                .iter()
+                .find(|c| c.id == "m_cX")
+                .map(|c| c.requirement.is_unresolved())
+                .unwrap_or(false),
+            "unknown free-form must be RequiresExplicitEvidence"
+        );
+        plan.absorb_tool_results(&[write_ok("README.md")]);
+        plan.mark_verify_done();
+        let mut evidence = AcceptanceEvidence {
+            had_tool_success: true,
+            files_written: vec!["README.md".into()],
+            verify_ok: Some(true),
+            model_claimed_done: true,
+            ..Default::default()
+        };
+        evidence.bag.mark_verify(true, vec!["cargo test".into()]);
+        let report = plan.evaluate_acceptance(&evidence);
+        assert!(
+            !report.ok,
+            "unresolved functional criterion must block Finish despite verify: {:?}",
+            report.failures
+        );
+        assert!(report
+            .failures
+            .iter()
+            .any(|f| f.contains("unresolved") || f.contains("m_cX")));
+    }
+
+    #[test]
+    fn semantic_completion_bound_evidence_is_not_reusable_across_criteria() {
+        let mut plan = TaskPlan::from_task("verify twice");
+        plan.criteria = vec![
+            AcceptanceCriterion::new("c1", "first check", EvidenceRequirement::VerificationPassed),
+            AcceptanceCriterion::new(
+                "c2",
+                "second check",
+                EvidenceRequirement::VerificationPassed,
+            ),
+        ];
+        let bound = EvidenceItem::new(
+            "ev_bound",
+            "verify",
+            EvidenceKind::TestPassed {
+                command: "cargo test".into(),
+            },
+        )
+        .bound_to("c1");
+        plan.absorb_evidence_item(&bound);
+        assert!(plan.criteria[0].is_met());
+        assert!(
+            !plan.criteria[1].is_met(),
+            "c2 must not steal c1-bound evidence"
+        );
+        // Reusable sentinel is explicit.
+        let shared = EvidenceItem::new(
+            "ev_shared",
+            "verify",
+            EvidenceKind::TestPassed {
+                command: "cargo test".into(),
+            },
+        )
+        .reusable();
+        assert!(plan.criteria[1].absorb(&shared));
+        assert!(plan.criteria[1].is_met());
+    }
+
+    #[test]
+    fn semantic_completion_model_claim_is_not_evidence() {
+        let plan = TaskPlan::from_task("Please update the README file");
+        // Claim alone must never inject TestPassed/FileChanged into the bag.
+        let evidence = AcceptanceEvidence {
+            model_claimed_done: true,
+            ..Default::default()
+        };
+        // Claim alone must never inject TestPassed/FileChanged into the bag.
+        assert!(evidence.bag.items.is_empty());
+        assert!(evidence.files_written.is_empty());
+        let report = plan.evaluate_acceptance(&evidence);
+        assert!(!report.ok);
+        assert!(!report.passed.iter().any(|p| p.contains("test")));
+    }
+
+    #[test]
+    fn semantic_completion_root_cause_criterion_rejects_read_and_git_status() {
+        let root = infer_criterion_req("root cause located in source");
+        assert!(matches!(
+            root,
+            EvidenceRequirement::SemanticProof {
+                target: SemanticTarget::RootCause
+            }
+        ));
+        let mut criterion = AcceptanceCriterion::new("rc", "root cause located", root);
+        let read = EvidenceItem::new(
+            "r",
+            "read_file",
+            EvidenceKind::FileRead {
+                path: "src/lib.rs".into(),
+            },
+        );
+        let git = EvidenceItem::new(
+            "g",
+            "run_command",
+            EvidenceKind::CommandSucceeded {
+                command: "git status --short".into(),
+                exit_code: 0,
+            },
+        );
+        assert!(!criterion.absorb(&read));
+        assert!(!criterion.absorb(&git));
+        assert!(!criterion.is_met());
     }
 }
