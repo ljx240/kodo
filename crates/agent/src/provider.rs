@@ -3,6 +3,22 @@
 //! Model identity is explicit: UI shows `display_name`, backend always sends
 //! `model_id`. Native tool calling is the primary path when capabilities say
 //! so; JSON-in-text is only a fallback for providers without native tools.
+//!
+//! # Wire contracts (verified against official sources, not memory)
+//!
+//! * **OpenAI-compatible Chat Completions** —
+//!   [openai/openai-openapi `openapi.yaml`](https://github.com/openai/openai-openapi)
+//!   `ChatCompletionTool`, `ChatCompletionMessageToolCall`,
+//!   `ChatCompletionRequestAssistantMessage`, `ChatCompletionRequestToolMessage`:
+//!   request `tools[]` use `{type:"function", function:{name, parameters}}`;
+//!   assistant `tool_calls[].function.arguments` is a **JSON string**; tool
+//!   results are `{role:"tool", tool_call_id, content}` (no `is_error` field).
+//! * **Anthropic Messages** — official Python SDK types
+//!   (`ToolParam`, `ToolUseBlockParam`, `ToolResultBlockParam`, `MessageParam`):
+//!   `tools[]` use `input_schema`; assistant emits `tool_use` blocks
+//!   (`id`/`name`/`input` object); results are `tool_result`
+//!   (`tool_use_id`/`content`/`is_error`) inside a **user** message; `system`
+//!   is top-level.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,6 +36,19 @@ pub struct ProviderCapabilities {
 
 impl ProviderCapabilities {
     pub fn text_only() -> Self {
+        Self {
+            text_chat: true,
+            native_tools: false,
+            streaming: false,
+            reasoning: false,
+            token_usage: false,
+        }
+    }
+
+    /// Conservative defaults for custom / unknown providers: prove each
+    /// capability via explicit config (or a probe) before turning it on.
+    /// Never assume `native_tools` / `streaming` / `token_usage`.
+    pub fn conservative() -> Self {
         Self {
             text_chat: true,
             native_tools: false,
@@ -68,7 +97,11 @@ pub struct ModelSpec {
     pub provider_type: String,
 }
 
-/// Catalog entry used for config migration from legacy display labels.
+/// Catalog entry used **only** for config migration from legacy display labels.
+///
+/// Marketing display labels are never a long-term source of API ids: prefer an
+/// explicit `model_id` in config. This table cannot track every model rename
+/// and must not be treated as the authority for what the backend accepts.
 #[derive(Debug, Clone, Copy)]
 pub struct CatalogModel {
     pub provider_type: &'static str,
@@ -76,7 +109,8 @@ pub struct CatalogModel {
     pub model_id: &'static str,
 }
 
-/// Known display labels → API model ids. Custom providers keep free-form ids.
+/// Known display labels → API model ids (migration aid only).
+/// Explicit `model_id` always wins when present on the config record.
 pub const MODEL_CATALOG: &[CatalogModel] = &[
     CatalogModel {
         provider_type: "anthropic",
@@ -290,7 +324,8 @@ impl Provider {
         self
     }
 
-    /// From a migrated config record.
+    /// From a migrated config record. Explicit `model_id` is authoritative
+    /// (catalog is only a legacy display-label migration aid).
     pub fn from_record(record: ProviderConfigRecord) -> Self {
         let rec = record.migrated();
         Self {
@@ -343,8 +378,9 @@ impl Provider {
         match self.template.as_str() {
             "anthropic" => ProviderCapabilities::anthropic(),
             "deepseek" => ProviderCapabilities::deepseek(),
-            "openai" | "custom" => ProviderCapabilities::openai_compatible(),
-            _ => ProviderCapabilities::openai_compatible(),
+            "openai" => ProviderCapabilities::openai_compatible(),
+            // Custom / unknown endpoints: conservative until configured or probed.
+            _ => ProviderCapabilities::conservative(),
         }
     }
 
@@ -921,6 +957,8 @@ fn openai_tool_payload(tools: &[ToolSchema]) -> Vec<Value> {
         .collect()
 }
 
+/// Serialize IR → OpenAI-compatible Chat Completions `messages` (official
+/// OpenAPI: assistant `tool_calls` + tool-role `tool_call_id`).
 fn openai_messages(messages: &[ProviderMessage]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for message in messages {
@@ -971,6 +1009,8 @@ fn openai_messages(messages: &[ProviderMessage]) -> Vec<Value> {
                         call_id, content, ..
                     } = block
                     {
+                        // Official OpenAI tool message has no `is_error` field;
+                        // error semantics travel in `content` (see lib push_tool_results).
                         out.push(json!({
                             "role": "tool",
                             "tool_call_id": call_id,
@@ -1092,12 +1132,20 @@ fn parse_openai_body(body: OpenAiResponse, model_id: &str) -> Result<ChatRespons
     })
 }
 
+/// Parse OpenAI Chat Completions `function.arguments` (JSON **string** per
+/// official OpenAPI). Malformed JSON becomes a non-object `Value::String` so
+/// the typed tool registry rejects it — never a silent free-text mutation.
 fn parse_openai_arguments(raw: &str) -> Value {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Value::Object(Default::default());
     }
-    serde_json::from_str(trimmed).unwrap_or(Value::String(trimmed.to_owned()))
+    match serde_json::from_str(trimmed) {
+        Ok(v) if v.is_object() || v.is_array() => v,
+        Ok(Value::String(s)) => Value::String(s),
+        Ok(_) => Value::String(trimmed.to_owned()),
+        Err(_) => Value::String(trimmed.to_owned()),
+    }
 }
 
 fn openai_sse(
@@ -1518,6 +1566,7 @@ fn anthropic_sse(
     let mut text = String::new();
     let mut usage = (0u32, 0u32);
     let mut pending_tool: Option<NativeToolCall> = None;
+    let mut completed_tools: Vec<NativeToolCall> = Vec::new();
     let mut buf = [0u8; 4096];
     use std::io::Read;
 
@@ -1611,6 +1660,8 @@ fn anthropic_sse(
                                     Value::String(s) => s,
                                     other => other.to_string(),
                                 };
+                                // Malformed partial JSON must stay non-object so the
+                                // registry rejects it (never free-text mutation).
                                 tool.arguments = if raw_args.trim().is_empty() {
                                     Value::Object(Default::default())
                                 } else {
@@ -1620,6 +1671,7 @@ fn anthropic_sse(
                                 let _ = on_event(ProviderEvent::ToolCallComplete {
                                     call: tool.clone(),
                                 });
+                                completed_tools.push(tool);
                             }
                         }
                         "message_delta" => {
@@ -1671,7 +1723,7 @@ fn anthropic_sse(
         text,
         input_tokens: usage.0,
         output_tokens: usage.1,
-        native_tool_calls: Vec::new(),
+        native_tool_calls: completed_tools,
         model_id: model_id.to_owned(),
         finish_reason: "stop".into(),
     })
@@ -1768,6 +1820,8 @@ pub fn openai_request_json(
     }))
 }
 
+/// Serialize IR → Anthropic Messages API request JSON (official SDK contract:
+/// `system` top-level; tools use `input_schema`; `tool_use` / `tool_result` blocks).
 pub fn anthropic_request_json(
     provider: &Provider,
     messages: &[ProviderMessage],
@@ -1878,6 +1932,492 @@ mod tests {
         };
         assert!(!text_only.capabilities().native_tools);
         assert!(!text_only.capabilities().streaming);
+    }
+
+    #[test]
+    fn custom_provider_capabilities_are_conservative_by_default() {
+        let custom = Provider::new("custom", "sk", "https://proxy.example/v1", "my-model-v2");
+        let caps = custom.capabilities();
+        assert!(caps.text_chat);
+        assert!(
+            !caps.native_tools && !caps.streaming && !caps.token_usage && !caps.reasoning,
+            "custom must not assume native_tools/streaming/token_usage, got {caps:?}"
+        );
+        let enabled = Provider {
+            capabilities_override: Some(ProviderCapabilities::openai_compatible()),
+            ..custom
+        };
+        assert!(enabled.capabilities().native_tools);
+        assert!(enabled.capabilities().streaming);
+        assert!(enabled.capabilities().token_usage);
+        let unknown = Provider::new("mystery-vendor", "sk", "", "m");
+        assert!(!unknown.capabilities().native_tools);
+    }
+
+    #[test]
+    fn provider_capabilities_true_has_contract_coverage() {
+        for (name, caps) in [
+            ("anthropic", ProviderCapabilities::anthropic()),
+            ("openai", ProviderCapabilities::openai_compatible()),
+            ("deepseek", ProviderCapabilities::deepseek()),
+        ] {
+            assert!(caps.native_tools, "{name} native_tools contract");
+            assert!(caps.streaming, "{name} streaming contract");
+            assert!(caps.token_usage, "{name} token_usage contract");
+            assert!(caps.text_chat, "{name} text_chat contract");
+        }
+        let conservative = ProviderCapabilities::conservative();
+        assert!(conservative.text_chat);
+        assert!(!conservative.native_tools);
+        assert!(!conservative.streaming);
+        assert!(!conservative.token_usage);
+        assert!(!conservative.reasoning);
+    }
+
+    #[test]
+    fn model_id_and_display_name_are_permanently_separated() {
+        let p = Provider::new("anthropic", "sk", "", "Claude Sonnet 5");
+        assert_eq!(p.display_label(), "Claude Sonnet 5");
+        assert_eq!(p.resolved_model_id(), "claude-sonnet-4-5");
+        let payload = anthropic_request_json(&p, &[ProviderMessage::user("hi")], &[], 512).unwrap();
+        assert_eq!(payload["model"], "claude-sonnet-4-5");
+        assert_ne!(payload["model"], "Claude Sonnet 5");
+
+        let rec = ProviderConfigRecord {
+            id: "p".into(),
+            name: "custom".into(),
+            template: "custom".into(),
+            model: "Claude Sonnet 5".into(),
+            model_id: Some("explicit-api-id-v9".into()),
+            display_name: Some("Marketing Label".into()),
+            endpoint: "https://x.test".into(),
+            api_key: "sk".into(),
+        }
+        .migrated();
+        assert_eq!(rec.model_id.as_deref(), Some("explicit-api-id-v9"));
+        assert_eq!(rec.display_name.as_deref(), Some("Marketing Label"));
+        let provider = Provider::from_record(rec);
+        assert_eq!(provider.resolved_model_id(), "explicit-api-id-v9");
+        assert_eq!(provider.display_label(), "Marketing Label");
+    }
+
+    #[test]
+    fn catalog_is_migration_aid_not_authoritative_api_id_source() {
+        let spec = resolve_model_identity("anthropic", "Claude Brand New Box");
+        assert_eq!(spec.model_id, "", "no inventing model ids from marketing");
+        let spec = resolve_model_identity("custom", "partner-chat-2026-01");
+        assert_eq!(spec.model_id, "partner-chat-2026-01");
+        assert_eq!(spec.display_name, "partner-chat-2026-01");
+    }
+
+    /// Official OpenAI Chat Completions multi-turn tool contract:
+    /// user → assistant tool_calls (JSON-string args) → tool result → second assistant.
+    #[test]
+    fn native_tool_openai_contract_multi_turn_multi_call() {
+        let provider = openai_provider();
+        let tools = vec![
+            ToolSchema {
+                name: "read_file".into(),
+                description: "Read a file".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                }),
+            },
+            ToolSchema {
+                name: "run_command".into(),
+                description: "Run a command".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "command": { "type": "string" } },
+                    "required": ["command"],
+                }),
+            },
+        ];
+
+        let history = vec![
+            ProviderMessage::system("You are Kodo"),
+            ProviderMessage::user("inspect and test"),
+        ];
+        let req1 = openai_request_json(&provider, &history, &tools, 2048).unwrap();
+        assert_eq!(req1["model"], "gpt-4o");
+        assert_eq!(req1["tool_choice"], "auto");
+        let tools_arr = req1["tools"].as_array().unwrap();
+        assert_eq!(tools_arr.len(), 2);
+        for t in tools_arr {
+            assert_eq!(t["type"], "function", "official ChatCompletionTool type");
+            assert!(t["function"]["name"].is_string());
+            assert!(t["function"]["parameters"].is_object());
+        }
+
+        let response_fixture = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc123",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"src/lib.rs\"}"
+                            }
+                        },
+                        {
+                            "id": "call_def456",
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": "{\"command\":\"cargo test\"}"
+                            }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 82, "completion_tokens": 17 }
+        });
+        let body: OpenAiResponse = serde_json::from_value(response_fixture).unwrap();
+        let response = parse_openai_body(body, "gpt-4o").unwrap();
+        assert_eq!(
+            response.native_tool_calls.len(),
+            2,
+            "multiple calls in one turn"
+        );
+        assert_eq!(response.native_tool_calls[0].id, "call_abc123");
+        assert_eq!(response.native_tool_calls[1].id, "call_def456");
+        assert_eq!(
+            response.native_tool_calls[0].arguments["path"],
+            "src/lib.rs"
+        );
+        assert_eq!(
+            response.native_tool_calls[1].arguments["command"],
+            "cargo test"
+        );
+        assert_eq!(response.finish_reason, "tool_calls");
+        assert_eq!(response.input_tokens, 82);
+        assert_eq!(response.output_tokens, 17);
+
+        let assistant = openai_assistant_message_from_response(&response);
+        let history2 = vec![
+            ProviderMessage::system("You are Kodo"),
+            ProviderMessage::user("inspect and test"),
+            assistant,
+            ProviderMessage::tool_result("call_abc123", "fn main() {}", false),
+            ProviderMessage::tool_result("call_def456", "test result: ok", false),
+        ];
+        let req2 = openai_request_json(&provider, &history2, &tools, 2048).unwrap();
+        let msgs = req2["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 5);
+        let asst = &msgs[2];
+        assert_eq!(asst["role"], "assistant");
+        let tcs = asst["tool_calls"].as_array().unwrap();
+        assert_eq!(tcs.len(), 2);
+        assert_eq!(tcs[0]["id"], "call_abc123");
+        assert_eq!(tcs[0]["type"], "function");
+        let args0 = tcs[0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments is string");
+        assert_eq!(
+            serde_json::from_str::<Value>(args0).unwrap()["path"],
+            "src/lib.rs"
+        );
+        assert_eq!(tcs[1]["id"], "call_def456");
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[3]["tool_call_id"], "call_abc123");
+        assert_eq!(msgs[4]["role"], "tool");
+        assert_eq!(msgs[4]["tool_call_id"], "call_def456");
+        assert!(
+            msgs[3].get("is_error").is_none(),
+            "OpenAI tool message has no is_error"
+        );
+
+        let turn2_fixture = json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "All good." },
+                "finish_reason": "stop"
+            }]
+        });
+        let body2: OpenAiResponse = serde_json::from_value(turn2_fixture).unwrap();
+        let response2 = parse_openai_body(body2, "gpt-4o").unwrap();
+        assert_eq!(response2.text, "All good.");
+        assert!(response2.native_tool_calls.is_empty());
+        assert_eq!(response2.finish_reason, "stop");
+    }
+
+    /// Official Anthropic Messages multi-turn tool contract (SDK types).
+    #[test]
+    fn native_tool_anthropic_contract_multi_turn_multi_call() {
+        let provider = anthropic_provider();
+        let tools = vec![
+            ToolSchema {
+                name: "read_file".into(),
+                description: "Read a file".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                }),
+            },
+            ToolSchema {
+                name: "run_command".into(),
+                description: "Run a command".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "command": { "type": "string" } },
+                    "required": ["command"],
+                }),
+            },
+        ];
+
+        let history = vec![
+            ProviderMessage::system("You are Kodo"),
+            ProviderMessage::user("inspect and test"),
+        ];
+        let req1 = anthropic_request_json(&provider, &history, &tools, 2048).unwrap();
+        assert_eq!(req1["model"], "claude-sonnet-4-5");
+        assert!(req1["system"].is_string());
+        let tools_arr = req1["tools"].as_array().unwrap();
+        assert_eq!(tools_arr.len(), 2);
+        for t in tools_arr {
+            assert!(t["name"].is_string());
+            assert!(
+                t["input_schema"].is_object(),
+                "official ToolParam.input_schema"
+            );
+            assert!(t.get("function").is_none(), "not OpenAI function shape");
+        }
+        let msgs = req1["messages"].as_array().unwrap();
+        assert!(msgs.iter().all(|m| m["role"] != "system"));
+
+        let response_fixture = json!({
+            "content": [
+                { "type": "text", "text": "I will inspect both." },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01A09q90qw90lq917835lq9",
+                    "name": "read_file",
+                    "input": { "path": "src/lib.rs" }
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01B09q90qw90lq917835lq9",
+                    "name": "run_command",
+                    "input": { "command": "cargo test" }
+                }
+            ],
+            "usage": { "input_tokens": 25, "output_tokens": 40 },
+            "stop_reason": "tool_use"
+        });
+        let body: AnthropicResponse = serde_json::from_value(response_fixture).unwrap();
+        let response = parse_anthropic_body(body, "claude-sonnet-4-5").unwrap();
+        assert_eq!(response.native_tool_calls.len(), 2);
+        assert_eq!(
+            response.native_tool_calls[0].id,
+            "toolu_01A09q90qw90lq917835lq9"
+        );
+        assert_eq!(
+            response.native_tool_calls[1].id,
+            "toolu_01B09q90qw90lq917835lq9"
+        );
+        assert_eq!(
+            response.native_tool_calls[0].arguments["path"],
+            "src/lib.rs"
+        );
+        assert_eq!(response.finish_reason, "tool_use");
+
+        let blocks = anthropic_assistant_blocks(&response);
+        let history2 = vec![
+            ProviderMessage::system("You are Kodo"),
+            ProviderMessage::user("inspect and test"),
+            ProviderMessage {
+                role: MessageRole::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "I will inspect both.".into(),
+                    },
+                    ContentBlock::ToolCall {
+                        id: response.native_tool_calls[0].id.clone(),
+                        name: response.native_tool_calls[0].name.clone(),
+                        arguments: response.native_tool_calls[0].arguments.clone(),
+                    },
+                    ContentBlock::ToolCall {
+                        id: response.native_tool_calls[1].id.clone(),
+                        name: response.native_tool_calls[1].name.clone(),
+                        arguments: response.native_tool_calls[1].arguments.clone(),
+                    },
+                ],
+            },
+            ProviderMessage::tool_result("toolu_01A09q90qw90lq917835lq9", "fn main() {}", false),
+            ProviderMessage::tool_result("toolu_01B09q90qw90lq917835lq9", "ERROR: exit 101", true),
+        ];
+        let req2 = anthropic_request_json(&provider, &history2, &tools, 2048).unwrap();
+        let msgs2 = req2["messages"].as_array().unwrap();
+        let asst = msgs2
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant");
+        let tool_uses: Vec<_> = asst["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["type"] == "tool_use")
+            .collect();
+        assert_eq!(tool_uses.len(), 2);
+        assert_eq!(tool_uses[0]["id"], "toolu_01A09q90qw90lq917835lq9");
+        assert_eq!(tool_uses[0]["input"]["path"], "src/lib.rs");
+        assert_eq!(tool_uses[1]["id"], "toolu_01B09q90qw90lq917835lq9");
+
+        let last_user = msgs2.iter().rfind(|m| m["role"] == "user").unwrap();
+        let results: Vec<_> = last_user["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["type"] == "tool_result")
+            .cloned()
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["tool_use_id"], tool_uses[0]["id"]);
+        assert_eq!(results[0]["is_error"], false);
+        assert_eq!(results[1]["tool_use_id"], tool_uses[1]["id"]);
+        assert_eq!(results[1]["is_error"], true, "error semantics preserved");
+        assert!(results[1]["content"].as_str().unwrap().contains("ERROR"));
+        assert_eq!(blocks[1]["id"], tool_uses[0]["id"]);
+    }
+
+    #[test]
+    fn tool_call_ids_survive_full_roundtrip_both_providers() {
+        let ids = ["call_stable_1", "toolu_stable_2"];
+        let response = ChatResponse {
+            text: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            native_tool_calls: vec![
+                NativeToolCall {
+                    id: ids[0].into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path":"a"}),
+                },
+                NativeToolCall {
+                    id: ids[1].into(),
+                    name: "run_command".into(),
+                    arguments: json!({"command":"true"}),
+                },
+            ],
+            model_id: "gpt-4o".into(),
+            finish_reason: "tool_calls".into(),
+        };
+        let assistant = openai_assistant_message_from_response(&response);
+        let payload = openai_request_json(
+            &openai_provider(),
+            &[
+                ProviderMessage::user("go"),
+                assistant,
+                ProviderMessage::tool_result(ids[0], "ok", false),
+                ProviderMessage::tool_result(ids[1], "ok", false),
+            ],
+            &[],
+            512,
+        )
+        .unwrap();
+        let serialized = payload.to_string();
+        assert!(serialized.contains(ids[0]));
+        assert!(serialized.contains(ids[1]));
+
+        let blocks = anthropic_assistant_blocks(&response);
+        assert_eq!(blocks[0]["id"], ids[0]);
+        assert_eq!(blocks[1]["id"], ids[1]);
+        let payload = anthropic_request_json(
+            &anthropic_provider(),
+            &[
+                ProviderMessage::user("go"),
+                ProviderMessage {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::ToolCall {
+                        id: ids[0].into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path":"a"}),
+                    }],
+                },
+                ProviderMessage::tool_result(ids[0], "ok", false),
+            ],
+            &[],
+            512,
+        )
+        .unwrap();
+        assert!(payload.to_string().contains(ids[0]));
+    }
+
+    #[test]
+    fn malformed_tool_args_reject_instead_of_free_text_mutation() {
+        let broken = parse_openai_arguments("{not json");
+        assert!(broken.is_string(), "must not pretend to be an object");
+        let registry = crate::protocol::ToolRegistry::standard();
+        let inv = registry.accept(
+            crate::protocol::ToolCallId::new("m2"),
+            "write_file",
+            &broken,
+        );
+        assert!(
+            matches!(inv, crate::protocol::ToolInvocation::Rejected(_)),
+            "malformed args must be rejected: {inv:?}"
+        );
+        let result = inv.into_result();
+        assert!(!result.ok);
+        // Valid object still accepted (mutation path only after typed parse).
+        let ok_inv = registry.accept(
+            crate::protocol::ToolCallId::new("m3"),
+            "write_file",
+            &json!({"path":"src/a.rs","content":"x"}),
+        );
+        assert!(matches!(ok_inv, crate::protocol::ToolInvocation::Ready(_)));
+    }
+
+    #[test]
+    fn openai_tool_result_error_uses_content_not_is_error_field() {
+        let messages = vec![
+            ProviderMessage::user("do it"),
+            ProviderMessage::assistant(
+                "",
+                vec![NativeToolCall {
+                    id: "call_e".into(),
+                    name: "run_command".into(),
+                    arguments: json!({"command":"rm"}),
+                }],
+            ),
+            ProviderMessage::tool_result("call_e", "ERROR: permission denied", true),
+        ];
+        let payload = openai_request_json(&openai_provider(), &messages, &[], 512).unwrap();
+        let tool_msg = payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool message");
+        assert_eq!(tool_msg["tool_call_id"], "call_e");
+        assert!(
+            tool_msg["content"].as_str().unwrap().contains("ERROR:"),
+            "error semantics live in content"
+        );
+        assert!(tool_msg.get("is_error").is_none());
+
+        let payload = anthropic_request_json(&anthropic_provider(), &messages, &[], 512).unwrap();
+        let last = payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rfind(|m| m["role"] == "user")
+            .unwrap();
+        let tr = last["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["type"] == "tool_result")
+            .unwrap();
+        assert_eq!(tr["is_error"], true);
+        assert_eq!(tr["tool_use_id"], "call_e");
     }
 
     #[test]
