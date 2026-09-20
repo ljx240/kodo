@@ -157,6 +157,36 @@ test("a killed run is reported as interrupted, not as finished or working", asyn
   await expect(page.locator(".reply-working")).toHaveCount(0);
 });
 
+test("a recovered turn stamped interrupted paints interrupted, never working", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "修复路由",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        {
+          ask: "跑一下检查",
+          items: [{ id: 1, at: 1_700_000_000, status: "running", duration: null, kind: "reasoning", summary: "先看目录" }],
+          done: false,
+          stopped: false,
+          interrupted: true,
+          error: null,
+        },
+      ],
+    },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+
+  await expect(page.locator(".reply-interrupted")).toBeVisible();
+  await expect(page.locator(".reply-working")).toHaveCount(0);
+});
+
 test("a failover event surfaces failed model, class, and next model", async ({ page }) => {
   await stubShell(page, {
     workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },

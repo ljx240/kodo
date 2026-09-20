@@ -113,8 +113,14 @@ fn open_session(project: String, title: String) -> Result<SessionView, String> {
 }
 
 #[tauri::command]
-fn load_session(id: String) -> Result<SessionView, String> {
-    load(&sessions()?, &id)
+fn load_session(runs: State<'_, Runs>, id: String) -> Result<SessionView, String> {
+    let dir = sessions()?;
+    // A killed run must not read as Running forever (and never as Completed).
+    // Recovery only stamps `interrupted` — items, changes, and verification stay.
+    if !runs.is_live(&id) {
+        let _ = session::recover_interrupted(&dir, &id, session::now());
+    }
+    load(&dir, &id)
 }
 
 #[tauri::command]

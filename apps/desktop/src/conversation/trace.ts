@@ -82,7 +82,12 @@ export function toReply(turn: TurnDto, running: boolean): Reply {
     checks: answer?.kind === "agentMessage" ? answer.checks : [],
     ...totals(changes),
     changes,
-    interrupted: !running && !turn.done && !turn.stopped && !turn.error && steps.some(isRunning),
+    interrupted:
+      !running &&
+      !turn.done &&
+      !turn.stopped &&
+      !turn.error &&
+      (Boolean(turn.interrupted) || steps.some(isRunning)),
   };
 }
 

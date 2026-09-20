@@ -525,7 +525,7 @@ function UserMessage({ time, text, context }: { time?: string; text: string; con
 }
 
 function blank(ask: string, context: string[] = []): TurnDto {
-  return { ask, context, items: [], done: false, stopped: false, error: null };
+  return { ask, context, items: [], done: false, stopped: false, interrupted: false, error: null };
 }
 
 function reduce(turns: TurnDto[], event: RunEventDto): TurnDto[] {

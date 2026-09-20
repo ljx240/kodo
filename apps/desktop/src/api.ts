@@ -76,6 +76,8 @@ export type TurnDto = {
   items: ItemDto[];
   done: boolean;
   stopped: boolean;
+  /** Recovery stamped a killed run as interrupted (never Completed). */
+  interrupted?: boolean;
   error: string | null;
 };
 

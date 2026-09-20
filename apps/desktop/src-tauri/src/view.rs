@@ -74,6 +74,8 @@ pub struct TurnView {
     pub items: Vec<ItemView>,
     pub done: bool,
     pub stopped: bool,
+    /// Set when recovery reclassified a killed run's open items as interrupted.
+    pub interrupted: bool,
     pub error: Option<String>,
 }
 
@@ -233,6 +235,7 @@ impl From<session::Session> for SessionView {
                     items: turn.items.into_iter().map(Into::into).collect(),
                     done: turn.done,
                     stopped: turn.stopped,
+                    interrupted: turn.interrupted,
                     error: turn.error,
                 })
                 .collect(),
@@ -507,6 +510,7 @@ mod tests {
                 })],
                 done: true,
                 stopped: false,
+                interrupted: false,
                 error: None,
             }],
         };

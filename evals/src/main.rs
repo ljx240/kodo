@@ -666,7 +666,8 @@ fn run_deterministic(report: &mut EvalReport) {
             && main.contains("fallback-behavior")
             && main.contains("extended-thinking")
             && main.contains("max-output-tokens")
-            && main.contains("default-model");
+            && main.contains("default-model")
+            && main.contains("recover_interrupted");
         report.check(
             "settings_have_runtime_consumers",
             ok,
@@ -894,7 +895,8 @@ fn run_deterministic(report: &mut EvalReport) {
             && app.contains("auto-detect-git-branch")
             && run.contains("fallback-behavior")
             && run.contains("permission")
-            && run.contains("default-model");
+            && run.contains("default-model")
+            && run.contains("recover_interrupted");
         report.check(
             "visible_settings_have_runtime_consumers",
             ok,
