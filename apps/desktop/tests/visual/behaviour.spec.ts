@@ -157,6 +157,39 @@ test("a killed run is reported as interrupted, not as finished or working", asyn
   await expect(page.locator(".reply-working")).toHaveCount(0);
 });
 
+test("a failover event surfaces failed model, class, and next model", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: { id: "s1", project: "/tmp/ws/alpha", title: "修复路由", at: 1_700_000_000, archived: false, turns: [] },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+  await page.locator(".composer-input").fill("试一下 failover");
+  await page.locator(".composer-input").press("Enter");
+  await expect(page.locator(".reply-working")).toBeVisible();
+
+  await emit(page, {
+    type: "failover",
+    session: "s1",
+    fromProvider: "GPT-4o",
+    fromModel: "gpt-4o",
+    errorClass: "RateLimit",
+    error: "429",
+    toProvider: "Claude Sonnet 5",
+    toModel: "claude-sonnet-4-5",
+  });
+
+  const note = page.locator('[data-testid="failover-note"]');
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("GPT-4o");
+  await expect(note).toContainText("gpt-4o");
+  await expect(note).toContainText("RateLimit");
+  await expect(note).toContainText("Claude Sonnet 5");
+  await expect(note).toContainText("claude-sonnet-4-5");
+});
+
 test("the Trace page's three tabs swap the pane, none of them onto nothing", async ({ page }) => {
   await page.goto("/ui-demo/trace");
 

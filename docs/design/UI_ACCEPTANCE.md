@@ -136,6 +136,7 @@ cannot check any of them.
 - [ ] a running composer shows stop, not send;
 - [ ] a finished reply does not claim to be working;
 - [ ] a killed run reports as interrupted, never as finished or working;
+- [ ] a failover event shows failed provider/model, error class, and next model;
 - [ ] the Response Trace tabs each swap the pane;
 - [ ] an Inspector card collapses and restores from its header.
 

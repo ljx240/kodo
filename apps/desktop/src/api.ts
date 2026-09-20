@@ -119,7 +119,17 @@ export type RunEventDto =
       reason?: string;
     }
   | { type: "textDelta"; session: string; text: string }
-  | { type: "progress"; session: string; phase: string; detail: string };
+  | { type: "progress"; session: string; phase: string; detail: string }
+  | {
+      type: "failover";
+      session: string;
+      fromProvider: string;
+      fromModel: string;
+      errorClass: string;
+      error: string;
+      toProvider: string;
+      toModel: string;
+    };
 
 export const RUN_EVENT = "run:event";
 

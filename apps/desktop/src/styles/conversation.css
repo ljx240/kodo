@@ -63,6 +63,13 @@
   font-size: var(--kodo-font-md);
 }
 
+/* Provider switch observed on the streaming path (failed → next + class). */
+.reply-failover {
+  margin: 0 0 8px 34px;
+  color: var(--kodo-text-muted, var(--kodo-text-secondary, #666));
+  font-size: var(--kodo-font-sm, 12px);
+}
+
 /* ---------------------------------------------------------------- trace -- */
 
 /* `padding: 0` clears the ordered list's default 40px inline start, which

@@ -665,7 +665,8 @@ fn run_deterministic(report: &mut EvalReport) {
         let ok = main.contains("permission")
             && main.contains("fallback-behavior")
             && main.contains("extended-thinking")
-            && main.contains("max-output-tokens");
+            && main.contains("max-output-tokens")
+            && main.contains("default-model");
         report.check(
             "settings_have_runtime_consumers",
             ok,
@@ -673,7 +674,7 @@ fn run_deterministic(report: &mut EvalReport) {
         );
     }
 
-    // 14) provider failover classification
+    // 14) provider failover classification + streaming path + UI event
     {
         let ok = !ProviderFailureClass::Auth.allows_failover()
             && !ProviderFailureClass::InvalidModel.allows_failover()
@@ -682,6 +683,32 @@ fn run_deterministic(report: &mut EvalReport) {
             "failover_classification_matches_ui",
             ok,
             "failover classes wrong",
+        );
+
+        let lib = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../crates/agent/src/lib.rs"),
+        )
+        .unwrap_or_default();
+        let provider = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../crates/agent/src/provider.rs"),
+        )
+        .unwrap_or_default();
+        let api = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../apps/desktop/src/api.ts"),
+        )
+        .unwrap_or_default();
+        let streaming_path = provider.contains("chat_stream_with_failover")
+            && lib.contains("chat_stream_with_failover")
+            && !lib.contains("provider::chat_with_failover(");
+        report.check(
+            "failover_uses_streaming_path",
+            streaming_path,
+            "agent still falls back to blocking chat_with_failover",
+        );
+        report.check(
+            "failover_event_reaches_ui",
+            api.contains("type: \"failover\"") && provider.contains("ProviderEvent::Failover"),
+            "structured failover event missing on the UI channel",
         );
     }
 
@@ -863,12 +890,29 @@ fn run_deterministic(report: &mut EvalReport) {
         let ok = app.contains("data-density")
             && app.contains("show-line-numbers")
             && app.contains("use-system-font")
+            && app.contains("data-theme")
+            && app.contains("auto-detect-git-branch")
             && run.contains("fallback-behavior")
-            && run.contains("permission");
+            && run.contains("permission")
+            && run.contains("default-model");
         report.check(
             "visible_settings_have_runtime_consumers",
             ok,
             "App/main wiring",
+        );
+    }
+
+    // 21b) max-output-tokens has a shared clamp helper used by payloads
+    {
+        let provider = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../crates/agent/src/provider.rs"),
+        )
+        .unwrap_or_default();
+        report.check(
+            "max_output_tokens_clamped",
+            provider.contains("fn effective_max_tokens")
+                && provider.matches("effective_max_tokens(").count() >= 3,
+            "effective_max_tokens missing or not used",
         );
     }
 

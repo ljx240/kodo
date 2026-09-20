@@ -303,6 +303,16 @@ pub enum RunEvent {
         phase: String,
         detail: String,
     },
+    /// Provider switch on the streaming path: failed side, error class, next side.
+    Failover {
+        session: String,
+        from_provider: String,
+        from_model: String,
+        error_class: String,
+        error: String,
+        to_provider: String,
+        to_model: String,
+    },
 }
 
 /// One archived conversation, as the Archive table needs it.
