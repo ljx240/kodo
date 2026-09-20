@@ -43,11 +43,23 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
     if (!projectPath || !sessionId) return;
     setMessage(null);
     void undoTurn(projectPath, sessionId)
-      .then((restored) => {
-        if (restored && restored.length >= 0) {
-          setMessage(restored.length ? `已撤销 ${restored.length} 个 Kodo 修改` : "没有可撤销的 Kodo 修改");
-          reload();
+      .then((report) => {
+        if (!report) return;
+        const parts: string[] = [];
+        if (report.restored.length) {
+          parts.push(`已撤销 ${report.restored.length} 个 Kodo 修改`);
         }
+        if (report.conflicts.length) {
+          const details = report.conflicts
+            .map((c) => `${c.path}（${c.reason}）`)
+            .join("、");
+          parts.push(`撤销冲突 ${report.conflicts.length} 个：${details} — 已保留您的修改`);
+        }
+        if (!parts.length) {
+          parts.push("没有可撤销的 Kodo 修改");
+        }
+        setMessage(parts.join(" · "));
+        reload();
       })
       .catch((error: unknown) => setMessage(`撤销失败：${String(error)}`));
   };
@@ -78,8 +90,15 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
               onClick={() => setOpen((cur) => (cur === change.path ? null : change.path))}
             >
               {change.path}
-              {change.userPreexisting ? " · (user dirty before)" : ""}
+              {change.userPreexisting ? " · (pre-existing user change)" : ""}
+              {change.conflict ? " · (undo conflict)" : ""}
+              {!change.conflict && !change.userPreexisting ? " · (Kodo change)" : ""}
             </button>
+            {change.conflict && (
+              <p className="ins-note" data-testid={`conflict-${change.path}`}>
+                Undo conflict — working tree diverged from Kodo&apos;s after-hash;您的后续修改会被保留
+              </p>
+            )}
             {open === change.path && (
               <pre className="terminal-block diff-block">{change.diff || "(no diff)"}</pre>
             )}

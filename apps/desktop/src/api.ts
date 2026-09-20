@@ -152,6 +152,21 @@ export type TurnChangeDto = {
   path: string;
   diff: string;
   userPreexisting: boolean;
+  /** Live undo state vs recorded after-hash. */
+  undoState: "clean" | "already_baseline" | "diverged" | "missing" | string;
+  /** True when working tree diverged from Kodo's after-hash (state C risk). */
+  conflict: boolean;
+};
+
+export type UndoConflictDto = {
+  path: string;
+  reason: string;
+  message: string;
+};
+
+export type UndoReportDto = {
+  restored: string[];
+  conflicts: UndoConflictDto[];
 };
 
 /** Per-file unified diffs of Kodo's changes for this session. */
@@ -159,9 +174,9 @@ export function turnChanges(project: string, id: string): Promise<TurnChangeDto[
   return read<TurnChangeDto[]>("turn_changes", { project, id });
 }
 
-/** Undo only Kodo's changes; user-only edits are never touched. */
-export function undoTurn(project: string, id: string): Promise<string[] | null> {
-  return write<string[]>("undo_turn", { project, id });
+/** Undo only Kodo's changes; user-only and post-turn user edits are never overwritten. */
+export function undoTurn(project: string, id: string): Promise<UndoReportDto | null> {
+  return write<UndoReportDto>("undo_turn", { project, id });
 }
 
 export function workspace(): Promise<WorkspaceDto | null> {

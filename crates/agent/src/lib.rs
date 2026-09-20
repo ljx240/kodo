@@ -47,7 +47,9 @@ use tools::{
 };
 use verify::{FinalStatus, VerificationRunner};
 
-pub use checkpoint::{unified_diff, TurnChangeSet};
+pub use checkpoint::{
+    unified_diff, TurnChangeSet, UndoConflict, UndoConflictReason, UndoFileState, UndoReport,
+};
 pub use classify::{classify as classify_task, TaskType};
 pub use context::{
     ContextBudget as TurnContextBudget, ContextManager, ContextSpan, DEFAULT_CONTEXT_CHARS,
@@ -286,7 +288,9 @@ pub fn load_changeset(project: &Path, session_id: &str) -> Result<TurnChangeSet,
 }
 
 /// Undo only Kodo's changes for a session; refuses when the changeset is missing.
-pub fn undo_session_changes(project: &Path, session_id: &str) -> Result<Vec<String>, String> {
+/// Returns which files were restored and which hit undo conflicts (never
+/// snapshot-overwrites user post-turn edits).
+pub fn undo_session_changes(project: &Path, session_id: &str) -> Result<UndoReport, String> {
     let changeset = load_changeset(project, session_id)?;
     changeset.undo_kodo_changes(project)
 }
