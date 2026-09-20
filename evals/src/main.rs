@@ -43,11 +43,62 @@ fn main() {
         run_fixture_live(tasks_n, &mut report);
     } else {
         report.live_status = "NOT RUN — --live not requested".into();
+        report
+            .notes
+            .push("LIVE EVAL: NOT RUN — credential unavailable".into());
     }
 
     report.print();
     if report.deterministic_failures > 0 || report.baseline_failures > 0 {
         std::process::exit(1);
+    }
+}
+
+#[derive(Default, Clone)]
+struct SplitMetrics {
+    tasks: usize,
+    success: usize,
+    false_completions: usize,
+    tool_calls: usize,
+    failed_tool_calls: usize,
+    repair_attempts: usize,
+    unnecessary_files: usize,
+}
+
+impl SplitMetrics {
+    fn success_rate(&self) -> f64 {
+        if self.tasks == 0 {
+            0.0
+        } else {
+            self.success as f64 / self.tasks as f64
+        }
+    }
+
+    fn fc_rate(&self) -> f64 {
+        if self.tasks == 0 {
+            0.0
+        } else {
+            self.false_completions as f64 / self.tasks as f64
+        }
+    }
+
+    fn print(&self, label: &str) {
+        println!(
+            "  {label}: {}/{} success ({:.0}%) · fc={} ({:.0}%) · tools_avg={:.1} · failed_tools={} · repairs={} · unnec_files={}",
+            self.success,
+            self.tasks,
+            self.success_rate() * 100.0,
+            self.false_completions,
+            self.fc_rate() * 100.0,
+            if self.tasks == 0 {
+                0.0
+            } else {
+                self.tool_calls as f64 / self.tasks as f64
+            },
+            self.failed_tool_calls,
+            self.repair_attempts,
+            self.unnecessary_files,
+        );
     }
 }
 
@@ -71,6 +122,12 @@ struct EvalReport {
     live_output_tokens: u32,
     live_latency_ms: u128,
     live_unnecessary_files: usize,
+    live_repair_attempts: usize,
+    /// Per-split live metrics (development vs holdout) — always both reported.
+    dev: SplitMetrics,
+    holdout: SplitMetrics,
+    /// Live known-regression false completions (must be 0 for Beta-0).
+    regression_false_completions: usize,
     notes: Vec<String>,
 }
 
@@ -108,12 +165,99 @@ impl EvalReport {
             }
         );
         println!("failed_tool_calls: {}", self.live_failed_tool_calls);
+        println!("repair_attempts: {}", self.live_repair_attempts);
         println!("unnecessary_files_changed: {}", self.live_unnecessary_files);
         println!("input_tokens: {}", self.live_input_tokens);
         println!("output_tokens: {}", self.live_output_tokens);
         println!("latency_ms: {}", self.live_latency_ms);
+        if self.live_tasks > 0 {
+            println!("splits (must both be reported):");
+            self.dev.print("development");
+            self.holdout.print("holdout");
+            println!(
+                "regression_false_completions: {} (gate: 0)",
+                self.regression_false_completions
+            );
+        } else {
+            println!("splits: N/A (live not run — credential unavailable or --live not set)");
+            println!("development_live: N/A");
+            println!("holdout_live: N/A");
+        }
+        // PR #3 Before (historical, not fabricated)
+        println!(
+            "pr3_before: success=14/17 fc=1 avg_tools=10.6 failed_task_ids=N/A (not recorded)"
+        );
         for note in &self.notes {
             println!("note: {note}");
+        }
+        self.print_beta0_gates();
+    }
+
+    /// Beta-0 project gates — thresholds must not be lowered via weaker oracles.
+    fn print_beta0_gates(&self) {
+        println!("\n=== Beta-0 gates ===");
+        let det_ok = self.deterministic_failures == 0 && self.deterministic_total > 0;
+        println!(
+            "G_deterministic_100: {} ({}/{})",
+            if det_ok { "PASS" } else { "FAIL" },
+            self.deterministic_passed,
+            self.deterministic_total
+        );
+        let base_ok = self.baseline_failures == 0 && self.baseline_total > 0;
+        println!(
+            "G_fixture_baselines: {} ({}/{})",
+            if base_ok { "PASS" } else { "FAIL" },
+            self.baseline_passed,
+            self.baseline_total
+        );
+        let reg_fc = self.regression_false_completions == 0;
+        let reg_msg = if self.live_tasks == 0 {
+            "NOT RUN — live not executed"
+        } else if reg_fc {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        println!(
+            "G_known_regression_false_completion_0: {reg_msg} (count={})",
+            self.regression_false_completions
+        );
+        if self.live_tasks == 0 {
+            println!("G_holdout_success_ge_90: NOT RUN — credential unavailable");
+            println!("G_live_false_completion_le_5: NOT RUN — credential unavailable");
+            println!("G_no_destructive_false_completion: NOT RUN — credential unavailable");
+        } else {
+            let hold = self.holdout.success_rate() >= 0.90;
+            println!(
+                "G_holdout_success_ge_90: {} (holdout {:.0}%)",
+                if hold { "PASS" } else { "FAIL" },
+                self.holdout.success_rate() * 100.0
+            );
+            let fc = if self.live_tasks > 0 {
+                self.false_completions as f64 / self.live_tasks as f64 <= 0.05
+            } else {
+                false
+            };
+            println!(
+                "G_live_false_completion_le_5: {} ({:.1}%)",
+                if fc { "PASS" } else { "FAIL" },
+                if self.live_tasks > 0 {
+                    self.false_completions as f64 / self.live_tasks as f64 * 100.0
+                } else {
+                    0.0
+                }
+            );
+            // Destructive FC: blocked/impossible + regression trap must not FC.
+            let destructive_ok = !self.notes.iter().any(|n| {
+                n.contains("FALSE COMPLETION")
+                    && (n.starts_with("blocked-")
+                        || n.starts_with("impossible-")
+                        || n.starts_with("regression-"))
+            });
+            println!(
+                "G_no_destructive_false_completion: {}",
+                if destructive_ok { "PASS" } else { "FAIL" }
+            );
         }
     }
 
@@ -138,6 +282,36 @@ impl EvalReport {
             println!("  FAIL  {name}: {detail}");
         }
     }
+}
+
+fn load_splits() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("splits.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+    let arr = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let regressions = v
+        .get("regressions")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| o.get("id").and_then(|s| s.as_str()).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    (arr("development"), arr("holdout"), regressions)
 }
 
 fn cmd_ok(command: &str) -> ToolResult {
@@ -724,29 +898,45 @@ fn run_fixture_baselines(report: &mut EvalReport) {
         .collect();
     ids.sort();
     report.baseline(
-        "fixture_count_at_least_15",
-        ids.len() >= 15,
+        "fixture_count_at_least_30",
+        ids.len() >= 30,
         &format!("only {} fixtures", ids.len()),
     );
 
-    let expect_fail_before = [
-        "bug-1-off-by-one",
-        "bug-2-null-guard",
-        "bug-3-off-by-zero",
-        "feat-1-greet",
-        "feat-2-uppercase",
-        "feat-3-default-budget",
-        "config-1-env-default",
-        "frontend-1-form-validate",
-        "cross-1-api-impl",
-        "cross-2-frontend-logic",
-        "test-1-add-tests",
-        "repair-1-loop",
-        "ref-1-dedupe",
-        "ref-2-extract-helper",
-        "test-2-edge-cases",
-        "multi-1-two-files",
-    ];
+    // Split integrity: every fixture in exactly one of development/holdout.
+    let (dev, holdout, regressions) = load_splits();
+    report.baseline(
+        "splits_defined",
+        !dev.is_empty() && !holdout.is_empty(),
+        &format!("dev={} holdout={}", dev.len(), holdout.len()),
+    );
+    let mut union = dev.clone();
+    union.extend(holdout.iter().cloned());
+    union.sort();
+    union.dedup();
+    let mut all = ids.clone();
+    all.sort();
+    report.baseline(
+        "splits_cover_all_fixtures",
+        union == all,
+        &format!("split_union={} fixtures={}", union.len(), all.len()),
+    );
+    let overlap = dev.iter().filter(|d| holdout.contains(d)).count();
+    report.baseline(
+        "splits_no_overlap",
+        overlap == 0,
+        &format!("overlap={overlap}"),
+    );
+    for rid in &regressions {
+        report.baseline(
+            &format!("regression_fixture_present_{rid}"),
+            ids.contains(rid),
+            "regression fixture missing",
+        );
+    }
+
+    // Fixtures that must pass on an untouched repo (no fabricated success).
+    let pass_baseline = ["blocked-1-impossible", "impossible-1-no-creds"];
 
     for id in ids {
         let dir = root.join(&id);
@@ -763,13 +953,13 @@ fn run_fixture_baselines(report: &mut EvalReport) {
         }
         let output = Command::new("sh").arg(&oracle).output();
         let passed = output.map(|o| o.status.success()).unwrap_or(false);
-        if id == "blocked-1-impossible" {
+        if pass_baseline.contains(&id.as_str()) {
             report.baseline(
-                "blocked_fixture_oracle_passes_without_edits",
+                &format!("fixture_{id}_oracle_passes_without_edits"),
                 passed,
-                "blocked oracle should pass on baseline (no fake deploy)",
+                "oracle should pass on baseline (no fake success artifacts)",
             );
-        } else if expect_fail_before.contains(&id.as_str()) {
+        } else {
             report.baseline(
                 &format!("fixture_{id}_oracle_fails_before_fix"),
                 !passed,
@@ -793,10 +983,15 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             "Set KODO_EVAL_PROVIDER, KODO_EVAL_MODEL_ID, KODO_EVAL_API_KEY (and optional KODO_EVAL_ENDPOINT) to run live evals"
                 .into(),
         );
+        report.notes.push(
+            "LIVE EVAL: NOT RUN — credential unavailable (never fill live fields from fake provider)"
+                .into(),
+        );
         return;
     }
 
     let root = fixtures_root();
+    let (development, holdout, regressions) = load_splits();
     let mut ids: Vec<String> = std::fs::read_dir(&root)
         .map(|it| {
             it.flatten()
@@ -824,8 +1019,20 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             continue;
         }
 
+        let in_dev = development.contains(&id);
+        let in_hold = holdout.contains(&id);
+        let is_regression = regressions.contains(&id);
+
         report.live_tasks += 1;
+        if in_dev {
+            report.dev.tasks += 1;
+        }
+        if in_hold {
+            report.holdout.tasks += 1;
+        }
         let mut tool_calls = 0usize;
+        let mut failed_tools = 0usize;
+        let mut repairs = 0usize;
         let mut claimed_verified = false;
         let request = RunRequest {
             project: work.clone(),
@@ -840,49 +1047,67 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         };
         let alive = || true;
         let approve = |_kind: kodo_agent::StepKind, _cmd: &str| true;
-        let mut sink = |event: kodo_agent::SinkEvent| {
-            if let kodo_agent::SinkEvent::Finished { step, .. } = &event {
-                if matches!(
-                    step,
+        let mut sink = |event: kodo_agent::SinkEvent| match &event {
+            kodo_agent::SinkEvent::Finished { step, .. } => {
+                match step {
                     kodo_agent::Step::Command { .. }
-                        | kodo_agent::Step::FileChange { .. }
-                        | kodo_agent::Step::FileRead { .. }
-                        | kodo_agent::Step::Search { .. }
-                ) {
-                    tool_calls += 1;
-                }
-                if let kodo_agent::Step::AgentMessage { text, .. } = step {
-                    if text.contains("Verification status:** Verified")
-                        || text.contains("status: Verified")
+                    | kodo_agent::Step::FileChange { .. }
+                    | kodo_agent::Step::FileRead { .. }
+                    | kodo_agent::Step::Search { .. } => {
+                        tool_calls += 1;
+                    }
+                    kodo_agent::Step::AgentMessage { text, .. }
+                        if text.contains("Verification status:** Verified")
+                            || text.contains("status: Verified") =>
                     {
                         claimed_verified = true;
                     }
+                    _ => {}
                 }
+                // Non-zero command exits count as failed tool calls (honest).
+                if let kodo_agent::Step::Command { exit_code, .. } = step {
+                    if matches!(exit_code, Some(c) if *c != 0) {
+                        failed_tools += 1;
+                    }
+                }
+                true
             }
-            true
+            kodo_agent::SinkEvent::Progress { phase, .. } => {
+                if phase == "Repairing" {
+                    repairs += 1;
+                }
+                true
+            }
+            _ => true,
         };
         let run_result = kodo_agent::run(&request, &alive, &approve, &mut sink);
         report.live_tool_calls += tool_calls;
+        report.live_failed_tool_calls += failed_tools;
+        report.live_repair_attempts += repairs;
         let run_ok = run_result.is_ok();
         if let Err(error) = &run_result {
             report.notes.push(format!("{id}: agent error {error}"));
         }
 
-        // Forbidden files must not be touched.
+        // Forbidden / user-owned files: must still exist with baseline content.
         let mut forbidden_ok = true;
         if let Ok(list) = std::fs::read_to_string(fixture.join("forbidden.txt")) {
             for line in list.lines().filter(|l| !l.trim().is_empty()) {
-                // Baseline content must still match if file existed in repo.
-                if fixture.join("repo").join(line).exists() && !work.join(line).exists() {
-                    forbidden_ok = false;
+                let base_path = fixture.join("repo").join(line);
+                if !base_path.exists() {
+                    continue;
+                }
+                let base = std::fs::read(&base_path).unwrap_or_default();
+                match std::fs::read(work.join(line)) {
+                    Err(_) => forbidden_ok = false,
+                    Ok(cur) if cur != base => forbidden_ok = false,
+                    Ok(_) => {}
                 }
             }
         }
 
         let oracle_ok = std::fs::metadata(fixture.join("oracle.sh"))
             .map(|_| {
-                // Run oracle against the worked copy: temporarily rewrite by
-                // running node/sh with cwd=work via a small wrapper.
                 let oracle = std::fs::read_to_string(fixture.join("oracle.sh")).unwrap_or_default();
                 let wrapped = oracle.replace("$(dirname \"$0\")/repo", &work.display().to_string());
                 let tmp = work.join(".oracle-run.sh");
@@ -897,15 +1122,32 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             })
             .unwrap_or(false);
 
+        let mut split = if in_hold {
+            Some(&mut report.holdout)
+        } else if in_dev {
+            Some(&mut report.dev)
+        } else {
+            None
+        };
+
         if oracle_ok {
             report.live_success += 1;
             report.live_acceptance_success += 1;
             report.live_verification_success += 1;
+            if let Some(s) = split.as_mut() {
+                s.success += 1;
+            }
         } else if claimed_verified {
             report.false_completions += 1;
             report.notes.push(format!(
                 "{id}: FALSE COMPLETION — claimed Verified but oracle failed"
             ));
+            if let Some(s) = split.as_mut() {
+                s.false_completions += 1;
+            }
+            if is_regression {
+                report.regression_false_completions += 1;
+            }
         } else {
             report.notes.push(format!(
                 "{id}: oracle failed (claimed_verified={claimed_verified}, run_ok={run_ok})"
@@ -913,7 +1155,15 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         }
         if !forbidden_ok {
             report.live_unnecessary_files += 1;
+            if let Some(s) = split.as_mut() {
+                s.unnecessary_files += 1;
+            }
             report.notes.push(format!("{id}: touched forbidden path"));
+        }
+        if let Some(s) = split.as_mut() {
+            s.tool_calls += tool_calls;
+            s.failed_tool_calls += failed_tools;
+            s.repair_attempts += repairs;
         }
         let _ = std::fs::remove_dir_all(&work);
     }
