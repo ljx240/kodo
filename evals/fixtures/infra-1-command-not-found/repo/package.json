@@ -1,0 +1,6 @@
+{
+  "name": "infra1",
+  "scripts": {
+    "test": "./no-such-bin --run"
+  }
+}
