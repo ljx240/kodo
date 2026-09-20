@@ -254,7 +254,9 @@ impl VerificationRunner {
         cmds
     }
 
-    /// Run one command with timeout + process-tree kill. `alive` can cancel earlier.
+    /// Run one command with timeout + process-tree kill via **the same**
+    /// [`crate::process::ProcessRunner`] as agent shell tools. `alive` can
+    /// cancel earlier; cancelled/timeout are not ordinary exit failures.
     pub fn run_one(
         &self,
         project: &Path,
@@ -262,7 +264,7 @@ impl VerificationRunner {
         alive: &dyn Fn() -> bool,
     ) -> VerifyOutcome {
         let timeout_secs = (cmd.timeout_ms.max(1_000)).div_ceil(1_000);
-        // Reuse the agent command runner: process-group kill covers children.
+        // Shared ProcessRunner path — no uncancellable side channel.
         let outcome = crate::tools::command_run(project, &cmd.command, alive, timeout_secs);
         let combined = crate::tools::redact_secrets(&outcome.output);
         let code = outcome.exit_code;
@@ -716,6 +718,26 @@ error[E0308]: mismatched types
         let outcome = runner.run_one(&dir, &cmd, &|| true);
         assert!(outcome.ok);
         assert!(outcome.failure.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_verification_cancel_is_not_completed() {
+        let dir = std::env::temp_dir().join(format!("kodo-vcancel-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let runner = VerificationRunner::new(30_000);
+        let cmd = VerifyCommand {
+            kind: VerifyKind::Test,
+            command: "sleep 20".into(),
+            timeout_ms: 15_000,
+        };
+        let outcome = runner.run_one(&dir, &cmd, &|| false);
+        assert!(outcome.cancelled, "expected cancel, got {outcome:?}");
+        assert!(!outcome.ok, "cancelled verify must not be ok");
+        assert_ne!(
+            VerificationRunner::final_status(std::slice::from_ref(&outcome)),
+            FinalStatus::Verified
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

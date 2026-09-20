@@ -1,10 +1,13 @@
 //! Local tools the agent can run. Commands always go through an explicit
 //! approval path when the permission mode requires it; there is no ambient
 //! "run anything" path from the model.
+//!
+//! Every spawned process goes through [`crate::process::ProcessRunner`]
+//! (timeout + cancel + process-tree kill + output caps).
 
+use crate::process::{EnvPolicy, ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStatus};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// True when a command looks destructive or system-wide.
 pub fn is_dangerous_command(command: &str) -> bool {
@@ -58,31 +61,30 @@ pub fn search_files(project: &Path, query: &str) -> String {
         return "空查询".to_owned();
     }
 
-    // Quote the pattern as a single rg argument; still no shell involved.
-    let rg = Command::new("rg")
-        .arg("-l")
-        .arg("--max-count")
-        .arg("1")
-        .arg("--")
-        .arg(query)
-        .current_dir(project)
-        .output();
+    // Quote the pattern as a single rg argument; still no shell metacharacters
+    // beyond the ProcessRunner shell wrapper. Bounded + cancellable.
+    let spec = ProcessSpec::shell(
+        project,
+        format!("rg -l --max-count 1 -- {}", shell_single_quote(query)),
+    )
+    .timeout(std::time::Duration::from_secs(15))
+    .stdout_limit(32 * 1024)
+    .stderr_limit(4 * 1024);
+    let outcome = ProcessRunner::run(&spec, &|| true);
 
-    if let Ok(output) = rg {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let all: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
-            if all.is_empty() {
-                return "0 处匹配".to_owned();
-            }
-            let total = all.len();
-            let shown: Vec<String> = all.into_iter().take(12).map(str::to_owned).collect();
-            let mut body = shown.join("\n");
-            if total > 12 {
-                body.push_str(&format!("\n… 共 {total} 个文件"));
-            }
-            return format!("{total} 个文件匹配：\n{body}");
+    if outcome.status == ProcessStatus::ExitSuccess {
+        let stdout = outcome.stdout.clone();
+        let all: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+        if all.is_empty() {
+            return "0 处匹配".to_owned();
         }
+        let total = all.len();
+        let shown: Vec<String> = all.into_iter().take(12).map(str::to_owned).collect();
+        let mut body = shown.join("\n");
+        if total > 12 {
+            body.push_str(&format!("\n… 共 {total} 个文件"));
+        }
+        return format!("{total} 个文件匹配：\n{body}");
     }
 
     let mut hits = Vec::new();
@@ -92,6 +94,11 @@ pub fn search_files(project: &Path, query: &str) -> String {
     } else {
         format!("{} 处匹配：\n{}", hits.len(), hits.join("\n"))
     }
+}
+
+/// Minimal POSIX single-quote for embedding a literal in `sh -c`.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn walk(root: &Path, dir: &Path, hits: &mut Vec<String>, query: &str, depth: usize) {
@@ -133,7 +140,7 @@ pub fn read_text(path: &Path, max_lines: usize) -> String {
     out
 }
 
-/// Outcome of a local command run.
+/// Outcome of a local command run (mapped from [`ProcessStatus`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandOutcomeKind {
     Success,
@@ -145,6 +152,18 @@ pub enum CommandOutcomeKind {
     Cancelled,
     /// Spawn or collection error.
     Error,
+}
+
+impl From<ProcessStatus> for CommandOutcomeKind {
+    fn from(status: ProcessStatus) -> Self {
+        match status {
+            ProcessStatus::ExitSuccess => Self::Success,
+            ProcessStatus::ExitFailure => Self::Failed,
+            ProcessStatus::Timeout => Self::TimedOut,
+            ProcessStatus::Cancelled => Self::Cancelled,
+            ProcessStatus::SpawnFailure => Self::Error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,55 +278,6 @@ fn redact_env_assignments(text: &str) -> String {
         .join("\n")
 }
 
-/// Kill a process tree. Unix: process-group SIGKILL when the child was
-/// started as group leader; Windows: taskkill /T /F.
-fn kill_process_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let pid = child.id() as i32;
-        unsafe {
-            // Negative pid → entire process group.
-            libc::kill(-pid, libc::SIGKILL);
-            libc::kill(pid, libc::SIGKILL);
-        }
-    }
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .output();
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// Prepare a shell command so cancel/timeout can kill grandchildren too.
-fn shell_command(command: &str) -> Command {
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(command);
-        c
-    } else {
-        let mut c = Command::new("/bin/sh");
-        c.arg("-c").arg(command);
-        c
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                // New process group: kill(-pgid) reaches grandchildren.
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    cmd
-}
-
 /// Read a line range from a file with an output cap.
 pub fn read_text_range(
     path: &Path,
@@ -345,116 +315,37 @@ pub fn command_output_interruptible(
     (outcome.output, outcome.exit_code, outcome.cancelled)
 }
 
-/// Full command runner with timeout + process-tree kill.
+/// Full command runner — thin adapter over [`ProcessRunner`].
 pub fn command_run(
     cwd: &Path,
     command: &str,
     alive: &dyn Fn() -> bool,
     timeout_secs: u64,
 ) -> CommandOutcome {
-    if command.trim().is_empty() {
-        return CommandOutcome {
-            kind: CommandOutcomeKind::Failed,
-            output: "空命令".to_owned(),
-            exit_code: Some(1),
-            duration_ms: 0,
-            timed_out: false,
-            cancelled: false,
-        };
-    }
+    let spec = ProcessSpec::shell(cwd, command)
+        .timeout(std::time::Duration::from_secs(
+            timeout_secs.clamp(1, MAX_COMMAND_TIMEOUT_SECS),
+        ))
+        .env(EnvPolicy::Inherit)
+        .stdout_limit(48 * 1024)
+        .stderr_limit(16 * 1024);
+    let outcome = ProcessRunner::run(&spec, alive);
+    map_process_outcome(outcome, timeout_secs)
+}
 
-    let timeout = std::time::Duration::from_secs(timeout_secs.clamp(1, MAX_COMMAND_TIMEOUT_SECS));
-    let mut cmd = shell_command(command);
-    let began = std::time::Instant::now();
-
-    let mut child = match cmd
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            return CommandOutcome {
-                kind: CommandOutcomeKind::Error,
-                output: format!("无法执行 `{command}`：{error}"),
-                exit_code: Some(127),
-                duration_ms: began.elapsed().as_millis() as u64,
-                timed_out: false,
-                cancelled: false,
-            };
-        }
-    };
-
-    let mut timed_out = false;
-    let mut cancelled = false;
-    loop {
-        if !alive() {
-            kill_process_tree(&mut child);
-            cancelled = true;
-            break;
-        }
-        if began.elapsed() >= timeout {
-            kill_process_tree(&mut child);
-            timed_out = true;
-            break;
-        }
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(40)),
-            Err(_) => break,
-        }
-    }
-
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(error) => {
-            return CommandOutcome {
-                kind: CommandOutcomeKind::Error,
-                output: format!("无法收集 `{command}` 输出：{error}"),
-                exit_code: Some(if cancelled {
-                    143
-                } else if timed_out {
-                    124
-                } else {
-                    127
-                }),
-                duration_ms: began.elapsed().as_millis() as u64,
-                timed_out,
-                cancelled,
-            };
-        }
-    };
-
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    let err = String::from_utf8_lossy(&output.stderr);
-    if !err.trim().is_empty() {
-        if !text.is_empty() {
+fn map_process_outcome(outcome: ProcessOutcome, timeout_secs: u64) -> CommandOutcome {
+    let mut text = outcome.combined_output();
+    if let Some(note) = outcome.note_suffix() {
+        if !text.is_empty() && text != "(无输出)" {
             text.push('\n');
         }
-        text.push_str(err.trim());
-    }
-    if cancelled {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str("[cancelled: process tree killed]");
-    }
-    if timed_out {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&format!(
-            "[timed out after {}s; process tree killed]",
-            timeout.as_secs()
-        ));
+        text.push_str(&note);
     }
     if text.trim().is_empty() {
         text = "(无输出)".to_owned();
     }
     let mut text = redact_secrets(&text);
     if text.len() > 4000 {
-        // Head/tail strategy: keep head and tail so the model knows it truncated.
         let head_cap = 2800;
         let mut head_end = head_cap;
         while head_end > 0 && !text.is_char_boundary(head_end) {
@@ -472,31 +363,24 @@ pub fn command_run(
             text.len()
         );
     }
-
-    let exit_code = if cancelled {
-        Some(143)
-    } else if timed_out {
-        Some(124)
-    } else {
-        output.status.code()
-    };
-    let kind = if cancelled {
-        CommandOutcomeKind::Cancelled
-    } else if timed_out {
-        CommandOutcomeKind::TimedOut
-    } else if exit_code == Some(0) {
-        CommandOutcomeKind::Success
-    } else {
-        CommandOutcomeKind::Failed
-    };
+    // Keep timeout note accurate when duration < full timeout (kill early).
+    if outcome.timed_out {
+        if let Some(pos) = text.rfind("[timed out after") {
+            let rest = &text[pos..];
+            if let Some(end) = rest.find(']') {
+                let replacement = format!("[timed out after {timeout_secs}s; process tree killed]");
+                text.replace_range(pos..pos + end + 1, &replacement);
+            }
+        }
+    }
 
     CommandOutcome {
-        kind,
+        kind: outcome.status.into(),
         output: text,
-        exit_code,
-        duration_ms: began.elapsed().as_millis() as u64,
-        timed_out,
-        cancelled,
+        exit_code: outcome.exit_code,
+        duration_ms: outcome.duration_ms,
+        timed_out: outcome.timed_out,
+        cancelled: outcome.cancelled,
     }
 }
 
@@ -622,19 +506,26 @@ pub fn detect_verify_command(project: &Path) -> Option<String> {
 }
 
 /// Best-effort git working-tree summary as (path, added, removed) line estimates.
+/// Uses ProcessRunner (timeout + cancel-safe), not a raw `Command::new`.
 pub fn summarize_git_changes(project: &Path) -> Vec<(String, u32, u32)> {
-    let status = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(project)
-        .output();
-    let Ok(status) = status else {
+    let run_git = |args: &str| -> Option<String> {
+        let spec = ProcessSpec::shell(project, format!("git {args}"))
+            .timeout(std::time::Duration::from_secs(10))
+            .stdout_limit(64 * 1024)
+            .stderr_limit(4 * 1024);
+        let outcome = ProcessRunner::run(&spec, &|| true);
+        if outcome.status == ProcessStatus::ExitSuccess {
+            Some(outcome.stdout)
+        } else {
+            None
+        }
+    };
+
+    let Some(status) = run_git("status --porcelain") else {
         return Vec::new();
     };
-    if !status.status.success() {
-        return Vec::new();
-    }
 
-    let mut paths: Vec<String> = String::from_utf8_lossy(&status.stdout)
+    let mut paths: Vec<String> = status
         .lines()
         .filter_map(|line| {
             if line.len() < 4 {
@@ -656,29 +547,23 @@ pub fn summarize_git_changes(project: &Path) -> Vec<(String, u32, u32)> {
         return Vec::new();
     }
 
-    let numstat = Command::new("git")
-        .args(["diff", "--numstat", "HEAD"])
-        .current_dir(project)
-        .output()
-        .ok();
+    let numstat = run_git("diff --numstat HEAD");
     let mut deltas: Vec<(String, u32, u32)> = Vec::new();
 
     if let Some(numstat) = numstat {
-        if numstat.status.success() {
-            for line in String::from_utf8_lossy(&numstat.stdout).lines() {
-                let mut parts = line.split('\t');
-                let added = parts
-                    .next()
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(0);
-                let removed = parts
-                    .next()
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(0);
-                let path = parts.next().unwrap_or("").to_owned();
-                if !path.is_empty() {
-                    deltas.push((path, added, removed));
-                }
+        for line in numstat.lines() {
+            let mut parts = line.split('\t');
+            let added = parts
+                .next()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            let removed = parts
+                .next()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            let path = parts.next().unwrap_or("").to_owned();
+            if !path.is_empty() {
+                deltas.push((path, added, removed));
             }
         }
     }
@@ -867,6 +752,27 @@ mod tests {
         let text = read_text_range(&file, 2, 3, 1000).unwrap();
         assert!(text.contains("b") && text.contains("c"));
         assert!(!text.contains("\nd"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_command_run_maps_to_shared_runner() {
+        let dir = std::env::temp_dir().join(format!("kodo_map_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let outcome = command_run(&dir, "echo via-runner", &|| true, 5);
+        assert_eq!(outcome.kind, CommandOutcomeKind::Success);
+        assert!(outcome.output.contains("via-runner"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_cancelled_task_is_not_success() {
+        let dir = std::env::temp_dir().join(format!("kodo_nc_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let outcome = command_run(&dir, "sleep 30", &|| false, 10);
+        assert_eq!(outcome.kind, CommandOutcomeKind::Cancelled);
+        assert!(outcome.cancelled);
+        assert_ne!(outcome.kind, CommandOutcomeKind::Success);
         let _ = fs::remove_dir_all(&dir);
     }
 }

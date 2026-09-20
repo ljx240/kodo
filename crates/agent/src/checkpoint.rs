@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileSnapshot {
@@ -143,13 +142,15 @@ fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 fn git_dirty_paths(project: &Path) -> BTreeSet<String> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(project)
-        .output();
+    use crate::process::{ProcessRunner, ProcessSpec, ProcessStatus};
+    let spec = ProcessSpec::shell(project, "git status --porcelain")
+        .timeout(std::time::Duration::from_secs(10))
+        .stdout_limit(64 * 1024)
+        .stderr_limit(4 * 1024);
+    let outcome = ProcessRunner::run(&spec, &|| true);
     let mut set = BTreeSet::new();
-    if let Ok(out) = output {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
+    if outcome.status == ProcessStatus::ExitSuccess {
+        for line in outcome.stdout.lines() {
             if line.len() < 4 {
                 continue;
             }
@@ -218,6 +219,7 @@ pub fn checkpoint_dir(project: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
 
     fn temp_project(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kodo_cs_{name}_{}", std::process::id()));

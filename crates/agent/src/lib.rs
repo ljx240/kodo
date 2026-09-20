@@ -14,6 +14,7 @@ mod context;
 pub mod evidence;
 mod patch;
 pub mod plan;
+pub mod process;
 pub mod protocol;
 pub mod provider;
 pub mod repomap;
@@ -58,6 +59,9 @@ pub use evidence::{
 };
 pub use patch::PatchOutcome;
 pub use plan::{Evidence, Subtask, SubtaskKind, SubtaskStatus};
+pub use process::{
+    kill_process_tree, EnvPolicy, ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStatus,
+};
 pub use protocol::{
     ToolDefinition, ToolError as AgentToolError, ToolRegistry as AgentToolRegistry,
 };

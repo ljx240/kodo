@@ -7,7 +7,6 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Default per-turn character budget for packed context handed to the model.
 pub const DEFAULT_CONTEXT_CHARS: usize = 12_000;
@@ -531,16 +530,18 @@ impl ContextManager {
 // ---------------------------------------------------------------------------
 
 fn git_ls_files(root: &Path) -> Vec<String> {
-    let out = Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(root)
-        .output();
-    let Ok(out) = out else { return Vec::new() };
-    if !out.status.success() {
+    use crate::process::{ProcessRunner, ProcessSpec, ProcessStatus};
+    let spec = ProcessSpec::shell(root, "git ls-files -z")
+        .timeout(std::time::Duration::from_secs(15))
+        .stdout_limit(512 * 1024)
+        .stderr_limit(4 * 1024);
+    let outcome = ProcessRunner::run(&spec, &|| true);
+    if outcome.status != ProcessStatus::ExitSuccess {
         return Vec::new();
     }
-    let raw = String::from_utf8_lossy(&out.stdout);
-    raw.split('\0')
+    outcome
+        .stdout
+        .split('\0')
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect()
@@ -883,6 +884,7 @@ pub fn truncate_chars_pub(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::process::Command;
 
     const UNIQUE: &str = "kodo_tax_rate_v2";
 
