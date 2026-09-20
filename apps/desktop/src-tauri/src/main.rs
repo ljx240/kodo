@@ -382,6 +382,21 @@ fn send_message(
                 }
             }
         }
+        // Default model is a runtime consumer: override the primary model so the
+        // Settings control is what the next call actually sends.
+        if let Some(model) = read_setting("default-model") {
+            let model = model.trim().to_owned();
+            if !model.is_empty() {
+                let mut next = AgentProvider::new(
+                    primary.template.clone(),
+                    primary.api_key.clone(),
+                    primary.endpoint.clone(),
+                    model,
+                );
+                next.fallbacks = std::mem::take(&mut primary.fallbacks);
+                primary = next;
+            }
+        }
         Some(primary)
     });
 

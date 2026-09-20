@@ -41,6 +41,28 @@ export function App() {
   const [density] = useSetting("density", "compact");
   const [lineNumbers] = useSetting("show-line-numbers", "true");
   const [systemFont] = useSetting("use-system-font", "true");
+  const [theme] = useSetting("theme", "light");
+
+  // Runtime consumer for Appearance → Theme (settings.log → <html data-theme>).
+  useEffect(() => {
+    const apply = (mode: string) => {
+      const resolved =
+        mode === "system"
+          ? window.matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light"
+          : mode === "dark"
+            ? "dark"
+            : "light";
+      document.documentElement.dataset.theme = resolved;
+    };
+    apply(theme);
+    if (theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => apply("system");
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [theme]);
 
   const onSnapshot = useCallback((snapshot: LiveSnapshot | null) => {
     setLiveSnapshot(snapshot);
