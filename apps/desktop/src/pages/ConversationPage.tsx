@@ -1,5 +1,5 @@
 import { Archive, Folder, MoreVertical, Pencil } from "lucide-react";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   loadSession,
   onRunEvent,
@@ -86,6 +86,8 @@ export function ConversationPage({
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [streamText, setStreamText] = useState("");
   const [progress, setProgress] = useState<{ phase: string; detail: string } | null>(null);
+  /** False after Stop — late TextDelta races must not repaint the preview. */
+  const acceptStreamRef = useRef(true);
 
   const providerWarning = useMemo(() => {
     if (isFixture) return null;
@@ -105,6 +107,7 @@ export function ConversationPage({
     setApprovalError(null);
     setStreamText("");
     setProgress(null);
+    acceptStreamRef.current = true;
     if (!conversationId || isFixture) {
       setTurns([]);
       setTitle("");
@@ -148,7 +151,9 @@ export function ConversationPage({
         return;
       }
       if (event.type === "textDelta") {
-        setStreamText((current) => current + event.text);
+        if (acceptStreamRef.current) {
+          setStreamText((current) => current + event.text);
+        }
         return;
       }
       if (event.type === "progress") {
@@ -159,11 +164,13 @@ export function ConversationPage({
         setStreamText("");
       }
       if (event.type === "turnStarted") {
+        acceptStreamRef.current = true;
         setStreamText("");
         setProgress(null);
       }
       setTurns((current) => reduce(current, event));
       if (event.type === "turnComplete" || event.type === "stopped" || event.type === "error") {
+        acceptStreamRef.current = false;
         setRunning(false);
         setApproval(null);
         setStreamText("");
@@ -196,6 +203,8 @@ export function ConversationPage({
     setPageError(null);
     setTurns((current) => [...current, blank(text, context)]);
     setRunning(true);
+    acceptStreamRef.current = true;
+    setStreamText("");
     try {
       await sendMessage(conversationId, text, context);
       // Context is consumed for this turn only; the user re-pins if needed.
@@ -218,6 +227,10 @@ export function ConversationPage({
   const stop = () => {
     if (!conversationId) return;
     setApproval(null);
+    // Stop 后不再产生用户可见 TextDelta。
+    acceptStreamRef.current = false;
+    setStreamText("");
+    setProgress(null);
     void stopRun(conversationId).catch((failure) => {
       setApprovalError(`停止失败：${errorMessage(failure)}`);
     });

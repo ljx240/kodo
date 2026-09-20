@@ -1161,12 +1161,24 @@ fn call_model(
                 }
                 _ => {}
             }
+            // Every event path honors cancellation immediately.
             alive()
         },
     );
+    let cancelled = match &result {
+        Err(err) => err.class == provider::ProviderFailureClass::Cancelled,
+        Ok(_) => false,
+    };
+    if cancelled || !alive() {
+        // Stop 后不再产生用户可见 TextDelta — drop any unflushed buffer.
+        delta_buf.clear();
+        return Ok(None);
+    }
     if !delta_buf.is_empty() {
         let chunk = std::mem::take(&mut delta_buf);
-        let _ = emit(SinkEvent::TextDelta { text: chunk });
+        if !emit(SinkEvent::TextDelta { text: chunk }) {
+            return Ok(None);
+        }
     }
     let duration_ms = began.elapsed().as_millis() as u64;
     if !alive() {
