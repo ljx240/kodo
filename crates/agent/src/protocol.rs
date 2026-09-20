@@ -633,7 +633,7 @@ impl ToolRegistry {
                 },
                 ToolDefinition {
                     name: "find_symbol",
-                    description: "Find struct/fn/enum/trait/class definitions by name substring in the repo map.",
+                    description: "Find symbol definitions (fn/struct/enum/class/…) in the RepoMap index: returns symbol, kind, file, line/range. Prefer this before reading files.",
                     input_schema: serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -645,7 +645,7 @@ impl ToolRegistry {
                 },
                 ToolDefinition {
                     name: "find_references",
-                    description: "Find references to a symbol via word-boundary text search across the project.",
+                    description: "Find references to a symbol with confidence=high (word-boundary) or confidence=lexical (fallback). Definition lines are marked. Do not assume precision when labeled lexical.",
                     input_schema: serde_json::json!({
                         "type": "object",
                         "properties": {

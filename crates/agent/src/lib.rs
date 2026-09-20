@@ -71,7 +71,7 @@ pub use provider::{
     catalog_models, resolve_model_identity, ModelSpec, Provider, ProviderCapabilities,
     ProviderConfigRecord, ProviderError, ProviderFailureClass,
 };
-pub use repomap::RepoMap;
+pub use repomap::{repo_map_cached, repo_map_invalidate, ReferenceEntry, RepoMap, SymbolEntry};
 pub use skill::{
     ContextStrategy, SkillRegistry as AgentSkillRegistry, SkillSpec as AgentSkillSpec,
     VerificationPolicy,
@@ -741,7 +741,7 @@ fn execute_tool_call(
                 return Ok((false, None));
             }
             let began = Instant::now();
-            let map = crate::repomap::RepoMap::build(project, alive).unwrap_or_default();
+            let map = crate::repomap::repo_map_cached(project, alive).unwrap_or_default();
             let entries = map.list_files(prefix.as_deref(), 80);
             let detail = if entries.is_empty() {
                 "0 files".to_owned()
@@ -785,13 +785,24 @@ fn execute_tool_call(
                 return Ok((false, None));
             }
             let began = Instant::now();
-            let map = crate::repomap::RepoMap::build(project, alive).unwrap_or_default();
+            // Cached RepoMap: incremental invalidation on file change.
+            let map = crate::repomap::repo_map_cached(project, alive).unwrap_or_default();
             let hits = map.find_symbol(name);
             let detail = if hits.is_empty() {
                 "0 symbol matches".to_owned()
             } else {
                 hits.iter()
-                    .map(|s| format!("{} {} at {}:{}", s.kind, s.name, s.path, s.line))
+                    .map(|s| {
+                        format!(
+                            "{} {} at {}:{}-{}{}",
+                            s.kind,
+                            s.name,
+                            s.path,
+                            s.line,
+                            s.end_line,
+                            if s.exported { " (exported)" } else { "" }
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             };
@@ -828,8 +839,36 @@ fn execute_tool_call(
                 return Ok((false, None));
             }
             let began = Instant::now();
-            // Word-ish search: rg -n with the symbol, fall back to walk search.
-            let detail = search_files(project, name);
+            // Syntax-aware word-boundary refs with confidence; lexical fallback
+            // labeled explicitly (never pretends precision).
+            let map = crate::repomap::repo_map_cached(project, alive).unwrap_or_default();
+            let refs = map.find_references(name);
+            let detail = if refs.is_empty() {
+                // Last resort: file-level lexical search, labeled as fallback.
+                let fallback = search_files(project, name);
+                if fallback.starts_with('0') {
+                    "0 references".to_owned()
+                } else {
+                    format!("confidence=lexical (repo-map miss)\n{fallback}")
+                }
+            } else {
+                let high = refs.iter().filter(|r| r.confidence == "high").count();
+                let mut out = format!(
+                    "high={high} lexical={} (definition lines marked)\n",
+                    refs.len() - high
+                );
+                for r in refs.iter().take(40) {
+                    out.push_str(&format!(
+                        "[{}] {}:{}{}  {}\n",
+                        r.confidence,
+                        r.path,
+                        r.line,
+                        if r.is_definition { " (def)" } else { "" },
+                        r.snippet
+                    ));
+                }
+                out
+            };
             let duration_ms = began.elapsed().as_millis() as u64;
             let keep = finish_step(
                 Step::Search {
@@ -1375,7 +1414,8 @@ pub fn run(
     let mut context_mgr = ContextManager::new(project, context_budget);
 
     // Repo map for orientation — injected into the system prompt (not proof).
-    let repo_map = crate::repomap::RepoMap::build(project, alive).ok();
+    // Cached + incremental: refreshed when source files change mid-turn.
+    let repo_map = crate::repomap::repo_map_cached(project, alive).ok();
 
     // User-pinned context paths: validate inside the project and pin spans first.
     for rel in &request.pinned_context {
@@ -1593,7 +1633,9 @@ pub fn run(
             system.push('\n');
             system.push_str(&map.to_prompt_block());
             system.push_str(
-                "Use list_files/find_symbol/find_references/read_range to orient before deep reads.\n",
+                "Search policy: RepoMap first → find_symbol / find_references (check confidence) \
+                 → read_range on hit files only. Prefer targeted ranges over reading whole \
+                 unrelated files.\n",
             );
         }
         if let Some(sk) = &skill {
