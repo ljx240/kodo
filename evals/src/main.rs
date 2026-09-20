@@ -773,13 +773,49 @@ fn run_deterministic(report: &mut EvalReport) {
         std::fs::write(dir.join("a.rs"), "v1\n").unwrap();
         let mut mgr = kodo_agent::ContextManager::new(&dir, Default::default());
         assert!(!mgr.is_stale("a.rs"));
+        let v1 = mgr.read_range("a.rs", 1, 1, "read v1").expect("read");
+        assert!(!v1.stale);
+        assert!(!v1.file_version.is_empty());
+        // Mutate → invalidate marks prior observation stale (not just path flag)
+        std::fs::write(dir.join("a.rs"), "v2 edited\n").unwrap();
         mgr.invalidate("a.rs");
         report.check(
             "context_observation_marked_stale_after_write",
-            mgr.is_stale("a.rs") && mgr.pinned().iter().all(|p| p.path != "a.rs"),
-            "invalidate did not mark stale",
+            mgr.is_stale("a.rs")
+                && mgr
+                    .observations()
+                    .iter()
+                    .any(|o| o.stale && o.file == "a.rs")
+                && v1.file_version != mgr.file_version("a.rs"),
+            "invalidate did not mark stale observation with version change",
+        );
+        // Fresh read is current (v2)
+        let v2 = mgr.read_range("a.rs", 1, 1, "read v2").expect("re-read");
+        report.check(
+            "context_read_v2_is_current_after_stale",
+            !v2.stale && v2.file_version != v1.file_version && !mgr.is_stale("a.rs"),
+            "v2 should be current",
+        );
+        // Dedupe: same version+range twice → one observation growth
+        let n = mgr.observations().len();
+        let _ = mgr.read_range("a.rs", 1, 1, "again").unwrap();
+        report.check(
+            "context_same_version_range_deduped",
+            mgr.observations().len() == n,
+            "duplicate observation for same file+version+range",
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 18b) huge command output does not explode prompt
+    {
+        let huge = "y".repeat(40_000);
+        let fmt = kodo_agent::ContextManager::format_command_output("npm test", &huge);
+        report.check(
+            "huge_command_output_bounded_in_history",
+            fmt.chars().count() < 6_000 && fmt.contains("output ref:"),
+            &format!("len={}", fmt.chars().count()),
+        );
     }
 
     // 19) cancel stream produces no further model events (typed Cancelled)

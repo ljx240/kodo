@@ -52,7 +52,8 @@ pub use checkpoint::{
 };
 pub use classify::{classify as classify_task, TaskType};
 pub use context::{
-    ContextBudget as TurnContextBudget, ContextManager, ContextSpan, DEFAULT_CONTEXT_CHARS,
+    ContextBudget as TurnContextBudget, ContextManager, ContextSpan,
+    Observation as TurnObservation, DEFAULT_CONTEXT_CHARS, MAX_HISTORY_MESSAGES,
 };
 pub use evidence::{
     AcceptanceCriterion, CommandExpectation, EvidenceItem as AgentEvidenceItem,
@@ -1321,26 +1322,78 @@ fn invocations_from_native(
 fn push_tool_results(history: &mut Vec<ProviderMessage>, results: &[ToolResult], native: bool) {
     if native {
         for result in results {
+            let body = if result.ok {
+                // Bound huge command output: structured head/tail + ref.
+                if result.name == "run_command" {
+                    crate::context::ContextManager::format_command_output(
+                        &result.input,
+                        &result.output,
+                    )
+                } else {
+                    let mut out = result.output.clone();
+                    if out.chars().count() > crate::context::MAX_HISTORY_OBS_CHARS {
+                        out = crate::context::truncate_chars_pub(
+                            &out,
+                            crate::context::MAX_HISTORY_OBS_CHARS,
+                        );
+                        out.push_str("\n[output truncated for history budget]");
+                    }
+                    out
+                }
+            } else {
+                format!(
+                    "ERROR: {}",
+                    result
+                        .error
+                        .as_ref()
+                        .map(|e| e.message.clone())
+                        .unwrap_or_else(|| "tool failed".into())
+                )
+            };
             history.push(ProviderMessage::tool_result(
                 result.id.to_string(),
-                if result.ok {
-                    result.output.clone()
-                } else {
-                    format!(
-                        "ERROR: {}",
-                        result
-                            .error
-                            .as_ref()
-                            .map(|e| e.message.clone())
-                            .unwrap_or_else(|| "tool failed".into())
-                    )
-                },
+                body,
                 !result.ok,
             ));
         }
     } else {
         history.push(ProviderMessage::user(format_observations(results)));
     }
+    // Context budget: never unbounded append of complete history.
+    trim_history(history);
+}
+
+/// Cap history size: keep system + last N messages; mark dropped count.
+fn trim_history(history: &mut Vec<ProviderMessage>) {
+    if history.len() <= crate::context::MAX_HISTORY_MESSAGES {
+        return;
+    }
+    // Preserve leading system messages.
+    let mut system_end = 0;
+    for (i, m) in history.iter().enumerate() {
+        if m.role == provider::MessageRole::System {
+            system_end = i + 1;
+        } else {
+            break;
+        }
+    }
+    let keep_tail = crate::context::MAX_HISTORY_MESSAGES.saturating_sub(system_end);
+    if history.len() <= system_end + keep_tail {
+        return;
+    }
+    let drop_from = history.len() - keep_tail;
+    // Never drop system prefix.
+    let drop_from = drop_from.max(system_end);
+    let dropped = drop_from - system_end;
+    let mut new_hist: Vec<ProviderMessage> = history.split_off(system_end);
+    new_hist.drain(0..(drop_from - system_end).min(new_hist.len()));
+    let marker = ProviderMessage::user(format!(
+        "[context budget: dropped {dropped} older messages; re-read files if needed]"
+    ));
+    let mut rebuilt: Vec<ProviderMessage> = history.drain(..system_end).collect();
+    rebuilt.push(marker);
+    rebuilt.extend(new_hist);
+    *history = rebuilt;
 }
 
 pub fn run(
@@ -1546,6 +1599,9 @@ pub fn run(
             if model_out.chars().count() > 2400 {
                 model_out = crate::context::truncate_chars_pub(&model_out, 2400);
                 model_out.push_str("\n[result truncated: context block capped for model]\n");
+            }
+            if span.stale {
+                model_out = format!("[OLD VERSION]\n{model_out}");
             }
             pre_observations.push(ToolResult::success(
                 ToolCallId::new(format!("ctx_{i}")),

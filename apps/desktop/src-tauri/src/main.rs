@@ -462,7 +462,7 @@ fn read_context_file(project: String, path: String) -> Result<String, String> {
     if path.trim().is_empty() || path.contains("..") || std::path::Path::new(&path).is_absolute() {
         return Err(format!("path must stay inside the project: {path}"));
     }
-    let manager = kodo_agent::ContextManager::new(
+    let mut manager = kodo_agent::ContextManager::new(
         root.to_path_buf(),
         kodo_agent::TurnContextBudget::default(),
     );
