@@ -45,7 +45,7 @@ use tools::{
     classify_command_risk, command_run, is_dangerous_command, read_text, search_files,
     summarize_git_changes, write_project_file, CommandOutcomeKind,
 };
-use verify::{FinalStatus, VerificationRunner};
+use verify::{FailureClass, FinalStatus, RepairDecision, VerificationPlan, VerificationRunner};
 
 pub use checkpoint::{
     unified_diff, TurnChangeSet, UndoConflict, UndoConflictReason, UndoFileState, UndoReport,
@@ -78,7 +78,12 @@ pub use skill::{
 };
 pub use state::{AgentState as TurnState, Budget as TurnBudget, FailReason as TurnFailReason};
 pub use tools::{dangerous_reason, CommandOutcome, CommandRisk};
-pub use verify::{FinalStatus as TurnFinalStatus, VerificationRunner as TurnVerifier};
+pub use verify::{
+    classify_verify_failure, FailureClass as TurnFailureClass, FinalStatus as TurnFinalStatus,
+    PlannedVerifyCommand, RepairDecision as TurnRepairDecision,
+    VerificationEvidence as TurnVerificationEvidence, VerificationPlan as TurnVerificationPlan,
+    VerificationRunner as TurnVerifier, VerifyTier,
+};
 
 /// Permission mode for tool execution. Default is Ask — Secure by Default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1572,6 +1577,9 @@ pub fn run(
     let mut changeset = TurnChangeSet::capture_baseline(project);
     let mut active_tool = String::from("—");
     let mut repair_attempts = 0usize;
+    let mut repair_started: Option<Instant> = None;
+    let mut last_verify_plan: Option<VerificationPlan> = None;
+    let mut partial_verify = false;
 
     if provider_ready && alive() {
         let mut provider = request.provider.clone().expect("checked above");
@@ -1637,43 +1645,102 @@ pub fn run(
                     .iter()
                     .map(|p| (*p).clone())
                     .collect();
-                let commands = match &skill {
-                    Some(sk) => sk.verification_commands(&verifier, project),
-                    None => verifier.infer_targeted(project, &changed),
-                };
+
+                // Criterion-scoped plan: exact → package → typecheck → broad.
+                let verify_criteria: Vec<(String, String)> = machine
+                    .plan()
+                    .criteria
+                    .iter()
+                    .filter(|c| {
+                        matches!(
+                            c.requirement,
+                            crate::evidence::EvidenceRequirement::VerificationPassed
+                                | crate::evidence::EvidenceRequirement::SemanticProof {
+                                    target: crate::evidence::SemanticTarget::RegressionPrevented
+                                }
+                        ) || c.description.to_ascii_lowercase().contains("verif")
+                    })
+                    .map(|c| (c.id.clone(), c.description.clone()))
+                    .collect();
+                let mut plan = VerificationRunner::build_plan(
+                    project,
+                    &verify_criteria,
+                    &changed,
+                    task_type.label(),
+                );
+                // Skill policy may replace the command list, but we keep
+                // criterion bindings from build_plan where possible.
+                if let Some(sk) = &skill {
+                    let skill_cmds = sk.verification_commands(&verifier, project);
+                    if skill_cmds.is_empty() {
+                        plan.commands.clear();
+                    } else {
+                        let skill_set: Vec<String> =
+                            skill_cmds.iter().map(|c| c.command.clone()).collect();
+                        plan.commands.retain(|pc| {
+                            skill_set.iter().any(|s| {
+                                *s == pc.command.command || s.contains(&pc.command.command)
+                            })
+                        });
+                    }
+                }
+                if last_verify_plan.as_ref() != Some(&plan) {
+                    // After repair we re-run the same plan (targeted first).
+                    last_verify_plan = Some(plan.clone());
+                }
+                // Always populate plan.verify_target_ids / bindings from plan.
+                {
+                    let target_ids = plan.targeted_criterion_ids();
+                    let bindings: Vec<(String, Vec<String>)> = plan
+                        .commands
+                        .iter()
+                        .map(|c| (c.command.command.clone(), c.criterion_ids.clone()))
+                        .collect();
+                    let plan_mut = machine.plan_mut();
+                    plan_mut.verify_target_ids = target_ids;
+                    plan_mut.verify_bindings = bindings;
+                }
+
                 if !alive() {
                     machine.handle(AgentEvent::Cancel);
                     break;
                 }
-                if commands.is_empty() {
+                if plan.commands.is_empty() {
                     notes.push("验证失败：当前 Skill 策略与项目没有可执行的验证命令".to_owned());
+                    if let Some(evidence) = machine.evidence_mut() {
+                        evidence.mark_verify_plan(false, Vec::new(), true);
+                    }
                     machine.handle(AgentEvent::VerifyFinished { ok: false });
                     continue;
                 }
-                // Targeted first: prefer package-local test/typecheck.
-                let outcomes = verifier.run_commands(project, &commands, alive, true);
+
+                // Targeted first: stop after first product failure for repair.
+                let evidence_list = verifier.run_plan(project, &plan, alive, true);
                 if !alive() {
                     machine.handle(AgentEvent::Cancel);
                     break;
                 }
-                let all_ok = !outcomes.is_empty() && outcomes.iter().all(|o| o.ok);
-                let any_ok = outcomes.iter().any(|o| o.ok);
-                let mut repair_hint = String::new();
-                if let Some(fail) = outcomes.iter().find(|o| !o.ok) {
-                    if let Some(report) = &fail.failure {
-                        repair_hint = report.to_prompt_block();
-                        notes.push(format!(
-                            "验证失败：{}\n{}",
-                            report.command, report.primary_error
-                        ));
-                    } else {
-                        notes.push(format!("验证失败：{}", fail.command.command));
-                    }
+
+                let all_ok = !evidence_list.is_empty() && evidence_list.iter().all(|e| e.ok);
+                let any_ok = evidence_list.iter().any(|e| e.ok);
+                partial_verify = any_ok && !all_ok;
+                let budget_ok = !machine.budget().repair_budget_exhausted()
+                    && !machine.budget().any_exhausted();
+                let decision = RepairDecision::from_evidence(&evidence_list, &plan, budget_ok);
+
+                // Surface failed command step for the UI/trace.
+                if let Some(fail) = evidence_list.iter().find(|e| !e.ok) {
+                    notes.push(format!(
+                        "验证失败 [{}] ({})：{}",
+                        fail.command,
+                        fail.failure_class.map(|c| c.label()).unwrap_or("unknown"),
+                        fail.output_summary
+                    ));
                     let _ = simple_step(
                         Step::Command {
-                            command: fail.command.command.clone(),
+                            command: fail.command.clone(),
                             cwd: project.to_string_lossy().into_owned(),
-                            output: fail.output_tail.clone(),
+                            output: fail.output_summary.clone(),
                             exit_code: fail.exit_code,
                         },
                         alive,
@@ -1683,37 +1750,88 @@ pub fn run(
 
                 if all_ok {
                     verified = true;
+                    partial_verify = false;
                     changeset.verified = Some(true);
-                    let cmds = commands
+                    let cmds = evidence_list
                         .iter()
-                        .map(|c| c.command.clone())
+                        .map(|e| e.command.clone())
                         .collect::<Vec<_>>();
-                    machine.plan_mut().verify_commands = cmds.clone();
-                    if let Some(evidence) = machine.evidence_mut() {
-                        evidence.mark_verify(true, cmds);
+                    machine.plan_mut().verify_commands = cmds;
+                    if let Some(ev) = machine.evidence_mut() {
+                        ev.mark_verify_plan(true, evidence_list.clone(), false);
                     }
                     machine.handle(AgentEvent::VerifyFinished { ok: true });
-                    history.push(ProviderMessage::user("All verification commands passed."));
+                    history.push(ProviderMessage::user(format!(
+                        "Verification plan passed (criterion-scoped):\n{}",
+                        evidence_list
+                            .iter()
+                            .map(|e| format!(
+                                "- {} → {:?} ({}ms{})",
+                                e.command,
+                                e.criterion_ids,
+                                e.duration_ms,
+                                if e.truncated { ", truncated" } else { "" }
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )));
                 } else {
-                    verified = any_ok;
                     changeset.verified = Some(false);
-                    repair_attempts += 1;
-                    if !repair_hint.is_empty() {
+                    let infra = decision.failure_class == FailureClass::Infrastructure
+                        || evidence_list
+                            .iter()
+                            .filter(|e| !e.ok)
+                            .all(|e| e.failure_class == Some(FailureClass::Infrastructure));
+
+                    if let Some(ev) = machine.evidence_mut() {
+                        ev.mark_verify_plan(false, evidence_list.clone(), infra);
+                    }
+
+                    if infra {
+                        notes.push(format!("基础设施验证失败（非产品回归）：{}", decision.hint));
                         history.push(ProviderMessage::user(format!(
-                            "Verification failed. Compressed failure:\n{repair_hint}\n\
-                             Prefer apply_patch/replace_range on the failing files only. \
-                             Do not run destructive git commands. Do not edit unrelated files."
+                            "Infrastructure verification failure (not a product regression):\n{}",
+                            decision.hint
                         )));
+                        machine.handle(AgentEvent::VerifyFinished { ok: false });
+                    } else if decision.budget_exhausted {
+                        notes.push(format!("验证失败且修复预算耗尽：{}", decision.hint));
+                        history.push(ProviderMessage::user(format!(
+                            "Verification failed and repair budget exhausted.\n{}",
+                            decision.hint
+                        )));
+                        machine.handle(AgentEvent::VerifyFinished { ok: false });
+                    } else {
+                        repair_attempts += 1;
+                        // Prefer re-running failed targeted commands after repair.
+                        let rerun: Vec<String> = decision
+                            .targeted_rerun
+                            .iter()
+                            .map(|c| c.command.clone())
+                            .collect();
+                        if !rerun.is_empty() {
+                            machine.plan_mut().verify_commands = rerun.clone();
+                            notes.push(format!("修复后优先重跑：{}", rerun.join(" && ")));
+                        }
+                        if !decision.hint.is_empty() {
+                            history.push(ProviderMessage::user(format!(
+                                "Verification failed (product). Repair then re-run targeted verification:\n{}\n\
+                                 Prefer apply_patch/replace_range on the failing files only. \
+                                 Do not run destructive git commands. Do not edit unrelated files.",
+                                decision.hint
+                            )));
+                        }
+                        machine.handle(AgentEvent::VerifyFinished { ok: false });
                     }
-                    if let Some(evidence) = machine.evidence_mut() {
-                        evidence.mark_verify(false, Vec::new());
-                    }
-                    machine.handle(AgentEvent::VerifyFinished { ok: false });
                 }
                 continue;
             }
 
             if machine.state() == &AgentState::Repair {
+                let wall_begin = Instant::now();
+                if repair_started.is_none() {
+                    repair_started = Some(Instant::now());
+                }
                 let _ = emit(SinkEvent::Progress {
                     phase: "Repairing".into(),
                     detail: format!("attempt {repair_attempts}/{}", machine.budget().max_repairs),
@@ -1733,6 +1851,10 @@ pub fn run(
                     break;
                 }
                 machine.handle(AgentEvent::RepairApplied);
+                machine
+                    .budget_mut()
+                    .charge_repair_wall(wall_begin.elapsed().as_millis() as u64);
+                // After repair, next Verify (or tools→Verify) re-runs targeted plan.
                 continue;
             }
 
@@ -2113,17 +2235,30 @@ pub fn run(
 
     if alive() {
         // Explicit verification status — never silent about verify state.
+        // Distinguishes CompletedVerified / PartiallyVerified /
+        // VerificationFailed / Blocked / Cancelled / ProviderError.
         let status = match machine.state() {
             AgentState::Cancelled => FinalStatus::Cancelled,
             AgentState::Failed { reason } => match reason {
                 FailReason::Unrecoverable => FinalStatus::Blocked,
-                _ => FinalStatus::VerificationFailed,
+                FailReason::BudgetExhausted => {
+                    if partial_verify || machine.evidence().partial_verified {
+                        FinalStatus::PartiallyVerified
+                    } else {
+                        FinalStatus::VerificationFailed
+                    }
+                }
+                FailReason::AcceptanceUnmet => FinalStatus::NotVerified,
             },
             _ => {
                 if verified {
                     FinalStatus::Verified
                 } else if provider_error_seen {
                     FinalStatus::ProviderError
+                } else if machine.evidence().verify_infra_failure {
+                    FinalStatus::Blocked
+                } else if partial_verify || machine.evidence().partial_verified {
+                    FinalStatus::PartiallyVerified
                 } else if wrote_files {
                     FinalStatus::NotVerified
                 } else if machine.state() == &AgentState::Finish {
@@ -2136,7 +2271,12 @@ pub fn run(
         };
 
         if verified {
-            checks.push("已执行项目验证命令".to_owned());
+            checks.push("验收条件验证通过（criterion-scoped）".to_owned());
+        } else if partial_verify {
+            checks.push("部分验证通过，未达全部验收条件".to_owned());
+        }
+        if machine.evidence().verify_infra_failure {
+            checks.push("基础设施验证失败（非产品回归）".to_owned());
         }
         if wrote_files {
             checks.push("已写入项目内文件".to_owned());

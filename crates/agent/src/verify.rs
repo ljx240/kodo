@@ -1,4 +1,9 @@
 //! Verification commands and failure compression for the repair loop.
+//!
+//! Verification is scoped to **user acceptance criteria** via
+//! [`VerificationPlan`]: commands are ordered exact → package → typecheck →
+//! broad, each command carries the `criterion_ids` it may prove, and a pass
+//! is never auto-applied to every criterion.
 
 use std::fs;
 use std::path::Path;
@@ -36,6 +41,334 @@ impl VerifyCommand {
             kind: VerifyKind::Test,
             command: cmd.into(),
             timeout_ms: 120_000,
+        }
+    }
+
+    pub fn build(cmd: impl Into<String>) -> Self {
+        Self {
+            kind: VerifyKind::Build,
+            command: cmd.into(),
+            timeout_ms: 120_000,
+        }
+    }
+}
+
+/// Why a verification command failed — product vs environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// Real product/test/assertion failure the agent should repair.
+    Product,
+    /// Missing compiler, network outage, command-not-found — not a code regression.
+    Infrastructure,
+    Timeout,
+    Cancelled,
+}
+
+impl FailureClass {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Product => "product",
+            Self::Infrastructure => "infrastructure",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Infra failures must not drive a product-regression repair loop.
+    pub fn is_infrastructure(self) -> bool {
+        matches!(self, Self::Infrastructure)
+    }
+}
+
+/// How early a planned command proves acceptance (run order priority).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VerifyTier {
+    /// Named regression / exact test from the criterion.
+    ExactRegression,
+    /// Tests for the changed package/crate.
+    Package,
+    /// Typecheck / check only.
+    Typecheck,
+    /// Broader workspace suite last.
+    Broad,
+}
+
+impl VerifyTier {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ExactRegression => "exact_regression",
+            Self::Package => "package",
+            Self::Typecheck => "typecheck",
+            Self::Broad => "broad",
+        }
+    }
+}
+
+/// One planned command bound to the acceptance criteria it may prove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedVerifyCommand {
+    pub command: VerifyCommand,
+    /// Criteria this command is allowed to mark as verification-passed.
+    pub criterion_ids: Vec<String>,
+    pub tier: VerifyTier,
+}
+
+/// Verification scoped to user acceptance criteria + changed scope.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VerificationPlan {
+    /// Every criterion this plan is responsible for proving.
+    pub criterion_ids: Vec<String>,
+    pub changed_files: Vec<String>,
+    /// Primary package/crate when known (e.g. `kodo-agent`).
+    pub package: Option<String>,
+    pub task_type: String,
+    /// Ordered: exact → package → typecheck → broad.
+    pub commands: Vec<PlannedVerifyCommand>,
+}
+
+impl VerificationPlan {
+    /// Criteria that some planned command may prove.
+    pub fn targeted_criterion_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .commands
+            .iter()
+            .flat_map(|c| c.criterion_ids.iter().cloned())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Failed commands from evidence, highest tier first (for repair re-run).
+    pub fn failed_commands(&self, failed: &[String]) -> Vec<VerifyCommand> {
+        let mut out: Vec<VerifyCommand> = Vec::new();
+        for planned in &self.commands {
+            if failed.iter().any(|f| f == &planned.command.command)
+                && !out.iter().any(|c| c.command == planned.command.command)
+            {
+                out.push(planned.command.clone());
+            }
+        }
+        out.sort_by_key(|c| {
+            self.commands
+                .iter()
+                .find(|p| p.command.command == c.command)
+                .map(|p| p.tier)
+                .unwrap_or(VerifyTier::Broad)
+        });
+        out
+    }
+}
+
+/// One observed verification run, bound to the criteria it targeted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationEvidence {
+    pub command: String,
+    pub cwd: String,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub criterion_ids: Vec<String>,
+    pub output_summary: String,
+    pub truncated: bool,
+    pub ok: bool,
+    pub failure_class: Option<FailureClass>,
+}
+
+impl VerificationEvidence {
+    pub fn from_outcome(
+        outcome: &VerifyOutcome,
+        cwd: &str,
+        criterion_ids: Vec<String>,
+        max_summary: usize,
+    ) -> Self {
+        let mut output_summary = outcome.output_tail.clone();
+        let mut truncated = output_summary.len() > max_summary;
+        if truncated {
+            let mut end = max_summary;
+            while end > 0 && !output_summary.is_char_boundary(end) {
+                end -= 1;
+            }
+            output_summary.truncate(end);
+            output_summary.push('…');
+        }
+        let failure_class = if outcome.ok {
+            None
+        } else if outcome.cancelled {
+            Some(FailureClass::Cancelled)
+        } else if outcome.timed_out {
+            Some(FailureClass::Timeout)
+        } else {
+            Some(classify_verify_failure(
+                &outcome.command.command,
+                &outcome.output_tail,
+            ))
+        };
+        // Keep truncated flag true if source was already a tail.
+        if outcome.output_tail.len() >= 2000 {
+            truncated = true;
+        }
+        Self {
+            command: outcome.command.command.clone(),
+            cwd: cwd.to_owned(),
+            exit_code: outcome.exit_code,
+            duration_ms: outcome.duration_ms,
+            criterion_ids,
+            output_summary,
+            truncated,
+            ok: outcome.ok,
+            failure_class,
+        }
+    }
+}
+
+/// Classify a failed verify command: product regression vs infrastructure.
+pub fn classify_verify_failure(command: &str, output: &str) -> FailureClass {
+    let lower = format!(
+        "{} \n{}",
+        command.to_ascii_lowercase(),
+        output.to_ascii_lowercase()
+    );
+    const INFRA: [&str; 24] = [
+        "command not found",
+        "no such file or directory",
+        "cannot find crate",
+        "error: no test target",
+        "could not resolve host",
+        "connection refused",
+        "econnrefused",
+        "network is unreachable",
+        "temporary failure in name resolution",
+        "dns error",
+        "rustc not found",
+        "cargo not found",
+        "node: command not found",
+        "npm err! missing script",
+        "enoent",
+        "no such package",
+        "unable to locate package",
+        "permission denied when spawning",
+        "not executable",
+        "http 503",
+        "http 502",
+        "http 429",
+        "rate limit",
+        "proxy error",
+    ];
+    if INFRA.iter().any(|m| lower.contains(m)) {
+        return FailureClass::Infrastructure;
+    }
+    FailureClass::Product
+}
+
+/// What to do after a verification run when something failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairDecision {
+    /// Product failure worth entering Repair.
+    pub can_repair: bool,
+    pub failure_class: FailureClass,
+    pub failed_evidence: Vec<VerificationEvidence>,
+    /// Commands to re-run first after repair (highest priority still failing).
+    pub targeted_rerun: Vec<VerifyCommand>,
+    /// Compressed hint for the model.
+    pub hint: String,
+    /// Budget already exhausted — do not enter Repair.
+    pub budget_exhausted: bool,
+}
+
+impl RepairDecision {
+    /// Build a repair decision from plan outcomes.
+    ///
+    /// * Infrastructure failures → `can_repair=false` (Blocked path).
+    /// * Product failures + budget left → repair with targeted re-run list.
+    /// * Product failures + budget out → `budget_exhausted=true`.
+    pub fn from_evidence(
+        evidence: &[VerificationEvidence],
+        plan: &VerificationPlan,
+        budget_ok: bool,
+    ) -> Self {
+        let failed: Vec<&VerificationEvidence> = evidence.iter().filter(|e| !e.ok).collect();
+        if failed.is_empty() {
+            return Self {
+                can_repair: false,
+                failure_class: FailureClass::Product,
+                failed_evidence: Vec::new(),
+                targeted_rerun: Vec::new(),
+                hint: String::new(),
+                budget_exhausted: false,
+            };
+        }
+        let infra = failed
+            .iter()
+            .all(|e| e.failure_class == Some(FailureClass::Infrastructure))
+            || failed
+                .iter()
+                .any(|e| e.failure_class == Some(FailureClass::Infrastructure))
+                && failed.iter().all(|e| {
+                    matches!(
+                        e.failure_class,
+                        Some(FailureClass::Infrastructure) | Some(FailureClass::Timeout)
+                    )
+                });
+        let class = if failed
+            .iter()
+            .any(|e| e.failure_class == Some(FailureClass::Product))
+        {
+            FailureClass::Product
+        } else if failed
+            .iter()
+            .any(|e| e.failure_class == Some(FailureClass::Infrastructure))
+        {
+            FailureClass::Infrastructure
+        } else if failed
+            .iter()
+            .any(|e| e.failure_class == Some(FailureClass::Timeout))
+        {
+            FailureClass::Timeout
+        } else {
+            FailureClass::Cancelled
+        };
+        let _ = infra;
+
+        let failed_cmds: Vec<String> = failed.iter().map(|e| e.command.clone()).collect();
+        let targeted = plan.failed_commands(&failed_cmds);
+        let hint = failed
+            .iter()
+            .map(|e| {
+                format!(
+                    "FAIL [{}] exit={:?} criteria={:?}\n{}",
+                    e.command, e.exit_code, e.criterion_ids, e.output_summary
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        match class {
+            FailureClass::Infrastructure => Self {
+                can_repair: false,
+                failure_class: class,
+                failed_evidence: failed.into_iter().cloned().collect(),
+                targeted_rerun: targeted,
+                hint: format!(
+                    "Infrastructure verification failure (not a product regression):\n{hint}"
+                ),
+                budget_exhausted: false,
+            },
+            _ if !budget_ok => Self {
+                can_repair: false,
+                failure_class: class,
+                failed_evidence: failed.into_iter().cloned().collect(),
+                targeted_rerun: targeted,
+                hint,
+                budget_exhausted: true,
+            },
+            _ => Self {
+                can_repair: true,
+                failure_class: class,
+                failed_evidence: failed.into_iter().cloned().collect(),
+                targeted_rerun: targeted,
+                hint,
+                budget_exhausted: false,
+            },
         }
     }
 }
@@ -254,6 +587,233 @@ impl VerificationRunner {
         cmds
     }
 
+    /// Build a criterion-scoped verification plan.
+    ///
+    /// Order: exact regression test → related package tests → typecheck →
+    /// broader suite. Each command lists only the `criterion_ids` it may prove
+    /// — a generic pass never blankets every criterion.
+    ///
+    /// `criteria` is `(id, description)` for acceptance criteria that need
+    /// verification evidence.
+    pub fn build_plan(
+        project: &Path,
+        criteria: &[(String, String)],
+        changed_files: &[String],
+        task_type: &str,
+    ) -> VerificationPlan {
+        let mut all_ids: Vec<String> = criteria.iter().map(|(id, _)| id.clone()).collect();
+        all_ids.sort();
+        all_ids.dedup();
+
+        // Criteria with a specific test/target extracted vs generic verify.
+        let mut exact_targets: Vec<(String, String)> = Vec::new(); // (criterion_id, test_filter)
+        let mut generic_ids: Vec<String> = Vec::new();
+        for (id, desc) in criteria {
+            if let Some(filter) = extract_test_filter(desc) {
+                exact_targets.push((id.clone(), filter));
+            } else {
+                generic_ids.push(id.clone());
+            }
+        }
+
+        let mut package = None;
+        let mut crates_changed: Vec<String> = Vec::new();
+        let mut web_changed = false;
+        for path in changed_files {
+            if let Some(rest) = path.strip_prefix("crates/") {
+                if let Some(pkg) = rest.split('/').next() {
+                    let name =
+                        std::fs::read_to_string(project.join(format!("crates/{pkg}/Cargo.toml")))
+                            .ok()
+                            .and_then(|text| {
+                                text.lines()
+                                    .find_map(|l| l.trim().strip_prefix("name = "))
+                                    .map(|n| n.trim_matches('"').to_owned())
+                            })
+                            .unwrap_or_else(|| pkg.to_owned());
+                    if !crates_changed.contains(&name) {
+                        crates_changed.push(name.clone());
+                    }
+                    if package.is_none() {
+                        package = Some(name);
+                    }
+                }
+            }
+            if path.starts_with("apps/desktop/") {
+                web_changed = true;
+            }
+        }
+
+        let mut commands: Vec<PlannedVerifyCommand> = Vec::new();
+        struct PushCtx<'a> {
+            commands: &'a mut Vec<PlannedVerifyCommand>,
+            timeout_ms: u64,
+        }
+        impl PushCtx<'_> {
+            fn push(
+                &mut self,
+                kind: VerifyKind,
+                command: String,
+                tier: VerifyTier,
+                ids: Vec<String>,
+            ) {
+                if command.is_empty() || ids.is_empty() {
+                    return;
+                }
+                if let Some(existing) = self
+                    .commands
+                    .iter_mut()
+                    .find(|c| c.command.command == command)
+                {
+                    for id in ids {
+                        if !existing.criterion_ids.contains(&id) {
+                            existing.criterion_ids.push(id);
+                        }
+                    }
+                    return;
+                }
+                self.commands.push(PlannedVerifyCommand {
+                    command: VerifyCommand {
+                        kind,
+                        command,
+                        timeout_ms: self.timeout_ms,
+                    },
+                    criterion_ids: ids,
+                    tier,
+                });
+            }
+        }
+
+        // Pushes that need &mut live in this scope so later code can use `commands`.
+        {
+            let mut ctx = PushCtx {
+                commands: &mut commands,
+                timeout_ms: 120_000,
+            };
+
+            // 1) Exact regression tests (one per criterion that named a test).
+            for (cid, filter) in &exact_targets {
+                ctx.push(
+                    VerifyKind::Test,
+                    format!("cargo test {filter} --quiet"),
+                    VerifyTier::ExactRegression,
+                    vec![cid.clone()],
+                );
+            }
+
+            // 2) Related package tests — generic verification criteria only.
+            let generic_for_package: Vec<String> = if exact_targets.is_empty() {
+                all_ids.clone()
+            } else {
+                generic_ids.clone()
+            };
+            if !generic_for_package.is_empty() {
+                if !crates_changed.is_empty() {
+                    for pkg in crates_changed.iter().take(3) {
+                        ctx.push(
+                            VerifyKind::Test,
+                            format!("cargo test -p {pkg} --quiet"),
+                            VerifyTier::Package,
+                            generic_for_package.clone(),
+                        );
+                    }
+                } else if project.join("Cargo.toml").is_file() {
+                    ctx.push(
+                        VerifyKind::Test,
+                        "cargo test --quiet".to_owned(),
+                        VerifyTier::Package,
+                        generic_for_package.clone(),
+                    );
+                }
+            }
+
+            // 3) Typecheck / check
+            if !generic_for_package.is_empty() || !exact_targets.is_empty() {
+                let typecheck_ids: Vec<String> = if exact_targets.is_empty() {
+                    all_ids.clone()
+                } else {
+                    generic_ids.clone()
+                };
+                if !typecheck_ids.is_empty() {
+                    if project.join("Cargo.toml").is_file() {
+                        ctx.push(
+                            VerifyKind::Build,
+                            "cargo check --quiet".to_owned(),
+                            VerifyTier::Typecheck,
+                            typecheck_ids.clone(),
+                        );
+                    }
+                    if web_changed {
+                        ctx.push(
+                            VerifyKind::Typecheck,
+                            "npm --prefix apps/desktop run typecheck".to_owned(),
+                            VerifyTier::Typecheck,
+                            typecheck_ids.clone(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // 4) Broader suite last — only when no package-level test was planned.
+        let has_package_cmd = commands.iter().any(|c| c.tier == VerifyTier::Package);
+        if !generic_ids.is_empty() && project.join("Cargo.toml").is_file() && !has_package_cmd {
+            commands.push(PlannedVerifyCommand {
+                command: VerifyCommand {
+                    kind: VerifyKind::Test,
+                    command: "cargo test --workspace --quiet".to_owned(),
+                    timeout_ms: 120_000,
+                },
+                criterion_ids: generic_ids.clone(),
+                tier: VerifyTier::Broad,
+            });
+        }
+
+        commands.sort_by_key(|c| c.tier);
+
+        // task_type currently informs callers / logging; keep on the plan.
+        VerificationPlan {
+            criterion_ids: all_ids,
+            changed_files: changed_files.to_vec(),
+            package,
+            task_type: task_type.to_owned(),
+            commands,
+        }
+    }
+
+    /// Run a verification plan in tier order. Stops after the first product
+    /// failure at ExactRegression (targeted repair) unless `stop_on_fail=false`.
+    /// Infra failures also stop (no point continuing the suite).
+    pub fn run_plan(
+        &self,
+        project: &Path,
+        plan: &VerificationPlan,
+        alive: &dyn Fn() -> bool,
+        stop_on_fail: bool,
+    ) -> Vec<VerificationEvidence> {
+        let mut out = Vec::new();
+        let cwd = project.display().to_string();
+        for planned in &plan.commands {
+            if !alive() {
+                break;
+            }
+            let outcome = self.run_one(project, &planned.command, alive);
+            let ev = VerificationEvidence::from_outcome(
+                &outcome,
+                &cwd,
+                planned.criterion_ids.clone(),
+                500,
+            );
+            let failed = !ev.ok;
+            out.push(ev);
+            if failed && stop_on_fail {
+                // Stop so repair can re-run this targeted command first.
+                break;
+            }
+        }
+        out
+    }
+
     /// Run one command with timeout + process-tree kill via **the same**
     /// [`crate::process::ProcessRunner`] as agent shell tools. `alive` can
     /// cancel earlier; cancelled/timeout are not ordinary exit failures.
@@ -458,6 +1018,67 @@ fn tail_chars(s: &str, max: usize) -> String {
     let mut out: String = s.chars().skip(skip).collect();
     out.insert(0, '…');
     out
+}
+
+/// Extract a concrete test filter from a criterion description, if any.
+///
+/// Recognizes:
+/// * backtick-quoted identifiers (`test_foo`, `foo::bar`)
+/// * bare `test_*` / `*_test` tokens
+/// * "the X test" where X looks like an identifier
+fn extract_test_filter(description: &str) -> Option<String> {
+    // Backtick identifiers
+    let mut rest = description;
+    while let Some(start) = rest.find('`') {
+        let after = &rest[start + 1..];
+        let end = after.find('`')?;
+        let inner = after[..end].trim();
+        if looks_like_test_filter(inner) {
+            return Some(inner.to_owned());
+        }
+        rest = &after[end + 1..];
+    }
+    // test_* tokens
+    for token in description.split_whitespace() {
+        let clean = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != ':');
+        if looks_like_test_filter(clean) {
+            return Some(clean.to_owned());
+        }
+    }
+    // "the login_panic test"
+    let lower = description.to_ascii_lowercase();
+    if let Some(idx) = lower.find("the ") {
+        let after = &description[idx + 4..];
+        if let Some(end) = after.to_ascii_lowercase().find(" test") {
+            let inner = after[..end].trim();
+            if looks_like_test_filter(inner) {
+                return Some(inner.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn looks_like_test_filter(s: &str) -> bool {
+    if s.len() < 4 || s.len() > 80 {
+        return false;
+    }
+    if s.contains(' ') {
+        return false;
+    }
+    // Must look like a Rust/node test path, not prose.
+    let lower = s.to_ascii_lowercase();
+    lower.starts_with("test_")
+        || lower.ends_with("_test")
+        || lower.contains("::test")
+        || (s.contains("::") && !s.contains('.'))
+        || (s
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == ':' || c == '.')
+            && s.contains('_')
+            && !lower.contains("the")
+            && !lower.contains("verification")
+            && !lower.contains("command"))
 }
 
 /// Failure report helper re-export used by callers that only need detect.
@@ -739,5 +1360,264 @@ error[E0308]: mismatched types
             FinalStatus::Verified
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // VerificationPlan / criterion-scoped evidence / repair regressions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn verify_exact_regression_tier_precedes_package_and_broad() {
+        let dir = temp_verify_dir("plan_order");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname=\"t\"\n").unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/lib.rs"), "").unwrap();
+        let criteria = vec![
+            (
+                "c_specific".to_string(),
+                "Fix the `test_login_panic` regression".to_string(),
+            ),
+            (
+                "c_generic".to_string(),
+                "Verification commands pass".to_string(),
+            ),
+        ];
+        let plan = VerificationRunner::build_plan(
+            &dir,
+            &criteria,
+            &["crates/agent/src/lib.rs".into()],
+            "bug-fix",
+        );
+        assert!(!plan.commands.is_empty(), "plan={:?}", plan.commands);
+        // Exact tier first when a named test exists.
+        if let Some(first) = plan.commands.first() {
+            assert_eq!(
+                first.tier,
+                VerifyTier::ExactRegression,
+                "exact must be first: {:?}",
+                plan.commands
+            );
+            assert!(first.command.command.contains("test_login_panic"));
+            assert_eq!(first.criterion_ids, vec!["c_specific".to_string()]);
+        }
+        // Tier order is non-decreasing.
+        let tiers: Vec<VerifyTier> = plan.commands.iter().map(|c| c.tier).collect();
+        let mut sorted = tiers.clone();
+        sorted.sort();
+        assert_eq!(tiers, sorted, "commands must be sorted by tier");
+        // Package/typecheck targets must NOT include the exact-only criterion.
+        for cmd in plan
+            .commands
+            .iter()
+            .filter(|c| c.tier != VerifyTier::ExactRegression)
+        {
+            assert!(
+                !cmd.criterion_ids.contains(&"c_specific".to_string()),
+                "unrelated pass must not target exact criterion: {:?}",
+                cmd
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_unrelated_test_pass_cannot_prove_target_criterion() {
+        let dir = temp_verify_dir("unrelated");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname=\"t\"\n").unwrap();
+        let criteria = vec![(
+            "c_target".to_string(),
+            "Must pass `test_login_panic`".to_string(),
+        )];
+        let plan = VerificationRunner::build_plan(&dir, &criteria, &[], "bug-fix");
+        // Simulate: broad/package command that does NOT target c_target.
+        let mut evidence = VerificationEvidence {
+            command: "cargo test --workspace --quiet".into(),
+            cwd: dir.display().to_string(),
+            exit_code: Some(0),
+            duration_ms: 10,
+            criterion_ids: vec![], // unrelated run — no binding
+            output_summary: "all tests passed".into(),
+            truncated: false,
+            ok: true,
+            failure_class: None,
+        };
+        // Empty criterion_ids must not prove c_target.
+        assert!(!evidence.criterion_ids.iter().any(|id| id == "c_target"));
+        // Even if we force wrong binding, exact criterion stays unmet without
+        // an evidence item bound to c_target from the exact command.
+        evidence.criterion_ids = vec!["c_other".into()];
+        assert!(!evidence.criterion_ids.contains(&"c_target".to_string()));
+
+        // Binding-aware bag check: only bound-to-c_target TestPassed counts.
+        use crate::evidence::{EvidenceBag, EvidenceItem, EvidenceKind, EvidenceRequirement};
+        let mut bag = EvidenceBag::default();
+        bag.push(
+            EvidenceItem::new(
+                "v1",
+                "verify",
+                EvidenceKind::TestPassed {
+                    command: "cargo test --workspace --quiet".into(),
+                },
+            )
+            .bound_to("c_other"),
+        );
+        let req = EvidenceRequirement::VerificationPassed;
+        assert!(
+            !bag.satisfies_for(Some("c_target"), &req),
+            "pass bound to c_other must not prove c_target"
+        );
+        bag.push(
+            EvidenceItem::new(
+                "v2",
+                "verify",
+                EvidenceKind::TestPassed {
+                    command: "cargo test test_login_panic --quiet".into(),
+                },
+            )
+            .bound_to("c_target"),
+        );
+        assert!(
+            bag.satisfies_for(Some("c_target"), &req),
+            "exact bound pass must prove c_target"
+        );
+        assert!(!plan.commands.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_exact_regression_pass_can_prove_criterion() {
+        use crate::evidence::{EvidenceBag, EvidenceItem, EvidenceKind, EvidenceRequirement};
+        let mut bag = EvidenceBag::default();
+        bag.push(
+            EvidenceItem::new(
+                "v",
+                "verify",
+                EvidenceKind::TestPassed {
+                    command: "cargo test test_login_panic --quiet".into(),
+                },
+            )
+            .bound_to("c_exact"),
+        );
+        assert!(bag.satisfies_for(Some("c_exact"), &EvidenceRequirement::VerificationPassed));
+    }
+
+    #[test]
+    fn verify_infra_failure_is_not_product_class() {
+        assert_eq!(
+            classify_verify_failure("cargo test foo", "error: command not found"),
+            FailureClass::Infrastructure
+        );
+        assert_eq!(
+            classify_verify_failure("cargo test foo", "cannot find crate `nope`"),
+            FailureClass::Infrastructure
+        );
+        assert_eq!(
+            classify_verify_failure("npm test", "Could not resolve host: registry.npmjs.org"),
+            FailureClass::Infrastructure
+        );
+        assert_eq!(
+            classify_verify_failure(
+                "cargo test",
+                "test login::test_login_panic ... FAILED\nassertion failed"
+            ),
+            FailureClass::Product
+        );
+    }
+
+    #[test]
+    fn verify_repair_decision_infra_blocks_repair() {
+        let plan = VerificationPlan {
+            criterion_ids: vec!["c1".into()],
+            changed_files: vec![],
+            package: None,
+            task_type: "bug-fix".into(),
+            commands: vec![PlannedVerifyCommand {
+                command: VerifyCommand::test("cargo test"),
+                criterion_ids: vec!["c1".into()],
+                tier: VerifyTier::Package,
+            }],
+        };
+        let ev = VerificationEvidence {
+            command: "cargo test".into(),
+            cwd: ".".into(),
+            exit_code: Some(101),
+            duration_ms: 5,
+            criterion_ids: vec!["c1".into()],
+            output_summary: "error: command not found".into(),
+            truncated: false,
+            ok: false,
+            failure_class: Some(FailureClass::Infrastructure),
+        };
+        let decision = RepairDecision::from_evidence(&[ev], &plan, true);
+        assert!(!decision.can_repair, "infra must not open product repair");
+        assert_eq!(decision.failure_class, FailureClass::Infrastructure);
+        assert!(decision.hint.contains("Infrastructure"));
+    }
+
+    #[test]
+    fn verify_repair_decision_product_and_budget() {
+        let plan = VerificationPlan::default();
+        let ev = VerificationEvidence {
+            command: "cargo test".into(),
+            cwd: ".".into(),
+            exit_code: Some(1),
+            duration_ms: 5,
+            criterion_ids: vec!["c1".into()],
+            output_summary: "assertion failed".into(),
+            truncated: false,
+            ok: false,
+            failure_class: Some(FailureClass::Product),
+        };
+        let decision = RepairDecision::from_evidence(std::slice::from_ref(&ev), &plan, true);
+        assert!(decision.can_repair);
+        assert_eq!(decision.failure_class, FailureClass::Product);
+
+        let decision = RepairDecision::from_evidence(std::slice::from_ref(&ev), &plan, false);
+        assert!(!decision.can_repair);
+        assert!(decision.budget_exhausted);
+    }
+
+    #[test]
+    fn verify_evidence_records_criterion_ids_and_truncation() {
+        let outcome = VerifyOutcome {
+            command: VerifyCommand::test("cargo test x"),
+            exit_code: Some(0),
+            ok: true,
+            timed_out: false,
+            cancelled: false,
+            cwd: "/tmp".into(),
+            duration_ms: 42,
+            output_tail: "ok".into(),
+            failure: None,
+        };
+        let ev = VerificationEvidence::from_outcome(&outcome, "/tmp", vec!["c_verify".into()], 500);
+        assert_eq!(ev.criterion_ids, vec!["c_verify".to_string()]);
+        assert_eq!(ev.duration_ms, 42);
+        assert_eq!(ev.exit_code, Some(0));
+        assert!(ev.ok);
+        assert!(!ev.truncated);
+
+        let long = VerifyOutcome {
+            output_tail: "x".repeat(3000),
+            ..outcome
+        };
+        let ev = VerificationEvidence::from_outcome(&long, "/tmp", vec![], 500);
+        assert!(ev.truncated);
+        assert!(ev.output_summary.chars().count() <= 501);
+    }
+
+    fn temp_verify_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kodo-vplan-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

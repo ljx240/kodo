@@ -1187,8 +1187,36 @@ impl EvidenceBag {
         self.verify_ok = Some(ok);
         if ok {
             self.verify_commands = commands.clone();
-            for command in commands {
-                let lower = command.to_ascii_lowercase();
+            // Unbound TestPassed is intentionally NOT pushed here: an arbitrary
+            // pass must not satisfy every VerificationPassed criterion.
+            // Use `mark_verify_bound` for criterion-scoped evidence.
+        }
+    }
+
+    /// Record criterion-scoped verification passes only.
+    ///
+    /// Each `(command, criterion_ids)` produces Test/Build/LintPassed items
+    /// bound to those criterion ids (never unbound, never broadcast).
+    pub fn mark_verify_bound(&mut self, ok: bool, bound: &[(String, Vec<String>)]) {
+        let ok = ok && !self.regression_failed;
+        self.verify_ok = Some(ok);
+        if !ok {
+            return;
+        }
+        for (command, ids) in bound {
+            if ids.is_empty() {
+                // Passing command with no criterion target: keep the command
+                // ledger but do not invent criterion evidence.
+                if !self.verify_commands.contains(command) {
+                    self.verify_commands.push(command.clone());
+                }
+                continue;
+            }
+            if !self.verify_commands.contains(command) {
+                self.verify_commands.push(command.clone());
+            }
+            let lower = command.to_ascii_lowercase();
+            for id in ids {
                 let kind = if lower.contains("test") {
                     EvidenceKind::TestPassed {
                         command: command.clone(),
@@ -1202,11 +1230,9 @@ impl EvidenceBag {
                         command: command.clone(),
                     }
                 };
-                self.push(EvidenceItem::new(
-                    format!("verify_{command}"),
-                    "verify",
-                    kind,
-                ));
+                let item = EvidenceItem::new(format!("verify_{command}->{id}"), "verify", kind)
+                    .bound_to(id.clone());
+                self.push(item);
             }
         }
     }

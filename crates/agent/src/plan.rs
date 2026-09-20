@@ -165,6 +165,13 @@ pub struct TaskPlan {
     /// Command labels to record as verification evidence on the next
     /// `mark_verify_done` (set by the loop from the real runner outcomes).
     pub verify_commands: Vec<String>,
+    /// Criteria that verification evidence is allowed to satisfy.
+    /// Empty = legacy fallback (all verify-shaped criteria in this plan).
+    /// Production always fills this from [`crate::verify::VerificationPlan`].
+    pub verify_target_ids: Vec<String>,
+    /// Per-command criterion bindings from the last verification run:
+    /// `(command, criterion_ids)`.
+    pub verify_bindings: Vec<(String, Vec<String>)>,
 }
 
 impl TaskPlan {
@@ -290,6 +297,8 @@ impl TaskPlan {
             requires_verify: mutating,
             repro_commands: Vec::new(),
             verify_commands: Vec::new(),
+            verify_target_ids: Vec::new(),
+            verify_bindings: Vec::new(),
         }
     }
 
@@ -414,6 +423,8 @@ impl TaskPlan {
             requires_verify,
             repro_commands: Vec::new(),
             verify_commands: Vec::new(),
+            verify_target_ids: Vec::new(),
+            verify_bindings: Vec::new(),
         })
     }
 
@@ -652,7 +663,12 @@ impl TaskPlan {
         1
     }
 
-    /// Record that verification succeeded, attaching evidence to Verify subtasks.
+    /// Record that verification succeeded, attaching **criterion-bound**
+    /// evidence only to criteria this plan is allowed to prove.
+    ///
+    /// Uses `verify_bindings` (per-command → criterion ids) when present;
+    /// otherwise falls back to `verify_target_ids`. Never blankets every
+    /// VerificationPassed criterion with an arbitrary pass.
     pub fn mark_verify_done(&mut self) {
         let command = if self.verify_commands.is_empty() {
             "project verification".to_owned()
@@ -666,35 +682,62 @@ impl TaskPlan {
                 });
             }
         }
-        for criterion in &mut self.criteria {
-            if matches!(
-                criterion.requirement,
-                EvidenceRequirement::VerificationPassed
-                    | EvidenceRequirement::SemanticProof {
-                        target: SemanticTarget::RegressionPrevented
+
+        // Build (command, criterion_id) pairs to absorb.
+        let mut pairs: Vec<(String, String)> = Vec::new(); // (cmd, criterion_id)
+        if !self.verify_bindings.is_empty() {
+            for (cmd, ids) in &self.verify_bindings {
+                for id in ids {
+                    pairs.push((cmd.clone(), id.clone()));
+                }
+            }
+        } else if !self.verify_target_ids.is_empty() {
+            for cmd in &self.verify_commands {
+                for id in &self.verify_target_ids {
+                    pairs.push((cmd.clone(), id.clone()));
+                }
+            }
+            if self.verify_commands.is_empty() {
+                for id in &self.verify_target_ids {
+                    pairs.push((command.clone(), id.clone()));
+                }
+            }
+        } else {
+            // Legacy/unit-test path: only generic verify-shaped criteria.
+            for criterion in &self.criteria {
+                if is_verify_shaped(&criterion.requirement) {
+                    pairs.push((command.clone(), criterion.id.clone()));
+                }
+            }
+        }
+
+        for (cmd, criterion_id) in pairs {
+            let kind = {
+                let lower = cmd.to_ascii_lowercase();
+                if lower.contains("test") {
+                    EvidenceKind::TestPassed {
+                        command: cmd.clone(),
                     }
-            ) {
-                let item = EvidenceItem::new(
-                    format!("verify_{command}"),
-                    "verify",
-                    if command.contains("test") {
-                        EvidenceKind::TestPassed {
-                            command: command.clone(),
-                        }
-                    } else if command.contains("lint") || command.contains("clippy") {
-                        EvidenceKind::LintPassed {
-                            command: command.clone(),
-                        }
-                    } else {
-                        EvidenceKind::BuildPassed {
-                            command: command.clone(),
-                        }
-                    },
-                );
-                criterion.absorb(&item);
+                } else if lower.contains("lint") || lower.contains("clippy") {
+                    EvidenceKind::LintPassed {
+                        command: cmd.clone(),
+                    }
+                } else {
+                    EvidenceKind::BuildPassed {
+                        command: cmd.clone(),
+                    }
+                }
+            };
+            let item = EvidenceItem::new(format!("verify_{cmd}->{criterion_id}"), "verify", kind)
+                .bound_to(criterion_id);
+            for criterion in &mut self.criteria {
+                if criterion.id == item.criterion_id.as_deref().unwrap_or("") {
+                    criterion.absorb(&item);
+                }
             }
         }
         self.verify_commands.clear();
+        self.verify_bindings.clear();
         self.advance_cursor();
     }
 
@@ -766,6 +809,10 @@ impl TaskPlan {
 
         // Evaluate structured criteria when present (strict), else legacy strings.
         if !self.criteria.is_empty() {
+            // Unscoped = no VerificationPlan targets configured (unit tests /
+            // legacy callers). Production always fills verify_target_ids.
+            let unscoped_verify =
+                self.verify_target_ids.is_empty() && self.verify_bindings.is_empty();
             for criterion in &self.criteria {
                 let mut met = criterion.is_met()
                     || evidence
@@ -780,13 +827,16 @@ impl TaskPlan {
                     ) && !evidence.files_written.is_empty())
                     || (matches!(criterion.requirement, EvidenceRequirement::AnyToolSuccess)
                         && evidence.had_tool_success)
+                    // Criterion-scoped verify only: bound bag items, or the
+                    // legacy unscoped shortcut when no plan targets exist.
                     || (matches!(
                         criterion.requirement,
                         EvidenceRequirement::VerificationPassed
                             | EvidenceRequirement::SemanticProof {
                                 target: SemanticTarget::RegressionPrevented
                             }
-                    ) && evidence.verify_ok == Some(true))
+                    ) && evidence.verify_ok == Some(true)
+                        && unscoped_verify)
                     || (matches!(
                         criterion.requirement,
                         EvidenceRequirement::ContextRead { .. }
@@ -927,6 +977,16 @@ fn criterion_could_be_structural(c: &str) -> bool {
         || lower.contains("写入")
         || lower.contains("验证")
         || lower.contains("测试")
+}
+
+fn is_verify_shaped(requirement: &EvidenceRequirement) -> bool {
+    matches!(
+        requirement,
+        EvidenceRequirement::VerificationPassed
+            | EvidenceRequirement::SemanticProof {
+                target: SemanticTarget::RegressionPrevented
+            }
+    )
 }
 
 fn flipped_unused(_item: &EvidenceItem) {}
@@ -1085,6 +1145,12 @@ pub struct AcceptanceEvidence {
     pub denied_tools: Vec<String>,
     /// Typed evidence bag for criterion matchers.
     pub bag: EvidenceBag,
+    /// Last verification runs (criterion-scoped).
+    pub verify_evidence: Vec<crate::verify::VerificationEvidence>,
+    /// Set when verification failed for infrastructure reasons (not product).
+    pub verify_infra_failure: bool,
+    /// True when at least one targeted verification command passed this turn.
+    pub partial_verified: bool,
 }
 
 impl AcceptanceEvidence {
@@ -1130,7 +1196,33 @@ impl AcceptanceEvidence {
         // Regression fingerprint reappearance fails verification.
         let ok = ok && !self.bag.regression_failed;
         self.verify_ok = Some(ok);
+        // Legacy path: only record overall verify_ok + bound items when we
+        // have explicit (command, criterion) bindings.
         self.bag.mark_verify(ok, commands);
+    }
+
+    /// Criterion-scoped verification result from [`crate::verify::VerificationPlan`].
+    pub fn mark_verify_plan(
+        &mut self,
+        ok: bool,
+        evidence: Vec<crate::verify::VerificationEvidence>,
+        infra_failure: bool,
+    ) {
+        let ok = ok && !self.bag.regression_failed;
+        self.verify_ok = Some(ok);
+        self.verify_infra_failure = infra_failure;
+        self.partial_verified = evidence.iter().any(|e| e.ok);
+        self.verify_evidence = evidence.clone();
+        // Bind only passing evidence to its criterion_ids — never blanket.
+        let bound: Vec<(String, Vec<String>)> = evidence
+            .iter()
+            .filter(|e| e.ok)
+            .map(|e| (e.command.clone(), e.criterion_ids.clone()))
+            .collect();
+        self.bag.mark_verify_bound(ok, &bound);
+        let cmds: Vec<String> = evidence.iter().map(|e| e.command.clone()).collect();
+        self.verify_ok = Some(ok);
+        let _ = cmds;
     }
 }
 
