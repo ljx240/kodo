@@ -1,4 +1,4 @@
-import { ArrowUp, ChevronDown, FileText, Plus, Search, Sparkles, Square, Shield, ShieldCheck, ShieldAlert, Settings, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, FileText, Plus, Search, Sparkles, Square, Shield, ShieldCheck, ShieldAlert, Settings, X } from "lucide-react";
 import { useLayoutEffect, useRef, useState, useEffect, useCallback } from "react";
 import { isDesktop, listProjectFiles, setSetting, setting, validateContextPath } from "../api";
 import { type ProviderConfig, templateById } from "../data/providers";
@@ -198,7 +198,8 @@ export function Composer({
               aria-expanded={pickerOpen}
               aria-haspopup="dialog"
               aria-controls={pickerOpen ? "context-picker" : undefined}
-              disabled={!ready || !projectPath}
+              disabled={!projectPath}
+              title={!projectPath ? "未选择项目目录" : "从项目中选择文件作为上下文"}
               onClick={() => setPickerOpen((open) => !open)}
             >
               <Plus size={16} strokeWidth={1.7} />
@@ -224,16 +225,26 @@ export function Composer({
                 PERMISSIONS.map(({ value, label, description }) => {
                   const cfg = PERM_CONFIG[value];
                   const Icon = PERM_ICONS[value];
+                  const selected = value === permission;
                   return (
-                    <MenuItem
+                    <button
                       key={value}
-                      icon={<Icon size={14} strokeWidth={1.8} style={{ color: cfg.color }} />}
-                      label={`${label} — ${description}`}
-                      onSelect={() => {
+                      type="button"
+                      role="menuitem"
+                      className={`perm-option${selected ? " perm-option--selected" : ""}`}
+                      aria-checked={selected}
+                      onClick={() => {
                         close();
                         setPerm(value);
                       }}
-                    />
+                    >
+                      <Icon size={14} strokeWidth={1.8} style={{ color: cfg.color }} />
+                      <span className="perm-option-text">
+                        <span className="perm-option-label">{label}</span>
+                        <span className="perm-option-desc">{description}</span>
+                      </span>
+                      {selected && <Check size={14} strokeWidth={2} className="perm-option-check" />}
+                    </button>
                   );
                 })
               }
@@ -309,6 +320,13 @@ export function Composer({
                 className="composer-send"
                 aria-label="Send"
                 disabled={!ready || draft.trim() === ""}
+                title={
+                  !ready
+                    ? "对话尚未就绪"
+                    : draft.trim() === ""
+                      ? "请输入消息后再发送"
+                      : "发送消息"
+                }
                 onClick={send}
               >
                 <ArrowUp size={16} strokeWidth={2.2} />
