@@ -39,10 +39,17 @@ function parse(): Route {
   const demo = path.startsWith(DEMO_PREFIX);
   const key = (demo ? path.slice(DEMO_PREFIX.length) : path).replace(/^\//, "");
 
+  // Narrow windows default the Inspector closed (LAYOUT.md §9).
+  // Explicit ?inspector=open|closed always wins so opening at 900px sticks.
+  const raw = params.get("inspector");
+  const narrow =
+    typeof window !== "undefined" && window.matchMedia("(max-width: 1199px)").matches;
+  const inspectorOpen = raw === "closed" ? false : raw === "open" ? true : !narrow;
+
   return {
     // An unknown path is the live conversation, which is also where `/` lands.
     name: NAMES[key] ?? "conversation",
-    inspectorOpen: params.get("inspector") !== "closed",
+    inspectorOpen,
     demo,
   };
 }
@@ -73,5 +80,11 @@ export function useRoute(): Route {
  */
 export function hrefTo(name: RouteName, inspectorOpen: boolean): string {
   const path = `${isDesktop() ? "" : DEMO_PREFIX}/${name}`;
-  return inspectorOpen ? path : `${path}?inspector=closed`;
+  const narrow =
+    typeof window !== "undefined" && window.matchMedia("(max-width: 1199px)").matches;
+  // Omit the param only when it matches the viewport default, so screenshots
+  // of /ui-demo/* stay query-free on wide viewports.
+  if (inspectorOpen && !narrow) return path;
+  if (!inspectorOpen && narrow) return path;
+  return inspectorOpen ? `${path}?inspector=open` : `${path}?inspector=closed`;
 }

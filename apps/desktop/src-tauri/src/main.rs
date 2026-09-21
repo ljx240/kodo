@@ -14,7 +14,7 @@ use run::{Approvals, Runs, StartArgs};
 mod run;
 mod view;
 
-use view::{ArchivedItemView, ProviderView, ProjectView, SessionRefView, SessionView, Workspace};
+use view::{ArchivedItemView, ProjectView, ProviderView, SessionRefView, SessionView, Workspace};
 
 #[derive(serde::Serialize)]
 struct CoreInfo {
@@ -25,7 +25,10 @@ struct CoreInfo {
 #[tauri::command]
 fn core_info() -> CoreInfo {
     let info = kodo_core::info();
-    CoreInfo { name: info.name, version: info.version }
+    CoreInfo {
+        name: info.name,
+        version: info.version,
+    }
 }
 
 #[tauri::command]
@@ -96,7 +99,9 @@ fn git_branch(path: String) -> Option<String> {
 
 #[tauri::command]
 fn reveal_project(app: AppHandle, path: String) -> Result<(), String> {
-    app.opener().reveal_item_in_dir(Path::new(&path)).map_err(|error| error.to_string())
+    app.opener()
+        .reveal_item_in_dir(Path::new(&path))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -169,10 +174,10 @@ fn list_archived() -> Result<Vec<ArchivedItemView>, String> {
                             }
                         }
                     }
-                    kodo_core::session::ItemKind::AgentMessage { text, .. } => {
-                        if !text.trim().is_empty() {
-                            summary = text.clone();
-                        }
+                    kodo_core::session::ItemKind::AgentMessage { text, .. }
+                        if !text.trim().is_empty() =>
+                    {
+                        summary = text.clone();
                     }
                     _ => {}
                 }
@@ -308,19 +313,38 @@ fn send_message(
     approvals: State<'_, Approvals>,
     id: String,
     text: String,
+    context: Option<Vec<String>>,
 ) -> Result<(), String> {
     let dir = sessions()?;
-    session::record_ask(&dir, &id, session::now(), &text).map_err(|error| error.to_string())?;
+    let context_paths: Vec<String> = context.unwrap_or_default();
+    // Reject paths that try to leave the project before any I/O.
+    for path in &context_paths {
+        if path.trim().is_empty() || path.contains("..") || std::path::Path::new(path).is_absolute()
+        {
+            return Err(format!("context path must stay inside the project: {path}"));
+        }
+    }
+    session::record_ask_with_context(&dir, &id, session::now(), &text, &context_paths)
+        .map_err(|error| error.to_string())?;
     let found = session::load(&dir, &id).map_err(|error| error.to_string())?;
 
     let settings_path = settings::settings_path();
-    let read_setting = |key: &str| settings_path.as_ref().and_then(|path| settings::read(path, key));
+    let read_setting = |key: &str| {
+        settings_path
+            .as_ref()
+            .and_then(|path| settings::read(path, key))
+    };
 
     let permission = run::permission_from_settings(read_setting("permission"));
 
     let provider = load_providers().ok().and_then(|list| {
-        let active = read_setting("active-provider").and_then(|raw| raw.parse::<usize>().ok()).unwrap_or(0);
-        let chosen = list.get(active).cloned().or_else(|| list.iter().find(|p| p.has_key).cloned());
+        let active = read_setting("active-provider")
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(0);
+        let chosen = list
+            .get(active)
+            .cloned()
+            .or_else(|| list.iter().find(|p| p.has_key).cloned());
         chosen.and_then(|p| {
             // Keys live only in credentials; the shell re-reads them here.
             let creds = settings::credentials_path()?;
@@ -353,6 +377,7 @@ fn send_message(
             id,
             project: found.project,
             message: text,
+            context: context_paths,
             provider,
             permission,
             fallback_to_local,
@@ -360,6 +385,67 @@ fn send_message(
             extended_thinking,
         },
     )
+}
+
+/// Lists project-relative files for the composer's Add context picker.
+/// Honors the same ignore set as the agent's ContextManager (no node_modules, etc.).
+#[tauri::command]
+fn list_project_files(project: String, query: Option<String>) -> Result<Vec<String>, String> {
+    let root = std::path::Path::new(&project);
+    if !root.is_dir() {
+        return Err(format!("project is not a directory: {project}"));
+    }
+    let mut manager = kodo_agent::ContextManager::new(
+        root.to_path_buf(),
+        kodo_agent::TurnContextBudget::default(),
+    );
+    manager
+        .scan(&|| true)
+        .map_err(|_| "cancelled while listing project files".to_owned())?;
+    let query = query.unwrap_or_default();
+    let mut paths: Vec<String> = if query.trim().is_empty() {
+        manager
+            .file_map()
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect()
+    } else {
+        manager
+            .file_map()
+            .iter()
+            .filter(|entry| {
+                entry
+                    .path
+                    .to_ascii_lowercase()
+                    .contains(&query.to_ascii_lowercase())
+            })
+            .map(|entry| entry.path.clone())
+            .collect()
+    };
+    paths.sort();
+    paths.truncate(200);
+    Ok(paths)
+}
+
+/// Validates that a context path is inside the project and returns a short preview.
+/// Never returns file bodies to the React layer beyond this bounded preview.
+#[tauri::command]
+fn read_context_file(project: String, path: String) -> Result<String, String> {
+    let root = std::path::Path::new(&project);
+    if !root.is_dir() {
+        return Err(format!("project is not a directory: {project}"));
+    }
+    if path.trim().is_empty() || path.contains("..") || std::path::Path::new(&path).is_absolute() {
+        return Err(format!("path must stay inside the project: {path}"));
+    }
+    let manager = kodo_agent::ContextManager::new(
+        root.to_path_buf(),
+        kodo_agent::TurnContextBudget::default(),
+    );
+    // Range-read a small preview; agent pins the fuller range later.
+    manager
+        .read_range(&path, 1, 40, "context preview")
+        .map(|span| span.snippet)
 }
 
 #[tauri::command]
@@ -383,7 +469,9 @@ fn sessions() -> Result<PathBuf, String> {
 }
 
 fn load(dir: &Path, id: &str) -> Result<SessionView, String> {
-    session::load(dir, id).map(SessionView::from).map_err(|error| error.to_string())
+    session::load(dir, id)
+        .map(SessionView::from)
+        .map_err(|error| error.to_string())
 }
 
 fn snapshot() -> Result<Workspace, String> {
@@ -425,6 +513,8 @@ fn main() {
             send_message,
             stop_run,
             respond_approval,
+            list_project_files,
+            read_context_file,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Kodo");

@@ -71,6 +71,8 @@ export type ItemKindDto = ItemDto["kind"];
 
 export type TurnDto = {
   ask: string;
+  /** Project-relative paths pinned as context for this turn (not file bodies). */
+  context: string[];
   items: ItemDto[];
   done: boolean;
   stopped: boolean;
@@ -121,6 +123,18 @@ function read<T>(command: string, args?: Record<string, unknown>): Promise<T | n
 function write<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
   if (!isDesktop()) return Promise.resolve(null);
   return invoke<T>(command, args);
+}
+
+export function sendMessage(id: string, text: string, context: string[] = []): Promise<void> {
+  return invoke<void>("send_message", { id, text, context });
+}
+
+export function stopRun(id: string): Promise<void | null> {
+  return write<void>("stop_run", { id });
+}
+
+export function respondApproval(id: string, step: number, approved: boolean): Promise<void> {
+  return invoke<void>("respond_approval", { id, step, approved });
 }
 
 export function workspace(): Promise<WorkspaceDto | null> {
@@ -210,16 +224,28 @@ export function saveProvidersCommand(providers: ProviderDto[]): Promise<Provider
   return write<ProviderDto[]>("save_providers", { providers });
 }
 
-export function sendMessage(id: string, text: string): Promise<void | null> {
-  return write<void>("send_message", { id, text });
+/** Project-relative file paths for the Add context picker (ignore rules applied). */
+export function listProjectFiles(project: string, query?: string): Promise<string[]> {
+  if (!isDesktop()) return Promise.resolve([]);
+  return invoke<string[]>("list_project_files", { project, query: query ?? null });
 }
 
-export function stopRun(id: string): Promise<void | null> {
-  return write<void>("stop_run", { id });
+/** Short preview of a project file; rejects when the path leaves the project. */
+export function readContextFile(project: string, path: string): Promise<string> {
+  if (!isDesktop()) return Promise.resolve("");
+  return invoke<string>("read_context_file", { project, path });
 }
 
-export function respondApproval(id: string, step: number, approved: boolean): Promise<void | null> {
-  return write<void>("respond_approval", { id, step, approved });
+/** True when the path is inside the project and readable; false otherwise. */
+export async function validateContextPath(project: string, path: string): Promise<boolean> {
+  if (!path || path.includes("..") || path.startsWith("/")) return false;
+  if (!isDesktop()) return false;
+  try {
+    await invoke<string>("read_context_file", { project, path });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function onRunEvent(handler: (event: RunEventDto) => void): Promise<() => void> {

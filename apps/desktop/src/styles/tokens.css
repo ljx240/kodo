@@ -1,5 +1,6 @@
 /* Mirrors docs/design/TOKENS.css — keep the two in sync. */
 :root {
+  /* ── Surfaces ─────────────────────────────────────────────────────────── */
   --kodo-canvas: #ffffff;
   --kodo-sidebar: #fafbfc;
   --kodo-surface: #f7f8fa;
@@ -8,17 +9,39 @@
 
   --kodo-border: #e5e9f0;
   --kodo-border-strong: #d7dee8;
+  --kodo-border-subtle: #f2f4f7;
 
+  /* ── Readable ink (must meet WCAG AA on every surface above) ─────────── */
   --kodo-text: #172033;
   --kodo-text-secondary: #667085;
+  /* Legacy alias kept so older rules that still read muted-as-text resolve to
+     a readable value; new rules should use secondary or decorative-muted. */
+  --kodo-text-tertiary: #667085;
+
+  /* ── Decorative ink (icons, chevrons, separators only) ────────────────── */
+  /* ~2.6:1 on canvas — never use for informational text. */
   --kodo-text-muted: #98a2b3;
 
+  /* ── Accents & status ─────────────────────────────────────────────────── */
   --kodo-accent: #2563eb;
   --kodo-accent-hover: #1d4ed8;
   --kodo-success: #16a34a;
+  --kodo-success-text: #15803d;
   --kodo-warning: #d97706;
-  --kodo-error: #dc2626;
+  --kodo-warning-text: #b45309;
+  /* #dc2626 dips under 4.5:1 on hover/selected surfaces; #b91c1c holds AA. */
+  --kodo-error: #b91c1c;
 
+  --kodo-success-bg: #eaf9f4;
+  --kodo-success-bg-soft: #e9f7ef;
+  --kodo-error-bg: #fef2f2;
+
+  /* ── Focus ────────────────────────────────────────────────────────────── */
+  --kodo-focus-ring: #2563eb;
+  --kodo-focus-width: 2px;
+  --kodo-focus-offset: 2px;
+
+  /* ── Typography ───────────────────────────────────────────────────────── */
   --kodo-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --kodo-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 
@@ -28,16 +51,19 @@
   --kodo-font-chat: 14px;
   --kodo-font-title: 18px;
 
+  /* ── Shape ────────────────────────────────────────────────────────────── */
   --kodo-radius-sm: 4px;
   --kodo-radius: 6px;
   --kodo-radius-popover: 8px;
 
+  /* ── Shell geometry ───────────────────────────────────────────────────── */
   --kodo-sidebar-width: 260px;
   --kodo-inspector-width: 330px;
   --kodo-inspector-rail-width: 40px;
   --kodo-topbar-height: 44px;
   --kodo-control-height: 32px;
 
+  /* ── Spacing scale ────────────────────────────────────────────────────── */
   --kodo-space-1: 2px;
   --kodo-space-2: 4px;
   --kodo-space-3: 6px;
@@ -46,4 +72,50 @@
   --kodo-space-6: 16px;
   --kodo-space-7: 20px;
   --kodo-space-8: 24px;
+
+  /* ── Semantic aliases (theme-ready) ───────────────────────────────────── */
+  /* Components should prefer these over raw palette names so a future theme
+     only swaps the aliases. Light is the V1 source of truth. */
+  --kodo-bg: var(--kodo-canvas);
+  --kodo-bg-nav: var(--kodo-sidebar);
+  --kodo-bg-raised: var(--kodo-surface);
+  --kodo-fg: var(--kodo-text);
+  --kodo-fg-secondary: var(--kodo-text-secondary);
+  --kodo-fg-decorative: var(--kodo-text-muted);
+  --kodo-accent-fg: var(--kodo-accent);
+}
+
+/* ── Dark theme architecture ──────────────────────────────────────────────
+   V1 ships light only. The dark block is the token contract: flipping
+   <html data-theme="dark"> remaps every semantic alias without touching
+   component CSS. Values are provisional and untested against references. */
+[data-theme="dark"] {
+  --kodo-canvas: #0f141c;
+  --kodo-sidebar: #121821;
+  --kodo-surface: #171e29;
+  --kodo-hover: #1c2431;
+  --kodo-selected: #17253f;
+
+  --kodo-border: #273043;
+  --kodo-border-strong: #364156;
+  --kodo-border-subtle: #1e2633;
+
+  --kodo-text: #e8edf6;
+  --kodo-text-secondary: #a7b0c0;
+  --kodo-text-tertiary: #a7b0c0;
+  --kodo-text-muted: #6d778a;
+
+  --kodo-accent: #5b8cff;
+  --kodo-accent-hover: #7aa2ff;
+  --kodo-success: #22c55e;
+  --kodo-success-text: #4ade80;
+  --kodo-warning: #f59e0b;
+  --kodo-warning-text: #fbbf24;
+  --kodo-error: #f87171;
+
+  --kodo-success-bg: #10251c;
+  --kodo-success-bg-soft: #10251c;
+  --kodo-error-bg: #2a1515;
+
+  --kodo-focus-ring: #7aa2ff;
 }

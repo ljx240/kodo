@@ -14,6 +14,19 @@ export type Core = {
   providers?: unknown[];
   /** `setting` values by key. */
   settings?: Record<string, string>;
+  /** Project-relative files for Add context (`list_project_files`). */
+  files?: string[];
+  /** When true, `send_message` always rejects (failed-send recovery UX). */
+  failSend?: boolean;
+  /** When true, `respond_approval` always rejects. */
+  failApproval?: boolean;
+  /** When true, `retitle_session` / `archive_session` reject. */
+  failRename?: boolean;
+  failArchive?: boolean;
+  /** When true, `read_context_file` rejects (context read failure). */
+  failContextRead?: boolean;
+  /** Captured `send_message` payloads for assertions. */
+  sendLog?: Array<{ id: string; text: string; context: string[] }>;
 };
 
 /**
@@ -30,6 +43,9 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     const settings: Record<string, string> = { ...(config.settings ?? {}) };
     let session = config.session ?? null;
     let workspace = config.workspace ?? { projects: [], sessions: [] };
+    const files = config.files ?? ["src/app.ts", "src/util.ts", "README.md", "package.json"];
+    const sendLog: Array<{ id: string; text: string; context: string[] }> = [];
+    (window as unknown as { __sendLog?: unknown }).__sendLog = sendLog;
 
     (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
       transformCallback: (callback: (event: unknown) => void) => {
@@ -66,18 +82,42 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             if (args?.key) settings[args.key as string] = String(args.value ?? "");
             return null;
           case "retitle_session": {
+            if (config.failRename) throw "rename failed";
             if (session && typeof session === "object") {
               session = { ...(session as Record<string, unknown>), title: args?.title };
             }
             return session;
           }
           case "archive_session":
+            if (config.failArchive) throw "archive failed";
             return workspace;
           case "restore_session":
             return workspace;
           case "respond_approval":
+            if (config.failApproval) throw "approval response failed";
             return null;
-          case "send_message":
+          case "list_project_files": {
+            const q = String(args?.query ?? "").toLowerCase();
+            return files.filter((f) => !q || f.toLowerCase().includes(q));
+          }
+          case "read_context_file": {
+            if (config.failContextRead) throw "cannot read file outside project";
+            const path = String(args?.path ?? "");
+            if (!path || path.includes("..") || path.startsWith("/")) {
+              throw `path must stay inside the project: ${path}`;
+            }
+            if (!files.includes(path)) throw `file not found: ${path}`;
+            return `// preview of ${path}`;
+          }
+          case "send_message": {
+            if (config.failSend) throw "send failed: provider unavailable";
+            sendLog.push({
+              id: String(args?.id ?? ""),
+              text: String(args?.text ?? ""),
+              context: Array.isArray(args?.context) ? (args.context as string[]) : [],
+            });
+            return null;
+          }
           case "stop_run":
             return null;
           default:

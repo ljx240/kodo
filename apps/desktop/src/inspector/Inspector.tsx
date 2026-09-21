@@ -49,11 +49,13 @@ function Tabs({
   onSelect: (tab: InspectorTab) => void;
 }) {
   return (
-    <nav className={`ins-tabs${chips ? " ins-tabs--chips" : ""}`}>
+    <nav className={`ins-tabs${chips ? " ins-tabs--chips" : ""}`} role="tablist" aria-label="Inspector sections">
       {tabs.map((item) => (
         <button
           key={item.tab}
           type="button"
+          role="tab"
+          aria-selected={item.tab === active}
           className={`ins-tab${item.tab === active ? " ins-tab--active" : ""}`}
           onClick={() => onSelect(item.tab)}
         >
@@ -130,7 +132,7 @@ export function Inspector({
   const active = allowed.has(tab) ? tab : tabs[0].tab;
 
   return (
-    <aside className="inspector">
+    <aside className="inspector" id="kodo-inspector">
       <div className="ins-rail">
         {rail.map(({ tab: railTab, label, Icon }) => (
           <button
@@ -139,6 +141,8 @@ export function Inspector({
             className={`rail-btn${open && active === railTab ? " rail-btn--active" : ""}`}
             title={label}
             aria-label={label}
+            aria-expanded={open && active === railTab}
+            aria-controls={open ? "kodo-inspector-panel" : undefined}
             onClick={() => {
               onSelectTab(railTab);
               if (!open) onOpen();
@@ -150,7 +154,7 @@ export function Inspector({
       </div>
 
       {open && (
-        <div className="ins-panel">
+        <div className="ins-panel" id="kodo-inspector-panel" role="region" aria-label="Inspector panel">
           {route === "conversation" ? (
             <>
               <header className="ins-panel-head">
@@ -172,7 +176,7 @@ export function Inspector({
             </header>
           )}
 
-          <div className="ins-content">
+          <div className="ins-content" role="tabpanel">
             {contentFor(route, active, demo, live, archiveSelection, onArchiveRestore, onOpenTrace)}
           </div>
         </div>

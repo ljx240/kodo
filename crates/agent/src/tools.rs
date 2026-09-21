@@ -25,10 +25,15 @@ pub fn dangerous_reason(command: &str) -> Option<&'static str> {
     if lower.contains("chmod ") || lower.contains("chown ") {
         return Some("修改权限");
     }
-    if (lower.contains("curl ") || lower.contains("wget ")) && (lower.contains("|") || lower.contains(";")) {
+    if (lower.contains("curl ") || lower.contains("wget "))
+        && (lower.contains("|") || lower.contains(";"))
+    {
         return Some("下载并管道执行");
     }
-    if lower.contains("git push") || lower.contains("git reset --hard") || lower.contains("git clean -") {
+    if lower.contains("git push")
+        || lower.contains("git reset --hard")
+        || lower.contains("git clean -")
+    {
         return Some("危险 git 操作");
     }
     if lower.contains("mkfs") || lower.contains("dd if=") || lower.contains(":(){") {
@@ -40,10 +45,10 @@ pub fn dangerous_reason(command: &str) -> Option<&'static str> {
     if lower.contains("> /") || lower.contains(">> /") {
         return Some("重定向到绝对路径");
     }
-    if first == "sh" || first == "bash" || first == "zsh" {
-        if lower.contains(" -c ") || lower.starts_with("sh -c") || lower.starts_with("bash -c") {
-            return Some("嵌套 shell");
-        }
+    if (first == "sh" || first == "bash" || first == "zsh")
+        && (lower.contains(" -c ") || lower.starts_with("sh -c") || lower.starts_with("bash -c"))
+    {
+        return Some("嵌套 shell");
     }
     None
 }
@@ -93,7 +98,9 @@ fn walk(root: &Path, dir: &Path, hits: &mut Vec<String>, query: &str, depth: usi
     if depth > 4 || hits.len() >= 12 {
         return;
     }
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -102,7 +109,10 @@ fn walk(root: &Path, dir: &Path, hits: &mut Vec<String>, query: &str, depth: usi
         }
         if path.is_dir() {
             walk(root, &path, hits, query, depth + 1);
-        } else if name.to_ascii_lowercase().contains(&query.to_ascii_lowercase()) {
+        } else if name
+            .to_ascii_lowercase()
+            .contains(&query.to_ascii_lowercase())
+        {
             if let Ok(rel) = path.strip_prefix(root) {
                 hits.push(rel.display().to_string());
             }
@@ -121,12 +131,6 @@ pub fn read_text(path: &Path, max_lines: usize) -> String {
         out.push_str(&format!("\n… 共 {total} 行"));
     }
     out
-}
-
-/// Runs `command` in `cwd` via the user shell.
-pub fn command_output(cwd: &Path, command: &str) -> (String, Option<i32>) {
-    let (text, code, _) = command_output_interruptible(cwd, command, &|| true);
-    (text, code)
 }
 
 /// Runs `command`, polling `alive` so the shell can kill a long process on stop.
@@ -148,7 +152,12 @@ pub fn command_output_interruptible(
         cmd.arg("-c").arg(command);
     }
 
-    let mut child = match cmd.current_dir(cwd).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn() {
+    let mut child = match cmd
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
         Ok(child) => child,
         Err(error) => return (format!("无法执行 `{command}`：{error}"), Some(127), false),
     };
@@ -170,7 +179,11 @@ pub fn command_output_interruptible(
     let output = match child.wait_with_output() {
         Ok(output) => output,
         Err(error) => {
-            return (format!("无法收集 `{command}` 输出：{error}"), Some(if killed { 143 } else { 127 }), killed);
+            return (
+                format!("无法收集 `{command}` 输出：{error}"),
+                Some(if killed { 143 } else { 127 }),
+                killed,
+            );
         }
     };
 
@@ -215,8 +228,16 @@ pub fn resolve_in_project(project: &Path, relative: &str) -> Result<PathBuf, Str
         return Err("path escapes the project root".to_owned());
     }
     let full = project.join(relative);
-    // Canonicalize parent when possible to catch symlink escapes.
-    if let Ok(canon) = full.canonicalize() {
+    // Canonicalize the deepest existing ancestor so a non-existent leaf still
+    // catches symlink escapes through its parent (e.g. `escape/new.txt`).
+    let mut probe = full.as_path();
+    while !probe.exists() {
+        match probe.parent() {
+            Some(parent) if parent != probe => probe = parent,
+            _ => break,
+        }
+    }
+    if let Ok(canon) = probe.canonicalize() {
         if let Ok(root) = project.canonicalize() {
             if !canon.starts_with(&root) {
                 return Err("path escapes the project root".to_owned());
@@ -226,140 +247,37 @@ pub fn resolve_in_project(project: &Path, relative: &str) -> Result<PathBuf, Str
     Ok(full)
 }
 
-/// Writes file content inside the project. Returns (path, added, removed) line delta.
-pub fn write_project_file(project: &Path, relative: &str, content: &str) -> Result<(String, u32, u32), String> {
+/// Writes file content inside the project. Returns (path, added, removed) line delta
+/// computed with a real LCS line diff (not a HashSet approximation).
+pub fn write_project_file(
+    project: &Path,
+    relative: &str,
+    content: &str,
+) -> Result<(String, u32, u32), String> {
     let full = resolve_in_project(project, relative)?;
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let old = fs::read_to_string(&full).unwrap_or_default();
-    let old_lines = old.lines().count() as u32;
-    let new_lines = content.lines().count() as u32;
+    let (added, removed) = crate::patch::line_diff_counts(&old, content);
     fs::write(&full, content).map_err(|e| e.to_string())?;
-    let added = new_lines.saturating_sub(old_lines);
-    let removed = old_lines.saturating_sub(new_lines);
-    // If both non-zero and file replaced entirely, keep raw counts.
-    if old_lines > 0 && new_lines > 0 && old != content {
-        // approximate: count changed lines cheaply
-        let old_set: std::collections::HashSet<&str> = old.lines().collect();
-        let new_set: std::collections::HashSet<&str> = content.lines().collect();
-        let added = new_set.difference(&old_set).count() as u32;
-        let removed = old_set.difference(&new_set).count() as u32;
-        return Ok((relative.trim().to_owned(), added, removed));
-    }
     Ok((relative.trim().to_owned(), added, removed))
-}
-
-/// Verification command for a project layout, if any.
-pub fn detect_verify_command(project: &Path) -> Option<String> {
-    if project.join("Cargo.toml").is_file() {
-        return Some("cargo test --workspace --quiet".to_owned());
-    }
-    if project.join("package.json").is_file() {
-        if project.join("node_modules").is_dir() {
-            return Some("npm test --silent".to_owned());
-        }
-        return Some("npm test --silent".to_owned());
-    }
-    if project.join("pyproject.toml").is_file() || project.join("pytest.ini").is_file() {
-        return Some("python -m pytest -q".to_owned());
-    }
-    None
-}
-
-/// One file write extracted from model output.
-pub struct WriteOp {
-    pub path: String,
-    pub content: String,
-}
-
-/// Parses ```write / path: / --- / content fences.
-pub fn extract_writes(text: &str) -> Vec<WriteOp> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("```write") {
-        let after = &rest[start + 8..];
-        let Some(end) = after.find("```") else { break };
-        let block = &after[..end];
-        rest = &after[end + 3..];
-
-        let mut path = String::new();
-        let mut content_lines: Vec<&str> = Vec::new();
-        let mut in_body = false;
-        for line in block.lines() {
-            if in_body {
-                content_lines.push(line);
-                continue;
-            }
-            let trimmed = line.trim();
-            if trimmed == "---" || trimmed == "===" {
-                in_body = true;
-                continue;
-            }
-            if let Some(p) = trimmed.strip_prefix("path:") {
-                path = p.trim().trim_matches('"').to_owned();
-            }
-        }
-        // Fallback: first non-empty line before --- is the path
-        if path.is_empty() {
-            for line in block.lines() {
-                let t = line.trim();
-                if t.is_empty() || t.starts_with("path:") || t == "---" {
-                    if t == "---" {
-                        break;
-                    }
-                    continue;
-                }
-                path = t.to_owned();
-                break;
-            }
-        }
-        if path.is_empty() {
-            continue;
-        }
-        // If no --- separator, treat everything after the path line as body
-        if !in_body {
-            let mut seen_path = false;
-            let mut lines = Vec::new();
-            for line in block.lines() {
-                let t = line.trim();
-                if !seen_path {
-                    if t.is_empty() {
-                        continue;
-                    }
-                    if let Some(p) = t.strip_prefix("path:") {
-                        if path.is_empty() {
-                            path = p.trim().trim_matches('"').to_owned();
-                        }
-                        seen_path = true;
-                        continue;
-                    }
-                    if t == path {
-                        seen_path = true;
-                        continue;
-                    }
-                }
-                lines.push(line);
-            }
-            content_lines = lines;
-        }
-
-        let mut content = content_lines.join("\n");
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        out.push(WriteOp { path, content });
-    }
-    out
 }
 
 /// Best-effort git working-tree summary as (path, added, removed) line estimates.
 pub fn summarize_git_changes(project: &Path) -> Vec<(String, u32, u32)> {
+    // Only summarize when the project itself is the git root — otherwise
+    // `git status` walks up and reports an unrelated parent repository.
+    if !project.join(".git").exists() {
+        return Vec::new();
+    }
     let status = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(project)
         .output();
-    let Ok(status) = status else { return Vec::new() };
+    let Ok(status) = status else {
+        return Vec::new();
+    };
     if !status.status.success() {
         return Vec::new();
     }
@@ -397,8 +315,14 @@ pub fn summarize_git_changes(project: &Path) -> Vec<(String, u32, u32)> {
         if numstat.status.success() {
             for line in String::from_utf8_lossy(&numstat.stdout).lines() {
                 let mut parts = line.split('\t');
-                let added = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-                let removed = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                let added = parts
+                    .next()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(0);
+                let removed = parts
+                    .next()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(0);
                 let path = parts.next().unwrap_or("").to_owned();
                 if !path.is_empty() {
                     deltas.push((path, added, removed));
@@ -435,8 +359,10 @@ mod tests {
     fn command_output_supports_multiline_shell() {
         let dir = std::env::temp_dir().join(format!("kodo-cmd-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let (text, code) = command_output(&dir, "echo one\necho two");
+        let (text, code, killed) =
+            command_output_interruptible(&dir, "echo one\necho two", &|| true);
         assert_eq!(code, Some(0));
+        assert!(!killed);
         assert!(text.contains("one"));
         assert!(text.contains("two"));
         let _ = fs::remove_dir_all(&dir);
@@ -452,15 +378,6 @@ mod tests {
         assert_eq!(delta.0, "src/hello.txt");
         assert!(dir.join("src/hello.txt").is_file());
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn extract_writes_reads_path_and_body() {
-        let text = "ok\n```write\npath: notes/a.md\n---\n# Title\nbody\n```\ndone";
-        let writes = extract_writes(text);
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].path, "notes/a.md");
-        assert!(writes[0].content.contains("# Title"));
     }
 
     #[test]

@@ -3,6 +3,8 @@
   display: flex;
   border-left: 1px solid var(--kodo-border);
   background: var(--kodo-canvas);
+  position: relative;
+  min-width: 0;
 }
 
 .ins-rail {
@@ -175,11 +177,12 @@
 }
 
 .ins-chevron {
+  /* Decorative disclosure glyph — not informational text. */
   color: var(--kodo-text-muted);
 }
 
 .ins-time {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
 }
 
@@ -213,6 +216,7 @@
 }
 
 .meta-project svg {
+  /* Decorative project glyph. */
   color: var(--kodo-text-muted);
 }
 
@@ -225,6 +229,7 @@
 
 .file-icon {
   flex: none;
+  /* Decorative file glyph. */
   color: var(--kodo-text-muted);
 }
 
@@ -256,7 +261,7 @@
 }
 
 .tool-count {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 .ins-link {
@@ -313,7 +318,7 @@
 }
 
 .llm-index {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 .llm-model {
@@ -323,7 +328,7 @@
 
 .llm-duration,
 .llm-time {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 .terminal-toolbar {
@@ -340,7 +345,7 @@
 }
 
 .terminal-exit {
-  color: var(--kodo-success);
+  color: var(--kodo-success-text);
   font-size: var(--kodo-font-sm);
   white-space: nowrap;
 }
@@ -369,7 +374,7 @@
 }
 
 .project-path {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-xs);
 }
 
@@ -397,6 +402,26 @@
 
 .quick-sub {
   display: block;
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-xs);
+}
+
+/* ── Narrow windows: panel overlays the conversation, rail stays in flow ──
+   Opening the panel must not squeeze the main pane below a usable width. */
+@media (max-width: 1199px) {
+  .ins-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(var(--kodo-inspector-width), calc(100vw - var(--kodo-sidebar-width) - var(--kodo-inspector-rail-width)));
+    background: var(--kodo-canvas);
+    border-left: 1px solid var(--kodo-border);
+    box-shadow: -12px 0 32px rgb(23 32 51 / 12%);
+  }
+
+  .app--sidebar-hidden .ins-panel {
+    width: min(var(--kodo-inspector-width), calc(100vw - var(--kodo-inspector-rail-width)));
+  }
 }

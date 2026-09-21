@@ -16,6 +16,7 @@ import { toReply, type Reply } from "../conversation/trace";
 import { changedFiles, conversation, projects, summary } from "../data/fixture";
 import { snapshotFromTurn, type LiveSnapshot } from "../data/liveContext";
 import { type ProviderConfig } from "../data/providers";
+import { navigate } from "../routes";
 import { Menu, MenuItem } from "../shell/Menu";
 
 type Props = {
@@ -33,6 +34,14 @@ type Props = {
 };
 
 type Approval = { step: number; kind: string; detail: string };
+
+/** Recoverable failure: message + optional retry / recovery action. */
+type ActionErrorState = {
+  message: string;
+  retry?: () => void;
+  retryLabel?: string;
+  action?: { label: string; run: () => void };
+};
 
 const demoReply: Reply = {
   steps: conversation.assistant.trace,
@@ -65,9 +74,26 @@ export function ConversationPage({
   const [approval, setApproval] = useState<Approval | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
+  const [contexts, setContexts] = useState<string[]>([]);
+  const [pageError, setPageError] = useState<ActionErrorState | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+
+  const providerWarning = useMemo(() => {
+    if (isFixture) return null;
+    if (providers.length === 0) return "尚未配置 AI Provider";
+    const active = provider;
+    if (!active) return "当前 Provider 不可用";
+    if (!active.hasKey && !(active.apiKey && active.apiKey.length > 0)) {
+      return "当前 Provider 缺少 API Key";
+    }
+    return null;
+  }, [isFixture, providers, provider]);
 
   useEffect(() => {
     setApproval(null);
+    setPageError(null);
+    setContexts([]);
+    setApprovalError(null);
     if (!conversationId || isFixture) {
       setTurns([]);
       setTitle("");
@@ -129,28 +155,80 @@ export function ConversationPage({
     onSnapshot?.(isFixture || !conversationId ? null : liveSnapshot);
   }, [onSnapshot, liveSnapshot, isFixture, conversationId]);
 
-  const send = async (text: string) => {
+  const send = async (text: string, context: string[]) => {
     if (!conversationId) return;
-    setTurns((current) => [...current, blank(text)]);
+    const payload = { text, context };
+    setPageError(null);
+    setTurns((current) => [...current, blank(text, context)]);
     setRunning(true);
     try {
-      await sendMessage(conversationId, text);
+      await sendMessage(conversationId, text, context);
+      // Context is consumed for this turn only; the user re-pins if needed.
+      setContexts([]);
     } catch (failure) {
       setRunning(false);
-      setTurns((current) => updateLast(current, (turn) => ({ ...turn, error: String(failure) })));
+      const message = errorMessage(failure);
+      setTurns((current) => updateLast(current, (turn) => ({ ...turn, error: message })));
+      setPageError({
+        message: `发送失败：${message}`,
+        retryLabel: "重试发送",
+        retry: () => {
+          setPageError(null);
+          void send(payload.text, payload.context);
+        },
+      });
     }
   };
 
   const stop = () => {
     if (!conversationId) return;
     setApproval(null);
-    void stopRun(conversationId);
+    void stopRun(conversationId).catch((failure) => {
+      setApprovalError(`停止失败：${errorMessage(failure)}`);
+    });
   };
 
   const decide = (approved: boolean) => {
     if (!conversationId || !approval) return;
-    void respondApproval(conversationId, approval.step, approved);
+    const pending = approval;
     setApproval(null);
+    setApprovalError(null);
+    void respondApproval(conversationId, pending.step, approved).catch((failure) => {
+      setApprovalError(
+        `审批响应失败：${errorMessage(failure)}（${approved ? "允许" : "拒绝"} step ${pending.step}）`,
+      );
+    });
+  };
+
+  const addContext = (path: string) => {
+    setContexts((current) => (current.includes(path) ? current : [...current, path]));
+  };
+
+  const rename = (next: string) => {
+    if (!conversationId) return;
+    const previous = title;
+    setTitle(next);
+    setRenaming(false);
+    setPageError(null);
+    void Promise.resolve(onRetitle(conversationId, next)).catch((failure) => {
+      setTitle(previous);
+      setPageError({
+        message: `重命名失败：${errorMessage(failure)}`,
+        retryLabel: "重试重命名",
+        retry: () => rename(next),
+      });
+    });
+  };
+
+  const archive = (id: string) => {
+    setPageError(null);
+    void Promise.resolve(onArchive(id)).catch((failure) => {
+      setPageError({
+        message: `归档失败：${errorMessage(failure)}`,
+        retryLabel: "重试归档",
+        retry: () => archive(id),
+      });
+    });
   };
 
   const heading = isFixture ? titleOf(conversationId) : title || "新对话";
@@ -170,12 +248,7 @@ export function ConversationPage({
                 onChange={(event) => setDraftTitle(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && draftTitle.trim() && conversationId) {
-                    const next = draftTitle.trim();
-                    setTitle(next);
-                    setRenaming(false);
-                    void Promise.resolve(onRetitle(conversationId, next)).catch(() => {
-                      /* workspace.retitle reports via tree refresh failure */
-                    });
+                    rename(draftTitle.trim());
                   }
                   if (event.key === "Escape") setRenaming(false);
                 }}
@@ -224,7 +297,7 @@ export function ConversationPage({
                       danger
                       onSelect={() => {
                         close();
-                        if (conversationId) void onArchive(conversationId);
+                        if (conversationId) archive(conversationId);
                       }}
                     />
                     <MenuItem
@@ -240,6 +313,32 @@ export function ConversationPage({
               </Menu>
             )}
           </div>
+
+          {pageError && (
+            <div className="action-error" role="alert" data-testid="action-error">
+              <span className="action-error-msg">{pageError.message}</span>
+              <div className="action-error-actions">
+                {pageError.retry && (
+                  <button
+                    type="button"
+                    className="btn btn--primary btn--sm"
+                    data-testid="action-error-retry"
+                    onClick={pageError.retry}
+                  >
+                    {pageError.retryLabel ?? "重试"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn--sm"
+                  data-testid="action-error-dismiss"
+                  onClick={() => setPageError(null)}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          )}
 
           {isFixture ? (
             <>
@@ -258,7 +357,7 @@ export function ConversationPage({
               const last = index === turns.length - 1;
               return (
                 <Fragment key={index}>
-                  <UserMessage text={turn.ask} />
+                  <UserMessage text={turn.ask} context={turn.context} />
                   <AssistantReply
                     time=""
                     reply={toReply(turn, running && last)}
@@ -287,6 +386,16 @@ export function ConversationPage({
               </div>
             </div>
           )}
+          {approvalError && (
+            <div className="action-error" role="alert" data-testid="approval-error">
+              <span className="action-error-msg">{approvalError}</span>
+              <div className="action-error-actions">
+                <button type="button" className="btn btn--sm" onClick={() => setApprovalError(null)}>
+                  关闭
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -296,14 +405,38 @@ export function ConversationPage({
         onSelectProvider={onSelectProvider}
         ready={!isFixture && conversationId !== null}
         running={running}
-        onSend={(text) => void send(text)}
+        projectPath={projectPath}
+        contexts={contexts}
+        onAddContext={addContext}
+        onRemoveContext={(path) => setContexts((current) => current.filter((item) => item !== path))}
+        onContextError={(message) =>
+          setPageError({
+            message,
+            action: {
+              label: "打开设置",
+              run: () => navigateSettings(),
+            },
+          })
+        }
+        onSend={(text, context) => void send(text, context)}
         onStop={stop}
+        providerWarning={providerWarning}
+        onOpenProviderSettings={() => navigateSettings()}
       />
     </main>
   );
 }
 
-function UserMessage({ time, text }: { time?: string; text: string }) {
+function errorMessage(failure: unknown): string {
+  if (failure instanceof Error) return failure.message;
+  return String(failure);
+}
+
+function navigateSettings() {
+  navigate(window.location.pathname.startsWith("/ui-demo") ? "/ui-demo/settings" : "/settings");
+}
+
+function UserMessage({ time, text, context }: { time?: string; text: string; context?: string[] }) {
   return (
     <div className="msg-user">
       <div className="msg-head">
@@ -311,13 +444,22 @@ function UserMessage({ time, text }: { time?: string; text: string }) {
         <span className="msg-author">You</span>
         {time && <span className="msg-time">{time}</span>}
       </div>
+      {context && context.length > 0 && (
+        <div className="msg-contexts" data-testid="msg-contexts">
+          {context.map((path) => (
+            <span key={path} className="chip chip--context chip--static">
+              <span className="chip-label">{path}</span>
+            </span>
+          ))}
+        </div>
+      )}
       <p className="msg-bubble">{text}</p>
     </div>
   );
 }
 
-function blank(ask: string): TurnDto {
-  return { ask, items: [], done: false, stopped: false, error: null };
+function blank(ask: string, context: string[] = []): TurnDto {
+  return { ask, context, items: [], done: false, stopped: false, error: null };
 }
 
 function reduce(turns: TurnDto[], event: RunEventDto): TurnDto[] {

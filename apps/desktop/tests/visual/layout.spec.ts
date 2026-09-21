@@ -5,6 +5,8 @@ import { expect, test } from "@playwright/test";
  * reference image at either size, so this asserts the layout invariants the
  * acceptance criteria name — panel widths, no horizontal overflow, the composer
  * and the trace rows staying usable — instead of comparing pixels.
+ *
+ * 900 / 1100 / 1586 are covered in a11y.spec.ts (multi-viewport smoke).
  */
 const VIEWPORTS = [
   { width: 1440, height: 900 },

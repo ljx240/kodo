@@ -35,6 +35,28 @@ select {
   color: inherit;
 }
 
+/* One focus ring for the whole shell. Mouse focus stays quiet. */
+:focus-visible {
+  outline: var(--kodo-focus-width) solid var(--kodo-focus-ring);
+  outline-offset: var(--kodo-focus-offset);
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Motion is optional; the shell must stay usable without it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 h1,
 h2,
 h3,
@@ -73,6 +95,8 @@ p {
   flex: 1;
   min-height: 0;
   display: flex;
+  position: relative;
+  min-width: 0;
 }
 
 .main {
@@ -81,6 +105,7 @@ p {
   display: flex;
   flex-direction: column;
   background: var(--kodo-canvas);
+  overflow-x: hidden;
 }
 
 .scroll {
@@ -109,6 +134,12 @@ p {
   flex-direction: column;
   background: var(--kodo-sidebar);
   border-right: 1px solid var(--kodo-border);
+}
+
+/* Top-bar toggle collapses the only navigation surface without changing the
+   conversation/inspector column rules. */
+.app--sidebar-hidden .sidebar {
+  display: none;
 }
 
 /* Holds the macOS traffic lights on the desktop build; empty otherwise. */
@@ -154,7 +185,7 @@ p {
 
 .brand-tagline {
   font-size: var(--kodo-font-xs);
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 .sidebar-search {
@@ -168,7 +199,7 @@ p {
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-popover);
   background: var(--kodo-canvas);
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
   text-align: left;
 }
@@ -316,7 +347,7 @@ p {
   margin: 0 4px 8px;
   padding: 6px 8px;
   border-radius: var(--kodo-radius);
-  background: #fef2f2;
+  background: var(--kodo-error-bg);
   color: var(--kodo-error);
   font-size: var(--kodo-font-sm);
 }
@@ -365,7 +396,7 @@ p {
 .tree-conversation-time {
   flex: none;
   font-size: var(--kodo-font-sm);
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 .tree-conversation:hover {
@@ -388,7 +419,7 @@ p {
    The root is a path, so it has to be allowed to break anywhere. */
 .tree-empty {
   padding: 4px 12px;
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
   line-height: 1.5;
 }
@@ -477,11 +508,11 @@ p {
 }
 
 .crumbs svg {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 .crumb-sep {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 .crumb-current {
@@ -537,7 +568,11 @@ p {
   border: 1px solid var(--kodo-border-strong);
   border-radius: var(--kodo-radius-sm);
   background: var(--kodo-canvas);
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
+}
+
+.search-field input::placeholder {
+  color: var(--kodo-text-secondary);
 }
 
 .search-field input {
@@ -550,6 +585,12 @@ p {
   color: var(--kodo-text);
 }
 
+.search-field input:focus-visible {
+  outline: var(--kodo-focus-width) solid var(--kodo-focus-ring);
+  outline-offset: var(--kodo-focus-offset);
+  border-radius: var(--kodo-radius-sm);
+}
+
 .search-field--inline {
   width: 250px;
 }
@@ -557,7 +598,7 @@ p {
 .search-field kbd {
   font-family: var(--kodo-font-ui);
   font-size: var(--kodo-font-xs);
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 /* --------------------------------------------------------- primitives --- */
@@ -573,6 +614,11 @@ p {
 }
 
 .icon-btn:hover {
+  background: var(--kodo-hover);
+}
+
+/* Menu toggles report open state to assistive tech from one place. */
+.menu-trigger[aria-expanded="true"] {
   background: var(--kodo-hover);
 }
 
@@ -642,7 +688,7 @@ p {
 }
 
 .chip svg {
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 .chip-icon {
@@ -680,6 +726,7 @@ p {
   display: flex;
   flex-direction: column;
   min-width: 180px;
+  max-width: min(320px, calc(100vw - 24px));
   padding: 4px;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-popover);
@@ -738,7 +785,7 @@ p {
 }
 
 .delta-add {
-  color: var(--kodo-success);
+  color: var(--kodo-success-text);
   font-size: var(--kodo-font-sm);
 }
 
@@ -754,8 +801,8 @@ p {
   height: 21px;
   padding: 0 9px 0 6px;
   border-radius: 999px;
-  background: #eaf9f4;
-  color: var(--kodo-success);
+  background: var(--kodo-success-bg);
+  color: var(--kodo-success-text);
   font-size: var(--kodo-font-md);
   font-weight: 500;
 }
@@ -775,8 +822,8 @@ p {
 .archived-pill {
   padding: 2px 8px;
   border-radius: var(--kodo-radius-sm);
-  background: #e9f7ef;
-  color: var(--kodo-success);
+  background: var(--kodo-success-bg-soft);
+  color: var(--kodo-success-text);
   font-size: var(--kodo-font-xs);
   font-weight: 500;
 }
@@ -792,7 +839,7 @@ p {
 
 .empty-note {
   margin: 40px 0;
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
   text-align: center;
 }
@@ -851,6 +898,53 @@ p {
   transform: rotate(90deg);
 }
 
+/* ── Narrow desktop windows (900–1199px) ──────────────────────────────────
+   Geometry shrinks per LAYOUT.md §9; density and hierarchy stay put. */
+@media (max-width: 1199px) {
+  :root {
+    --kodo-sidebar-width: 220px;
+    --kodo-inspector-width: 300px;
+  }
+
+  .topbar {
+    padding: 0 10px 0 12px;
+    gap: 6px;
+  }
+
+  .topbar-menu {
+    width: auto;
+    min-width: 28px;
+  }
+
+  .chip {
+    min-width: 0;
+    max-width: 220px;
+    overflow: hidden;
+  }
+
+  .chip > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .page-inner {
+    padding: 0 16px 32px;
+  }
+
+  .page-inner--wide {
+    padding: 0 14px 16px;
+  }
+
+  .page-head {
+    padding: 0 16px;
+    gap: 10px;
+  }
+
+  .search-field--inline {
+    width: min(200px, 36vw);
+  }
+}
+
 /* ------------------------------------------------------------ controls -- */
 
 /* The reference sets the control text and the chevron a step below the primary
@@ -861,6 +955,7 @@ p {
   border: 1px solid var(--kodo-border-strong);
   border-radius: var(--kodo-radius-sm);
   background-color: var(--kodo-canvas);
+  /* Stroke matches decorative-muted; the control text stays primary ink. */
   background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2398a2b3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 8px center;
@@ -960,7 +1055,7 @@ p {
 }
 
 .icon-btn--danger:hover {
-  background: var(--kodo-error-bg, rgba(220, 38, 38, 0.08));
+  background: var(--kodo-error-bg);
 }
 
 /* ── Provider editor (inline form) ──────────────────────────────────────── */
