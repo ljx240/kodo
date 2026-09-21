@@ -47,7 +47,30 @@ test("the composer sends on Enter, clears, and stops claiming to be working", as
   await page.locator(".tree-conversation").click();
   await expect(page.locator(".conv-title")).toHaveText("修复路由");
 
-  await expect(page.locator(".empty-note")).toBeVisible();
+  await expect(page.locator('[data-testid="welcome"]')).toBeVisible();
+  await expect(page.locator(".welcome-title")).toHaveText("今天想做什么？");
+
+  // Empty stage: welcome + composer sit in the middle of the pane, not stuck at the bottom.
+  const stage = await page.evaluate(() => {
+    const main = document.querySelector(".main");
+    const welcome = document.querySelector('[data-testid="welcome"]');
+    const composer = document.querySelector(".composer");
+    if (!main || !welcome || !composer) return null;
+    const mainBox = main.getBoundingClientRect();
+    const welcomeBox = welcome.getBoundingClientRect();
+    const composerBox = composer.getBoundingClientRect();
+    return {
+      mainMid: mainBox.top + mainBox.height / 2,
+      welcomeMid: welcomeBox.top + welcomeBox.height / 2,
+      composerBottomFromMainBottom: mainBox.bottom - composerBox.bottom,
+      mainHeight: mainBox.height,
+    };
+  });
+  expect(stage).not.toBeNull();
+  // Centered within ~120px of the pane midline (heading + composer as one group).
+  expect(Math.abs(stage!.welcomeMid - stage!.mainMid)).toBeLessThan(120);
+  // Not flush to the bottom edge like the post-message layout.
+  expect(stage!.composerBottomFromMainBottom).toBeGreaterThan(48);
 
   const composer = page.locator(".composer-input");
   await expect(page.locator(".composer-send")).toBeDisabled();
@@ -63,6 +86,26 @@ test("the composer sends on Enter, clears, and stops claiming to be working", as
   await expect(page.locator(".composer-send--stop")).toBeVisible();
 
   await page.locator(".composer-send--stop").click();
+});
+
+test("an empty live conversation keeps Inspector summary cards out of the response section", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: { id: "s1", project: "/tmp/ws/alpha", title: "修复路由", at: 1_700_000_000, archived: false, turns: [] },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+
+  await expect(page.locator('[data-testid="welcome"]')).toBeVisible();
+  await expect(page.locator(".ins-section", { hasText: "This response" })).toContainText("尚未开始响应");
+  await expect(page.locator(".status-pill")).toHaveCount(0);
+  await expect(page.locator(".ins-section", { hasText: "Total steps" })).toHaveCount(0);
+  await expect(page.locator(".ins-section", { hasText: "Changed files" })).toHaveCount(0);
+  await expect(page.locator(".ins-section", { hasText: "Tools used" })).toHaveCount(0);
+  await expect(page.locator(".ins-section", { hasText: "LLM calls" })).toHaveCount(0);
+  await expect(page.locator(".ins-section", { hasText: "Current project" })).toBeVisible();
 });
 
 test("Shift+Enter inserts a newline instead of sending", async ({ page }) => {
@@ -152,9 +195,78 @@ test("a killed run is reported as interrupted, not as finished or working", asyn
   await page.locator(".tree-project-main").click();
   await page.locator(".tree-conversation").click();
 
-  await expect(page.locator(".trace-mark--running")).toHaveCount(1);
+  await expect(page.locator(".trace-mark--interrupted")).toHaveCount(1);
+  await expect(page.locator(".trace-mark--running")).toHaveCount(0);
+  await expect(page.locator(".trace-row-inner")).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".trace-duration")).toHaveText("—");
   await expect(page.locator(".reply-interrupted")).toBeVisible();
   await expect(page.locator(".reply-working")).toHaveCount(0);
+  await expect(page.locator(".status-pill--interrupted")).toContainText("Interrupted");
+});
+
+test("a user-stopped run is marked stopped in the trace and Inspector", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "修复路由",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        {
+          ask: "跑一下检查",
+          items: [{ id: 1, at: 1_700_000_000, status: "running", duration: null, kind: "reasoning", summary: "先看目录" }],
+          done: false,
+          stopped: true,
+          error: null,
+        },
+      ],
+    },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+
+  await expect(page.locator(".trace-mark--stopped")).toHaveCount(1);
+  await expect(page.locator(".trace-mark--running")).toHaveCount(0);
+  await expect(page.locator(".trace-row-inner")).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".reply-stopped")).toBeVisible();
+  await expect(page.locator(".reply-working")).toHaveCount(0);
+  await expect(page.locator(".reply-interrupted")).toHaveCount(0);
+  await expect(page.locator(".status-pill--stopped")).toContainText("Stopped");
+});
+
+test("a failed run does not leave a spinner on its last step", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "修复路由",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        {
+          ask: "跑一下检查",
+          items: [{ id: 1, at: 1_700_000_000, status: "running", duration: null, kind: "reasoning", summary: "先看目录" }],
+          done: false,
+          stopped: false,
+          error: "模型服务不可用",
+        },
+      ],
+    },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+
+  await expect(page.locator(".trace-mark--failed")).toHaveCount(1);
+  await expect(page.locator(".trace-mark--running")).toHaveCount(0);
+  await expect(page.locator(".reply-failed")).toContainText("模型服务不可用");
+  await expect(page.locator(".status-pill--failed")).toContainText("Failed");
 });
 
 test("the Trace page's three tabs swap the pane, none of them onto nothing", async ({ page }) => {

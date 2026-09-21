@@ -6,8 +6,6 @@ import type { Reply } from "./trace";
 type Props = {
   time: string;
   reply: Reply;
-  /** True while this turn is the one being generated. */
-  running: boolean;
   /** Live assistant text accumulated from provider stream deltas. */
   streamText?: string;
   /** Structured progress phase from the agent (not chain-of-thought). */
@@ -18,11 +16,12 @@ type Props = {
 export function AssistantReply({
   time,
   reply,
-  running,
   streamText = "",
   progress = null,
   onViewFiles,
 }: Props) {
+  const working = reply.status === "working";
+
   return (
     <article className="reply">
       <div className="msg-head">
@@ -31,17 +30,21 @@ export function AssistantReply({
         {time && <span className="msg-time">{time}</span>}
       </div>
 
-      {running && (
+      {working && (
         <p className="reply-working" data-testid="agent-progress">
           {progress ? `${progress.phase} · ${progress.detail}` : "正在处理您的请求..."}
         </p>
       )}
-      {running && streamText && (
+      {working && streamText && (
         <div className="final stream-preview" data-testid="stream-preview">
           <p className="final-text">{streamText}</p>
         </div>
       )}
-      {reply.interrupted && <p className="reply-interrupted">这次运行中断了，最后一步没有完成。</p>}
+      {reply.status === "interrupted" && <p className="reply-interrupted">这次运行中断了，最后一步没有完成。</p>}
+      {reply.status === "stopped" && <p className="reply-stopped">这次运行已停止，最后一步没有完成。</p>}
+      {reply.status === "failed" && (
+        <p className="reply-failed">这次运行失败了{reply.error ? `：${reply.error}` : "。"}</p>
+      )}
 
       <AgentTrace steps={reply.steps} />
 

@@ -19,7 +19,7 @@ export type Project = {
   conversations: ConversationRef[];
 };
 
-export type StepStatus = "done" | "running" | "failed";
+export type StepStatus = "done" | "running" | "failed" | "interrupted" | "stopped";
 
 export type TraceStep = {
   type: "thinking" | "search" | "read" | "run" | "model" | "edit" | "finalize";

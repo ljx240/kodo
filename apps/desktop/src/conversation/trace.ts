@@ -51,6 +51,8 @@ export function toStep(item: ItemDto): TraceStep {
 /** What one turn renders as, once its items are read. */
 export type Reply = {
   steps: TraceStep[];
+  status: ReplyStatus;
+  error: string | null;
   /** The answer, or null while there is not one yet. */
   final: string | null;
   checks: string[];
@@ -59,31 +61,49 @@ export type Reply = {
   files: number;
   added: number;
   removed: number;
-  /** An item that was started and never finished, and is not running now. */
-  interrupted: boolean;
 };
+
+export type ReplyStatus = "empty" | "working" | "completed" | "stopped" | "interrupted" | "failed";
 
 /**
  * Folds a turn into the pieces the reply renders.
  *
  * The agent's message is pulled out of the step list rather than drawn as a
- * step: it is the answer, and the trace is what led to it. `interrupted` is
- * left over from the lifecycle envelope — an item still marked running in a
- * turn nothing is driving is where a killed run stopped.
+ * step: it is the answer, and the trace is what led to it. The lifecycle is
+ * derived once here so the reply, trace, and Inspector cannot disagree.
  */
 export function toReply(turn: TurnDto, running: boolean): Reply {
   const answer = [...turn.items].reverse().find((item) => item.kind === "agentMessage");
-  const steps = turn.items.filter((item) => item.kind !== "agentMessage").map(toStep);
+  const status = replyStatus(turn, running);
+  const steps = turn.items
+    .filter((item) => item.kind !== "agentMessage")
+    .map(toStep)
+    .map((step) =>
+      step.status === "running" &&
+      (status === "interrupted" || status === "stopped" || status === "failed")
+        ? { ...step, status }
+        : step,
+    );
   const changes = turn.items.flatMap((item) => (item.kind === "fileChange" ? item.changes : []));
 
   return {
     steps,
+    status,
+    error: turn.error,
     final: answer?.kind === "agentMessage" ? answer.text : null,
     checks: answer?.kind === "agentMessage" ? answer.checks : [],
     ...totals(changes),
     changes,
-    interrupted: !running && !turn.done && !turn.stopped && !turn.error && steps.some(isRunning),
   };
+}
+
+export function replyStatus(turn: TurnDto, running: boolean): ReplyStatus {
+  if (running) return "working";
+  if (turn.error) return "failed";
+  if (turn.done) return "completed";
+  if (turn.stopped) return "stopped";
+  if (turn.items.some((item) => item.status === "running")) return "interrupted";
+  return "empty";
 }
 
 export function totals(changes: ChangeDto[]): { files: number; added: number; removed: number } {
@@ -94,10 +114,6 @@ export function totals(changes: ChangeDto[]): { files: number; added: number; re
   };
 }
 
-function isRunning(step: TraceStep): boolean {
-  return step.status === "running";
-}
-
 function describe(changes: ChangeDto[]): string {
   const added = changes.reduce((total, change) => total + change.added, 0);
   const removed = changes.reduce((total, change) => total + change.removed, 0);
@@ -106,7 +122,7 @@ function describe(changes: ChangeDto[]): string {
 
 /** Milliseconds, in the shape the reference uses: `820ms`, `1.5s`, `1m 12s`. */
 export function formatDuration(ms: number | null): string {
-  if (ms === null) return "";
+  if (ms === null) return "—";
   if (ms < 1000) return `${ms}ms`;
 
   const seconds = ms / 1000;

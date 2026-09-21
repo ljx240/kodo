@@ -63,6 +63,17 @@
   font-size: var(--kodo-font-md);
 }
 
+.reply-stopped,
+.reply-failed {
+  margin: 0 0 8px 34px;
+  color: var(--kodo-error);
+  font-size: var(--kodo-font-md);
+}
+
+.reply-stopped {
+  color: var(--kodo-warning-text);
+}
+
 /* ---------------------------------------------------------------- trace -- */
 
 /* `padding: 0` clears the ordered list's default 40px inline start, which
@@ -83,6 +94,7 @@
 .trace-row-inner {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   min-height: 36px;
@@ -114,6 +126,7 @@
 .trace-line {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -143,6 +156,16 @@
   border-top-color: transparent;
 }
 
+.trace-mark--interrupted {
+  background: var(--kodo-warning);
+  color: #fff;
+}
+
+.trace-mark--stopped {
+  background: var(--kodo-warning-text);
+  color: #fff;
+}
+
 /* The reference lets each step's content follow its own label rather than
    aligning every row to a shared label column. */
 .trace-label {
@@ -159,7 +182,15 @@
   gap: 14px;
 }
 
+.trace-body > .code-chip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .trace-detail {
+  flex: 0 1 auto;
+  min-width: 0;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
   white-space: nowrap;
@@ -168,6 +199,10 @@
 }
 
 .trace-tokens {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
   white-space: nowrap;
@@ -177,7 +212,8 @@
    block. `max-width` is what keeps the reference's longest line unwrapped and
    leaves the step's detail room to sit beside the box. */
 .trace-output {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 340px;
   max-height: 72px;
   overflow: hidden;
@@ -301,10 +337,46 @@
   overflow: hidden;
 }
 
+.composer-box:has(.menu),
+.composer-box:has(.composer-plus-root) {
+  overflow: visible;
+}
+
+.composer-box:has(.composer-input:focus) {
+  border-color: var(--kodo-border-strong);
+}
+
 /* ── Row 1: textarea ─────────────────────────────────────────────────────── */
 
 .composer-row {
   padding: 12px 14px 4px;
+}
+
+.composer-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 14px 0;
+}
+
+.composer-skill {
+  height: 24px;
+  max-width: 260px;
+  padding: 0 4px 0 8px;
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-xs);
+}
+
+.composer-skill-label {
+  color: var(--kodo-text-secondary);
+}
+
+.composer-skill code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kodo-font-mono);
 }
 
 /* A textarea so a draft can hold more than one line. It grows with its content
@@ -324,12 +396,12 @@
   overflow-y: auto;
 }
 
-/* Keyboard focus must remain visible on the draft box (outline:none above
-   only quiets mouse focus). */
+/* No ring around the draft box — the outer composer border already frames it.
+   Override both :focus and the global :focus-visible so no blue outline paints. */
+.composer-input:focus,
 .composer-input:focus-visible {
-  outline: var(--kodo-focus-width) solid var(--kodo-focus-ring);
-  outline-offset: var(--kodo-focus-offset);
-  border-radius: var(--kodo-radius-sm);
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 .composer-input::placeholder {
@@ -378,13 +450,103 @@
   background: var(--kodo-hover);
 }
 
-/* ── Model picker ─────────────────────────────────────────────────────────── */
-
-/* The picker opens upward: the composer sits at the bottom of the window. */
-.composer-box .menu {
+/* ── Model / permission pickers open upward (composer sits at the bottom).
+   Exclude the + menu: it is positioned against `.composer-box` instead. */
+.composer-left .menu:not(.composer-plus-menu),
+.composer-right .menu {
   top: auto;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 4px);
 }
+
+/* Permission labels are long Chinese sentences — fit them on one line.
+   Scoped so the + menu stays compact. */
+.composer-left > .menu-anchor:not(.composer-plus) .menu {
+  min-width: min(560px, calc(100vw - 40px));
+  max-width: calc(100vw - 40px);
+}
+
+/* ── Composer + menu (floating attach menu, tightly tied to the input box) ── */
+
+/* Static so the panel anchors to `.composer-box` (the whole card), matching
+   the reference: a few pixels above the box, not a menu-height above the +. */
+.composer-plus {
+  position: static;
+  display: flex;
+}
+
+.composer-plus .menu-backdrop {
+  z-index: 40;
+}
+
+.composer-box {
+  position: relative;
+}
+
+.composer-plus-root {
+  position: absolute;
+  left: 8px;
+  right: auto;
+  bottom: calc(100% + 6px);
+  top: auto;
+  z-index: 41;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.composer-plus-menu,
+.composer-plus-panel {
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: auto;
+}
+
+.composer-plus-menu {
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 40px));
+}
+
+.composer-plus-panel {
+  width: 280px;
+  max-height: 280px;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Browser-only hidden input; opens the OS chooser when Tauri dialog is absent. */
+.composer-attach-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.menu-item--active {
+  background: var(--kodo-hover);
+}
+
+.menu-item--disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.menu-item--disabled:hover {
+  background: none;
+}
+
+.menu-item-trail {
+  margin-left: auto;
+  color: var(--kodo-text-muted) !important;
+  transform: rotate(-90deg);
+}
+
+/* ── Model trigger ────────────────────────────────────────────────────────── */
 
 .composer-model {
   display: flex;
@@ -487,81 +649,6 @@
   color: var(--kodo-error);
 }
 
-/* ── Add context file picker ─────────────────────────────────────────────── */
-
-.context-picker {
-  display: flex;
-  flex-direction: column;
-  max-height: 240px;
-  border-top: 1px solid var(--kodo-border);
-  background: var(--kodo-canvas);
-}
-
-.context-picker-search {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--kodo-border);
-  color: var(--kodo-text-secondary);
-}
-
-.context-picker-input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  outline: none;
-  background: none;
-  font: inherit;
-  font-size: var(--kodo-font-sm);
-  color: var(--kodo-text);
-}
-
-.context-picker-input:focus-visible {
-  outline: var(--kodo-focus-width) solid var(--kodo-focus-ring);
-  outline-offset: var(--kodo-focus-offset);
-  border-radius: var(--kodo-radius-sm);
-}
-
-.context-picker-list {
-  list-style: none;
-  margin: 0;
-  padding: 4px;
-  overflow-y: auto;
-}
-
-.context-picker-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 8px;
-  border: none;
-  border-radius: var(--kodo-radius-sm);
-  background: none;
-  font-size: var(--kodo-font-sm);
-  font-family: var(--kodo-font-mono);
-  color: var(--kodo-text);
-  text-align: left;
-  cursor: pointer;
-}
-
-.context-picker-item:hover {
-  background: var(--kodo-hover);
-}
-
-.context-picker-empty,
-.context-picker-error {
-  margin: 0;
-  padding: 8px 10px;
-  font-size: var(--kodo-font-sm);
-  color: var(--kodo-text-secondary);
-}
-
-.context-picker-error {
-  color: var(--kodo-error);
-}
-
 /* ── Provider / recovery alert under the composer ────────────────────────── */
 
 .composer-alert {
@@ -616,6 +703,11 @@
 
   .composer-box .menu {
     max-width: calc(100vw - 24px);
+  }
+
+  .composer-plus-root {
+    left: 0;
+    flex-wrap: wrap;
   }
 }
 
