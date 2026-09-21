@@ -482,6 +482,26 @@ mod tests {
     }
 
     #[test]
+    fn failover_event_carries_both_sides_and_class() {
+        let event = super::RunEvent::Failover {
+            session: "s1".into(),
+            from_provider: "GPT-4o".into(),
+            from_model: "gpt-4o".into(),
+            error_class: "RateLimit".into(),
+            error: "429".into(),
+            to_provider: "Claude".into(),
+            to_model: "claude-sonnet".into(),
+        };
+        let value = serde_json::to_value(event).expect("serialize");
+        assert_eq!(value["type"], json!("failover"));
+        assert_eq!(value["fromProvider"], json!("GPT-4o"));
+        assert_eq!(value["fromModel"], json!("gpt-4o"));
+        assert_eq!(value["errorClass"], json!("RateLimit"));
+        assert_eq!(value["toProvider"], json!("Claude"));
+        assert_eq!(value["toModel"], json!("claude-sonnet"));
+    }
+
+    #[test]
     fn a_session_view_carries_its_turns() {
         let session = kodo_core::session::Session {
             id: "abc".to_owned(),

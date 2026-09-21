@@ -1077,14 +1077,15 @@ fn map_ureq_err(error: ureq::Error) -> ProviderError {
             let body = response
                 .into_string()
                 .unwrap_or_else(|_| format!("HTTP {status}"));
+            let body = crate::tools::redact_secrets(&body);
             let class = classify_failure(&body, Some(status));
             ProviderError {
                 class,
-                message: format!("HTTP {status}: {body}"),
+                message: crate::tools::redact_secrets(&format!("HTTP {status}: {body}")),
             }
         }
         ureq::Error::Transport(t) => {
-            let message = t.to_string();
+            let message = crate::tools::redact_secrets(&t.to_string());
             let class = classify_failure(&message, None);
             ProviderError { class, message }
         }

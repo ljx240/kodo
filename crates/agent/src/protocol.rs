@@ -344,10 +344,10 @@ pub enum ToolErrorCode {
 
 impl ToolError {
     pub fn new(code: ToolErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
+        // Redaction at construction — every consumer (model, UI, session)
+        // sees a sanitized message without a second chance to leak.
+        let message = crate::tools::redact_secrets(&message.into());
+        Self { code, message }
     }
 
     pub fn invalid_args(message: impl Into<String>) -> Self {
@@ -451,11 +451,14 @@ impl ToolResult {
         input: impl Into<String>,
         output: impl Into<String>,
     ) -> Self {
+        // Redact both sides before they can reach model/history/session.
+        let input = crate::tools::redact_secrets(&input.into());
+        let output = crate::tools::redact_secrets(&output.into());
         Self {
             id,
             name: name.into(),
-            input: input.into(),
-            output: output.into(),
+            input,
+            output,
             ok: true,
             error: None,
         }
@@ -467,11 +470,12 @@ impl ToolResult {
         input: impl Into<String>,
         error: ToolError,
     ) -> Self {
+        let input = crate::tools::redact_secrets(&input.into());
         let output = error.message.clone();
         Self {
             id,
             name: name.into(),
-            input: input.into(),
+            input,
             output,
             ok: false,
             error: Some(error),
