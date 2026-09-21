@@ -578,16 +578,26 @@ export function Composer({
                 PERMISSIONS.map(({ value, label, description }) => {
                   const cfg = PERM_CONFIG[value];
                   const Icon = PERM_ICONS[value];
+                  const selected = value === permission;
                   return (
-                    <MenuItem
+                    <button
                       key={value}
-                      icon={<Icon size={14} strokeWidth={1.8} style={{ color: cfg.color }} />}
-                      label={`${label} — ${description}`}
-                      onSelect={() => {
+                      type="button"
+                      role="menuitem"
+                      className={`perm-option${selected ? " perm-option--selected" : ""}`}
+                      aria-checked={selected}
+                      onClick={() => {
                         close();
                         setPerm(value);
                       }}
-                    />
+                    >
+                      <Icon size={14} strokeWidth={1.8} style={{ color: cfg.color }} />
+                      <span className="perm-option-text">
+                        <span className="perm-option-label">{label}</span>
+                        <span className="perm-option-desc">{description}</span>
+                      </span>
+                      {selected && <Check size={14} strokeWidth={2} className="perm-option-check" />}
+                    </button>
                   );
                 })
               }

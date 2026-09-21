@@ -338,7 +338,7 @@
 .composer-box {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--kodo-border-strong);
+  border: none;
   border-radius: var(--kodo-radius-popover);
   background: var(--kodo-canvas);
   overflow: hidden;
@@ -453,7 +453,8 @@
   transition: background 0.1s;
 }
 
-.composer-perm-trigger:hover {
+.composer-perm-trigger:hover,
+.composer-perm-trigger[aria-expanded="true"] {
   background: var(--kodo-hover);
 }
 
