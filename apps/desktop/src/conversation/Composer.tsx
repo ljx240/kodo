@@ -258,6 +258,118 @@ export function Composer({
     await addDataTransferPaths(event.dataTransfer);
   };
 
+  /** Skill id is written into the draft so the runtime SkillRegistry can match it. */
+  const applySkill = (skillId: string) => {
+    const tag = `【技能：${skillId}】`;
+    setDraft((current) => (current.trim() ? `${current.trimEnd()}\n${tag}` : `${tag} `));
+    closePlus();
+    requestAnimationFrame(() => input.current?.focus());
+  };
+
+  // Stable handle for async drop/paste handlers that must see the latest pickFile.
+  const pickFileRef = useRef(pickFile);
+  pickFileRef.current = pickFile;
+
+  /** Absolute path → project-relative when inside the project; else null. */
+  const toProjectRelative = (absolute: string): string | null => {
+    if (!projectPath) return null;
+    const root = projectPath.replace(/\/+$/, "");
+    const path = absolute.replace(/\\/g, "/");
+    if (path === root) return null;
+    if (!path.startsWith(`${root}/`)) return null;
+    return path.slice(root.length + 1);
+  };
+
+  const addExternalPaths = useCallback(
+    async (paths: string[]) => {
+      for (const raw of paths) {
+        const relative = toProjectRelative(raw) ?? (raw.startsWith("/") ? null : raw);
+        if (!relative) {
+          onContextError(`只能添加当前项目内的文件：${raw}`);
+          continue;
+        }
+        await pickFileRef.current(relative);
+      }
+    },
+    [projectPath, onContextError],
+  );
+
+  // Native file drop (Tauri): full filesystem paths, independent of HTML5 DnD.
+  useEffect(() => {
+    if (!isDesktop() || !projectPath) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    // getCurrentWebview() can throw synchronously when __TAURI_INTERNALS__ is a stub
+    // (browser tests) or window.webview is missing — only bind when it exists.
+    void Promise.resolve()
+      .then(() => getCurrentWebview())
+      .then((webview) =>
+        webview.onDragDropEvent((event) => {
+          if (event.payload.type !== "drop") return;
+          void addExternalPaths(event.payload.paths);
+        }),
+      )
+      .then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {
+        /* drag-drop unavailable — HTML5 handlers still cover the browser shell */
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [projectPath, addExternalPaths]);
+
+  const addDataTransferPaths = async (transfer: DataTransfer | null) => {
+    if (!transfer) return;
+    const uris = transfer.getData("text/uri-list");
+    const plain = transfer.getData("text/plain");
+    const candidates = `${uris}\n${plain}`
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => line.replace(/^file:\/\//, ""));
+    if (candidates.length > 0) await addExternalPaths(candidates);
+  };
+
+  const onComposerPaste = async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    // Prefer filesystem paths when the shell exposed them on the File object.
+    const withPath = files
+      .map((file) => (file as File & { path?: string }).path)
+      .filter((path): path is string => Boolean(path));
+    if (withPath.length > 0) {
+      event.preventDefault();
+      await addExternalPaths(withPath);
+      return;
+    }
+    const text = event.clipboardData.getData("text/plain").trim();
+    if (text.startsWith("/") || text.startsWith("file://")) {
+      event.preventDefault();
+      await addExternalPaths([text.replace(/^file:\/\//, "")]);
+    }
+  };
+
+  const onComposerDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer) return;
+    const hasFiles = event.dataTransfer.types.includes("Files");
+    const hasUri = event.dataTransfer.types.includes("text/uri-list");
+    if (!hasFiles && !hasUri) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const withPath = Array.from(event.dataTransfer.files)
+      .map((file) => (file as File & { path?: string }).path)
+      .filter((path): path is string => Boolean(path));
+    if (withPath.length > 0) {
+      await addExternalPaths(withPath);
+      return;
+    }
+    await addDataTransferPaths(event.dataTransfer);
+  };
+
   const send = () => {
     const skillText = selectedSkills.map((skillId) => `【技能：${skillId}】`).join("\n");
     const text = [skillText, draft.trim()].filter(Boolean).join("\n");
