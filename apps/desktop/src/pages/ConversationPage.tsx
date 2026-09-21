@@ -12,7 +12,7 @@ import {
 } from "../api";
 import { AssistantReply } from "../conversation/AssistantReply";
 import { Composer } from "../conversation/Composer";
-import { toReply, type Reply } from "../conversation/trace";
+import { titleFromAsk, toReply, type Reply } from "../conversation/trace";
 import { type DemoState } from "../data/demoState";
 import { snapshotFromTurn, type LiveSnapshot } from "../data/liveContext";
 import { type ProviderConfig } from "../data/providers";
@@ -24,6 +24,7 @@ type Props = {
   provider: ProviderConfig | null;
   providers: ProviderConfig[];
   onSelectProvider: (index: number) => void;
+  onSelectProviderModel: (providerIndex: number, modelId: string, displayName: string) => void;
   onViewFiles: () => void;
   onRetitle: (id: string, title: string) => Promise<void> | void;
   onArchive: (id: string) => Promise<void> | void;
@@ -55,17 +56,32 @@ type ActionErrorState = {
   action?: { label: string; run: () => void };
 };
 
+type PendingSend = { text: string; context: string[] };
+
+type FailoverNotice = {
+  fromProvider: string;
+  fromModel: string;
+  errorClass: string;
+  error: string;
+  toProvider: string;
+  toModel: string;
+};
+
 function demoReplyFrom(demo: DemoState): Reply {
   return {
     steps: demo.conversation.assistant.trace,
     status: "completed",
-    error: null,
     final: demo.conversation.assistant.final,
     checks: demo.conversation.assistant.checks,
     changes: demo.changedFiles,
     files: demo.summary.files_changed,
     added: demo.summary.added,
     removed: demo.summary.removed,
+    interrupted: false,
+    stopped: false,
+    error: null,
+    models: demo.summary.llm_calls.map((call) => call.model),
+    tokens: null,
   };
 }
 
@@ -74,6 +90,7 @@ export function ConversationPage({
   provider,
   providers,
   onSelectProvider,
+  onSelectProviderModel,
   onViewFiles,
   onRetitle,
   onArchive,
@@ -96,8 +113,22 @@ export function ConversationPage({
   const [streamText, setStreamText] = useState("");
   const [progress, setProgress] = useState<{ phase: string; detail: string } | null>(null);
   const [failovers, setFailovers] = useState<string[]>([]);
+  const [failover, setFailover] = useState<FailoverNotice | null>(null);
+  const [queue, setQueueState] = useState<PendingSend[]>([]);
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState<number | null>(null);
   /** False after Stop — late TextDelta races must not repaint the preview. */
   const acceptStreamRef = useRef(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
+  /** Queue lives in a ref so drain never double-fires under StrictMode. */
+  const queueRef = useRef<PendingSend[]>([]);
+  const drainingRef = useRef(false);
+
+  const applyQueue = (next: PendingSend[]) => {
+    queueRef.current = next;
+    setQueueState(next);
+  };
 
   const providerWarning = useMemo(() => {
     if (demoMode) return null;
@@ -118,7 +149,12 @@ export function ConversationPage({
     setStreamText("");
     setProgress(null);
     setFailovers([]);
+    setFailover(null);
+    applyQueue([]);
+    setRunStartedAt(null);
+    setElapsed(null);
     acceptStreamRef.current = true;
+    stickToBottomRef.current = true;
     if (!conversationId || demoMode) {
       setTurns([]);
       setTitle("");
@@ -132,8 +168,9 @@ export function ConversationPage({
       if (!alive || !loaded) return;
       setTurns(loaded.turns);
       setTitle(loaded.title);
-      // Reopened sessions start "not running". The reply lifecycle derives
-      // interrupted/stopped state from the persisted turn envelope.
+      // Reopened sessions start "not running". A step still marked running in
+      // the log is a killed run — toReply paints that as interrupted. If the
+      // driver is still live, run:event will set running again on the next step.
       setRunning(false);
     });
     return () => {
@@ -141,94 +178,48 @@ export function ConversationPage({
     };
   }, [conversationId, demoMode, onSnapshot]);
 
+  // Elapsed clock for the live turn status line.
   useEffect(() => {
+    if (runStartedAt === null || !running) {
+      setElapsed(null);
+      return;
+    }
+    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - runStartedAt) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [runStartedAt, running]);
+
+  const adoptAskTitle = (ask: string) => {
     if (!conversationId || demoMode) return;
-
-    let alive = true;
-    let stop: (() => void) | null = null;
-
-    void onRunEvent((event) => {
-      if (event.session !== conversationId) return;
-      if (event.type === "approvalRequest") {
-        setApproval({
-          step: event.step,
-          kind: event.kind,
-          detail: event.detail ?? "",
-          cwd: event.cwd,
-          riskCategory: event.riskCategory,
-          reason: event.reason,
-        });
-        return;
-      }
-      if (event.type === "textDelta") {
-        if (acceptStreamRef.current) {
-          setStreamText((current) => current + event.text);
-        }
-        return;
-      }
-      if (event.type === "progress") {
-        setProgress({ phase: event.phase, detail: event.detail });
-        return;
-      }
-      if (event.type === "failover") {
-        setFailovers((current) => [
-          ...current,
-          `已从 ${event.fromProvider}（${event.fromModel}）切换到 ${event.toProvider}（${event.toModel}）· ${event.errorClass}`,
-        ]);
-        return;
-      }
-      if (event.type === "itemCompleted" && event.item.kind === "agentMessage") {
-        setStreamText("");
-      }
-      if (event.type === "turnStarted") {
-        acceptStreamRef.current = true;
-        setStreamText("");
-        setProgress(null);
-        setFailovers([]);
-      }
-      setTurns((current) => reduce(current, event));
-      if (event.type === "turnComplete" || event.type === "stopped" || event.type === "error") {
-        acceptStreamRef.current = false;
-        setRunning(false);
-        setApproval(null);
-        setStreamText("");
-        setProgress(null);
-      }
-    }).then((off) => {
-      if (alive) stop = off;
-      else off();
+    if (title && title !== "新对话") return;
+    const next = titleFromAsk(ask);
+    if (!next) return;
+    setTitle(next);
+    void Promise.resolve(onRetitle(conversationId, next)).catch(() => {
+      /* title is cosmetic; keep the turn usable if retitle fails */
     });
+  };
 
-    return () => {
-      alive = false;
-      stop?.();
-    };
-  }, [conversationId, demoMode]);
-
-  const liveSnapshot = useMemo(() => {
-    if (demoMode || !conversationId) return null;
-    const last = turns[turns.length - 1] ?? null;
-    return snapshotFromTurn(conversationId, title || "新对话", projectName, projectPath, last, running);
-  }, [demoMode, conversationId, turns, title, running, projectName, projectPath]);
-
-  useEffect(() => {
-    onSnapshot?.(demoMode || !conversationId ? null : liveSnapshot);
-  }, [onSnapshot, liveSnapshot, demoMode, conversationId]);
-
-  const send = async (text: string, context: string[]) => {
+  const dispatchSend = async (text: string, context: string[], opts?: { skipTitle?: boolean }) => {
     if (!conversationId) return;
     const payload = { text, context };
     setPageError(null);
     setTurns((current) => [...current, blank(text, context)]);
     setRunning(true);
+    setRunStartedAt(Date.now());
     acceptStreamRef.current = true;
     setStreamText("");
+    setProgress(null);
+    stickToBottomRef.current = true;
+    if (!opts?.skipTitle) adoptAskTitle(text);
     try {
       await sendMessage(conversationId, text, context);
       // Context is consumed for this turn only; the user re-pins if needed.
       setContexts([]);
     } catch (failure) {
       setRunning(false);
+      setRunStartedAt(null);
       const message = errorMessage(failure);
       setTurns((current) => updateLast(current, (turn) => ({ ...turn, error: message })));
       setPageError({
@@ -236,10 +227,39 @@ export function ConversationPage({
         retryLabel: "重试发送",
         retry: () => {
           setPageError(null);
-          void send(payload.text, payload.context);
+          void dispatchSend(payload.text, payload.context, { skipTitle: true });
         },
       });
     }
+  };
+
+  const drainQueue = () => {
+    if (drainingRef.current) return;
+    const pending = queueRef.current;
+    if (pending.length === 0) return;
+    drainingRef.current = true;
+    const [next, ...rest] = pending;
+    applyQueue(rest);
+    void dispatchSend(next.text, next.context, { skipTitle: true }).finally(() => {
+      drainingRef.current = false;
+    });
+  };
+
+  const send = (text: string, context: string[]) => {
+    if (!conversationId) return;
+    // Running: queue the follow-up instead of dropping the draft (codex/DSH).
+    if (running) {
+      applyQueue([...queueRef.current, { text, context }]);
+      return;
+    }
+    void dispatchSend(text, context);
+  };
+
+  const regenerate = () => {
+    if (!conversationId || running) return;
+    const last = [...turns].reverse().find((turn) => turn.ask.trim());
+    if (!last) return;
+    void dispatchSend(last.ask, last.context ?? [], { skipTitle: true });
   };
 
   const stop = () => {
@@ -249,6 +269,7 @@ export function ConversationPage({
     acceptStreamRef.current = false;
     setStreamText("");
     setProgress(null);
+    setRunStartedAt(null);
     void stopRun(conversationId).catch((failure) => {
       setApprovalError(`停止失败：${errorMessage(failure)}`);
     });
@@ -297,23 +318,127 @@ export function ConversationPage({
     });
   };
 
+  useEffect(() => {
+    if (!conversationId || demoMode) return;
+
+    let alive = true;
+    let stop: (() => void) | null = null;
+
+    void onRunEvent((event) => {
+      if (event.session !== conversationId) return;
+      if (event.type === "approvalRequest") {
+        setApproval({
+          step: event.step,
+          kind: event.kind,
+          detail: event.detail ?? "",
+          cwd: event.cwd,
+          riskCategory: event.riskCategory,
+          reason: event.reason,
+        });
+        return;
+      }
+      if (event.type === "textDelta") {
+        if (acceptStreamRef.current) {
+          setStreamText((current) => current + event.text);
+        }
+        return;
+      }
+      if (event.type === "progress") {
+        setProgress({ phase: event.phase, detail: event.detail });
+        return;
+      }
+      if (event.type === "failover" || event.type === "providerSwitch") {
+        const notice = {
+          fromProvider: event.fromProvider,
+          fromModel: event.fromModel,
+          errorClass: event.errorClass,
+          error: event.error,
+          toProvider: event.toProvider,
+          toModel: event.toModel,
+        };
+        setFailover(notice);
+        setFailovers((current) => [
+          ...current,
+          `已从 ${event.fromProvider}（${event.fromModel}）切换到 ${event.toProvider}（${event.toModel}）· ${event.errorClass}`,
+        ]);
+        return;
+      }
+      if (event.type === "itemCompleted" && event.item.kind === "agentMessage") {
+        setStreamText("");
+      }
+      if (event.type === "turnStarted") {
+        acceptStreamRef.current = true;
+        setStreamText("");
+        setProgress(null);
+        setFailovers([]);
+        setFailover(null);
+        setRunStartedAt((current) => current ?? Date.now());
+      }
+      setTurns((current) => reduce(current, event));
+      if (event.type === "turnComplete" || event.type === "stopped" || event.type === "error") {
+        acceptStreamRef.current = false;
+        setRunning(false);
+        setApproval(null);
+        setStreamText("");
+        setProgress(null);
+        setRunStartedAt(null);
+        if (event.type === "turnComplete") drainQueue();
+      }
+    }).then((off) => {
+      if (alive) stop = off;
+      else off();
+    });
+
+    return () => {
+      alive = false;
+      stop?.();
+    };
+  }, [conversationId, demoMode]);
+
+  // Follow the live turn: stick to bottom only while the reader is already there.
+  useEffect(() => {
+    if (demoMode) return;
+    const el = scrollRef.current;
+    if (!el || !stickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [demoMode, turns, streamText, progress, queue, running]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distance < 48;
+  };
+
+  const liveSnapshot = useMemo(() => {
+    if (demoMode || !conversationId) return null;
+    const last = turns[turns.length - 1] ?? null;
+    return snapshotFromTurn(conversationId, title || "新对话", projectName, projectPath, last, running);
+  }, [demoMode, conversationId, turns, title, running, projectName, projectPath]);
+
+  useEffect(() => {
+    onSnapshot?.(demoMode || !conversationId ? null : liveSnapshot);
+  }, [onSnapshot, liveSnapshot, demoMode, conversationId]);
+
   const heading = demoMode && demo
     ? demo.conversation.title
     : title || "新对话";
   const liveSession = !demoMode && conversationId !== null;
   const demoReply = demo ? demoReplyFrom(demo) : null;
   // Centered first-run stage: empty live conversation, no demo payload, no approval bar.
-  const showWelcome = liveSession && turns.length === 0 && !approval && !pageError;
+  const showWelcome = liveSession && turns.length === 0 && !approval && !pageError && queue.length === 0;
 
   const composer = (
     <Composer
       provider={provider}
       providers={providers}
       onSelectProvider={onSelectProvider}
+      onSelectProviderModel={onSelectProviderModel}
       ready={!demoMode && conversationId !== null}
       running={running}
       projectPath={projectPath}
       contexts={contexts}
+      queueCount={queue.length}
       onAddContext={addContext}
       onRemoveContext={(path) => setContexts((current) => current.filter((item) => item !== path))}
       onContextError={(message) =>
@@ -325,7 +450,7 @@ export function ConversationPage({
           },
         })
       }
-      onSend={(text, context) => void send(text, context)}
+      onSend={(text, context) => send(text, context)}
       onStop={stop}
       providerWarning={providerWarning}
       onOpenProviderSettings={() => navigateSettings()}
@@ -334,7 +459,7 @@ export function ConversationPage({
 
   return (
     <main className={showWelcome ? "main main--welcome" : "main"}>
-      <div className="scroll">
+      <div className="scroll" ref={scrollRef} onScroll={onScroll} data-testid="conversation-scroll">
         <div className="page-inner">
           <div className="conv-head">
             <Folder size={16} strokeWidth={1.7} />
@@ -438,6 +563,26 @@ export function ConversationPage({
             </div>
           )}
 
+          {failover && (
+            <div className="action-error" role="status" data-testid="failover-notice">
+              <span className="action-error-msg">
+                Failover · {failover.fromProvider}/{failover.fromModel} → {failover.toProvider}/
+                {failover.toModel} · {failover.errorClass}
+                {failover.error ? ` — ${failover.error.slice(0, 160)}` : ""}
+              </span>
+              <div className="action-error-actions">
+                <button
+                  type="button"
+                  className="btn btn--sm"
+                  data-testid="failover-dismiss"
+                  onClick={() => setFailover(null)}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          )}
+
           {showWelcome ? (
             <div className="welcome-stage" data-testid="welcome">
               <div className="welcome-copy">
@@ -445,6 +590,11 @@ export function ConversationPage({
                 <p className="welcome-sub empty-note">
                   描述任务或粘贴报错，我会在当前项目里读代码、改代码。
                 </p>
+                <div className="welcome-hints" data-testid="welcome-hints">
+                  <span className="welcome-hint">/ 调用技能</span>
+                  <span className="welcome-hint">+ 附加文件</span>
+                  <span className="welcome-hint">运行中可排队下一条</span>
+                </div>
               </div>
               {composer}
             </div>
@@ -456,30 +606,67 @@ export function ConversationPage({
                   <AssistantReply
                     time={demo.conversation.assistant.time}
                     reply={demoReply}
+                    running={false}
+                    failovers={[]}
                     onViewFiles={onViewFiles}
                   />
                 </>
-              ) : turns.length === 0 ? (
+              ) : turns.length === 0 && queue.length === 0 ? (
                 <p className="empty-note">发一条消息开始这次对话。</p>
               ) : (
                 turns.map((turn, index) => {
                   const last = index === turns.length - 1;
                   return (
                     <Fragment key={index}>
-                      <UserMessage text={turn.ask} context={turn.context} />
+                      <UserMessage
+                        text={turn.ask}
+                        context={turn.context}
+                        time={formatTurnTime(turn)}
+                      />
                       <AssistantReply
                         time=""
                         reply={toReply(turn, running && last)}
+                        running={running && last}
                         streamText={running && last ? streamText : ""}
                         progress={running && last ? progress : null}
+                        elapsed={running && last ? elapsed : null}
                         failovers={last ? failovers : []}
                         onViewFiles={onViewFiles}
+                        onRegenerate={liveSession && last && !running ? regenerate : null}
                       />
                     </Fragment>
                   );
                 })
               )}
             </>
+          )}
+
+          {queue.length > 0 && (
+            <div className="send-queue" data-testid="send-queue">
+              <div className="send-queue-head">
+                <strong>待发送 · {queue.length}</strong>
+                <button type="button" className="btn btn--sm" data-testid="queue-clear" onClick={() => applyQueue([])}>
+                  清空
+                </button>
+              </div>
+              <ul className="send-queue-list">
+                {queue.map((item, index) => (
+                  <li key={`${item.text}-${index}`}>
+                    <span className="send-queue-text">{item.text}</span>
+                    <button
+                      type="button"
+                      className="icon-btn icon-btn--sm"
+                      aria-label={`移出队列 ${index + 1}`}
+                      onClick={() =>
+                        applyQueue(queueRef.current.filter((_, position) => position !== index))
+                      }
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
 
           {/* Approval sits outside the turn list so it also shows on an empty turn. */}
@@ -508,10 +695,10 @@ export function ConversationPage({
                 )}
               </div>
               <div className="approval-actions">
-                <button type="button" className="btn" onClick={() => decide(false)}>
+                <button type="button" className="btn" data-testid="approval-deny" onClick={() => decide(false)}>
                   拒绝
                 </button>
-                <button type="button" className="btn btn--primary" onClick={() => decide(true)}>
+                <button type="button" className="btn btn--primary" data-testid="approval-allow" onClick={() => decide(true)}>
                   允许
                 </button>
               </div>
@@ -542,6 +729,15 @@ function errorMessage(failure: unknown): string {
 
 function navigateSettings() {
   navigate(window.location.pathname.startsWith("/ui-demo") ? "/ui-demo/settings" : "/settings");
+}
+
+function formatTurnTime(turn: TurnDto): string | undefined {
+  const at = turn.items[0]?.at;
+  if (!at) return undefined;
+  // core `at` is unix seconds
+  const date = new Date(at < 1e12 ? at * 1000 : at);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
 function UserMessage({ time, text, context }: { time?: string; text: string; context?: string[] }) {

@@ -420,6 +420,53 @@ p {
   color: var(--kodo-accent);
 }
 
+/* Conversation row + trailing ⋯. The button is the primary target; the menu
+   sits beside it without nesting another navigation surface. */
+.tree-conversation-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.tree-conversation-row--active {
+  background: var(--kodo-selected);
+  border-radius: var(--kodo-radius);
+}
+
+.tree-conversation-row .tree-conversation {
+  flex: 1;
+  min-width: 0;
+  border-radius: var(--kodo-radius) 0 0 var(--kodo-radius);
+}
+
+.tree-conversation-row--active .tree-conversation {
+  background: transparent;
+}
+
+.tree-conversation-more {
+  flex: none;
+  opacity: 0;
+  margin-right: 4px;
+}
+
+.tree-conversation-row:hover .tree-conversation-more,
+.tree-conversation-more:focus-visible {
+  opacity: 1;
+}
+
+.welcome-hints {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 12px;
+  margin-top: 12px;
+}
+
+.welcome-hint {
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-muted);
+}
+
 /* Shown only when a real scan found nothing, so it never reaches a screenshot.
    The root is a path, so it has to be allowed to break anywhere. */
 .tree-empty {

@@ -36,13 +36,25 @@ type Props = {
   onSelectConversation: (id: string) => void;
   /** Creates a new conversation under the given project and selects it. */
   onStartConversation: (projectPath: string) => void;
+  onRenameConversation?: (id: string, title: string) => Promise<void> | void;
+  onArchiveConversation?: (id: string) => Promise<void> | void;
   workspace: WorkspaceState;
 };
 
-export function Sidebar({ route, inspectorOpen, activeConversationId, onSelectConversation, onStartConversation, workspace }: Props) {
+export function Sidebar({
+  route,
+  inspectorOpen,
+  activeConversationId,
+  onSelectConversation,
+  onStartConversation,
+  onRenameConversation,
+  onArchiveConversation,
+  workspace,
+}: Props) {
   const { projects, add, create, remove, rename, reorder, reveal } = workspace;
 
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [renamingConversation, setRenamingConversation] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   /** The parent the user picked, held while they type the new folder's name. */
   const [parent, setParent] = useState<string | null>(null);
@@ -270,18 +282,89 @@ export function Sidebar({ route, inspectorOpen, activeConversationId, onSelectCo
               {project.expanded && (
                 <div className="tree-conversations">
                   {project.conversations.map((conversation) => (
-                    <button
+                    <div
                       key={conversation.id}
-                      type="button"
-                      className={`tree-conversation${
-                        conversation.id === activeConversationId ? " tree-conversation--active" : ""
+                      className={`tree-conversation-row${
+                        conversation.id === activeConversationId ? " tree-conversation-row--active" : ""
                       }`}
-                      onClick={() => onSelectConversation(conversation.id)}
                     >
-                      <Clock size={14} strokeWidth={1.7} />
-                      <span className="tree-conversation-title">{conversation.title}</span>
-                      <span className="tree-conversation-time">{conversation.time}</span>
-                    </button>
+                      {renamingConversation === conversation.id ? (
+                        <input
+                          className="tree-input"
+                          autoFocus
+                          value={draft}
+                          onChange={(event) => setDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              const next = draft.trim();
+                              setRenamingConversation(null);
+                              if (next) void onRenameConversation?.(conversation.id, next);
+                            }
+                            if (event.key === "Escape") setRenamingConversation(null);
+                          }}
+                          onBlur={() => setRenamingConversation(null)}
+                        />
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className={`tree-conversation${
+                              conversation.id === activeConversationId ? " tree-conversation--active" : ""
+                            }`}
+                            onClick={() => onSelectConversation(conversation.id)}
+                          >
+                            <Clock size={14} strokeWidth={1.7} />
+                            <span className="tree-conversation-title">{conversation.title}</span>
+                            <span className="tree-conversation-time">{conversation.time}</span>
+                          </button>
+                          {(onRenameConversation || onArchiveConversation) && (
+                            <Menu
+                              align="right"
+                              trigger={({ toggle }) => (
+                                <button
+                                  type="button"
+                                  className="icon-btn icon-btn--sm tree-more tree-conversation-more"
+                                  aria-label={`${conversation.title} 的操作`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    toggle();
+                                  }}
+                                >
+                                  <MoreHorizontal size={13} strokeWidth={1.9} />
+                                </button>
+                              )}
+                            >
+                              {(close) => (
+                                <>
+                                  {onRenameConversation && (
+                                    <MenuItem
+                                      icon={<Pencil size={14} strokeWidth={1.8} />}
+                                      label="重命名"
+                                      onSelect={() => {
+                                        close();
+                                        setDraft(conversation.title);
+                                        setRenamingConversation(conversation.id);
+                                      }}
+                                    />
+                                  )}
+                                  {onArchiveConversation && (
+                                    <MenuItem
+                                      danger
+                                      icon={<Archive size={14} strokeWidth={1.8} />}
+                                      label="归档"
+                                      onSelect={() => {
+                                        close();
+                                        void onArchiveConversation(conversation.id);
+                                      }}
+                                    />
+                                  )}
+                                </>
+                              )}
+                            </Menu>
+                          )}
+                        </>
+                      )}
+                    </div>
                   ))}
                 </div>
               )}

@@ -38,6 +38,12 @@ export type TraceStep = {
   model?: string;
   input_tokens?: string;
   output_tokens?: string;
+  /** Command working directory, when the runner recorded one. */
+  cwd?: string;
+  /** Command exit code; null while still running. */
+  exitCode?: number | null;
+  /** Paths touched by a file-change step. */
+  files?: string[];
 };
 
 export type ChangedFile = {

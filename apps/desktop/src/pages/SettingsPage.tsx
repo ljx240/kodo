@@ -459,7 +459,7 @@ function StorageBody() {
     <>
       <Field
         label="Local state"
-        hint="项目、会话与设置使用 append-only 日志；API Key 在 credentials.log"
+        hint="项目、会话与设置写入 settings.log（append-only）；API Key 在 credentials.log"
         hintBelow
         block
       >
@@ -502,6 +502,9 @@ function AppearanceBody() {
 function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m: string) => void }) {
   return (
     <>
+      <Field label="Fallback behavior" hint="所选模型不可用时" hintBelow wide>
+        <FallbackSelect />
+      </Field>
       <Field label="Default model" hint="Used for new conversations" hintBelow wide>
         <select className="select" value={model} onChange={(event) => onSelectModel(event.target.value)}>
           {MODELS.map((name) => (
@@ -510,9 +513,6 @@ function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m
             </option>
           ))}
         </select>
-      </Field>
-      <Field label="Fallback behavior" hint="所选模型不可用时" hintBelow wide>
-        <FallbackSelect />
       </Field>
       <SwitchRow label="Extended thinking" hint="Allow models to think step by step" trailing settingKey="extended-thinking" />
       <Field label="Max output tokens" hint="Default for new conversations" hintBelow wide>

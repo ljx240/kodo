@@ -2,7 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { coreInfo, gitBranch, setting, setSetting } from "./api";
 import { loadDemoState, type DemoState } from "./data/demoState";
 import { DEFAULT_MODEL, MODEL_SETTING, MODELS } from "./data/models";
-import { type ProviderConfig, loadProviders, loadActiveIndex, saveActiveIndex } from "./data/providers";
+import {
+  type ProviderConfig,
+  loadProviders,
+  loadActiveIndex,
+  saveActiveIndex,
+  saveProviders,
+} from "./data/providers";
 import { useSetting } from "./data/useSetting";
 import type { LiveSnapshot } from "./data/liveContext";
 import { useWorkspace } from "./data/workspace";
@@ -61,13 +67,13 @@ export function App() {
     setActiveProjectId(null);
   }, [route.demo, demoState]);
 
-  // Ensure a conversation is open so send / Add context are usable without an
-  // extra sidebar click. Prefer an existing session; otherwise open one under
-  // the first project that has a real path.
+  // Ensure a conversation is open so send / Add context and the live trace are
+  // usable without an extra sidebar click. Prefer an existing session;
+  // otherwise open one under the first project that has a real path.
   const sessionBootstrapped = useRef(false);
   const startSession = workspace.startSession;
   useEffect(() => {
-    if (route.demo || route.name !== "conversation" || activeConversationId) return;
+    if (route.demo || (route.name !== "conversation" && route.name !== "trace") || activeConversationId) return;
     if (sessionBootstrapped.current) return;
     const existing = workspace.projects.flatMap((project) => project.conversations)[0];
     if (existing) {
@@ -175,6 +181,22 @@ export function App() {
     }
   };
 
+  /** Switch model inside a provider from the composer without leaving the conversation. */
+  const selectProviderModel = (providerIndex: number, modelId: string, displayName: string) => {
+    const next = providers.map((item, index) =>
+      index === providerIndex
+        ? { ...item, model: modelId, modelId, displayName }
+        : item,
+    );
+    setProviders(next);
+    setActiveProviderIndex(providerIndex);
+    void saveActiveIndex(providerIndex);
+    void saveProviders(next).then(() => {
+      setModel(modelId);
+      void setSetting(MODEL_SETTING, modelId);
+    });
+  };
+
   const newChat = async (projectPath?: string) => {
     const path = projectPath ?? activeProject?.path;
     if (!path) return;
@@ -222,6 +244,13 @@ export function App() {
         activeConversationId={activeConversationId}
         onSelectConversation={setActiveConversationId}
         onStartConversation={(path) => void newChat(path)}
+        onRenameConversation={async (id, title) => {
+          await workspace.retitle(id, title);
+        }}
+        onArchiveConversation={async (id) => {
+          await workspace.archive(id);
+          if (activeConversationId === id) setActiveConversationId(null);
+        }}
         workspace={workspace}
       />
 
@@ -249,6 +278,7 @@ export function App() {
               provider={activeProvider}
               providers={providers}
               onSelectProvider={selectProvider}
+              onSelectProviderModel={selectProviderModel}
               onViewFiles={openFiles}
               onOpenTrace={openTrace}
               onSnapshot={onSnapshot}

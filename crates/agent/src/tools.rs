@@ -82,9 +82,10 @@ impl CommandRisk {
         matches!(self, Self::Catastrophic | Self::DestructiveGit)
     }
 
-    /// Auto mode auto-runs only ReadOnly / pure workspace writes.
+    /// Auto mode auto-runs only read-only commands; every filesystem mutation
+    /// still requires an explicit approval, even when it stays in the project.
     pub fn needs_approval_in_auto(self) -> bool {
-        !matches!(self, Self::ReadOnly | Self::FilesystemWrite)
+        !matches!(self, Self::ReadOnly)
     }
 }
 

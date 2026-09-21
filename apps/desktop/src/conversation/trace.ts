@@ -31,7 +31,15 @@ export function toStep(item: ItemDto): TraceStep {
     case "fileRead":
       return { ...base, type: "read", chip: item.path, detail: item.detail };
     case "commandExecution":
-      return { ...base, type: "run", chip: item.command, detail: "", output: item.output || undefined };
+      return {
+        ...base,
+        type: "run",
+        chip: item.command,
+        detail: "",
+        output: item.output || undefined,
+        cwd: item.cwd,
+        exitCode: item.exitCode,
+      };
     case "modelCall":
       return {
         ...base,
@@ -42,7 +50,12 @@ export function toStep(item: ItemDto): TraceStep {
         output_tokens: formatTokens(item.outputTokens),
       };
     case "fileChange":
-      return { ...base, type: "edit", detail: describe(item.changes) };
+      return {
+        ...base,
+        type: "edit",
+        detail: describe(item.changes),
+        files: item.changes.map((change) => change.path),
+      };
     case "agentMessage":
       return { ...base, type: "finalize", detail: "" };
   }
@@ -52,7 +65,6 @@ export function toStep(item: ItemDto): TraceStep {
 export type Reply = {
   steps: TraceStep[];
   status: ReplyStatus;
-  error: string | null;
   /** The answer, or null while there is not one yet. */
   final: string | null;
   checks: string[];
@@ -61,6 +73,16 @@ export type Reply = {
   files: number;
   added: number;
   removed: number;
+  /** An item that was started and never finished, and is not running now. */
+  interrupted: boolean;
+  /** The user stopped this run. */
+  stopped: boolean;
+  /** Terminal error recorded on the turn, if any. */
+  error: string | null;
+  /** Model chips from completed model calls in this turn. */
+  models: string[];
+  /** `12.4k → 2.1k` rollup for the reply footer, or null when unknown. */
+  tokens: string | null;
 };
 
 export type ReplyStatus = "empty" | "working" | "completed" | "stopped" | "interrupted" | "failed";
@@ -69,12 +91,14 @@ export type ReplyStatus = "empty" | "working" | "completed" | "stopped" | "inter
  * Folds a turn into the pieces the reply renders.
  *
  * The agent's message is pulled out of the step list rather than drawn as a
- * step: it is the answer, and the trace is what led to it. The lifecycle is
- * derived once here so the reply, trace, and Inspector cannot disagree.
+ * step: it is the answer, and the trace is what led to it. `interrupted` is
+ * left over from the lifecycle envelope — an item still marked running in a
+ * turn nothing is driving is where a killed run stopped.
  */
 export function toReply(turn: TurnDto, running: boolean): Reply {
   const answer = [...turn.items].reverse().find((item) => item.kind === "agentMessage");
   const status = replyStatus(turn, running);
+  const hasRunningItem = turn.items.some((item) => item.status === "running");
   const steps = turn.items
     .filter((item) => item.kind !== "agentMessage")
     .map(toStep)
@@ -85,15 +109,36 @@ export function toReply(turn: TurnDto, running: boolean): Reply {
         : step,
     );
   const changes = turn.items.flatMap((item) => (item.kind === "fileChange" ? item.changes : []));
+  const modelCalls = turn.items.filter((item) => item.kind === "modelCall");
+  const models = [...new Set(modelCalls.map((item) => (item.kind === "modelCall" ? item.model : "")))].filter(
+    Boolean,
+  );
+  const input = modelCalls.reduce(
+    (sum, item) => sum + (item.kind === "modelCall" ? item.inputTokens : 0),
+    0,
+  );
+  const output = modelCalls.reduce(
+    (sum, item) => sum + (item.kind === "modelCall" ? item.outputTokens : 0),
+    0,
+  );
 
   return {
     steps,
     status,
-    error: turn.error,
     final: answer?.kind === "agentMessage" ? answer.text : null,
     checks: answer?.kind === "agentMessage" ? answer.checks : [],
     ...totals(changes),
     changes,
+    interrupted:
+      !running &&
+      !turn.done &&
+      !turn.stopped &&
+      !turn.error &&
+      (Boolean(turn.interrupted) || hasRunningItem),
+    stopped: Boolean(turn.stopped),
+    error: turn.error ?? null,
+    models,
+    tokens: modelCalls.length > 0 ? `${formatTokens(input)} → ${formatTokens(output)}` : null,
   };
 }
 
@@ -123,7 +168,7 @@ function describe(changes: ChangeDto[]): string {
 
 /** Milliseconds, in the shape the reference uses: `820ms`, `1.5s`, `1m 12s`. */
 export function formatDuration(ms: number | null): string {
-  if (ms === null) return "—";
+  if (ms === null) return "";
   if (ms < 1000) return `${ms}ms`;
 
   const seconds = ms / 1000;
@@ -136,4 +181,11 @@ export function formatDuration(ms: number | null): string {
 /** `12480` → `12.5k`, so a token count stays one short chip. */
 export function formatTokens(count: number): string {
   return count < 1000 ? String(count) : `${(count / 1000).toFixed(1)}k`;
+}
+
+/** Session titles default to 新对话 until the first ask supplies a real one. */
+export function titleFromAsk(ask: string): string | null {
+  const compact = ask.replace(/\s+/g, " ").trim();
+  if (!compact) return null;
+  return compact.length <= 24 ? compact : `${compact.slice(0, 24)}…`;
 }

@@ -131,6 +131,17 @@ export type RunEventDto =
       error: string;
       toProvider: string;
       toModel: string;
+    }
+  /** Compatibility alias for older runners; new runners emit `failover`. */
+  | {
+      type: "providerSwitch";
+      session: string;
+      fromProvider: string;
+      fromModel: string;
+      errorClass: string;
+      error: string;
+      toProvider: string;
+      toModel: string;
     };
 
 export const RUN_EVENT = "run:event";
