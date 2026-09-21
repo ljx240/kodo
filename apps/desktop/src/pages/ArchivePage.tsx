@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Archive, ArrowDownUp, MessageCircle, Search } from "lucide-react";
 import { isDesktop, listArchived, type ArchivedItemDto } from "../api";
-import { archiveFooter, archivedConversations } from "../data/demo";
+import type { DemoState } from "../data/demoState";
 
 type Row = {
   id: string;
@@ -24,11 +24,14 @@ function formatWhen(at: number): string {
 
 export function ArchivePage({
   demo,
+  demoState,
   selectedId,
   reloadToken = 0,
   onSelect,
 }: {
+  /** True on `/ui-demo`; demo rows then come from `demoState`. */
   demo: boolean;
+  demoState?: DemoState | null;
   selectedId: string | null;
   /** Bump after restore/archive so the table refetches. */
   reloadToken?: number;
@@ -42,23 +45,33 @@ export function ArchivePage({
   }) => void;
 }) {
   const live = !demo && isDesktop();
-  const [rows, setRows] = useState<Row[]>(() =>
-    archivedConversations.map((item) => ({
-      id: item.id,
-      title: item.title,
-      summary: item.summary,
-      archivedAt: item.archivedAt,
-      model: item.model,
-      added: item.added,
-      removed: item.removed,
-      filesChanged: item.added + item.removed > 0 ? 7 : 0,
-      projectName: "—",
-      live: false,
-    })),
+  const demoRows = useMemo<Row[]>(
+    () =>
+      (demoState?.archivedConversations ?? []).map((item) => ({
+        id: item.id,
+        title: item.title,
+        summary: item.summary,
+        archivedAt: item.archivedAt,
+        model: item.model,
+        added: item.added,
+        removed: item.removed,
+        filesChanged: item.added + item.removed > 0 ? 7 : 0,
+        projectName: "—",
+        live: false,
+      })),
+    [demoState],
   );
-  const [total, setTotal] = useState(archiveFooter.total);
+  const [rows, setRows] = useState<Row[]>(demoRows);
+  const [total, setTotal] = useState(demoState?.archiveFooter.total ?? 0);
   const [query, setQuery] = useState("");
   const [reverse, setReverse] = useState(false);
+
+  useEffect(() => {
+    if (demo) {
+      setRows(demoRows);
+      setTotal(demoState?.archiveFooter.total ?? demoRows.length);
+    }
+  }, [demo, demoRows, demoState]);
 
   const visibleRows = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -135,6 +148,7 @@ export function ArchivePage({
               type="button"
               className="icon-btn icon-btn--boxed"
               aria-label="Reverse sort order"
+              title="反转排序"
               onClick={() => setReverse((value) => !value)}
             >
               <ArrowDownUp size={15} strokeWidth={1.7} />

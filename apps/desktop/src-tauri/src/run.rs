@@ -204,6 +204,7 @@ pub fn start(
         let approve_approvals = approvals.clone();
         let approve_app = app.clone();
         let approve_project = args.project.clone();
+        let approve_runs = runs.clone();
         let permission = args.permission;
         let approve_seq = Arc::new(Mutex::new(0u32));
         let approve = {
@@ -211,6 +212,10 @@ pub fn start(
             move |kind: StepKind, command: &str| -> bool {
                 if !permission.needs_approval(kind, Some(command)) {
                     return true;
+                }
+                // Run already cancelled — never wait for an approval ticket.
+                if !approve_runs.is_live(&approve_id) {
+                    return false;
                 }
                 let mut seq = approve_seq.lock().unwrap_or_else(|p| p.into_inner());
                 *seq += 1;
@@ -243,7 +248,24 @@ pub fn start(
                         reason: reason.to_owned(),
                     },
                 );
-                let decided = rx.recv_timeout(Duration::from_secs(300)).unwrap_or(false);
+                // Approval wait must respond to run cancellation — poll in
+                // short slices instead of one 300s blocking recv.
+                let deadline = std::time::Instant::now() + Duration::from_secs(300);
+                let mut decided = false;
+                while std::time::Instant::now() < deadline {
+                    if !approve_runs.is_live(&approve_id) {
+                        // Cancelled during approval → deny, do not run the step.
+                        break;
+                    }
+                    match rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(value) => {
+                            decided = value;
+                            break;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
                 drop(ticket);
                 decided
             }

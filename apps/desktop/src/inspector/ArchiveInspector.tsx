@@ -1,5 +1,5 @@
 import { CircleCheckBig, Folder, RotateCcw, SquareArrowOutUpRight } from "lucide-react";
-import { conversation, project } from "../data/fixture";
+import type { DemoState } from "../data/demoState";
 
 export type ArchiveSelection = {
   id: string;
@@ -12,11 +12,13 @@ export type ArchiveSelection = {
 
 export function ArchiveOverview({
   demo,
+  demoState,
   selection,
   onRestore,
   onOpenTrace,
 }: {
   demo: boolean;
+  demoState?: DemoState | null;
   selection: ArchiveSelection;
   onRestore: () => void;
   onOpenTrace: () => void;
@@ -30,11 +32,19 @@ export function ArchiveOverview({
     );
   }
 
-  const title = selection?.title ?? (demo ? conversation.title : "");
-  const projectName = selection?.projectName ?? (demo ? project.name : "");
-  const model = selection?.model && selection.model !== "—" ? selection.model : demo ? "Claude 3.5 Sonnet" : "—";
+  const fixture = demo ? demoState?.conversation : undefined;
+  const fixtureProject = demo ? demoState?.project : undefined;
+  const title = selection?.title ?? fixture?.title ?? "";
+  const projectName = selection?.projectName ?? fixtureProject?.name ?? "";
+  const model =
+    selection?.model && selection.model !== "—"
+      ? selection.model
+      : demo
+        ? "Claude 3.5 Sonnet"
+        : "—";
   const archivedAt = selection?.at || (demo ? "Apr 29, 2024 10:25 AM" : "");
-  const summary = selection?.summary ?? (demo ? conversation.assistant.final : "—");
+  const summary = selection?.summary ?? fixture?.assistant.final ?? "—";
+  const canRestore = Boolean(selection && selection.id);
 
   return (
     <>
@@ -60,7 +70,9 @@ export function ArchiveOverview({
         <button
           type="button"
           className="btn btn--primary btn--block"
-          disabled={!selection || !selection.id}
+          disabled={!canRestore}
+          title={canRestore ? "恢复该归档会话" : "先在左侧选择一条归档会话"}
+          data-testid="restore-conversation"
           onClick={onRestore}
         >
           <RotateCcw size={15} strokeWidth={1.9} />

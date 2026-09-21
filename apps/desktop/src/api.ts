@@ -152,6 +152,21 @@ export type TurnChangeDto = {
   path: string;
   diff: string;
   userPreexisting: boolean;
+  /** Live undo state vs recorded after-hash. */
+  undoState: "clean" | "already_baseline" | "diverged" | "missing" | string;
+  /** True when working tree diverged from Kodo's after-hash (state C risk). */
+  conflict: boolean;
+};
+
+export type UndoConflictDto = {
+  path: string;
+  reason: string;
+  message: string;
+};
+
+export type UndoReportDto = {
+  restored: string[];
+  conflicts: UndoConflictDto[];
 };
 
 /** Per-file unified diffs of Kodo's changes for this session. */
@@ -159,9 +174,9 @@ export function turnChanges(project: string, id: string): Promise<TurnChangeDto[
   return read<TurnChangeDto[]>("turn_changes", { project, id });
 }
 
-/** Undo only Kodo's changes; user-only edits are never touched. */
-export function undoTurn(project: string, id: string): Promise<string[] | null> {
-  return write<string[]>("undo_turn", { project, id });
+/** Undo only Kodo's changes; user-only and post-turn user edits are never overwritten. */
+export function undoTurn(project: string, id: string): Promise<UndoReportDto | null> {
+  return write<UndoReportDto>("undo_turn", { project, id });
 }
 
 export function workspace(): Promise<WorkspaceDto | null> {
@@ -262,15 +277,21 @@ export function listProjectFiles(project: string, query?: string): Promise<strin
   return invoke<string[]>("list_project_files", { project, query: query ?? null });
 }
 
+/** Absolute paths from the OS "添加照片和文件" dialog; null when cancelled. */
+export function pickFiles(): Promise<string[] | null> {
+  if (!isDesktop()) return Promise.resolve(null);
+  return invoke<string[] | null>("pick_files", {}).catch(() => null);
+}
+
 /** Short preview of a project file; rejects when the path leaves the project. */
 export function readContextFile(project: string, path: string): Promise<string> {
   if (!isDesktop()) return Promise.resolve("");
   return invoke<string>("read_context_file", { project, path });
 }
 
-/** True when the path is inside the project and readable; false otherwise. */
+/** True when the path is readable (project-relative or an absolute external file). */
 export async function validateContextPath(project: string, path: string): Promise<boolean> {
-  if (!path || path.includes("..") || path.startsWith("/")) return false;
+  if (!path || path.includes("..")) return false;
   if (!isDesktop()) return false;
   try {
     await invoke<string>("read_context_file", { project, path });

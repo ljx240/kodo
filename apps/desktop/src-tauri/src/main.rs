@@ -462,7 +462,7 @@ fn read_context_file(project: String, path: String) -> Result<String, String> {
     if path.trim().is_empty() || path.contains("..") || std::path::Path::new(&path).is_absolute() {
         return Err(format!("path must stay inside the project: {path}"));
     }
-    let manager = kodo_agent::ContextManager::new(
+    let mut manager = kodo_agent::ContextManager::new(
         root.to_path_buf(),
         kodo_agent::TurnContextBudget::default(),
     );
@@ -484,6 +484,7 @@ fn respond_approval(approvals: State<'_, Approvals>, id: String, step: u32, appr
 }
 
 /// Per-file unified diffs for the turn's Kodo changes (empty when none).
+/// Each entry reports pre-existing user dirt and live undo-conflict state.
 #[tauri::command]
 fn turn_changes(project: String, id: String) -> Result<Vec<view::TurnChangeView>, String> {
     let root = Path::new(&project);
@@ -491,19 +492,40 @@ fn turn_changes(project: String, id: String) -> Result<Vec<view::TurnChangeView>
     let mut out = Vec::new();
     for path in changeset.kodo_changes() {
         let user_preexisting = changeset.was_pre_existing(path);
+        let undo_state = match changeset.undo_file_state(root, path) {
+            kodo_agent::UndoFileState::Clean => "clean",
+            kodo_agent::UndoFileState::AlreadyBaseline => "already_baseline",
+            kodo_agent::UndoFileState::Diverged => "diverged",
+            kodo_agent::UndoFileState::Missing => "missing",
+        };
         out.push(view::TurnChangeView {
             path: path.clone(),
             diff: changeset.diffs.get(path).cloned().unwrap_or_default(),
             user_preexisting,
+            undo_state: undo_state.to_owned(),
+            conflict: undo_state == "diverged" || undo_state == "missing",
         });
     }
     Ok(out)
 }
 
-/// Undo only Kodo's changes for this session. Never touches user-only edits.
+/// Undo only Kodo's changes for this session. Never touches user-only edits
+/// and never snapshot-overwrites post-turn user edits (returns conflicts).
 #[tauri::command]
-fn undo_turn(project: String, id: String) -> Result<Vec<String>, String> {
-    kodo_agent::undo_session_changes(Path::new(&project), &id)
+fn undo_turn(project: String, id: String) -> Result<view::UndoReportView, String> {
+    let report = kodo_agent::undo_session_changes(Path::new(&project), &id)?;
+    Ok(view::UndoReportView {
+        restored: report.restored,
+        conflicts: report
+            .conflicts
+            .into_iter()
+            .map(|c| view::UndoConflictView {
+                path: c.path,
+                reason: c.reason.label().to_owned(),
+                message: c.message,
+            })
+            .collect(),
+    })
 }
 
 fn log() -> Result<PathBuf, String> {

@@ -1,0 +1,91 @@
+{
+  "description": "Layer-B development vs holdout split. Always report both sets. Holdout is not for iterative prompt-tuning on development only.",
+  "development": [
+    "bug-1-off-by-one",
+    "bug-2-null-guard",
+    "bug-3-off-by-zero",
+    "feat-1-greet",
+    "feat-2-uppercase",
+    "feat-3-default-budget",
+    "ref-1-dedupe",
+    "ref-2-extract-helper",
+    "test-1-add-tests",
+    "test-2-edge-cases",
+    "cross-1-api-impl",
+    "cross-2-frontend-logic",
+    "config-1-env-default",
+    "frontend-1-form-validate",
+    "multi-1-two-files",
+    "repair-1-loop",
+    "blocked-1-impossible"
+  ],
+  "holdout": [
+    "contract-1-api-signature",
+    "rename-1-callsites",
+    "dirty-1-worktree",
+    "unrelated-fail-1-suite",
+    "infra-1-command-not-found",
+    "impossible-1-no-creds",
+    "config-1-runtime-consumer",
+    "coord-1-fe-be",
+    "scope-1-no-unrelated",
+    "bugmulti-1-two-tests",
+    "stale-1-after-edit",
+    "undo-1-preserves-user",
+    "regression-1-fc-trap"
+  ],
+  "regressions": [
+    {
+      "id": "regression-1-fc-trap",
+      "pr3_task_id": null,
+      "pr3_note": "PR #3 recorded aggregate 14/17 + 1 false completion but did not persist per-task ids; this fixture is the permanent completion-gate regression.",
+      "root_cause": "completion"
+    },
+    {
+      "id": "unrelated-fail-1-suite",
+      "pr3_task_id": null,
+      "pr3_note": "Category regression for verification false-pass / unrelated green tests.",
+      "root_cause": "verification"
+    },
+    {
+      "id": "contract-1-api-signature",
+      "pr3_task_id": null,
+      "pr3_note": "Category regression for cross-file API contract (planning/edit).",
+      "root_cause": "edit"
+    },
+    {
+      "id": "rename-1-callsites",
+      "pr3_task_id": null,
+      "pr3_note": "Category regression for search/find-references completeness.",
+      "root_cause": "search"
+    },
+    {
+      "id": "stale-1-after-edit",
+      "pr3_task_id": null,
+      "pr3_note": "Category regression for stale context after edit.",
+      "root_cause": "context"
+    },
+    {
+      "id": "infra-1-command-not-found",
+      "pr3_task_id": null,
+      "pr3_note": "Category regression for provider/tool protocol + infra failure honesty.",
+      "root_cause": "provider/tool protocol"
+    },
+    {
+      "id": "dirty-1-worktree",
+      "pr3_task_id": null,
+      "pr3_note": "Category regression for pre-existing user edits (planning/undo safety).",
+      "root_cause": "planning"
+    }
+  ],
+  "pr3_live_before": {
+    "source": "github.com/ljx240/kodo pull/3 body",
+    "tasks": 17,
+    "success": 14,
+    "false_completion": 1,
+    "avg_tool_calls": 10.6,
+    "failed_task_ids": null,
+    "false_completion_task_id": null,
+    "note": "Per-task ids were not recorded in the PR; do not invent them."
+  }
+}

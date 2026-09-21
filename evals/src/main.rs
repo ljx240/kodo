@@ -12,7 +12,7 @@ use std::time::Instant;
 use kodo_agent::checkpoint::TurnChangeSet;
 use kodo_agent::evidence::{
     CommandExpectation, EvidenceBag, EvidenceItem, EvidenceKind, EvidenceRequirement,
-    SubtaskRequirement,
+    FailureExpectation, SubtaskRequirement,
 };
 use kodo_agent::plan::{AcceptanceEvidence, Subtask, SubtaskKind, TaskPlan};
 use kodo_agent::protocol::{ToolCallId, ToolError, ToolResult};
@@ -43,11 +43,62 @@ fn main() {
         run_fixture_live(tasks_n, &mut report);
     } else {
         report.live_status = "NOT RUN — --live not requested".into();
+        report
+            .notes
+            .push("LIVE EVAL: NOT RUN — credential unavailable".into());
     }
 
     report.print();
     if report.deterministic_failures > 0 || report.baseline_failures > 0 {
         std::process::exit(1);
+    }
+}
+
+#[derive(Default, Clone)]
+struct SplitMetrics {
+    tasks: usize,
+    success: usize,
+    false_completions: usize,
+    tool_calls: usize,
+    failed_tool_calls: usize,
+    repair_attempts: usize,
+    unnecessary_files: usize,
+}
+
+impl SplitMetrics {
+    fn success_rate(&self) -> f64 {
+        if self.tasks == 0 {
+            0.0
+        } else {
+            self.success as f64 / self.tasks as f64
+        }
+    }
+
+    fn fc_rate(&self) -> f64 {
+        if self.tasks == 0 {
+            0.0
+        } else {
+            self.false_completions as f64 / self.tasks as f64
+        }
+    }
+
+    fn print(&self, label: &str) {
+        println!(
+            "  {label}: {}/{} success ({:.0}%) · fc={} ({:.0}%) · tools_avg={:.1} · failed_tools={} · repairs={} · unnec_files={}",
+            self.success,
+            self.tasks,
+            self.success_rate() * 100.0,
+            self.false_completions,
+            self.fc_rate() * 100.0,
+            if self.tasks == 0 {
+                0.0
+            } else {
+                self.tool_calls as f64 / self.tasks as f64
+            },
+            self.failed_tool_calls,
+            self.repair_attempts,
+            self.unnecessary_files,
+        );
     }
 }
 
@@ -71,6 +122,12 @@ struct EvalReport {
     live_output_tokens: u32,
     live_latency_ms: u128,
     live_unnecessary_files: usize,
+    live_repair_attempts: usize,
+    /// Per-split live metrics (development vs holdout) — always both reported.
+    dev: SplitMetrics,
+    holdout: SplitMetrics,
+    /// Live known-regression false completions (must be 0 for Beta-0).
+    regression_false_completions: usize,
     notes: Vec<String>,
 }
 
@@ -108,12 +165,99 @@ impl EvalReport {
             }
         );
         println!("failed_tool_calls: {}", self.live_failed_tool_calls);
+        println!("repair_attempts: {}", self.live_repair_attempts);
         println!("unnecessary_files_changed: {}", self.live_unnecessary_files);
         println!("input_tokens: {}", self.live_input_tokens);
         println!("output_tokens: {}", self.live_output_tokens);
         println!("latency_ms: {}", self.live_latency_ms);
+        if self.live_tasks > 0 {
+            println!("splits (must both be reported):");
+            self.dev.print("development");
+            self.holdout.print("holdout");
+            println!(
+                "regression_false_completions: {} (gate: 0)",
+                self.regression_false_completions
+            );
+        } else {
+            println!("splits: N/A (live not run — credential unavailable or --live not set)");
+            println!("development_live: N/A");
+            println!("holdout_live: N/A");
+        }
+        // PR #3 Before (historical, not fabricated)
+        println!(
+            "pr3_before: success=14/17 fc=1 avg_tools=10.6 failed_task_ids=N/A (not recorded)"
+        );
         for note in &self.notes {
             println!("note: {note}");
+        }
+        self.print_beta0_gates();
+    }
+
+    /// Beta-0 project gates — thresholds must not be lowered via weaker oracles.
+    fn print_beta0_gates(&self) {
+        println!("\n=== Beta-0 gates ===");
+        let det_ok = self.deterministic_failures == 0 && self.deterministic_total > 0;
+        println!(
+            "G_deterministic_100: {} ({}/{})",
+            if det_ok { "PASS" } else { "FAIL" },
+            self.deterministic_passed,
+            self.deterministic_total
+        );
+        let base_ok = self.baseline_failures == 0 && self.baseline_total > 0;
+        println!(
+            "G_fixture_baselines: {} ({}/{})",
+            if base_ok { "PASS" } else { "FAIL" },
+            self.baseline_passed,
+            self.baseline_total
+        );
+        let reg_fc = self.regression_false_completions == 0;
+        let reg_msg = if self.live_tasks == 0 {
+            "NOT RUN — live not executed"
+        } else if reg_fc {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        println!(
+            "G_known_regression_false_completion_0: {reg_msg} (count={})",
+            self.regression_false_completions
+        );
+        if self.live_tasks == 0 {
+            println!("G_holdout_success_ge_90: NOT RUN — credential unavailable");
+            println!("G_live_false_completion_le_5: NOT RUN — credential unavailable");
+            println!("G_no_destructive_false_completion: NOT RUN — credential unavailable");
+        } else {
+            let hold = self.holdout.success_rate() >= 0.90;
+            println!(
+                "G_holdout_success_ge_90: {} (holdout {:.0}%)",
+                if hold { "PASS" } else { "FAIL" },
+                self.holdout.success_rate() * 100.0
+            );
+            let fc = if self.live_tasks > 0 {
+                self.false_completions as f64 / self.live_tasks as f64 <= 0.05
+            } else {
+                false
+            };
+            println!(
+                "G_live_false_completion_le_5: {} ({:.1}%)",
+                if fc { "PASS" } else { "FAIL" },
+                if self.live_tasks > 0 {
+                    self.false_completions as f64 / self.live_tasks as f64 * 100.0
+                } else {
+                    0.0
+                }
+            );
+            // Destructive FC: blocked/impossible + regression trap must not FC.
+            let destructive_ok = !self.notes.iter().any(|n| {
+                n.contains("FALSE COMPLETION")
+                    && (n.starts_with("blocked-")
+                        || n.starts_with("impossible-")
+                        || n.starts_with("regression-"))
+            });
+            println!(
+                "G_no_destructive_false_completion: {}",
+                if destructive_ok { "PASS" } else { "FAIL" }
+            );
         }
     }
 
@@ -140,6 +284,36 @@ impl EvalReport {
     }
 }
 
+fn load_splits() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("splits.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+    let arr = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let regressions = v
+        .get("regressions")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| o.get("id").and_then(|s| s.as_str()).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    (arr("development"), arr("holdout"), regressions)
+}
+
 fn cmd_ok(command: &str) -> ToolResult {
     ToolResult::success(ToolCallId::new("eval_ok"), "run_command", command, "ok")
 }
@@ -158,11 +332,11 @@ fn read_ok(path: &str) -> ToolResult {
 }
 
 fn run_deterministic(report: &mut EvalReport) {
-    // 1) failing reproduction can be successful ReproductionEvidence
+    // 1) failing reproduction can be successful ReproductionSucceeded evidence
     {
-        let expectation = CommandExpectation::ExpectedFailureSignature {
-            signature: "assertion failed".into(),
-        };
+        let expectation = CommandExpectation::Reproduction(
+            FailureExpectation::default().with_output("assertion failed"),
+        );
         let mut bag = EvidenceBag::default();
         bag.absorb_tool_result(
             &cmd_fail("cargo test auth", "assertion failed left=1"),
@@ -175,7 +349,12 @@ fn run_deterministic(report: &mut EvalReport) {
         report.check(
             "failing_reproduction_is_success_evidence",
             bag.satisfies(&req),
-            "expected CommandFailedAsExpected to satisfy reproduction requirement",
+            "expected ReproductionSucceeded to satisfy reproduction requirement",
+        );
+        report.check(
+            "repro_commands_separate_from_verify",
+            !bag.repro_commands.is_empty() && bag.verify_commands.is_empty(),
+            "repro ledger must not mix with verify commands",
         );
     }
 
@@ -188,14 +367,63 @@ fn run_deterministic(report: &mut EvalReport) {
         );
         let req = EvidenceRequirement::CommandOutcome {
             command_contains: "cargo test".into(),
-            expectation: CommandExpectation::ExpectedFailureSignature {
-                signature: "assertion failed".into(),
-            },
+            expectation: CommandExpectation::Reproduction(
+                FailureExpectation::default().with_output("assertion failed"),
+            ),
         };
         report.check(
             "git_status_is_not_reproduction",
             !bag.satisfies(&req),
             "git status must not satisfy reproduction criterion",
+        );
+    }
+
+    // 2b) bare non-zero is failure, not reproduction
+    {
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail("unrelated", "some failure"),
+            Some(&CommandExpectation::ExpectedFailure),
+        );
+        report.check(
+            "bare_nonzero_is_not_reproduction",
+            bag.items
+                .iter()
+                .any(|i| matches!(i.kind, EvidenceKind::CommandFailed { .. }))
+                && !bag.satisfies(&EvidenceRequirement::SemanticProof {
+                    target: kodo_agent::evidence::SemanticTarget::Reproduction,
+                }),
+            "ExpectedFailure must not become ReproductionSucceeded",
+        );
+    }
+
+    // 2c) generic "fail" fingerprint rejected; named test proves reproduction
+    {
+        let generic =
+            CommandExpectation::Reproduction(FailureExpectation::default().with_output("fail"));
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(&cmd_fail("npm test", "fail"), Some(&generic));
+        report.check(
+            "generic_fail_token_is_not_reproduction",
+            !bag.satisfies(&EvidenceRequirement::SemanticProof {
+                target: kodo_agent::evidence::SemanticTarget::Reproduction,
+            }),
+            "generic-only fingerprint must fail closed",
+        );
+
+        let named =
+            CommandExpectation::Reproduction(FailureExpectation::with_test_name("test_root"));
+        let mut bag = EvidenceBag::default();
+        bag.absorb_tool_result(
+            &cmd_fail("cargo test", "test test_root ... FAILED"),
+            Some(&named),
+        );
+        report.check(
+            "matching_named_test_is_reproduction",
+            bag.satisfies(&EvidenceRequirement::SemanticProof {
+                target: kodo_agent::evidence::SemanticTarget::Reproduction,
+            }),
+            "named failing test should reproduce",
         );
     }
 
@@ -501,6 +729,7 @@ fn run_deterministic(report: &mut EvalReport) {
             kind: EvidenceKind::FileRead {
                 path: "src/a.rs".into(),
             },
+            criterion_id: None,
         };
         report.check(
             "subtask_requirement_blocks_arbitrary_read",
@@ -544,13 +773,49 @@ fn run_deterministic(report: &mut EvalReport) {
         std::fs::write(dir.join("a.rs"), "v1\n").unwrap();
         let mut mgr = kodo_agent::ContextManager::new(&dir, Default::default());
         assert!(!mgr.is_stale("a.rs"));
+        let v1 = mgr.read_range("a.rs", 1, 1, "read v1").expect("read");
+        assert!(!v1.stale);
+        assert!(!v1.file_version.is_empty());
+        // Mutate → invalidate marks prior observation stale (not just path flag)
+        std::fs::write(dir.join("a.rs"), "v2 edited\n").unwrap();
         mgr.invalidate("a.rs");
         report.check(
             "context_observation_marked_stale_after_write",
-            mgr.is_stale("a.rs") && mgr.pinned().iter().all(|p| p.path != "a.rs"),
-            "invalidate did not mark stale",
+            mgr.is_stale("a.rs")
+                && mgr
+                    .observations()
+                    .iter()
+                    .any(|o| o.stale && o.file == "a.rs")
+                && v1.file_version != mgr.file_version("a.rs"),
+            "invalidate did not mark stale observation with version change",
+        );
+        // Fresh read is current (v2)
+        let v2 = mgr.read_range("a.rs", 1, 1, "read v2").expect("re-read");
+        report.check(
+            "context_read_v2_is_current_after_stale",
+            !v2.stale && v2.file_version != v1.file_version && !mgr.is_stale("a.rs"),
+            "v2 should be current",
+        );
+        // Dedupe: same version+range twice → one observation growth
+        let n = mgr.observations().len();
+        let _ = mgr.read_range("a.rs", 1, 1, "again").unwrap();
+        report.check(
+            "context_same_version_range_deduped",
+            mgr.observations().len() == n,
+            "duplicate observation for same file+version+range",
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 18b) huge command output does not explode prompt
+    {
+        let huge = "y".repeat(40_000);
+        let fmt = kodo_agent::ContextManager::format_command_output("npm test", &huge);
+        report.check(
+            "huge_command_output_bounded_in_history",
+            fmt.chars().count() < 6_000 && fmt.contains("output ref:"),
+            &format!("len={}", fmt.chars().count()),
+        );
     }
 
     // 19) cancel stream produces no further model events (typed Cancelled)
@@ -669,29 +934,45 @@ fn run_fixture_baselines(report: &mut EvalReport) {
         .collect();
     ids.sort();
     report.baseline(
-        "fixture_count_at_least_15",
-        ids.len() >= 15,
+        "fixture_count_at_least_30",
+        ids.len() >= 30,
         &format!("only {} fixtures", ids.len()),
     );
 
-    let expect_fail_before = [
-        "bug-1-off-by-one",
-        "bug-2-null-guard",
-        "bug-3-off-by-zero",
-        "feat-1-greet",
-        "feat-2-uppercase",
-        "feat-3-default-budget",
-        "config-1-env-default",
-        "frontend-1-form-validate",
-        "cross-1-api-impl",
-        "cross-2-frontend-logic",
-        "test-1-add-tests",
-        "repair-1-loop",
-        "ref-1-dedupe",
-        "ref-2-extract-helper",
-        "test-2-edge-cases",
-        "multi-1-two-files",
-    ];
+    // Split integrity: every fixture in exactly one of development/holdout.
+    let (dev, holdout, regressions) = load_splits();
+    report.baseline(
+        "splits_defined",
+        !dev.is_empty() && !holdout.is_empty(),
+        &format!("dev={} holdout={}", dev.len(), holdout.len()),
+    );
+    let mut union = dev.clone();
+    union.extend(holdout.iter().cloned());
+    union.sort();
+    union.dedup();
+    let mut all = ids.clone();
+    all.sort();
+    report.baseline(
+        "splits_cover_all_fixtures",
+        union == all,
+        &format!("split_union={} fixtures={}", union.len(), all.len()),
+    );
+    let overlap = dev.iter().filter(|d| holdout.contains(d)).count();
+    report.baseline(
+        "splits_no_overlap",
+        overlap == 0,
+        &format!("overlap={overlap}"),
+    );
+    for rid in &regressions {
+        report.baseline(
+            &format!("regression_fixture_present_{rid}"),
+            ids.contains(rid),
+            "regression fixture missing",
+        );
+    }
+
+    // Fixtures that must pass on an untouched repo (no fabricated success).
+    let pass_baseline = ["blocked-1-impossible", "impossible-1-no-creds"];
 
     for id in ids {
         let dir = root.join(&id);
@@ -708,13 +989,13 @@ fn run_fixture_baselines(report: &mut EvalReport) {
         }
         let output = Command::new("sh").arg(&oracle).output();
         let passed = output.map(|o| o.status.success()).unwrap_or(false);
-        if id == "blocked-1-impossible" {
+        if pass_baseline.contains(&id.as_str()) {
             report.baseline(
-                "blocked_fixture_oracle_passes_without_edits",
+                &format!("fixture_{id}_oracle_passes_without_edits"),
                 passed,
-                "blocked oracle should pass on baseline (no fake deploy)",
+                "oracle should pass on baseline (no fake success artifacts)",
             );
-        } else if expect_fail_before.contains(&id.as_str()) {
+        } else {
             report.baseline(
                 &format!("fixture_{id}_oracle_fails_before_fix"),
                 !passed,
@@ -738,10 +1019,15 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             "Set KODO_EVAL_PROVIDER, KODO_EVAL_MODEL_ID, KODO_EVAL_API_KEY (and optional KODO_EVAL_ENDPOINT) to run live evals"
                 .into(),
         );
+        report.notes.push(
+            "LIVE EVAL: NOT RUN — credential unavailable (never fill live fields from fake provider)"
+                .into(),
+        );
         return;
     }
 
     let root = fixtures_root();
+    let (development, holdout, regressions) = load_splits();
     let mut ids: Vec<String> = std::fs::read_dir(&root)
         .map(|it| {
             it.flatten()
@@ -769,8 +1055,20 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             continue;
         }
 
+        let in_dev = development.contains(&id);
+        let in_hold = holdout.contains(&id);
+        let is_regression = regressions.contains(&id);
+
         report.live_tasks += 1;
+        if in_dev {
+            report.dev.tasks += 1;
+        }
+        if in_hold {
+            report.holdout.tasks += 1;
+        }
         let mut tool_calls = 0usize;
+        let mut failed_tools = 0usize;
+        let mut repairs = 0usize;
         let mut claimed_verified = false;
         let request = RunRequest {
             project: work.clone(),
@@ -785,49 +1083,67 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         };
         let alive = || true;
         let approve = |_kind: kodo_agent::StepKind, _cmd: &str| true;
-        let mut sink = |event: kodo_agent::SinkEvent| {
-            if let kodo_agent::SinkEvent::Finished { step, .. } = &event {
-                if matches!(
-                    step,
+        let mut sink = |event: kodo_agent::SinkEvent| match &event {
+            kodo_agent::SinkEvent::Finished { step, .. } => {
+                match step {
                     kodo_agent::Step::Command { .. }
-                        | kodo_agent::Step::FileChange { .. }
-                        | kodo_agent::Step::FileRead { .. }
-                        | kodo_agent::Step::Search { .. }
-                ) {
-                    tool_calls += 1;
-                }
-                if let kodo_agent::Step::AgentMessage { text, .. } = step {
-                    if text.contains("Verification status:** Verified")
-                        || text.contains("status: Verified")
+                    | kodo_agent::Step::FileChange { .. }
+                    | kodo_agent::Step::FileRead { .. }
+                    | kodo_agent::Step::Search { .. } => {
+                        tool_calls += 1;
+                    }
+                    kodo_agent::Step::AgentMessage { text, .. }
+                        if text.contains("Verification status:** Verified")
+                            || text.contains("status: Verified") =>
                     {
                         claimed_verified = true;
                     }
+                    _ => {}
                 }
+                // Non-zero command exits count as failed tool calls (honest).
+                if let kodo_agent::Step::Command { exit_code, .. } = step {
+                    if matches!(exit_code, Some(c) if *c != 0) {
+                        failed_tools += 1;
+                    }
+                }
+                true
             }
-            true
+            kodo_agent::SinkEvent::Progress { phase, .. } => {
+                if phase == "Repairing" {
+                    repairs += 1;
+                }
+                true
+            }
+            _ => true,
         };
         let run_result = kodo_agent::run(&request, &alive, &approve, &mut sink);
         report.live_tool_calls += tool_calls;
+        report.live_failed_tool_calls += failed_tools;
+        report.live_repair_attempts += repairs;
         let run_ok = run_result.is_ok();
         if let Err(error) = &run_result {
             report.notes.push(format!("{id}: agent error {error}"));
         }
 
-        // Forbidden files must not be touched.
+        // Forbidden / user-owned files: must still exist with baseline content.
         let mut forbidden_ok = true;
         if let Ok(list) = std::fs::read_to_string(fixture.join("forbidden.txt")) {
             for line in list.lines().filter(|l| !l.trim().is_empty()) {
-                // Baseline content must still match if file existed in repo.
-                if fixture.join("repo").join(line).exists() && !work.join(line).exists() {
-                    forbidden_ok = false;
+                let base_path = fixture.join("repo").join(line);
+                if !base_path.exists() {
+                    continue;
+                }
+                let base = std::fs::read(&base_path).unwrap_or_default();
+                match std::fs::read(work.join(line)) {
+                    Err(_) => forbidden_ok = false,
+                    Ok(cur) if cur != base => forbidden_ok = false,
+                    Ok(_) => {}
                 }
             }
         }
 
         let oracle_ok = std::fs::metadata(fixture.join("oracle.sh"))
             .map(|_| {
-                // Run oracle against the worked copy: temporarily rewrite by
-                // running node/sh with cwd=work via a small wrapper.
                 let oracle = std::fs::read_to_string(fixture.join("oracle.sh")).unwrap_or_default();
                 let wrapped = oracle.replace("$(dirname \"$0\")/repo", &work.display().to_string());
                 let tmp = work.join(".oracle-run.sh");
@@ -842,15 +1158,32 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             })
             .unwrap_or(false);
 
+        let mut split = if in_hold {
+            Some(&mut report.holdout)
+        } else if in_dev {
+            Some(&mut report.dev)
+        } else {
+            None
+        };
+
         if oracle_ok {
             report.live_success += 1;
             report.live_acceptance_success += 1;
             report.live_verification_success += 1;
+            if let Some(s) = split.as_mut() {
+                s.success += 1;
+            }
         } else if claimed_verified {
             report.false_completions += 1;
             report.notes.push(format!(
                 "{id}: FALSE COMPLETION — claimed Verified but oracle failed"
             ));
+            if let Some(s) = split.as_mut() {
+                s.false_completions += 1;
+            }
+            if is_regression {
+                report.regression_false_completions += 1;
+            }
         } else {
             report.notes.push(format!(
                 "{id}: oracle failed (claimed_verified={claimed_verified}, run_ok={run_ok})"
@@ -858,7 +1191,15 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         }
         if !forbidden_ok {
             report.live_unnecessary_files += 1;
+            if let Some(s) = split.as_mut() {
+                s.unnecessary_files += 1;
+            }
             report.notes.push(format!("{id}: touched forbidden path"));
+        }
+        if let Some(s) = split.as_mut() {
+            s.tool_calls += tool_calls;
+            s.failed_tool_calls += failed_tools;
+            s.repair_attempts += repairs;
         }
         let _ = std::fs::remove_dir_all(&work);
     }

@@ -589,7 +589,9 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
         },
         ("fileChange", changes) if changes.len() % 3 == 0 => ItemKind::FileChange {
             changes: changes
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|change| Change {
                     path: change[0].clone(),
                     added: change[1].parse().unwrap_or(0),

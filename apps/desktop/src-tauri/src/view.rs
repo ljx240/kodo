@@ -141,6 +141,24 @@ pub struct TurnChangeView {
     pub diff: String,
     #[serde(rename = "userPreexisting")]
     pub user_preexisting: bool,
+    /// Live undo state: "clean" | "already_baseline" | "diverged" | "missing".
+    pub undo_state: String,
+    /// True when the recorded after-hash no longer matches the working tree.
+    pub conflict: bool,
+}
+
+/// Safe undo outcome: restored paths + per-file conflicts (state C).
+#[derive(serde::Serialize, Clone)]
+pub struct UndoReportView {
+    pub restored: Vec<String>,
+    pub conflicts: Vec<UndoConflictView>,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct UndoConflictView {
+    pub path: String,
+    pub reason: String,
+    pub message: String,
 }
 
 impl From<session::Item> for ItemView {
