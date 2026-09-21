@@ -107,7 +107,7 @@ export function App() {
           : mode === "dark"
             ? "dark"
             : "light";
-      document.documentElement.dataset.theme = resolved;
+      document.documentElement.setAttribute("data-theme", resolved);
     };
     apply(theme);
     if (theme !== "system") return;

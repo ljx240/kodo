@@ -415,7 +415,10 @@ pub fn record_interrupted(dir: &Path, id: &str, at: u64) -> io::Result<()> {
 ///
 /// Live ids (still running in this process) are skipped. Never emits
 /// `turn.complete` — Running must not become Completed.
-pub fn recover_interrupted(dir: &Path, live: &std::collections::HashSet<String>) -> io::Result<Vec<String>> {
+pub fn recover_interrupted(
+    dir: &Path,
+    live: &std::collections::HashSet<String>,
+) -> io::Result<Vec<String>> {
     let mut recovered = Vec::new();
     for reference in list(dir)? {
         if live.contains(&reference.id) {
@@ -775,14 +778,34 @@ mod tests {
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
 
         record_ask(&dir, &id, 10, "帮我看一下这个报错").expect("ask");
+        // context round-trip: with context field
+        record_ask_with_context(
+            &dir,
+            &id,
+            20,
+            "再看这个",
+            &["src/lib.rs".to_owned(), "a b.md".to_owned()],
+        )
+        .expect("ask+ctx");
+        let loaded = load(&dir, &id).expect("load");
+        assert_eq!(loaded.turns.len(), 2);
+        assert!(loaded.turns[0].context.is_empty());
+        assert_eq!(
+            loaded.turns[1].context,
+            vec!["src/lib.rs".to_owned(), "a b.md".to_owned()]
+        );
+        assert_eq!(loaded.turns[1].ask, "再看这个");
         let session = load(&dir, &id).expect("load");
-        assert_eq!(session.turns.len(), 1);
+        assert_eq!(session.turns.len(), 2);
         assert_eq!(session.turns[0].ask, "帮我看一下这个报错");
         assert!(session.turns[0].context.is_empty());
         assert!(!session.turns[0].done, "a fresh turn is not done");
 
+        // `turn.complete` closes the most recent open turn.
         record_turn_complete(&dir, &id, 20).expect("complete");
-        assert!(load(&dir, &id).expect("load").turns[0].done);
+        let after = load(&dir, &id).expect("load");
+        assert!(after.turns[1].done);
+        assert!(!after.turns[0].done, "only the completed turn is done");
     }
 
     #[test]
@@ -938,7 +961,12 @@ mod tests {
         record_item(
             &dir,
             &id2,
-            &item(1, ItemKind::Reasoning { summary: "s".to_owned() }),
+            &item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "s".to_owned(),
+                },
+            ),
             Phase::Started,
         )
         .expect("started");

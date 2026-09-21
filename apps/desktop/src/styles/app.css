@@ -679,6 +679,11 @@ p {
   background: var(--kodo-hover);
 }
 
+/* Menu toggles report open state to assistive tech from one place. */
+.menu-trigger[aria-expanded="true"] {
+  background: var(--kodo-hover);
+}
+
 .icon-btn--sm {
   width: 22px;
   height: 22px;

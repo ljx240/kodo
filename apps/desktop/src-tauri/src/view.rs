@@ -290,6 +290,7 @@ pub enum RunEvent {
         /// Structured risk: Safe | FilesystemWrite | Network | PackageInstall |
         /// DestructiveGit | ProcessControl | SensitiveData | Dangerous.
         #[serde(default)]
+        #[serde(rename = "riskCategory")]
         risk_category: String,
         /// Human-readable reason for the risk.
         #[serde(default)]
@@ -309,11 +310,16 @@ pub enum RunEvent {
     /// Provider switch on the streaming path: failed side, error class, next side.
     Failover {
         session: String,
+        #[serde(rename = "fromProvider")]
         from_provider: String,
+        #[serde(rename = "fromModel")]
         from_model: String,
+        #[serde(rename = "errorClass")]
         error_class: String,
         error: String,
+        #[serde(rename = "toProvider")]
         to_provider: String,
+        #[serde(rename = "toModel")]
         to_model: String,
     },
 }

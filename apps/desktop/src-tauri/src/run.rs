@@ -233,13 +233,7 @@ pub fn start(
                     kodo_agent::tools::CommandRisk::ProcessControl => "ProcessControl",
                     kodo_agent::tools::CommandRisk::PackageInstall => "PackageInstall",
                     kodo_agent::tools::CommandRisk::Network => "Network",
-                    kodo_agent::tools::CommandRisk::FilesystemWrite => {
-                        if matches!(kind, StepKind::FileChange) {
-                            "FilesystemWrite"
-                        } else {
-                            "FilesystemWrite"
-                        }
-                    }
+                    kodo_agent::tools::CommandRisk::FilesystemWrite => "FilesystemWrite",
                     kodo_agent::tools::CommandRisk::ReadOnly => {
                         if matches!(kind, StepKind::FileChange) {
                             "FilesystemWrite"

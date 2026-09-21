@@ -750,6 +750,14 @@ pub fn chat_ir(
     let max_tokens = effective_max_tokens(max_tokens);
     let caps = provider.capabilities();
 
+    // Deterministic local provider used by the offline agent benchmark. The
+    // endpoint is a JSONL file path, never a network URL; one response is
+    // consumed per model call. It intentionally stays on the text path so
+    // benchmark scripts exercise the same protocol parser as custom providers.
+    if provider.template == "fake" {
+        return fake_text(provider, &model_id);
+    }
+
     if caps.native_tools && !tools.is_empty() {
         match provider.template.as_str() {
             "anthropic" => anthropic_native(provider, &model_id, messages, tools, max_tokens),
@@ -777,6 +785,38 @@ pub fn chat_ir(
             _ => openai_text(provider, &model_id, &flat, max_tokens),
         }
     }
+}
+
+fn fake_text(provider: &Provider, model_id: &str) -> Result<ChatResponse, ProviderError> {
+    let path = provider.endpoint.trim();
+    let content = std::fs::read_to_string(path).map_err(|error| ProviderError {
+        class: ProviderFailureClass::Unknown,
+        message: format!("fake provider script read failed: {error}"),
+    })?;
+    let (line, rest) = content.split_once('\n').unwrap_or((content.as_str(), ""));
+    std::fs::write(path, rest).map_err(|error| ProviderError {
+        class: ProviderFailureClass::Unknown,
+        message: format!("fake provider script update failed: {error}"),
+    })?;
+    let payload: Value = serde_json::from_str(line.trim()).map_err(|error| ProviderError {
+        class: ProviderFailureClass::MalformedResponse,
+        message: format!("fake provider response is not JSON: {error}"),
+    })?;
+    let text = payload
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProviderError {
+            class: ProviderFailureClass::MalformedResponse,
+            message: "fake provider response must contain a string `text` field".to_owned(),
+        })?;
+    Ok(ChatResponse {
+        text: text.to_owned(),
+        input_tokens: 0,
+        output_tokens: 0,
+        native_tool_calls: Vec::new(),
+        model_id: model_id.to_owned(),
+        finish_reason: "stop".to_owned(),
+    })
 }
 
 /// Streaming chat. When capabilities.streaming is false, emits a single

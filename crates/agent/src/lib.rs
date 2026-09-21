@@ -42,8 +42,8 @@ use provider::{NativeToolCall, ProviderEvent, ProviderMessage, ToolSchema};
 use skill::{SkillRegistry, SkillSpec};
 use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason};
 use tools::{
-    classify_command_risk, command_run, read_text, search_files,
-    summarize_git_changes, write_project_file, CommandOutcomeKind,
+    classify_command_risk, command_run, read_text, search_files, summarize_git_changes,
+    write_project_file, CommandOutcomeKind,
 };
 use verify::{FailureClass, FinalStatus, RepairDecision, VerificationPlan, VerificationRunner};
 

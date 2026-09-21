@@ -133,10 +133,7 @@ pub fn agent_env_policy() -> EnvPolicy {
     }
     // Ensure a usable PATH even if the parent had none.
     if !vars.iter().any(|(k, _)| k == "PATH") {
-        vars.push((
-            "PATH".into(),
-            "/usr/local/bin:/usr/bin:/bin".into(),
-        ));
+        vars.push(("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()));
     }
     EnvPolicy::Scrubbed { vars }
 }
@@ -194,15 +191,11 @@ fn tokenize_shell(command: &str) -> Vec<String> {
 fn command_head_tokens(tokens: &[String]) -> Vec<String> {
     let mut i = 0;
     while i < tokens.len() {
-        let t = tokens[i].trim_start_matches(|c| c == '\'' || c == '"');
+        let t = tokens[i].trim_start_matches(['\'', '"']);
         if t.contains('=') && !t.starts_with('=') {
             let name_end = t.find('=').unwrap_or(0);
             let name = &t[..name_end];
-            if !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 i += 1;
                 continue;
             }
@@ -373,7 +366,10 @@ pub fn redact_secrets(text: &str) -> String {
 fn redact_private_key_blocks(text: &str) -> String {
     // Collapse PEM private key bodies between headers.
     let mut out = text.to_owned();
-    for header in ["-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----"] {
+    for header in [
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----",
+    ] {
         while let Some(start) = out.find(header) {
             let end_marker = header.replace("BEGIN", "END");
             let rest_start = start + header.len();
@@ -509,7 +505,8 @@ fn redact_json_secrets(text: &str) -> String {
                     from = after_colon;
                     continue;
                 }
-                let value_start_offset = value_part.len() - trimmed[q.len_utf8()..].len().saturating_sub(0);
+                let value_start_offset =
+                    value_part.len() - trimmed[q.len_utf8()..].len().saturating_sub(0);
                 // absolute index of first quote
                 let abs_q = after_colon + value_part.find(q).unwrap_or(0);
                 let body_start = abs_q + q.len_utf8();
@@ -715,9 +712,9 @@ fn map_process_outcome(outcome: ProcessOutcome, timeout_secs: u64) -> CommandOut
     } else if stream_capped {
         truncation.truncated = true;
         // Record cap observation in the notice so the model knows.
-        text.push_str(&format!(
-            "\n… [output truncated: original_size=unknown truncated=true; stream byte cap hit] …"
-        ));
+        text.push_str(
+            "\n… [output truncated: original_size=unknown truncated=true; stream byte cap hit] …",
+        );
     }
 
     // Keep timeout note accurate when duration < full timeout (kill early).
@@ -793,17 +790,20 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
     {
         bump(CommandRisk::Catastrophic);
     }
-    if head.first().map(|s| basename(s)).is_some_and(|b| {
-        matches!(b.as_str(), "shutdown" | "reboot" | "halt" | "poweroff")
-    }) {
+    if head
+        .first()
+        .map(|s| basename(s))
+        .is_some_and(|b| matches!(b.as_str(), "shutdown" | "reboot" | "halt" | "poweroff"))
+    {
         bump(CommandRisk::Catastrophic);
     }
     // rm -rf of system / home roots (not a normal workspace file)
     if head.first().map(|s| basename(s)) == Some("rm".into()) {
         let recursive = tokens.iter().any(|t| {
-            let t = t.trim_start_matches(|c| c == '\'' || c == '"');
+            let t = t.trim_start_matches(['\'', '"']);
             t.starts_with("-") && t.contains('r') && t.contains('f')
-        }) || lower_all.contains("rm -rf") || lower_all.contains("rm -fr");
+        }) || lower_all.contains("rm -rf")
+            || lower_all.contains("rm -fr");
         let targets_system = tokens.iter().any(|t| {
             let bare = t.trim_matches(|c| c == '\'' || c == '"');
             bare == "/"
@@ -832,7 +832,9 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
         let sub = git_args.first().map(|s| s.to_ascii_lowercase());
         match sub.as_deref() {
             Some("push") => {
-                if git_args.iter().any(|a| a == "--force" || a == "-f" || a == "--force-with-lease")
+                if git_args
+                    .iter()
+                    .any(|a| a == "--force" || a == "-f" || a == "--force-with-lease")
                     || git_args.iter().any(|a| a.starts_with("--force"))
                 {
                     bump(CommandRisk::DestructiveGit);
@@ -850,7 +852,9 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
                 bump(CommandRisk::DestructiveGit)
             }
             Some("checkout") | Some("restore")
-                if git_args.iter().any(|a| a == "." || a == "--" || a.starts_with("--source")) =>
+                if git_args
+                    .iter()
+                    .any(|a| a == "." || a == "--" || a.starts_with("--source")) =>
             {
                 // `git checkout .` / `git restore .` can wipe local edits
                 if git_args.iter().any(|a| a == ".") {
@@ -874,21 +878,8 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
 
     // --- PackageInstall ---
     let installer_heads = [
-        "npm",
-        "pnpm",
-        "yarn",
-        "pip",
-        "pip3",
-        "cargo",
-        "brew",
-        "apt",
-        "apt-get",
-        "yum",
-        "dnf",
-        "apk",
-        "gem",
-        "go",
-        "uv",
+        "npm", "pnpm", "yarn", "pip", "pip3", "cargo", "brew", "apt", "apt-get", "yum", "dnf",
+        "apk", "gem", "go", "uv",
     ];
     if let Some(h) = head.first().map(|s| basename(s)) {
         let installish = head.iter().any(|t| {
@@ -900,7 +891,10 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
         }
         // cargo install / go get / go install
         if (h == "cargo" && head.iter().any(|t| basename(t) == "install"))
-            || (h == "go" && head.iter().any(|t| matches!(basename(t).as_str(), "get" | "install")))
+            || (h == "go"
+                && head
+                    .iter()
+                    .any(|t| matches!(basename(t).as_str(), "get" | "install")))
         {
             bump(CommandRisk::PackageInstall);
         }
@@ -908,7 +902,10 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
 
     // --- Network ---
     if head.first().map(|s| basename(s)).is_some_and(|b| {
-        matches!(b.as_str(), "curl" | "wget" | "nc" | "ncat" | "ssh" | "scp" | "sftp" | "ftp")
+        matches!(
+            b.as_str(),
+            "curl" | "wget" | "nc" | "ncat" | "ssh" | "scp" | "sftp" | "ftp"
+        )
     }) {
         bump(CommandRisk::Network);
     }
@@ -922,17 +919,21 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
     }) {
         bump(CommandRisk::ProcessControl);
     }
-    if head.first().map(|s| basename(s)).is_some_and(|b| {
-        matches!(b.as_str(), "sh" | "bash" | "zsh" | "dash")
-    }) && head.iter().any(|t| t == "-c")
+    if head
+        .first()
+        .map(|s| basename(s))
+        .is_some_and(|b| matches!(b.as_str(), "sh" | "bash" | "zsh" | "dash"))
+        && head.iter().any(|t| t == "-c")
     {
         bump(CommandRisk::ProcessControl);
     }
 
     // --- SensitiveData ---
-    if head.first().map(|s| basename(s)).is_some_and(|b| {
-        matches!(b.as_str(), "printenv" | "env" | "set")
-    }) {
+    if head
+        .first()
+        .map(|s| basename(s))
+        .is_some_and(|b| matches!(b.as_str(), "printenv" | "env" | "set"))
+    {
         bump(CommandRisk::SensitiveData);
     }
     // Reading credential-shaped paths via shell (when not already higher)
@@ -948,12 +949,17 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
 
     // --- FilesystemWrite: chmod/chown/write redirection ---
     if head.first().map(|s| basename(s)).is_some_and(|b| {
-        matches!(b.as_str(), "chmod" | "chown" | "chgrp" | "mv" | "cp" | "tee" | "truncate")
+        matches!(
+            b.as_str(),
+            "chmod" | "chown" | "chgrp" | "mv" | "cp" | "tee" | "truncate"
+        )
     }) {
         bump(CommandRisk::FilesystemWrite);
     }
     if tokens.iter().any(|t| t == ">" || t == ">>")
-        && tokens.iter().any(|t| t.starts_with('/') || t.starts_with("~"))
+        && tokens
+            .iter()
+            .any(|t| t.starts_with('/') || t.starts_with("~"))
     {
         bump(CommandRisk::Catastrophic);
     }
@@ -989,8 +995,16 @@ pub fn resolve_in_project(project: &Path, relative: &str) -> Result<PathBuf, Str
         return Err("refusing to read or write a sensitive credential path".to_owned());
     }
     let full = project.join(relative);
-    // Canonicalize parent when possible to catch symlink escapes.
-    if let Ok(canon) = full.canonicalize() {
+    // Canonicalize the deepest existing ancestor so a non-existent leaf still
+    // catches symlink escapes through its parent (e.g. `escape/new.txt`).
+    let mut probe = full.as_path();
+    while !probe.exists() {
+        match probe.parent() {
+            Some(parent) if parent != probe => probe = parent,
+            _ => break,
+        }
+    }
+    if let Ok(canon) = probe.canonicalize() {
         if let Ok(root) = project.canonicalize() {
             if !canon.starts_with(&root) {
                 return Err("path escapes the project root".to_owned());
@@ -998,9 +1012,7 @@ pub fn resolve_in_project(project: &Path, relative: &str) -> Result<PathBuf, Str
             // Sensitive files under the workspace (e.g. project/.env)
             if let Ok(rel) = canon.strip_prefix(&root) {
                 if is_sensitive_relative_path(&rel.to_string_lossy()) {
-                    return Err(
-                        "refusing to read or write a sensitive credential path".to_owned()
-                    );
+                    return Err("refusing to read or write a sensitive credential path".to_owned());
                 }
             }
         }
@@ -1338,19 +1350,29 @@ mod tests {
 
     #[test]
     fn package_install_and_network_classify_for_ask_approval() {
-        assert_eq!(classify_command_risk("npm install left-pad"), CommandRisk::PackageInstall);
-        assert_eq!(classify_command_risk("pip install requests"), CommandRisk::PackageInstall);
-        assert_eq!(classify_command_risk("cargo install ripgrep"), CommandRisk::PackageInstall);
-        assert_eq!(classify_command_risk("curl https://example.com"), CommandRisk::Network);
+        assert_eq!(
+            classify_command_risk("npm install left-pad"),
+            CommandRisk::PackageInstall
+        );
+        assert_eq!(
+            classify_command_risk("pip install requests"),
+            CommandRisk::PackageInstall
+        );
+        assert_eq!(
+            classify_command_risk("cargo install ripgrep"),
+            CommandRisk::PackageInstall
+        );
+        assert_eq!(
+            classify_command_risk("curl https://example.com"),
+            CommandRisk::Network
+        );
         assert_eq!(
             classify_command_risk("VAR=1 curl https://api.example.com"),
             CommandRisk::Network
         );
         // Ask always needs approval for any command (including these).
-        assert!(crate::Permission::Ask.needs_approval(
-            crate::StepKind::Command,
-            Some("npm install left-pad")
-        ));
+        assert!(crate::Permission::Ask
+            .needs_approval(crate::StepKind::Command, Some("npm install left-pad")));
     }
 
     #[test]
@@ -1363,8 +1385,14 @@ mod tests {
             CommandRisk::FilesystemWrite
         );
         // chmod is FilesystemWrite, not catastrophic unless targeting system roots.
-        assert_eq!(classify_command_risk("chmod +x script.sh"), CommandRisk::FilesystemWrite);
-        assert_eq!(classify_command_risk("sudo rm -rf /"), CommandRisk::Catastrophic);
+        assert_eq!(
+            classify_command_risk("chmod +x script.sh"),
+            CommandRisk::FilesystemWrite
+        );
+        assert_eq!(
+            classify_command_risk("sudo rm -rf /"),
+            CommandRisk::Catastrophic
+        );
     }
 
     #[test]
@@ -1392,12 +1420,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kodo_env_tok_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         std::env::set_var("KODO_LEAK_TEST_TOKEN", "parent-secret-tok");
-        let outcome = command_run(
-            &dir,
-            "echo tok=${KODO_LEAK_TEST_TOKEN:-none}",
-            &|| true,
-            5,
-        );
+        let outcome = command_run(&dir, "echo tok=${KODO_LEAK_TEST_TOKEN:-none}", &|| true, 5);
         assert!(
             outcome.output.contains("tok=none"),
             "allowlist env must not inherit arbitrary parent secrets: {}",

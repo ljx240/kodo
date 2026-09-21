@@ -792,6 +792,7 @@ export function Composer({
             )}
           </div>
         </div>
+
       </div>
 
       {(queueCount > 0 || running) && (
