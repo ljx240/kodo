@@ -337,6 +337,161 @@ test("settings toggles persist through the stubbed settings store", async ({ pag
   await expect(toggle).toHaveAttribute("aria-checked", "true");
 });
 
+test("every visible functional setting maps to a runtime consumer", async ({ page }) => {
+  await stubShell(page, {
+    settings: {
+      theme: "system",
+      density: "comfortable",
+      "show-line-numbers": "false",
+      "use-system-font": "true",
+      "auto-detect-git-branch": "false",
+      "fallback-behavior": "fail",
+      "extended-thinking": "true",
+      "max-output-tokens": "2048",
+      permission: "auto",
+      "default-model": "Claude Sonnet 5",
+    },
+  });
+  await page.goto("/");
+
+  // Appearance → DOM consumers
+  await page.locator(".sidebar-foot .nav-item").click();
+  await page.locator(".settings-nav-item", { hasText: "Appearance" }).click();
+  await expect(page.locator('.settings-detail select[aria-label="Theme"]')).toHaveValue("system");
+  await expect(page.locator(".app")).toHaveAttribute("data-density", "comfortable");
+  await expect(page.locator(".app")).toHaveAttribute("data-line-numbers", "false");
+  await expect(page.locator(".app")).toHaveClass(/app--system-font/);
+
+  // Models → fallback / thinking / max tokens keys
+  await page.locator(".settings-nav-item", { hasText: "Models" }).click();
+  await expect(page.locator(".settings-detail select").first()).toHaveValue("fail");
+  await expect(page.locator('.settings-detail input[role="switch"], .settings-detail .toggle').first()).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(page.locator(".settings-detail input.input").first()).toHaveValue("2048");
+
+  // Projects → auto git branch (App skips gitBranch when false)
+  await page.locator(".settings-nav-item", { hasText: "Projects" }).click();
+  await expect(page.locator(".settings-detail .toggle").first()).toHaveAttribute("aria-checked", "false");
+
+  // Storage → auto-save / trace persistence path documented as append-only
+  await page.locator(".settings-nav-item", { hasText: "Archive" }).click();
+  await expect(page.locator(".settings-detail")).toContainText("settings.log");
+});
+
+test("provider failover switch is visible to the conversation UI", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "修复路由",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        {
+          ask: "跑一下",
+          context: [],
+          items: [],
+          done: false,
+          stopped: false,
+          interrupted: false,
+          error: null,
+        },
+      ],
+    },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+
+  await emit(page, {
+    type: "providerSwitch",
+    session: "s1",
+    fromProvider: "openai",
+    fromModel: "gpt-4o",
+    errorClass: "RateLimit",
+    error: "429 too many requests",
+    toProvider: "anthropic",
+    toModel: "claude-sonnet-4-5",
+  });
+
+  const notice = page.locator('[data-testid="failover-notice"]');
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText("openai/gpt-4o");
+  await expect(notice).toContainText("anthropic/claude-sonnet-4-5");
+  await expect(notice).toContainText("RateLimit");
+  await notice.locator('[data-testid="failover-dismiss"]').click();
+  await expect(notice).toHaveCount(0);
+});
+
+test("recovered interrupted turn is not shown as completed or working", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "中断会话")] },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "中断会话",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        {
+          ask: "跑检查",
+          context: [],
+          items: [{ id: 1, at: 1_700_000_000, status: "running", duration: null, kind: "reasoning", summary: "先看" }],
+          done: false,
+          stopped: false,
+          interrupted: true,
+          error: null,
+        },
+      ],
+    },
+  });
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+
+  await expect(page.locator(".reply-interrupted")).toBeVisible();
+  await expect(page.locator(".reply-working")).toHaveCount(0);
+  // Trace status on a live session never claims Completed for interrupted turn.
+  await page.goto("/trace");
+  await expect(page.locator(".status-pill")).toContainText("Interrupted");
+});
+
+test("trace page reads persisted session items (trace persistence chain)", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "有痕迹")] },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "有痕迹",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        {
+          ask: "看日志",
+          context: [],
+          items: [
+            { id: 1, at: 1_700_000_000, status: "done", duration: 1200, kind: "commandExecution", command: "cargo check", cwd: "/tmp/ws/alpha", output: "ok", exitCode: 0 },
+            { id: 2, at: 1_700_000_001, status: "done", duration: 800, kind: "agentMessage", text: "完成", checks: ["通过"] },
+          ],
+          done: true,
+          stopped: false,
+          interrupted: false,
+          error: null,
+        },
+      ],
+    },
+  });
+
+  await page.goto("/trace");
+  await expect(page.locator(".status-pill")).toContainText("Completed");
+  await expect(page.locator(".timeline, .trace").first()).toBeVisible();
+});
+
 test("archive restore is an Inspector action, not a row button", async ({ page }) => {
   await stubShell(page, {
     workspace: {

@@ -574,6 +574,13 @@ fn snapshot() -> Result<Workspace, String> {
 }
 
 fn main() {
+    // App restart: any Running persisted session becomes Interrupted here —
+    // never Completed. No live runs exist yet, so the live set is empty.
+    if let Ok(dir) = session::dir() {
+        let live = std::collections::HashSet::new();
+        let _ = session::recover_interrupted(&dir, &live);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

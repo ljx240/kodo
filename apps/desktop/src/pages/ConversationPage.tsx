@@ -372,6 +372,26 @@ export function ConversationPage({
             )}
           </div>
 
+          {failover && (
+            <div className="action-error" role="status" data-testid="failover-notice">
+              <span className="action-error-msg">
+                Failover · {failover.fromProvider}/{failover.fromModel} → {failover.toProvider}/
+                {failover.toModel} · {failover.errorClass}
+                {failover.error ? ` — ${failover.error.slice(0, 160)}` : ""}
+              </span>
+              <div className="action-error-actions">
+                <button
+                  type="button"
+                  className="btn btn--sm"
+                  data-testid="failover-dismiss"
+                  onClick={() => setFailover(null)}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          )}
+
           {pageError && (
             <div className="action-error" role="alert" data-testid="action-error">
               <span className="action-error-msg">{pageError.message}</span>

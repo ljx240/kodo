@@ -401,6 +401,40 @@ pub fn record_error(dir: &Path, id: &str, at: u64, message: &str) -> io::Result<
     append(dir, id, &["error", &at.to_string(), message])
 }
 
+/// Marks the current turn interrupted after recovery (app restart mid-run).
+///
+/// Never writes `turn.complete`: a running persisted session becomes Interrupted,
+/// not Completed. Items, phases, and payload lines stay untouched so last phase,
+/// known changes, and undo/diff remain available.
+pub fn record_interrupted(dir: &Path, id: &str, at: u64) -> io::Result<()> {
+    append(dir, id, &["interrupted", &at.to_string()])
+}
+
+/// On startup: convert unfinished non-live turns to Interrupted.
+/// Returns session ids that received a recovery line.
+///
+/// Live ids (still running in this process) are skipped. Never emits
+/// `turn.complete` — Running must not become Completed.
+pub fn recover_interrupted(dir: &Path, live: &std::collections::HashSet<String>) -> io::Result<Vec<String>> {
+    let mut recovered = Vec::new();
+    for reference in list(dir)? {
+        if live.contains(&reference.id) {
+            continue;
+        }
+        let session = load(dir, &reference.id)?;
+        let Some(turn) = session.turns.last() else {
+            continue;
+        };
+        if turn.done || turn.stopped || turn.interrupted || turn.error.is_some() {
+            continue;
+        }
+        // Unfinished turn with no driver → interrupted, not completed.
+        record_interrupted(dir, &reference.id, now())?;
+        recovered.push(reference.id);
+    }
+    Ok(recovered)
+}
+
 /// Changes the display title. The file name does not move.
 pub fn retitle(dir: &Path, id: &str, title: &str) -> io::Result<()> {
     append(dir, id, &["retitle", title])
@@ -1201,6 +1235,71 @@ mod tests {
             load(&dir, &id).expect("load").turns[0].error.as_deref(),
             Some("模型返回了无法解析的内容"),
         );
+    }
+
+    #[test]
+    fn recovery_marks_running_as_interrupted_never_completed() {
+        let tmp = TempDir::new("sess-recover");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "killed", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "s".to_owned(),
+                },
+            ),
+            Phase::Started,
+        )
+        .expect("started");
+
+        let live = std::collections::HashSet::new();
+        let recovered = recover_interrupted(&dir, &live).expect("recover");
+        assert_eq!(recovered, vec![id.clone()]);
+
+        let session = load(&dir, &id).expect("load");
+        let turn = &session.turns[0];
+        assert!(turn.interrupted, "must convert Running → Interrupted");
+        assert!(!turn.done, "recovery must never write turn.complete");
+        assert_eq!(turn.items[0].status, Status::Running, "item envelope kept");
+        assert_eq!(
+            turn.items[0].kind,
+            item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "s".to_owned(),
+                }
+            )
+            .kind,
+            "last phase payload preserved for undo/diff"
+        );
+
+        // Second recovery is a no-op (idempotent).
+        let again = recover_interrupted(&dir, &live).expect("recover again");
+        assert!(again.is_empty());
+    }
+
+    #[test]
+    fn recovery_skips_live_and_finished_turns() {
+        let tmp = TempDir::new("sess-recover-skip");
+        let dir = tmp.dir("sessions");
+
+        let done = open(&dir, Path::new("/p"), "done", 1).expect("open");
+        record_ask(&dir, &done, 10, "go").expect("ask");
+        record_turn_complete(&dir, &done, 20).expect("complete");
+
+        let live = open(&dir, Path::new("/p"), "live", 2).expect("open");
+        record_ask(&dir, &live, 10, "go").expect("ask");
+
+        let mut live_set = std::collections::HashSet::new();
+        live_set.insert(live.clone());
+        let recovered = recover_interrupted(&dir, &live_set).expect("recover");
+        assert!(recovered.is_empty(), "live and completed must be skipped");
+        assert!(!load(&dir, &live).expect("load").turns[0].interrupted);
+        assert!(load(&dir, &done).expect("load").turns[0].done);
     }
 
     #[test]

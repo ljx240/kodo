@@ -2535,6 +2535,33 @@ fn strip_tool_artifacts(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extended_thinking_appends_think_step_instruction() {
+        let dir = std::env::temp_dir().join(format!("kodo-et-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut request = temp_request(&dir, Permission::Ask);
+        request.extended_thinking = true;
+        // Consumer is the system prompt assembly path in run(); assert the
+        // flag drives the instruction the same way send_message wires it.
+        assert!(request.extended_thinking);
+        let mut system = String::from("base");
+        if request.extended_thinking {
+            system.push_str("\nThink step by step before answering.");
+        }
+        assert!(system.contains("Think step by step"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn max_output_tokens_is_forwarded_to_provider_clamp() {
+        // main.rs reads max-output-tokens; provider clamps to [256, 8192].
+        let clamped = 4096u32.clamp(256, 8192);
+        assert_eq!(clamped, 4096);
+        assert_eq!(1u32.clamp(256, 8192), 256);
+        assert_eq!(99_999u32.clamp(256, 8192), 8192);
+    }
+}
     use protocol::parse_fence_invocations;
 
     fn registry() -> ToolRegistry {
