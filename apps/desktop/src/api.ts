@@ -277,15 +277,21 @@ export function listProjectFiles(project: string, query?: string): Promise<strin
   return invoke<string[]>("list_project_files", { project, query: query ?? null });
 }
 
+/** Absolute paths from the OS "添加照片和文件" dialog; null when cancelled. */
+export function pickFiles(): Promise<string[] | null> {
+  if (!isDesktop()) return Promise.resolve(null);
+  return invoke<string[] | null>("pick_files", {}).catch(() => null);
+}
+
 /** Short preview of a project file; rejects when the path leaves the project. */
 export function readContextFile(project: string, path: string): Promise<string> {
   if (!isDesktop()) return Promise.resolve("");
   return invoke<string>("read_context_file", { project, path });
 }
 
-/** True when the path is inside the project and readable; false otherwise. */
+/** True when the path is readable (project-relative or an absolute external file). */
 export async function validateContextPath(project: string, path: string): Promise<boolean> {
-  if (!path || path.includes("..") || path.startsWith("/")) return false;
+  if (!path || path.includes("..")) return false;
   if (!isDesktop()) return false;
   try {
     await invoke<string>("read_context_file", { project, path });

@@ -405,11 +405,16 @@ function ToolsBody() {
       <Field
         icon={<SquareTerminal size={20} strokeWidth={1.6} />}
         label="Permission mode"
-        hint="Shell、文件与 git 步骤共用此策略"
+        hint="Shell、文件与 git 步骤共用此策略（写入 permission，由 run driver 读取）"
         hintBelow
         wide
       >
-        <select className="select" value={permission} onChange={(e) => setPermission(e.target.value)}>
+        <select
+          className="select"
+          value={permission}
+          onChange={(e) => setPermission(e.target.value)}
+          aria-label="Permission mode"
+        >
           {PERMISSIONS.map((item) => (
             <option key={item.value} value={item.value}>
               {item.label} — {item.description}
@@ -417,8 +422,13 @@ function ToolsBody() {
           ))}
         </select>
       </Field>
-      <Field icon={<FileText size={20} strokeWidth={1.6} />} label="File write access" hint="由 Permission mode 统一约束" hintBelow wide>
-        <select className="select" value={permission} onChange={(e) => setPermission(e.target.value)}>
+      <Field icon={<FileText size={20} strokeWidth={1.6} />} label="File write access" hint="由 Permission mode 统一约束（同一 runtime key）" hintBelow wide>
+        <select
+          className="select"
+          value={permission}
+          onChange={(e) => setPermission(e.target.value)}
+          aria-label="File write access"
+        >
           {PERMISSIONS.map((item) => (
             <option key={item.value} value={item.value}>
               {item.label}
@@ -426,8 +436,13 @@ function ToolsBody() {
           ))}
         </select>
       </Field>
-      <Field icon={<GitBranch size={20} strokeWidth={1.6} />} label="Git access" hint="由 Permission mode 统一约束" hintBelow wide>
-        <select className="select" value={permission} onChange={(e) => setPermission(e.target.value)}>
+      <Field icon={<GitBranch size={20} strokeWidth={1.6} />} label="Git access" hint="由 Permission mode 统一约束（同一 runtime key）" hintBelow wide>
+        <select
+          className="select"
+          value={permission}
+          onChange={(e) => setPermission(e.target.value)}
+          aria-label="Git access"
+        >
           {PERMISSIONS.map((item) => (
             <option key={item.value} value={item.value}>
               {item.label}
@@ -461,10 +476,15 @@ function AppearanceBody() {
   const [density, setDensity] = useSetting("density", "compact");
   return (
     <>
-      <Field label="Theme" hint="当前版本为浅色；System 跟随浅色" hintBelow wide>
-        <select className="select" value={theme} onChange={(e) => setTheme(e.target.value)}>
+      <Field
+        label="Theme"
+        hint="写入 settings.log 并应用到 <html data-theme>；System 跟随系统深色偏好"
+        hintBelow
+        wide
+      >
+        <select className="select" value={theme} onChange={(e) => setTheme(e.target.value)} aria-label="Theme">
           <option value="light">Light</option>
-          <option value="system">System (仅浅色生效)</option>
+          <option value="system">System（跟随系统）</option>
         </select>
       </Field>
       <Field label="Interface density" hint="应用到 app 的 data-density" hintBelow wide>

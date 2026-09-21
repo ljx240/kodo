@@ -31,7 +31,15 @@ export function toStep(item: ItemDto): TraceStep {
     case "fileRead":
       return { ...base, type: "read", chip: item.path, detail: item.detail };
     case "commandExecution":
-      return { ...base, type: "run", chip: item.command, detail: "", output: item.output || undefined };
+      return {
+        ...base,
+        type: "run",
+        chip: item.command,
+        detail: "",
+        output: item.output || undefined,
+        cwd: item.cwd,
+        exitCode: item.exitCode,
+      };
     case "modelCall":
       return {
         ...base,
@@ -42,7 +50,12 @@ export function toStep(item: ItemDto): TraceStep {
         output_tokens: formatTokens(item.outputTokens),
       };
     case "fileChange":
-      return { ...base, type: "edit", detail: describe(item.changes) };
+      return {
+        ...base,
+        type: "edit",
+        detail: describe(item.changes),
+        files: item.changes.map((change) => change.path),
+      };
     case "agentMessage":
       return { ...base, type: "finalize", detail: "" };
   }
@@ -61,6 +74,14 @@ export type Reply = {
   removed: number;
   /** An item that was started and never finished, and is not running now. */
   interrupted: boolean;
+  /** The user stopped this run. */
+  stopped: boolean;
+  /** Terminal error recorded on the turn, if any. */
+  error: string | null;
+  /** Model chips from completed model calls in this turn. */
+  models: string[];
+  /** `12.4k → 2.1k` rollup for the reply footer, or null when unknown. */
+  tokens: string | null;
 };
 
 /**
@@ -75,6 +96,18 @@ export function toReply(turn: TurnDto, running: boolean): Reply {
   const answer = [...turn.items].reverse().find((item) => item.kind === "agentMessage");
   const steps = turn.items.filter((item) => item.kind !== "agentMessage").map(toStep);
   const changes = turn.items.flatMap((item) => (item.kind === "fileChange" ? item.changes : []));
+  const modelCalls = turn.items.filter((item) => item.kind === "modelCall");
+  const models = [...new Set(modelCalls.map((item) => (item.kind === "modelCall" ? item.model : "")))].filter(
+    Boolean,
+  );
+  const input = modelCalls.reduce(
+    (sum, item) => sum + (item.kind === "modelCall" ? item.inputTokens : 0),
+    0,
+  );
+  const output = modelCalls.reduce(
+    (sum, item) => sum + (item.kind === "modelCall" ? item.outputTokens : 0),
+    0,
+  );
 
   return {
     steps,
@@ -83,6 +116,10 @@ export function toReply(turn: TurnDto, running: boolean): Reply {
     ...totals(changes),
     changes,
     interrupted: !running && !turn.done && !turn.stopped && !turn.error && steps.some(isRunning),
+    stopped: Boolean(turn.stopped),
+    error: turn.error ?? null,
+    models,
+    tokens: modelCalls.length > 0 ? `${formatTokens(input)} → ${formatTokens(output)}` : null,
   };
 }
 
@@ -119,4 +156,11 @@ export function formatDuration(ms: number | null): string {
 /** `12480` → `12.5k`, so a token count stays one short chip. */
 export function formatTokens(count: number): string {
   return count < 1000 ? String(count) : `${(count / 1000).toFixed(1)}k`;
+}
+
+/** Session titles default to 新对话 until the first ask supplies a real one. */
+export function titleFromAsk(ask: string): string | null {
+  const compact = ask.replace(/\s+/g, " ").trim();
+  if (!compact) return null;
+  return compact.length <= 24 ? compact : `${compact.slice(0, 24)}…`;
 }
