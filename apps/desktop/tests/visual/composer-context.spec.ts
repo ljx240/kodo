@@ -1,6 +1,13 @@
 import { expect, test } from "@playwright/test";
 import { emit, project, sessionRef, stubShell } from "./shell";
 
+/** Open the + menu, then the project-file side panel (not an inline expansion). */
+async function openFilePicker(page: import("@playwright/test").Page) {
+  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator(".composer-plus-menu").getByRole("menuitem", { name: "从项目添加文件" }).click();
+  await expect(page.locator('[data-testid="context-file-list"]')).toBeVisible();
+}
+
 /** Common live conversation stub with one project + session. */
 function liveCore(extra: Record<string, unknown> = {}) {
   return {
@@ -23,15 +30,43 @@ test("no decorative Mic button remains in the composer", async ({ page }) => {
   await stubShell(page, liveCore());
   await openLiveConversation(page);
   await expect(page.locator('.composer button[aria-label="Voice input"]')).toHaveCount(0);
-  await expect(page.locator('.composer button[aria-label="Add context"]')).toHaveCount(1);
+  await expect(page.locator('.composer button[aria-label="Composer menu"]')).toHaveCount(1);
+});
+
+test("+ opens a menu first, not an inline file picker", async ({ page }) => {
+  await stubShell(page, liveCore({ files: ["src/app.ts"] }));
+  await openLiveConversation(page);
+
+  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await expect(page.locator('[data-testid="context-file-list"]')).toHaveCount(0);
+  await expect(page.locator(".composer-plus-menu")).toBeVisible();
+  await expect(page.locator(".composer-plus-menu").getByRole("menuitem", { name: "从项目添加文件" })).toBeVisible();
+
+  await page.locator(".composer-plus-menu").getByRole("menuitem", { name: "从项目添加文件" }).click();
+  await expect(page.locator('[data-testid="context-file-list"]')).toBeVisible();
+  // Floating side layer (absolute), not an in-flow expansion inside the composer box.
+  await expect(page.locator(".composer-plus-root [data-testid='context-file-list']")).toHaveCount(1);
+  const rootPos = await page
+    .locator(".composer-plus-root")
+    .evaluate((el) => getComputedStyle(el).position);
+  expect(rootPos).toBe("absolute");
+});
+
+test("+ lists builtin skills and inserts a skill tag into the draft", async ({ page }) => {
+  await stubShell(page, liveCore());
+  await openLiveConversation(page);
+
+  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator(".composer-plus-menu", { hasText: "技能" }).getByRole("menuitem", { name: "技能" }).click();
+  await page.locator('[data-skill-id="bug-fix"]').click();
+  await expect(page.locator(".composer-input")).toHaveValue("【技能：bug-fix】 ");
 });
 
 test("add one context chip via the project file picker", async ({ page }) => {
   await stubShell(page, liveCore({ files: ["src/app.ts", "src/util.ts", "README.md"] }));
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Add context"]').click();
-  await expect(page.locator('[data-testid="context-file-list"]')).toBeVisible();
+  await openFilePicker(page);
 
   await page.locator('[data-file-path="src/app.ts"]').click();
   await expect(page.locator('[data-context-path="src/app.ts"]')).toBeVisible();
@@ -44,9 +79,9 @@ test("add multiple context chips", async ({ page }) => {
   await stubShell(page, liveCore({ files: ["src/app.ts", "src/util.ts", "README.md"] }));
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Add context"]').click();
+  await openFilePicker(page);
   await page.locator('[data-file-path="src/app.ts"]').click();
-  await page.locator('.composer button[aria-label="Add context"]').click();
+  await openFilePicker(page);
   await page.locator('[data-file-path="src/util.ts"]').click();
 
   await expect(page.locator("[data-context-path]")).toHaveCount(2);
@@ -58,10 +93,10 @@ test("remove a context chip", async ({ page }) => {
   await stubShell(page, liveCore({ files: ["src/app.ts", "README.md"] }));
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Add context"]').click();
+  await openFilePicker(page);
   await page.locator('[data-file-path="src/app.ts"]').click();
   // Picking a file closes the picker; reopen for the second path.
-  await page.locator('.composer button[aria-label="Add context"]').click();
+  await openFilePicker(page);
   await page.locator('[data-file-path="README.md"]').click();
 
   await expect(page.locator("[data-context-path]")).toHaveCount(2);
@@ -74,7 +109,7 @@ test("send passes structured context in the invoke payload, not in the ask text"
   await stubShell(page, liveCore({ files: ["src/app.ts", "README.md"] }));
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Add context"]').click();
+  await openFilePicker(page);
   await page.locator('[data-file-path="src/app.ts"]').click();
 
   await page.locator(".composer-input").fill("看看这个文件");
@@ -106,7 +141,7 @@ test("illegal external path is rejected and surfaces recovery", async ({ page })
   );
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Add context"]').click();
+  await openFilePicker(page);
   // The listed file fails read_context_file (failContextRead), so validation
   // rejects it and the recovery banner appears instead of a context chip.
   await page.locator('[data-file-path="src/app.ts"]').click();
@@ -218,7 +253,7 @@ test("context search filters the project file list", async ({ page }) => {
   await stubShell(page, liveCore({ files: ["src/app.ts", "src/util.ts", "README.md"] }));
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Add context"]').click();
+  await openFilePicker(page);
   await page.locator(".context-picker-input").fill("util");
   await expect(page.locator('[data-file-path="src/util.ts"]')).toBeVisible();
   await expect(page.locator('[data-file-path="src/app.ts"]')).toHaveCount(0);

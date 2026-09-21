@@ -13,7 +13,7 @@ import {
 import { AssistantReply } from "../conversation/AssistantReply";
 import { Composer } from "../conversation/Composer";
 import { toReply, type Reply } from "../conversation/trace";
-import { changedFiles, conversation, projects, summary } from "../data/fixture";
+import { type DemoState } from "../data/demoState";
 import { snapshotFromTurn, type LiveSnapshot } from "../data/liveContext";
 import { type ProviderConfig } from "../data/providers";
 import { navigate } from "../routes";
@@ -31,6 +31,11 @@ type Props = {
   onSnapshot?: (snapshot: LiveSnapshot | null) => void;
   projectName?: string;
   projectPath?: string;
+  /**
+   * Deterministic fixture for `/ui-demo` only. Live routes pass null and must
+   * never import data/fixture or data/demo themselves.
+   */
+  demo?: DemoState | null;
 };
 
 type Approval = {
@@ -50,16 +55,18 @@ type ActionErrorState = {
   action?: { label: string; run: () => void };
 };
 
-const demoReply: Reply = {
-  steps: conversation.assistant.trace,
-  final: conversation.assistant.final,
-  checks: conversation.assistant.checks,
-  changes: changedFiles,
-  files: summary.files_changed,
-  added: summary.added,
-  removed: summary.removed,
-  interrupted: false,
-};
+function demoReplyFrom(demo: DemoState): Reply {
+  return {
+    steps: demo.conversation.assistant.trace,
+    final: demo.conversation.assistant.final,
+    checks: demo.conversation.assistant.checks,
+    changes: demo.changedFiles,
+    files: demo.summary.files_changed,
+    added: demo.summary.added,
+    removed: demo.summary.removed,
+    interrupted: false,
+  };
+}
 
 export function ConversationPage({
   conversationId,
@@ -73,8 +80,9 @@ export function ConversationPage({
   onSnapshot,
   projectName = "",
   projectPath = "",
+  demo = null,
 }: Props) {
-  const isFixture = conversationId === conversation.id;
+  const demoMode = Boolean(demo);
   const [turns, setTurns] = useState<TurnDto[]>([]);
   const [title, setTitle] = useState("");
   const [running, setRunning] = useState(false);
@@ -90,7 +98,7 @@ export function ConversationPage({
   const acceptStreamRef = useRef(true);
 
   const providerWarning = useMemo(() => {
-    if (isFixture) return null;
+    if (demoMode) return null;
     if (providers.length === 0) return "尚未配置 AI Provider";
     const active = provider;
     if (!active) return "当前 Provider 不可用";
@@ -98,7 +106,7 @@ export function ConversationPage({
       return "当前 Provider 缺少 API Key";
     }
     return null;
-  }, [isFixture, providers, provider]);
+  }, [demoMode, providers, provider]);
 
   useEffect(() => {
     setApproval(null);
@@ -108,7 +116,7 @@ export function ConversationPage({
     setStreamText("");
     setProgress(null);
     acceptStreamRef.current = true;
-    if (!conversationId || isFixture) {
+    if (!conversationId || demoMode) {
       setTurns([]);
       setTitle("");
       setRunning(false);
@@ -129,10 +137,10 @@ export function ConversationPage({
     return () => {
       alive = false;
     };
-  }, [conversationId, isFixture]);
+  }, [conversationId, demoMode, onSnapshot]);
 
   useEffect(() => {
-    if (!conversationId || isFixture) return;
+    if (!conversationId || demoMode) return;
 
     let alive = true;
     let stop: (() => void) | null = null;
@@ -185,17 +193,17 @@ export function ConversationPage({
       alive = false;
       stop?.();
     };
-  }, [conversationId, isFixture]);
+  }, [conversationId, demoMode]);
 
   const liveSnapshot = useMemo(() => {
-    if (isFixture || !conversationId) return null;
+    if (demoMode || !conversationId) return null;
     const last = turns[turns.length - 1] ?? null;
     return snapshotFromTurn(conversationId, title || "新对话", projectName, projectPath, last, running);
-  }, [isFixture, conversationId, turns, title, running, projectName, projectPath]);
+  }, [demoMode, conversationId, turns, title, running, projectName, projectPath]);
 
   useEffect(() => {
-    onSnapshot?.(isFixture || !conversationId ? null : liveSnapshot);
-  }, [onSnapshot, liveSnapshot, isFixture, conversationId]);
+    onSnapshot?.(demoMode || !conversationId ? null : liveSnapshot);
+  }, [onSnapshot, liveSnapshot, demoMode, conversationId]);
 
   const send = async (text: string, context: string[]) => {
     if (!conversationId) return;
@@ -279,8 +287,11 @@ export function ConversationPage({
     });
   };
 
-  const heading = isFixture ? titleOf(conversationId) : title || "新对话";
-  const liveSession = !isFixture && conversationId !== null;
+  const heading = demoMode && demo
+    ? demo.conversation.title
+    : title || "新对话";
+  const liveSession = !demoMode && conversationId !== null;
+  const demoReply = demo ? demoReplyFrom(demo) : null;
 
   return (
     <main className="main">
@@ -388,11 +399,11 @@ export function ConversationPage({
             </div>
           )}
 
-          {isFixture ? (
+          {demoMode && demo && demoReply ? (
             <>
-              <UserMessage time={conversation.user.time} text={conversation.user.content} />
+              <UserMessage time={demo.conversation.user.time} text={demo.conversation.user.content} />
               <AssistantReply
-                time={conversation.assistant.time}
+                time={demo.conversation.assistant.time}
                 reply={demoReply}
                 running={false}
                 onViewFiles={onViewFiles}
@@ -421,15 +432,28 @@ export function ConversationPage({
 
           {/* Approval sits outside the turn list so it also shows on an empty turn. */}
           {liveSession && approval && (
-            <div className="approval-bar" role="alertdialog" aria-label="审批工具步骤">
+            <div className="approval-bar" role="alertdialog" aria-label="审批工具步骤" data-testid="approval-bar">
               <div className="approval-text">
                 <strong>
                   需要批准 · {approval.kind}
                   {approval.riskCategory ? ` · ${approval.riskCategory}` : ""}
                 </strong>
-                <code>{approval.detail || "继续执行该步骤"}</code>
-                {approval.reason && <span className="approval-reason">原因：{approval.reason}</span>}
-                {approval.cwd && <span className="approval-cwd">cwd: {approval.cwd}</span>}
+                <code data-testid="approval-command">{approval.detail || "继续执行该步骤"}</code>
+                {approval.reason && (
+                  <span className="approval-reason" data-testid="approval-reason">
+                    原因：{approval.reason}
+                  </span>
+                )}
+                {approval.cwd && (
+                  <span className="approval-cwd" data-testid="approval-cwd">
+                    cwd: {approval.cwd}
+                  </span>
+                )}
+                {approval.riskCategory && (
+                  <span className="approval-risk" data-testid="approval-risk">
+                    risk: {approval.riskCategory}
+                  </span>
+                )}
               </div>
               <div className="approval-actions">
                 <button type="button" className="btn" onClick={() => decide(false)}>
@@ -458,7 +482,7 @@ export function ConversationPage({
         provider={provider}
         providers={providers}
         onSelectProvider={onSelectProvider}
-        ready={!isFixture && conversationId !== null}
+        ready={!demoMode && conversationId !== null}
         running={running}
         projectPath={projectPath}
         contexts={contexts}
@@ -546,13 +570,4 @@ function upsert(items: ItemDto[], item: ItemDto): ItemDto[] {
   const next = [...items];
   next[index] = item;
   return next;
-}
-
-function titleOf(conversationId: string | null): string {
-  if (!conversationId) return "新对话";
-  for (const project of projects) {
-    const match = project.conversations.find((item) => item.id === conversationId);
-    if (match) return match.title;
-  }
-  return conversation.title;
 }

@@ -41,6 +41,11 @@ select {
   outline-offset: var(--kodo-focus-offset);
 }
 
+/* The draft box is framed by the composer border — no inner ring. */
+.composer-input:focus-visible {
+  outline: none !important;
+}
+
 :focus:not(:focus-visible) {
   outline: none;
 }
@@ -613,8 +618,13 @@ p {
   color: var(--kodo-text-secondary);
 }
 
-.icon-btn:hover {
+.icon-btn:hover:not(:disabled) {
   background: var(--kodo-hover);
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* Menu toggles report open state to assistive tech from one place. */

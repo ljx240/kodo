@@ -1,4 +1,5 @@
-import { ArrowUp, ChevronDown, FileText, Plus, Search, Sparkles, Square, Shield, ShieldCheck, ShieldAlert, Settings, X } from "lucide-react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { ArrowUp, ChevronDown, FileText, Paperclip, Plus, Puzzle, Search, Sparkles, Square, Shield, ShieldCheck, ShieldAlert, Settings, X } from "lucide-react";
 import { useLayoutEffect, useRef, useState, useEffect, useCallback } from "react";
 import { isDesktop, listProjectFiles, setSetting, setting, validateContextPath } from "../api";
 import { type ProviderConfig, templateById } from "../data/providers";
@@ -48,6 +49,17 @@ const PERM_CONFIG: Record<Permission, { label: string; color: string }> = {
 
 const openSettings = () => navigate(isDesktop() ? "/settings" : "/ui-demo/settings");
 
+/** Builtin agent skills mirrored from skills/<id>/SKILL.md (runtime SkillRegistry). */
+const BUILTIN_SKILLS: { id: string; label: string }[] = [
+  { id: "bug-fix", label: "缺陷修复" },
+  { id: "feature", label: "功能开发" },
+  { id: "test", label: "测试" },
+  { id: "refactor", label: "重构" },
+  { id: "code-review", label: "代码评审" },
+  { id: "docs", label: "文档" },
+  { id: "kodo-ui", label: "Kodo UI" },
+];
+
 export function Composer({
   provider,
   providers,
@@ -67,7 +79,10 @@ export function Composer({
   const [draft, setDraft] = useState("");
   const input = useRef<HTMLTextAreaElement>(null);
   const [permission, setPermission] = useState<Permission>(DEFAULT_PERMISSION);
-  const [pickerOpen, setPickerOpen] = useState(false);
+  /** + opens a floating action menu (reference: attach menu pattern), not the inline picker. */
+  const [plusOpen, setPlusOpen] = useState(false);
+  /** Side panel next to the + menu: project files or skills. */
+  const [plusPanel, setPlusPanel] = useState<"files" | "skills" | null>(null);
   const [fileQuery, setFileQuery] = useState("");
   const [fileList, setFileList] = useState<string[]>([]);
   const [listLoading, setListLoading] = useState(false);
@@ -113,14 +128,21 @@ export function Composer({
     }
   }, [projectPath, fileQuery, onContextError]);
 
+  const filesPanelOpen = plusOpen && plusPanel === "files";
+
   useEffect(() => {
-    if (!pickerOpen) return;
+    if (!filesPanelOpen) return;
     void refreshFiles();
-  }, [pickerOpen, refreshFiles]);
+  }, [filesPanelOpen, refreshFiles]);
+
+  const closePlus = useCallback(() => {
+    setPlusOpen(false);
+    setPlusPanel(null);
+  }, []);
 
   const pickFile = async (path: string) => {
     if (contexts.includes(path)) {
-      setPickerOpen(false);
+      closePlus();
       return;
     }
     const ok = await validateContextPath(projectPath, path).catch(() => false);
@@ -130,8 +152,120 @@ export function Composer({
       return;
     }
     onAddContext(path);
-    setPickerOpen(false);
+    closePlus();
     setFileQuery("");
+  };
+
+  /** Skill id is written into the draft so the runtime SkillRegistry can match it. */
+  const applySkill = (skillId: string) => {
+    const tag = `【技能：${skillId}】`;
+    setDraft((current) => (current.trim() ? `${current.trimEnd()}\n${tag}` : `${tag} `));
+    closePlus();
+    requestAnimationFrame(() => input.current?.focus());
+  };
+
+  // Stable handle for async drop/paste handlers that must see the latest pickFile.
+  const pickFileRef = useRef(pickFile);
+  pickFileRef.current = pickFile;
+
+  /** Absolute path → project-relative when inside the project; else null. */
+  const toProjectRelative = (absolute: string): string | null => {
+    if (!projectPath) return null;
+    const root = projectPath.replace(/\/+$/, "");
+    const path = absolute.replace(/\\/g, "/");
+    if (path === root) return null;
+    if (!path.startsWith(`${root}/`)) return null;
+    return path.slice(root.length + 1);
+  };
+
+  const addExternalPaths = useCallback(
+    async (paths: string[]) => {
+      for (const raw of paths) {
+        const relative = toProjectRelative(raw) ?? (raw.startsWith("/") ? null : raw);
+        if (!relative) {
+          onContextError(`只能添加当前项目内的文件：${raw}`);
+          continue;
+        }
+        await pickFileRef.current(relative);
+      }
+    },
+    [projectPath, onContextError],
+  );
+
+  // Native file drop (Tauri): full filesystem paths, independent of HTML5 DnD.
+  useEffect(() => {
+    if (!isDesktop() || !projectPath) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    // getCurrentWebview() can throw synchronously when __TAURI_INTERNALS__ is a stub
+    // (browser tests) or window.webview is missing — only bind when it exists.
+    void Promise.resolve()
+      .then(() => getCurrentWebview())
+      .then((webview) =>
+        webview.onDragDropEvent((event) => {
+          if (event.payload.type !== "drop") return;
+          void addExternalPaths(event.payload.paths);
+        }),
+      )
+      .then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {
+        /* drag-drop unavailable — HTML5 handlers still cover the browser shell */
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [projectPath, addExternalPaths]);
+
+  const addDataTransferPaths = async (transfer: DataTransfer | null) => {
+    if (!transfer) return;
+    const uris = transfer.getData("text/uri-list");
+    const plain = transfer.getData("text/plain");
+    const candidates = `${uris}\n${plain}`
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => line.replace(/^file:\/\//, ""));
+    if (candidates.length > 0) await addExternalPaths(candidates);
+  };
+
+  const onComposerPaste = async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    // Prefer filesystem paths when the shell exposed them on the File object.
+    const withPath = files
+      .map((file) => (file as File & { path?: string }).path)
+      .filter((path): path is string => Boolean(path));
+    if (withPath.length > 0) {
+      event.preventDefault();
+      await addExternalPaths(withPath);
+      return;
+    }
+    const text = event.clipboardData.getData("text/plain").trim();
+    if (text.startsWith("/") || text.startsWith("file://")) {
+      event.preventDefault();
+      await addExternalPaths([text.replace(/^file:\/\//, "")]);
+    }
+  };
+
+  const onComposerDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer) return;
+    const hasFiles = event.dataTransfer.types.includes("Files");
+    const hasUri = event.dataTransfer.types.includes("text/uri-list");
+    if (!hasFiles && !hasUri) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const withPath = Array.from(event.dataTransfer.files)
+      .map((file) => (file as File & { path?: string }).path)
+      .filter((path): path is string => Boolean(path));
+    if (withPath.length > 0) {
+      await addExternalPaths(withPath);
+      return;
+    }
+    await addDataTransferPaths(event.dataTransfer);
   };
 
   const send = () => {
@@ -147,7 +281,15 @@ export function Composer({
 
   return (
     <div className="composer">
-      <div className="composer-box">
+      <div
+        className="composer-box"
+        onDragOver={(event) => {
+          if (event.dataTransfer?.types.includes("Files") || event.dataTransfer?.types.includes("text/uri-list")) {
+            event.preventDefault();
+          }
+        }}
+        onDrop={(event) => void onComposerDrop(event)}
+      >
         {/* Row 1: textarea */}
         <div className="composer-row">
           <textarea
@@ -157,6 +299,7 @@ export function Composer({
             placeholder="描述任务，输入/调用技能"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
+            onPaste={(event) => void onComposerPaste(event)}
             onKeyDown={(event) => {
               // Enter sends, Shift+Enter breaks the line.
               if (event.key === "Enter" && !event.shiftKey) {
@@ -191,18 +334,145 @@ export function Composer({
         <div className="composer-controls">
           {/* Left side */}
           <div className="composer-left">
-            <button
-              type="button"
-              className="icon-btn"
-              aria-label="Add context"
-              aria-expanded={pickerOpen}
-              aria-haspopup="dialog"
-              aria-controls={pickerOpen ? "context-picker" : undefined}
-              disabled={!ready || !projectPath}
-              onClick={() => setPickerOpen((open) => !open)}
+            <div
+              className="menu-anchor composer-plus"
+              onKeyDown={(event) => {
+                if (plusOpen && event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closePlus();
+                }
+              }}
             >
-              <Plus size={16} strokeWidth={1.7} />
-            </button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Composer menu"
+                aria-expanded={plusOpen}
+                aria-haspopup="menu"
+                aria-controls={plusOpen ? "composer-plus-menu" : undefined}
+                title="添加项目文件、技能或打开模型设置"
+                onClick={() => {
+                  if (plusOpen) closePlus();
+                  else {
+                    setPlusOpen(true);
+                    setPlusPanel(null);
+                  }
+                }}
+              >
+                <Plus size={16} strokeWidth={1.7} />
+              </button>
+
+              {plusOpen && (
+                <>
+                  <div className="menu-backdrop" onClick={() => closePlus()} />
+                  <div className="composer-plus-root">
+                    <div id="composer-plus-menu" className="menu composer-plus-menu" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={`menu-item${!projectPath ? " menu-item--disabled" : ""}${plusPanel === "files" ? " menu-item--active" : ""}`}
+                        data-testid="add-context-item"
+                        disabled={!projectPath}
+                        title={projectPath ? "从项目中选择文件作为上下文" : "未选择项目目录，无法添加上下文"}
+                        onClick={() => setPlusPanel((panel) => (panel === "files" ? null : "files"))}
+                      >
+                        <Paperclip size={14} strokeWidth={1.8} />
+                        <span>从项目添加文件</span>
+                        <ChevronDown size={12} strokeWidth={2} className="menu-item-trail" />
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={`menu-item${plusPanel === "skills" ? " menu-item--active" : ""}`}
+                        onClick={() => setPlusPanel((panel) => (panel === "skills" ? null : "skills"))}
+                      >
+                        <Puzzle size={14} strokeWidth={1.8} />
+                        <span>技能</span>
+                        <ChevronDown size={12} strokeWidth={2} className="menu-item-trail" />
+                      </button>
+                      <div className="menu-separator" />
+                      <MenuItem
+                        icon={<Settings size={14} strokeWidth={1.8} />}
+                        label="配置自定义模型"
+                        onSelect={() => {
+                          closePlus();
+                          openSettings();
+                        }}
+                      />
+                    </div>
+
+                    {plusPanel === "files" && (
+                      <div
+                        className="menu composer-plus-panel context-picker"
+                        id="context-picker"
+                        role="dialog"
+                        aria-label="Add context files"
+                      >
+                        <div className="context-picker-search">
+                          <Search size={14} strokeWidth={1.8} />
+                          <input
+                            className="context-picker-input"
+                            placeholder="在项目内搜索文件…"
+                            value={fileQuery}
+                            autoFocus
+                            onChange={(event) => setFileQuery(event.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="icon-btn icon-btn--sm"
+                            aria-label="Close context picker"
+                            onClick={() => closePlus()}
+                          >
+                            <X size={14} strokeWidth={2} />
+                          </button>
+                        </div>
+                        {listError && <p className="context-picker-error">{listError}</p>}
+                        <ul className="context-picker-list" data-testid="context-file-list">
+                          {listLoading && <li className="context-picker-empty">加载中…</li>}
+                          {!listLoading && fileList.length === 0 && !listError && (
+                            <li className="context-picker-empty">没有匹配的文件</li>
+                          )}
+                          {!listLoading &&
+                            fileList.slice(0, 40).map((path) => (
+                              <li key={path}>
+                                <button
+                                  type="button"
+                                  className="context-picker-item"
+                                  data-file-path={path}
+                                  onClick={() => void pickFile(path)}
+                                >
+                                  <FileText size={13} strokeWidth={1.8} />
+                                  <span>{path}</span>
+                                </button>
+                              </li>
+                            ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {plusPanel === "skills" && (
+                      <div className="menu composer-plus-panel" role="listbox" aria-label="Skills">
+                        {BUILTIN_SKILLS.map((skill) => (
+                          <button
+                            key={skill.id}
+                            type="button"
+                            role="option"
+                            className="menu-item"
+                            data-skill-id={skill.id}
+                            onClick={() => applySkill(skill.id)}
+                          >
+                            <Puzzle size={14} strokeWidth={1.8} />
+                            <span>{skill.label}</span>
+                            <span className="menu-item-hint">{skill.id}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
 
             {/* Permission dropdown */}
             <Menu
@@ -309,6 +579,13 @@ export function Composer({
                 className="composer-send"
                 aria-label="Send"
                 disabled={!ready || draft.trim() === ""}
+                title={
+                  !ready
+                    ? "对话尚未就绪"
+                    : draft.trim() === ""
+                      ? "请输入消息后再发送"
+                      : "发送消息"
+                }
                 onClick={send}
               >
                 <ArrowUp size={16} strokeWidth={2.2} />
@@ -316,46 +593,6 @@ export function Composer({
             )}
           </div>
         </div>
-
-        {/* File picker for Add context */}
-        {pickerOpen && (
-          <div className="context-picker" id="context-picker" role="dialog" aria-label="Add context files">
-            <div className="context-picker-search">
-              <Search size={14} strokeWidth={1.8} />
-              <input
-                className="context-picker-input"
-                placeholder="在项目内搜索文件…"
-                value={fileQuery}
-                autoFocus
-                onChange={(event) => setFileQuery(event.target.value)}
-              />
-              <button type="button" className="icon-btn icon-btn--sm" aria-label="Close context picker" onClick={() => setPickerOpen(false)}>
-                <X size={14} strokeWidth={2} />
-              </button>
-            </div>
-            {listError && <p className="context-picker-error">{listError}</p>}
-            <ul className="context-picker-list" data-testid="context-file-list">
-              {listLoading && <li className="context-picker-empty">加载中…</li>}
-              {!listLoading && fileList.length === 0 && !listError && (
-                <li className="context-picker-empty">没有匹配的文件</li>
-              )}
-              {!listLoading &&
-                fileList.slice(0, 40).map((path) => (
-                  <li key={path}>
-                    <button
-                      type="button"
-                      className="context-picker-item"
-                      data-file-path={path}
-                      onClick={() => void pickFile(path)}
-                    >
-                      <FileText size={13} strokeWidth={1.8} />
-                      <span>{path}</span>
-                    </button>
-                  </li>
-                ))}
-            </ul>
-          </div>
-        )}
       </div>
 
       {providerWarning && (
