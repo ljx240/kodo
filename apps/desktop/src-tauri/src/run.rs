@@ -223,26 +223,40 @@ pub fn start(
                 drop(seq);
                 let (ticket, rx) = approve_approvals.wait_point(&approve_id, step);
                 let risk = kodo_agent::tools::classify_command_risk(command);
-                let reason = agent::dangerous_reason(command).unwrap_or(risk.reason);
-                let risk_category = if risk.destructive_git {
-                    "DestructiveGit"
-                } else if risk.dangerous {
-                    "Dangerous"
-                } else if risk.network_sensitive {
-                    "Network"
-                } else if matches!(kind, StepKind::FileChange) {
-                    "FilesystemWrite"
-                } else {
-                    "Safe"
+                let reason = agent::tools::redact_secrets(
+                    agent::dangerous_reason(command).unwrap_or_else(|| risk.reason()),
+                );
+                let risk_category = match risk {
+                    kodo_agent::tools::CommandRisk::Catastrophic => "Catastrophic",
+                    kodo_agent::tools::CommandRisk::DestructiveGit => "DestructiveGit",
+                    kodo_agent::tools::CommandRisk::SensitiveData => "SensitiveData",
+                    kodo_agent::tools::CommandRisk::ProcessControl => "ProcessControl",
+                    kodo_agent::tools::CommandRisk::PackageInstall => "PackageInstall",
+                    kodo_agent::tools::CommandRisk::Network => "Network",
+                    kodo_agent::tools::CommandRisk::FilesystemWrite => {
+                        if matches!(kind, StepKind::FileChange) {
+                            "FilesystemWrite"
+                        } else {
+                            "FilesystemWrite"
+                        }
+                    }
+                    kodo_agent::tools::CommandRisk::ReadOnly => {
+                        if matches!(kind, StepKind::FileChange) {
+                            "FilesystemWrite"
+                        } else {
+                            "Safe"
+                        }
+                    }
                 };
                 let cwd = approve_project.to_string_lossy().into_owned();
+                let safe_command = kodo_agent::tools::redact_secrets(command);
                 let _ = approve_app.emit(
                     "run:event",
                     RunEvent::ApprovalRequest {
                         session: approve_id.clone(),
                         step,
                         kind: step_kind_label(kind).to_owned(),
-                        detail: format!("{command}  ·  {reason}"),
+                        detail: format!("{safe_command}  ·  {reason}"),
                         cwd,
                         risk_category: risk_category.to_owned(),
                         reason: reason.to_owned(),
@@ -428,10 +442,11 @@ pub fn start(
                 }
             }
             Err(error) => {
-                let _ = session::record_error(&args.dir, &args.id, session::now(), &error);
+                let safe_error = kodo_agent::tools::redact_secrets(&error);
+                let _ = session::record_error(&args.dir, &args.id, session::now(), &safe_error);
                 notify(RunEvent::Error {
                     session: args.id.clone(),
-                    message: error,
+                    message: safe_error,
                 });
             }
         }

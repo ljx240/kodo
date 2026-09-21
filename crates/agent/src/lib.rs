@@ -42,7 +42,7 @@ use provider::{NativeToolCall, ProviderEvent, ProviderMessage, ToolSchema};
 use skill::{SkillRegistry, SkillSpec};
 use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason};
 use tools::{
-    classify_command_risk, command_run, is_dangerous_command, read_text, search_files,
+    classify_command_risk, command_run, read_text, search_files,
     summarize_git_changes, write_project_file, CommandOutcomeKind,
 };
 use verify::{FailureClass, FinalStatus, RepairDecision, VerificationPlan, VerificationRunner};
@@ -112,9 +112,13 @@ impl Permission {
             StepKind::Command => match self {
                 Self::Full => command
                     .map(classify_command_risk)
-                    .map(|risk| risk.needs_approval_in_full)
+                    .map(|risk| risk.needs_approval_in_full())
                     .unwrap_or(false),
-                Self::Auto => command.map(is_dangerous_command).unwrap_or(true),
+                Self::Auto => command
+                    .map(|c| classify_command_risk(c).needs_approval_in_auto())
+                    .unwrap_or(true),
+                // Ask: every command — including Network and PackageInstall —
+                // requires explicit approval.
                 Self::Ask => true,
             },
             // Writes always need a human in ask/auto; Full allows project-local writes.
@@ -347,12 +351,13 @@ fn command_step(
         .needs_approval(StepKind::Command, Some(command))
         && !approve(StepKind::Command, command)
     {
-        notes.push(format!("用户拒绝了 `{command}`"));
+        let safe_cmd = tools::redact_secrets(command);
+        notes.push(format!("用户拒绝了 `{safe_cmd}`"));
         let keep = finish_step(provisional, 0, true, emit);
         let result = ToolResult::failure(
             call_id,
             ToolName::RunCommand.label(),
-            command,
+            safe_cmd,
             ToolError::permission_denied("用户拒绝了该命令"),
         );
         return Ok((keep, Some(result)));
@@ -365,6 +370,7 @@ fn command_step(
     let outcome = command_run(project, command, alive, tools::DEFAULT_COMMAND_TIMEOUT_SECS);
     let duration_ms = began.elapsed().as_millis() as u64;
     let output = outcome.output.clone();
+    let command_label = tools::redact_secrets(command);
     let code = outcome.exit_code;
     let ok = matches!(outcome.kind, CommandOutcomeKind::Success);
     let summary = match outcome.kind {
@@ -378,7 +384,7 @@ fn command_step(
         ToolResult::success(
             call_id,
             ToolName::RunCommand.label(),
-            command,
+            command_label.clone(),
             output.clone(),
         )
     } else {
@@ -395,30 +401,30 @@ fn command_step(
         ToolResult::failure(
             call_id,
             ToolName::RunCommand.label(),
-            command,
+            command_label.clone(),
             ToolError::new(err_code, detail),
         )
     };
 
     if outcome.cancelled && !alive() {
         let finished = Step::Command {
-            command: command.to_owned(),
+            command: command_label.clone(),
             cwd,
             output,
             exit_code: code,
         };
         let keep = finish_step(finished, duration_ms, false, emit);
-        notes.push(format!("`{command}` → 已中断"));
+        notes.push(format!("`{command_label}` → 已中断"));
         return Ok((keep, Some(result)));
     }
     let finished = Step::Command {
-        command: command.to_owned(),
+        command: command_label.clone(),
         cwd,
         output,
         exit_code: code,
     };
     let keep = finish_step(finished, duration_ms, false, emit);
-    notes.push(format!("`{command}` → {summary}"));
+    notes.push(format!("`{command_label}` → {summary}"));
     Ok((keep, Some(result)))
 }
 
@@ -2564,6 +2570,15 @@ mod tests {
         assert!(!Permission::Full.needs_approval(StepKind::FileChange, Some("write a.rs")));
         assert!(!Permission::Auto.needs_approval(StepKind::Command, Some("cargo check")));
         assert!(Permission::Auto.needs_approval(StepKind::Command, Some("rm -rf x")));
+        // Network + package install require approval even beyond Full catastrophic set.
+        assert!(Permission::Ask.needs_approval(StepKind::Command, Some("npm install lodash")));
+        assert!(Permission::Ask.needs_approval(StepKind::Command, Some("curl https://x.example")));
+        assert!(Permission::Auto.needs_approval(StepKind::Command, Some("npm install lodash")));
+        assert!(Permission::Auto.needs_approval(StepKind::Command, Some("curl https://x.example")));
+        // Full keeps catastrophic + destructive git hard guard.
+        assert!(Permission::Full.needs_approval(StepKind::Command, Some("rm -rf /")));
+        assert!(Permission::Full.needs_approval(StepKind::Command, Some("git push --force")));
+        assert!(Permission::Full.needs_approval(StepKind::Command, Some("sudo ls")));
     }
 
     #[test]

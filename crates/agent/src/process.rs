@@ -128,6 +128,10 @@ pub struct ProcessOutcome {
     pub cancelled: bool,
     pub spawn_error: Option<String>,
     pub command: String,
+    /// True when the stdout byte cap stopped reading while data remained.
+    pub stdout_hit_limit: bool,
+    /// True when the stderr byte cap stopped reading while data remained.
+    pub stderr_hit_limit: bool,
 }
 
 impl ProcessOutcome {
@@ -184,6 +188,8 @@ impl ProcessRunner {
                 cancelled: false,
                 spawn_error: None,
                 command: spec.command.clone(),
+                stdout_hit_limit: false,
+                stderr_hit_limit: false,
             };
         }
         if !alive() {
@@ -197,6 +203,8 @@ impl ProcessRunner {
                 cancelled: true,
                 spawn_error: None,
                 command: spec.command.clone(),
+                stdout_hit_limit: false,
+                stderr_hit_limit: false,
             };
         }
 
@@ -225,6 +233,8 @@ impl ProcessRunner {
                     cancelled: false,
                     spawn_error: Some(error.to_string()),
                     command: spec.command.clone(),
+                    stdout_hit_limit: false,
+                    stderr_hit_limit: false,
                 };
             }
         };
@@ -235,11 +245,14 @@ impl ProcessRunner {
         let stderr_limit = spec.stderr_limit.max(1);
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
         let (err_tx, err_rx) = mpsc::channel::<Vec<u8>>();
+        let (out_flag_tx, out_flag_rx) = mpsc::channel::<bool>();
+        let (err_flag_tx, err_flag_rx) = mpsc::channel::<bool>();
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
         let out_handle = std::thread::spawn(move || {
             let mut acc = Vec::new();
             let mut buf = [0u8; 8192];
+            let mut hit = false;
             if let Some(stream) = stdout.as_mut() {
                 loop {
                     match stream.read(&mut buf) {
@@ -248,15 +261,21 @@ impl ProcessRunner {
                             let remain = stdout_limit.saturating_sub(acc.len());
                             let take = n.min(remain);
                             acc.extend_from_slice(&buf[..take]);
+                            if take < n {
+                                hit = true;
+                                break;
+                            }
                         }
                     }
                 }
             }
+            let _ = out_flag_tx.send(hit);
             let _ = out_tx.send(acc);
         });
         let err_handle = std::thread::spawn(move || {
             let mut acc = Vec::new();
             let mut buf = [0u8; 4096];
+            let mut hit = false;
             if let Some(stream) = stderr.as_mut() {
                 loop {
                     match stream.read(&mut buf) {
@@ -265,10 +284,15 @@ impl ProcessRunner {
                             let remain = stderr_limit.saturating_sub(acc.len());
                             let take = n.min(remain);
                             acc.extend_from_slice(&buf[..take]);
+                            if take < n {
+                                hit = true;
+                                break;
+                            }
                         }
                     }
                 }
             }
+            let _ = err_flag_tx.send(hit);
             let _ = err_tx.send(acc);
         });
 
@@ -307,6 +331,12 @@ impl ProcessRunner {
         let stderr_bytes = err_rx
             .recv_timeout(Duration::from_millis(2_000))
             .unwrap_or_default();
+        let stdout_hit_limit = out_flag_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap_or(false);
+        let stderr_hit_limit = err_flag_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap_or(false);
         let _ = out_handle.join();
         let _ = err_handle.join();
 
@@ -315,6 +345,8 @@ impl ProcessRunner {
         // Enforce limits again on decoded strings (char-boundary safe truncate).
         truncate_chars_in_place(&mut stdout_text, stdout_limit);
         truncate_chars_in_place(&mut stderr_text, stderr_limit);
+        let stdout_hit_limit = stdout_hit_limit || stdout_text.len() >= stdout_limit;
+        let stderr_hit_limit = stderr_hit_limit || stderr_text.len() >= stderr_limit;
 
         if cancelled {
             exit_code = Some(143);
@@ -350,6 +382,8 @@ impl ProcessRunner {
             cancelled,
             spawn_error,
             command: spec.command.clone(),
+            stdout_hit_limit,
+            stderr_hit_limit,
         }
     }
 }
