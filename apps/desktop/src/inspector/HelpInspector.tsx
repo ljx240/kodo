@@ -1,6 +1,7 @@
-import { ChevronDown, Database, FolderOpen, Info, SquareArrowOutUpRight, Zap } from "lucide-react";
+import { Database, FolderOpen, Info, SquareArrowOutUpRight, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 
+/** Static help card — no chevron: a disclosure glyph with no toggle would be a dead affordance. */
 function HelpCard({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
   return (
     <section className="ins-section">
@@ -8,7 +9,6 @@ function HelpCard({ icon, title, children }: { icon: ReactNode; title: string; c
         <span className="ins-section-icon">{icon}</span>
         <h3>{title}</h3>
         <span className="spacer" />
-        <ChevronDown size={14} strokeWidth={1.9} className="ins-chevron" />
       </header>
       <div className="ins-body">{children}</div>
     </section>

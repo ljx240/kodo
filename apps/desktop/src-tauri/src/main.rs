@@ -77,6 +77,26 @@ async fn pick_folder(app: AppHandle) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+/// OS file picker for "添加照片和文件" (photos and files from the filesystem).
+#[tauri::command]
+async fn pick_files(app: AppHandle) -> Option<Vec<String>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("添加照片和文件")
+        .blocking_pick_files()?;
+    let paths = picked
+        .into_iter()
+        .filter_map(|path| path.into_path().ok())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
+}
+
 #[tauri::command]
 fn setting(key: String) -> Option<String> {
     settings::settings_path().and_then(|path| settings::read(&path, &key))
@@ -324,11 +344,15 @@ fn send_message(
 ) -> Result<(), String> {
     let dir = sessions()?;
     let context_paths: Vec<String> = context.unwrap_or_default();
-    // Reject paths that try to leave the project before any I/O.
+    // Reject path traversal; absolute paths outside the project are allowed
+    // (e.g. ~/Downloads) when they resolve to an existing regular file.
     for path in &context_paths {
-        if path.trim().is_empty() || path.contains("..") || std::path::Path::new(path).is_absolute()
-        {
-            return Err(format!("context path must stay inside the project: {path}"));
+        if path.trim().is_empty() || path.contains("..") {
+            return Err(format!("invalid context path: {path}"));
+        }
+        let candidate = std::path::Path::new(path);
+        if candidate.is_absolute() && !candidate.is_file() {
+            return Err(format!("context file not found: {path}"));
         }
     }
     session::record_ask_with_context(&dir, &id, session::now(), &text, &context_paths)
@@ -451,16 +475,28 @@ fn list_project_files(project: String, query: Option<String>) -> Result<Vec<Stri
     Ok(paths)
 }
 
-/// Validates that a context path is inside the project and returns a short preview.
-/// Never returns file bodies to the React layer beyond this bounded preview.
+/// Validates that a context path exists and returns a short preview.
+/// Relative paths stay inside the project; absolute paths (external files) are readable too.
 #[tauri::command]
 fn read_context_file(project: String, path: String) -> Result<String, String> {
+    if path.trim().is_empty() || path.contains("..") {
+        return Err(format!("invalid path: {path}"));
+    }
+    let candidate = std::path::Path::new(&path);
+    if candidate.is_absolute() {
+        if !candidate.is_file() {
+            return Err(format!("file not found: {path}"));
+        }
+        let text = std::fs::read_to_string(candidate).map_err(|e| format!("read failed: {e}"))?;
+        if text.bytes().take(2048).any(|b| b == 0) {
+            return Err(format!("binary file refused: {path}"));
+        }
+        return Ok(text.lines().take(40).collect::<Vec<_>>().join("\n"));
+    }
+
     let root = std::path::Path::new(&project);
     if !root.is_dir() {
         return Err(format!("project is not a directory: {project}"));
-    }
-    if path.trim().is_empty() || path.contains("..") || std::path::Path::new(&path).is_absolute() {
-        return Err(format!("path must stay inside the project: {path}"));
     }
     let mut manager = kodo_agent::ContextManager::new(
         root.to_path_buf(),
@@ -567,6 +603,7 @@ fn main() {
             rename_project,
             reorder_project,
             pick_folder,
+            pick_files,
             setting,
             set_setting,
             git_branch,

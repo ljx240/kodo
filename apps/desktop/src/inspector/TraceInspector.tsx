@@ -1,16 +1,20 @@
 import { BarChart3, Copy, Sparkles } from "lucide-react";
 import { useEffect, useState } from "react";
 import { formatDuration } from "../conversation/trace";
-import { llmCalls, responseMeta } from "../data/demo";
+import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
 import { llmFromTurn } from "../data/liveContext";
 import { MetaRow, Section } from "./Section";
 import { ChangedFilesSection } from "./ResponseInspector";
 
-export function LlmCallsDetailed({ demo, live }: { demo: boolean; live: LiveSnapshot | null }) {
+export function LlmCallsDetailed({ demo, demoState, live }: {
+  demo: boolean;
+  demoState?: DemoState | null;
+  live: LiveSnapshot | null;
+}) {
   const calls = !demo
     ? llmFromTurn(live?.turn ?? null)
-    : llmCalls.map((call) => ({
+    : (demoState?.llmCalls ?? []).map((call) => ({
         model: call.model,
         input_tokens: call.inputTokens,
         output_tokens: call.outputTokens,
@@ -41,24 +45,39 @@ export function LlmCallsDetailed({ demo, live }: { demo: boolean; live: LiveSnap
   );
 }
 
-function MetadataSection({ demo, live }: { demo: boolean; live: LiveSnapshot | null }) {
+function MetadataSection({ demo, demoState, live }: {
+  demo: boolean;
+  demoState?: DemoState | null;
+  live: LiveSnapshot | null;
+}) {
+  const meta = demoState?.responseMeta;
   return (
     <Section icon={<BarChart3 size={14} strokeWidth={1.7} />} title="Metadata">
       <div className="ins-body">
-        <MetaRow label="Model">{!demo ? live?.reply?.steps.length ? "见 LLM 卡片" : "—" : responseMeta.model}</MetaRow>
-        <MetaRow label="Total steps">{!demo ? (live?.reply?.steps.length ?? 0) : responseMeta.totalSteps}</MetaRow>
-        <MetaRow label="Workspace">{!demo ? live?.projectPath || "—" : responseMeta.workspace}</MetaRow>
+        <MetaRow label="Model">
+          {!demo ? (live?.reply?.steps.length ? "见 LLM 卡片" : "—") : meta?.model ?? "—"}
+        </MetaRow>
+        <MetaRow label="Total steps">
+          {!demo ? (live?.reply?.steps.length ?? 0) : meta?.totalSteps ?? 0}
+        </MetaRow>
+        <MetaRow label="Workspace">
+          {!demo ? live?.projectPath || "—" : meta?.workspace ?? "—"}
+        </MetaRow>
       </div>
     </Section>
   );
 }
 
-export function TraceOverview({ demo, live }: { demo: boolean; live: LiveSnapshot | null }) {
+export function TraceOverview({ demo, demoState, live }: {
+  demo: boolean;
+  demoState?: DemoState | null;
+  live: LiveSnapshot | null;
+}) {
   return (
     <>
-      <ChangedFilesSection demo={demo} live={live} />
-      <LlmCallsDetailed demo={demo} live={live} />
-      <MetadataSection demo={demo} live={live} />
+      <ChangedFilesSection demo={demo} demoState={demoState} live={live} />
+      <LlmCallsDetailed demo={demo} demoState={demoState} live={live} />
+      <MetadataSection demo={demo} demoState={demoState} live={live} />
     </>
   );
 }
@@ -66,12 +85,15 @@ export function TraceOverview({ demo, live }: { demo: boolean; live: LiveSnapsho
 /** Left-hand metadata block of the Response Trace header. */
 export function ReplyMeta({
   demo,
+  demoState,
   live,
 }: {
   demo: boolean;
+  demoState?: DemoState | null;
   live: LiveSnapshot | null;
 }) {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!copied) return;
@@ -87,20 +109,34 @@ export function ReplyMeta({
   const durationMs =
     firstAt != null && lastAt != null && lastAt >= firstAt ? (lastAt - firstAt) * 1000 : null;
 
-  const replyId = demo ? responseMeta.replyId : live?.conversationId ?? "—";
+  const replyId = demo
+    ? demoState?.responseMeta.replyId ?? "—"
+    : live?.conversationId ?? "—";
   const startedAt = demo
-    ? responseMeta.startedAt
+    ? demoState?.responseMeta.startedAt ?? "—"
     : firstAt != null
       ? new Date(firstAt * 1000).toLocaleString()
       : "—";
   const duration = demo
-    ? responseMeta.duration
+    ? demoState?.responseMeta.duration ?? "—"
     : live?.running
       ? "进行中"
       : durationMs != null
         ? formatDuration(durationMs)
         : "—";
-  const model = demo ? responseMeta.model : lastModel?.model ?? "—";
+  const model = demo ? demoState?.responseMeta.model ?? "—" : lastModel?.model ?? "—";
+
+  const copyReplyId = () => {
+    setCopyError(null);
+    if (!navigator.clipboard?.writeText) {
+      setCopyError("剪贴板不可用");
+      return;
+    }
+    void navigator.clipboard.writeText(replyId).then(
+      () => setCopied(true),
+      () => setCopyError("复制失败"),
+    );
+  };
 
   return (
     <dl className="reply-meta">
@@ -112,17 +148,22 @@ export function ReplyMeta({
             type="button"
             className="icon-btn icon-btn--sm"
             aria-label="Copy reply id"
-            onClick={() => {
-              const value = replyId;
-              if (navigator.clipboard?.writeText) {
-                void navigator.clipboard.writeText(value);
-              }
-              setCopied(true);
-            }}
+            data-testid="copy-reply-id"
+            title="复制 Reply ID 到剪贴板"
+            onClick={copyReplyId}
           >
             <Copy size={13} strokeWidth={1.8} />
           </button>
-          {copied && <span className="copied-hint">已复制</span>}
+          {copied && (
+            <span className="copied-hint" data-testid="copy-ok">
+              已复制
+            </span>
+          )}
+          {copyError && (
+            <span className="copied-hint" data-testid="copy-error" role="alert">
+              {copyError}
+            </span>
+          )}
         </dd>
       </div>
       <div className="reply-meta-row">

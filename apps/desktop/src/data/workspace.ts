@@ -15,7 +15,7 @@ import {
   type SessionRefDto,
   type WorkspaceDto,
 } from "../api";
-import { projects as fixtureProjects } from "./fixture";
+import { loadDemoState } from "./demoState";
 import type { Project } from "./types";
 
 export type WorkspaceState = {
@@ -40,11 +40,13 @@ export type WorkspaceState = {
  * The one place that decides where the sidebar's projects come from.
  *
  * The demo routes and the plain browser (visual regression, `vite dev`) read the
- * deterministic fixture; only the desktop shell on a real route asks the core.
+ * deterministic fixture via the demo boundary; only the desktop shell on a real
+ * route asks the core.
  */
 export function useWorkspace(demo: boolean): WorkspaceState {
   const live = !demo && isDesktop();
-  const [projects, setProjects] = useState<Project[]>(live ? [] : fixtureProjects);
+  const initial = demo ? loadDemoState().projects : [];
+  const [projects, setProjects] = useState<Project[]>(initial);
 
   const apply = (payload: WorkspaceDto | null) => {
     if (!payload) return;
@@ -57,7 +59,7 @@ export function useWorkspace(demo: boolean): WorkspaceState {
   };
 
   useEffect(() => {
-    setProjects(live ? [] : fixtureProjects);
+    setProjects(demo ? loadDemoState().projects : []);
     if (!live) return;
     let alive = true;
     void workspace().then((payload) => {
@@ -67,7 +69,7 @@ export function useWorkspace(demo: boolean): WorkspaceState {
     return () => {
       alive = false;
     };
-  }, [live]);
+  }, [live, demo]);
 
   const toggleProject = (id: string) =>
     setProjects((current) =>
