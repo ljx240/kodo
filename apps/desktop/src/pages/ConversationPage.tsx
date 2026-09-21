@@ -95,6 +95,7 @@ export function ConversationPage({
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [streamText, setStreamText] = useState("");
   const [progress, setProgress] = useState<{ phase: string; detail: string } | null>(null);
+  const [failovers, setFailovers] = useState<string[]>([]);
   /** False after Stop — late TextDelta races must not repaint the preview. */
   const acceptStreamRef = useRef(true);
 
@@ -116,6 +117,7 @@ export function ConversationPage({
     setApprovalError(null);
     setStreamText("");
     setProgress(null);
+    setFailovers([]);
     acceptStreamRef.current = true;
     if (!conversationId || demoMode) {
       setTurns([]);
@@ -168,6 +170,13 @@ export function ConversationPage({
         setProgress({ phase: event.phase, detail: event.detail });
         return;
       }
+      if (event.type === "failover") {
+        setFailovers((current) => [
+          ...current,
+          `已从 ${event.fromProvider}（${event.fromModel}）切换到 ${event.toProvider}（${event.toModel}）· ${event.errorClass}`,
+        ]);
+        return;
+      }
       if (event.type === "itemCompleted" && event.item.kind === "agentMessage") {
         setStreamText("");
       }
@@ -175,6 +184,7 @@ export function ConversationPage({
         acceptStreamRef.current = true;
         setStreamText("");
         setProgress(null);
+        setFailovers([]);
       }
       setTurns((current) => reduce(current, event));
       if (event.type === "turnComplete" || event.type === "stopped" || event.type === "error") {
@@ -462,6 +472,7 @@ export function ConversationPage({
                         reply={toReply(turn, running && last)}
                         streamText={running && last ? streamText : ""}
                         progress={running && last ? progress : null}
+                        failovers={last ? failovers : []}
                         onViewFiles={onViewFiles}
                       />
                     </Fragment>
@@ -556,7 +567,7 @@ function UserMessage({ time, text, context }: { time?: string; text: string; con
 }
 
 function blank(ask: string, context: string[] = []): TurnDto {
-  return { ask, context, items: [], done: false, stopped: false, error: null };
+  return { ask, context, items: [], done: false, stopped: false, interrupted: false, error: null };
 }
 
 function reduce(turns: TurnDto[], event: RunEventDto): TurnDto[] {

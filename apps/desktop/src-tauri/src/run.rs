@@ -319,6 +319,28 @@ pub fn start(
                     );
                     record_runs.is_live(&record_id)
                 }
+                SinkEvent::Failover {
+                    from_provider,
+                    from_model,
+                    error_class,
+                    error,
+                    to_provider,
+                    to_model,
+                } => {
+                    let _ = record_app.emit(
+                        "run:event",
+                        RunEvent::Failover {
+                            session: record_id.clone(),
+                            from_provider,
+                            from_model,
+                            error_class,
+                            error,
+                            to_provider,
+                            to_model,
+                        },
+                    );
+                    record_runs.is_live(&record_id)
+                }
                 SinkEvent::Started { step } => {
                     seq += 1;
                     open_id = Some(seq);

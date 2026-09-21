@@ -13,6 +13,7 @@
 //! item.failed    <seq>  <at>
 //! turn.complete  <at>
 //! stopped        <at>
+//! interrupted    <at>
 //! error          <at>  <message>
 //! retitle        <title>
 //! archive
@@ -23,6 +24,9 @@
 //! `started` line and nothing after it is running, and that is how a run killed
 //! mid-flight is reported as interrupted rather than as finished. Nothing has to
 //! be trusted to have been written correctly at the end of a process that died.
+//! On reload without a live run, [`recover_interrupted`] stamps `interrupted` so
+//! a persisted Running turn becomes Interrupted — never Completed — while
+//! keeping items, changes, and verification intact.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -69,6 +73,9 @@ pub struct Turn {
     /// killed would be indistinguishable after a restart — both simply lack
     /// `turn.complete`.
     pub stopped: bool,
+    /// Set by recovery after a restart when the turn still had open items.
+    /// Running never becomes Completed; it becomes Interrupted.
+    pub interrupted: bool,
     pub error: Option<String>,
 }
 
@@ -246,6 +253,7 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
                 items: Vec::new(),
                 done: false,
                 stopped: false,
+                interrupted: false,
                 error: None,
             }),
             // `ask <at> <text> <context-json>` — optional trailing field.
@@ -255,6 +263,7 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
                 items: Vec::new(),
                 done: false,
                 stopped: false,
+                interrupted: false,
                 error: None,
             }),
             ("item.started", rest) => {
@@ -276,6 +285,11 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
             ("stopped", [_at]) => {
                 if let Some(turn) = session.turns.last_mut() {
                     turn.stopped = true;
+                }
+            }
+            ("interrupted", [_at]) => {
+                if let Some(turn) = session.turns.last_mut() {
+                    turn.interrupted = true;
                 }
             }
             ("error", [_at, message]) => {
@@ -359,9 +373,66 @@ pub fn record_stopped(dir: &Path, id: &str, at: u64) -> io::Result<()> {
     append(dir, id, &["stopped", &at.to_string()])
 }
 
+/// Recovery for a killed run found on load with no live driver.
+///
+/// Appends `interrupted` only when the last turn still has open items and was
+/// neither completed, stopped, nor already recovered. Never marks the turn
+/// done, never rewrites item payloads, and never touches the changeset — so
+/// last phase, known changes, verification, and undo/diff all survive.
+///
+/// Returns whether a marker was written.
+pub fn recover_interrupted_session(dir: &Path, id: &str, at: u64) -> io::Result<bool> {
+    let session = load(dir, id)?;
+    let Some(turn) = session.turns.last() else {
+        return Ok(false);
+    };
+    if turn.done || turn.stopped || turn.interrupted || turn.error.is_some() {
+        return Ok(false);
+    }
+    if !turn.items.iter().any(|item| item.status == Status::Running) {
+        return Ok(false);
+    }
+    append(dir, id, &["interrupted", &at.to_string()])?;
+    Ok(true)
+}
+
 /// Records a failure that belongs to the turn rather than to one step.
 pub fn record_error(dir: &Path, id: &str, at: u64, message: &str) -> io::Result<()> {
     append(dir, id, &["error", &at.to_string(), message])
+}
+
+/// Marks the current turn interrupted after recovery (app restart mid-run).
+///
+/// Never writes `turn.complete`: a running persisted session becomes Interrupted,
+/// not Completed. Items, phases, and payload lines stay untouched so last phase,
+/// known changes, and undo/diff remain available.
+pub fn record_interrupted(dir: &Path, id: &str, at: u64) -> io::Result<()> {
+    append(dir, id, &["interrupted", &at.to_string()])
+}
+
+/// On startup: convert unfinished non-live turns to Interrupted.
+/// Returns session ids that received a recovery line.
+///
+/// Live ids (still running in this process) are skipped. Never emits
+/// `turn.complete` — Running must not become Completed.
+pub fn recover_interrupted(dir: &Path, live: &std::collections::HashSet<String>) -> io::Result<Vec<String>> {
+    let mut recovered = Vec::new();
+    for reference in list(dir)? {
+        if live.contains(&reference.id) {
+            continue;
+        }
+        let session = load(dir, &reference.id)?;
+        let Some(turn) = session.turns.last() else {
+            continue;
+        };
+        if turn.done || turn.stopped || turn.interrupted || turn.error.is_some() {
+            continue;
+        }
+        // Unfinished turn with no driver → interrupted, not completed.
+        record_interrupted(dir, &reference.id, now())?;
+        recovered.push(reference.id);
+    }
+    Ok(recovered)
 }
 
 /// Changes the display title. The file name does not move.
@@ -814,6 +885,71 @@ mod tests {
     }
 
     #[test]
+    fn recovery_turns_running_into_interrupted_without_completion() {
+        let tmp = TempDir::new("sess-recover");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "phase note".to_owned(),
+                },
+            ),
+            Phase::Started,
+        )
+        .expect("started");
+
+        let stamped = recover_interrupted_session(&dir, &id, 99).expect("recover");
+        assert!(stamped, "open running turn must be recovered");
+        let session = load(&dir, &id).expect("reload");
+        assert!(session.turns[0].interrupted, "must read as interrupted");
+        assert!(
+            !session.turns[0].done,
+            "recovery must never mark the turn Completed"
+        );
+        assert_eq!(session.turns[0].items[0].status, Status::Running);
+        assert_eq!(
+            session.turns[0].items[0].kind,
+            ItemKind::Reasoning {
+                summary: "phase note".to_owned()
+            },
+            "item payload (last phase) is preserved"
+        );
+
+        // Idempotent: a second recovery does not append another marker.
+        assert!(!recover_interrupted_session(&dir, &id, 100).expect("second"));
+    }
+
+    #[test]
+    fn recovery_skips_completed_and_stopped_turns() {
+        let tmp = TempDir::new("sess-recover-done");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_turn_complete(&dir, &id, 20).expect("complete");
+        assert!(!recover_interrupted_session(&dir, &id, 30).expect("done"));
+
+        let id2 = open(&dir, Path::new("/p"), "t2", 1).expect("open");
+        record_ask(&dir, &id2, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id2,
+            &item(1, ItemKind::Reasoning { summary: "s".to_owned() }),
+            Phase::Started,
+        )
+        .expect("started");
+        record_stopped(&dir, &id2, 20).expect("stop");
+        assert!(!recover_interrupted_session(&dir, &id2, 30).expect("stopped"));
+        let session = load(&dir, &id2).expect("load");
+        assert!(session.turns[0].stopped);
+        assert!(!session.turns[0].interrupted);
+    }
+
+    #[test]
     fn a_failed_item_is_marked_without_a_payload() {
         let tmp = TempDir::new("sess-failed");
         let dir = tmp.dir("sessions");
@@ -1099,6 +1235,71 @@ mod tests {
             load(&dir, &id).expect("load").turns[0].error.as_deref(),
             Some("模型返回了无法解析的内容"),
         );
+    }
+
+    #[test]
+    fn recovery_marks_running_as_interrupted_never_completed() {
+        let tmp = TempDir::new("sess-recover");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "killed", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "s".to_owned(),
+                },
+            ),
+            Phase::Started,
+        )
+        .expect("started");
+
+        let live = std::collections::HashSet::new();
+        let recovered = recover_interrupted(&dir, &live).expect("recover");
+        assert_eq!(recovered, vec![id.clone()]);
+
+        let session = load(&dir, &id).expect("load");
+        let turn = &session.turns[0];
+        assert!(turn.interrupted, "must convert Running → Interrupted");
+        assert!(!turn.done, "recovery must never write turn.complete");
+        assert_eq!(turn.items[0].status, Status::Running, "item envelope kept");
+        assert_eq!(
+            turn.items[0].kind,
+            item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "s".to_owned(),
+                }
+            )
+            .kind,
+            "last phase payload preserved for undo/diff"
+        );
+
+        // Second recovery is a no-op (idempotent).
+        let again = recover_interrupted(&dir, &live).expect("recover again");
+        assert!(again.is_empty());
+    }
+
+    #[test]
+    fn recovery_skips_live_and_finished_turns() {
+        let tmp = TempDir::new("sess-recover-skip");
+        let dir = tmp.dir("sessions");
+
+        let done = open(&dir, Path::new("/p"), "done", 1).expect("open");
+        record_ask(&dir, &done, 10, "go").expect("ask");
+        record_turn_complete(&dir, &done, 20).expect("complete");
+
+        let live = open(&dir, Path::new("/p"), "live", 2).expect("open");
+        record_ask(&dir, &live, 10, "go").expect("ask");
+
+        let mut live_set = std::collections::HashSet::new();
+        live_set.insert(live.clone());
+        let recovered = recover_interrupted(&dir, &live_set).expect("recover");
+        assert!(recovered.is_empty(), "live and completed must be skipped");
+        assert!(!load(&dir, &live).expect("load").turns[0].interrupted);
+        assert!(load(&dir, &done).expect("load").turns[0].done);
     }
 
     #[test]

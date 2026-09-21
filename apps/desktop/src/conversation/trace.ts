@@ -102,6 +102,7 @@ export function replyStatus(turn: TurnDto, running: boolean): ReplyStatus {
   if (turn.error) return "failed";
   if (turn.done) return "completed";
   if (turn.stopped) return "stopped";
+  if (turn.interrupted) return "interrupted";
   if (turn.items.some((item) => item.status === "running")) return "interrupted";
   return "empty";
 }

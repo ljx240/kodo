@@ -133,8 +133,14 @@ fn open_session(project: String, title: String) -> Result<SessionView, String> {
 }
 
 #[tauri::command]
-fn load_session(id: String) -> Result<SessionView, String> {
-    load(&sessions()?, &id)
+fn load_session(runs: State<'_, Runs>, id: String) -> Result<SessionView, String> {
+    let dir = sessions()?;
+    // A killed run must not read as Running forever (and never as Completed).
+    // Recovery only stamps `interrupted` — items, changes, and verification stay.
+    if !runs.is_live(&id) {
+        let _ = session::recover_interrupted_session(&dir, &id, session::now());
+    }
+    load(&dir, &id)
 }
 
 #[tauri::command]
@@ -406,6 +412,21 @@ fn send_message(
                 }
             }
         }
+        // Default model is a runtime consumer: override the primary model so the
+        // Settings control is what the next call actually sends.
+        if let Some(model) = read_setting("default-model") {
+            let model = model.trim().to_owned();
+            if !model.is_empty() {
+                let mut next = AgentProvider::new(
+                    primary.template.clone(),
+                    primary.api_key.clone(),
+                    primary.endpoint.clone(),
+                    model,
+                );
+                next.fallbacks = std::mem::take(&mut primary.fallbacks);
+                primary = next;
+            }
+        }
         Some(primary)
     });
 
@@ -589,6 +610,13 @@ fn snapshot() -> Result<Workspace, String> {
 }
 
 fn main() {
+    // App restart: any Running persisted session becomes Interrupted here —
+    // never Completed. No live runs exist yet, so the live set is empty.
+    if let Some(dir) = session::dir() {
+        let live = std::collections::HashSet::new();
+        let _ = session::recover_interrupted(&dir, &live);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

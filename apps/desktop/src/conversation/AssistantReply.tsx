@@ -10,6 +10,8 @@ type Props = {
   streamText?: string;
   /** Structured progress phase from the agent (not chain-of-thought). */
   progress?: { phase: string; detail: string } | null;
+  /** One line per provider switch observed on the streaming path. */
+  failovers?: string[];
   onViewFiles: () => void;
 };
 
@@ -18,6 +20,7 @@ export function AssistantReply({
   reply,
   streamText = "",
   progress = null,
+  failovers = [],
   onViewFiles,
 }: Props) {
   const working = reply.status === "working";
@@ -35,6 +38,11 @@ export function AssistantReply({
           {progress ? `${progress.phase} · ${progress.detail}` : "正在处理您的请求..."}
         </p>
       )}
+      {failovers.map((line) => (
+        <p key={line} className="reply-failover" data-testid="failover-note">
+          {line}
+        </p>
+      ))}
       {working && streamText && (
         <div className="final stream-preview" data-testid="stream-preview">
           <p className="final-text">{streamText}</p>
