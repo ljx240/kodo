@@ -268,7 +268,7 @@ test("an approval request is shown and can be allowed or denied", async ({ page 
   const bar = page.locator(".approval-bar");
   await expect(bar).toBeVisible();
   await expect(bar).toContainText("rm -rf build");
-  await bar.locator(".btn:not(.btn--primary)").click();
+  await bar.locator('[data-testid="approval-deny"]').click();
   await expect(bar).toHaveCount(0);
 
   await emit(page, {

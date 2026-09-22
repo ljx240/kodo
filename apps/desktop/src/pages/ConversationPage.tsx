@@ -6,6 +6,7 @@ import {
   respondApproval,
   sendMessage,
   stopRun,
+  turnChanges,
   type ItemDto,
   type RunEventDto,
   type TurnDto,
@@ -105,6 +106,7 @@ export function ConversationPage({
   const [queue, setQueueState] = useState<PendingSend[]>([]);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(null);
+  const [fileDiffs, setFileDiffs] = useState<Record<string, string> | null>(null);
   /** False after Stop — late TextDelta races must not repaint the preview. */
   const acceptStreamRef = useRef(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -261,14 +263,15 @@ export function ConversationPage({
     });
   };
 
-  const decide = (approved: boolean) => {
+  const decide = (approved: boolean, sessionWide = false) => {
     if (!conversationId || !approval) return;
     const pending = approval;
     setApproval(null);
     setApprovalError(null);
-    void respondApproval(conversationId, pending.step, approved).catch((failure) => {
+    void respondApproval(conversationId, pending.step, approved, sessionWide).catch((failure) => {
+      const label = !approved ? "拒绝" : sessionWide ? "本会话允许" : "允许";
       setApprovalError(
-        `审批响应失败：${errorMessage(failure)}（${approved ? "允许" : "拒绝"} step ${pending.step}）`,
+        `审批响应失败：${errorMessage(failure)}（${label} step ${pending.step}）`,
       );
     });
   };
@@ -376,6 +379,29 @@ export function ConversationPage({
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distance < 48;
   };
+
+  // Load per-file unified diffs for Edit steps once a turn recorded changes.
+  useEffect(() => {
+    if (demoMode || !conversationId || !projectPath || running) return;
+    const hasEdit = turns.some((turn) => turn.items.some((item) => item.kind === "fileChange"));
+    if (!hasEdit) return;
+    let alive = true;
+    void turnChanges(projectPath, conversationId)
+      .then((list) => {
+        if (!alive || !list) return;
+        const map: Record<string, string> = {};
+        for (const change of list) {
+          if (change.diff) map[change.path] = change.diff;
+        }
+        setFileDiffs(map);
+      })
+      .catch(() => {
+        /* diffs are progressive disclosure; the path list still stands */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [demoMode, conversationId, projectPath, turns, running]);
 
   const liveSnapshot = useMemo(() => {
     if (demoMode || !conversationId) return null;
@@ -555,6 +581,7 @@ export function ConversationPage({
                     reply={demoReply}
                     running={false}
                     onViewFiles={onViewFiles}
+                    fileDiffs={fileDiffs}
                   />
                 </>
               ) : turns.length === 0 && queue.length === 0 ? (
@@ -578,6 +605,7 @@ export function ConversationPage({
                         elapsed={running && last ? elapsed : null}
                         onViewFiles={onViewFiles}
                         onRegenerate={liveSession && last && !running ? regenerate : null}
+                        fileDiffs={fileDiffs}
                       />
                     </Fragment>
                   );
@@ -642,6 +670,15 @@ export function ConversationPage({
               <div className="approval-actions">
                 <button type="button" className="btn" data-testid="approval-deny" onClick={() => decide(false)}>
                   拒绝
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  data-testid="approval-allow-session"
+                  title="本会话内相同命令不再询问"
+                  onClick={() => decide(true, true)}
+                >
+                  本会话允许
                 </button>
                 <button type="button" className="btn btn--primary" data-testid="approval-allow" onClick={() => decide(true)}>
                   允许

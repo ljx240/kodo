@@ -114,6 +114,7 @@ export type RunEventDto =
       step: number;
       kind: string;
       detail?: string;
+      command?: string;
       cwd?: string;
       riskCategory?: string;
       reason?: string;
@@ -144,8 +145,13 @@ export function stopRun(id: string): Promise<void | null> {
   return write<void>("stop_run", { id });
 }
 
-export function respondApproval(id: string, step: number, approved: boolean): Promise<void> {
-  return invoke<void>("respond_approval", { id, step, approved });
+export function respondApproval(
+  id: string,
+  step: number,
+  approved: boolean,
+  sessionWide = false,
+): Promise<void> {
+  return invoke<void>("respond_approval", { id, step, approved, sessionWide });
 }
 
 export type TurnChangeDto = {

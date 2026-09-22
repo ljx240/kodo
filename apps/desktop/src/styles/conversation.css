@@ -817,6 +817,11 @@
   gap: 4px;
 }
 
+.trace-diff {
+  margin: 6px 0 10px;
+  max-height: 280px;
+}
+
 .code-chip--fail {
   color: var(--kodo-error);
   border-color: color-mix(in srgb, var(--kodo-error) 40%, var(--kodo-border));

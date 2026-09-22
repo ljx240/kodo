@@ -20,10 +20,16 @@ function StatusMark({ status }: { status: TraceStep["status"] }) {
  * What a row hides until it is opened.
  *
  * Each kind is hiding something different, so each answers its own question —
- * a command its cwd/exit code/output, a file edit the paths it touched, a
- * model its token counts. `detail` is the fallback for the rest.
+ * a command its cwd/exit code/output, a file edit the paths and unified diffs,
+ * a model its token counts. `detail` is the fallback for the rest.
  */
-function Expanded({ step }: { step: TraceStep }) {
+function Expanded({
+  step,
+  fileDiffs,
+}: {
+  step: TraceStep;
+  fileDiffs?: Record<string, string> | null;
+}) {
   switch (step.type) {
     case "run": {
       const meta = [
@@ -45,22 +51,32 @@ function Expanded({ step }: { step: TraceStep }) {
         </div>
       );
     }
-    case "edit":
+    case "edit": {
+      const paths = step.files ?? [];
       return (
         <div className="trace-expand">
-          {step.files && step.files.length > 0 ? (
+          {paths.length > 0 ? (
             <ul className="trace-file-list" data-testid="trace-file-list">
-              {step.files.map((path) => (
-                <li key={path}>
-                  <code className="code-chip">{path}</code>
-                </li>
-              ))}
+              {paths.map((path) => {
+                const diff = fileDiffs?.[path];
+                return (
+                  <li key={path}>
+                    <code className="code-chip">{path}</code>
+                    {diff ? (
+                      <pre className="trace-output trace-diff" data-testid={`trace-diff-${path}`}>
+                        {diff}
+                      </pre>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <pre className="trace-output">{step.detail}</pre>
           )}
         </div>
       );
+    }
     case "read":
     case "search":
       return (
@@ -85,7 +101,13 @@ function Expanded({ step }: { step: TraceStep }) {
   }
 }
 
-function TraceItem({ step }: { step: TraceStep }) {
+function TraceItem({
+  step,
+  fileDiffs,
+}: {
+  step: TraceStep;
+  fileDiffs?: Record<string, string> | null;
+}) {
   // `null` until the reader works the row themselves. The default is a function
   // of the step rather than a value captured once, because a step that is still
   // running has no output yet: seeded from `Boolean(step.output)` it would open
@@ -93,7 +115,12 @@ function TraceItem({ step }: { step: TraceStep }) {
   // moment its output matters. Failed steps stay open so the diagnosis is
   // visible without another click.
   const [toggled, setToggled] = useState<boolean | null>(null);
-  const shown = toggled ?? (Boolean(step.output) || step.status === "running" || step.status === "failed");
+  const shown =
+    toggled ??
+    (Boolean(step.output) ||
+      step.status === "running" ||
+      step.status === "failed" ||
+      (step.type === "edit" && (step.files?.length ?? 0) > 0));
 
   // `splitDetail` is a guess about where a fixture's chip ends. A step that
   // knows its own chip says so, and is never re-split.
@@ -148,7 +175,7 @@ function TraceItem({ step }: { step: TraceStep }) {
             )}
           </span>
 
-          {shown && <Expanded step={step} />}
+          {shown && <Expanded step={step} fileDiffs={fileDiffs} />}
 
           <span className="trace-duration">{step.duration}</span>
 
@@ -161,11 +188,22 @@ function TraceItem({ step }: { step: TraceStep }) {
   );
 }
 
-export function AgentTrace({ steps }: { steps: TraceStep[] }) {
+export function AgentTrace({
+  steps,
+  fileDiffs = null,
+}: {
+  steps: TraceStep[];
+  /** Unified diffs keyed by project-relative path (`turn_changes`). */
+  fileDiffs?: Record<string, string> | null;
+}) {
   return (
     <ol className="trace">
       {steps.map((step, index) => (
-        <TraceItem key={`${step.type}-${step.chip ?? "n"}-${index}`} step={step} />
+        <TraceItem
+          key={`${step.type}-${step.chip ?? "n"}-${index}`}
+          step={step}
+          fileDiffs={fileDiffs}
+        />
       ))}
     </ol>
   );
