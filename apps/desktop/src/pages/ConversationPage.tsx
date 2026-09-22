@@ -30,6 +30,9 @@ type Props = {
   onArchive: (id: string) => Promise<void> | void;
   onOpenTrace: () => void;
   onSnapshot?: (snapshot: LiveSnapshot | null) => void;
+  onConversationCreated?: (id: string) => void;
+  onConversationCommitted?: () => Promise<void> | void;
+  onOpenSettings?: () => void;
   projectName?: string;
   projectPath?: string;
   /**
@@ -58,9 +61,19 @@ type ActionErrorState = {
 
 type PendingSend = { text: string; context: string[] };
 
+type FailoverNotice = {
+  fromProvider: string;
+  fromModel: string;
+  errorClass: string;
+  error: string;
+  toProvider: string;
+  toModel: string;
+};
+
 function demoReplyFrom(demo: DemoState): Reply {
   return {
     steps: demo.conversation.assistant.trace,
+    status: "completed",
     final: demo.conversation.assistant.final,
     checks: demo.conversation.assistant.checks,
     changes: demo.changedFiles,
@@ -86,12 +99,17 @@ export function ConversationPage({
   onArchive,
   onOpenTrace,
   onSnapshot,
+  onConversationCreated,
+  onConversationCommitted,
+  onOpenSettings,
   projectName = "",
   projectPath = "",
   demo = null,
 }: Props) {
   const demoMode = Boolean(demo);
+  const openSettings = onOpenSettings ?? navigateSettings;
   const [turns, setTurns] = useState<TurnDto[]>([]);
+  const [createdConversationId, setCreatedConversationId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [running, setRunning] = useState(false);
   const [approval, setApproval] = useState<Approval | null>(null);
@@ -102,6 +120,8 @@ export function ConversationPage({
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [streamText, setStreamText] = useState("");
   const [progress, setProgress] = useState<{ phase: string; detail: string } | null>(null);
+  const [failovers, setFailovers] = useState<string[]>([]);
+  const [failover, setFailover] = useState<FailoverNotice | null>(null);
   const [queue, setQueueState] = useState<PendingSend[]>([]);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(null);
@@ -136,11 +156,15 @@ export function ConversationPage({
     setApprovalError(null);
     setStreamText("");
     setProgress(null);
+    setFailovers([]);
+    setFailover(null);
     applyQueue([]);
     setRunStartedAt(null);
     setElapsed(null);
     acceptStreamRef.current = true;
     stickToBottomRef.current = true;
+    if (createdConversationId && conversationId === createdConversationId) return;
+    setCreatedConversationId(null);
     if (!conversationId || demoMode) {
       setTurns([]);
       setTitle("");
@@ -162,7 +186,9 @@ export function ConversationPage({
     return () => {
       alive = false;
     };
-  }, [conversationId, demoMode, onSnapshot]);
+  }, [conversationId, demoMode, onSnapshot, createdConversationId]);
+
+  const sessionId = conversationId ?? createdConversationId;
 
   // Elapsed clock for the live turn status line.
   useEffect(() => {
@@ -177,19 +203,19 @@ export function ConversationPage({
   }, [runStartedAt, running]);
 
   const adoptAskTitle = (ask: string) => {
-    if (!conversationId || demoMode) return;
+    if (!sessionId || demoMode) return;
     if (title && title !== "新对话") return;
     const next = titleFromAsk(ask);
     if (!next) return;
     setTitle(next);
-    void Promise.resolve(onRetitle(conversationId, next)).catch(() => {
+    void Promise.resolve(onRetitle(sessionId, next)).catch(() => {
       /* title is cosmetic; keep the turn usable if retitle fails */
     });
   };
 
   const dispatchSend = async (text: string, context: string[], opts?: { skipTitle?: boolean }) => {
-    if (!conversationId) return;
     const payload = { text, context };
+    const targetId = sessionId ?? "";
     setPageError(null);
     setTurns((current) => [...current, blank(text, context)]);
     setRunning(true);
@@ -200,7 +226,13 @@ export function ConversationPage({
     stickToBottomRef.current = true;
     if (!opts?.skipTitle) adoptAskTitle(text);
     try {
-      await sendMessage(conversationId, text, context);
+      const createdId = await sendMessage(targetId, text, context, projectPath);
+      if (!targetId && createdId) {
+        setCreatedConversationId(createdId);
+        onConversationCreated?.(createdId);
+      }
+      if (!createdId && !targetId) throw new Error("创建任务失败");
+      await onConversationCommitted?.();
       // Context is consumed for this turn only; the user re-pins if needed.
       setContexts([]);
     } catch (failure) {
@@ -232,7 +264,7 @@ export function ConversationPage({
   };
 
   const send = (text: string, context: string[]) => {
-    if (!conversationId) return;
+    if (!sessionId && !projectPath) return;
     // Running: queue the follow-up instead of dropping the draft (codex/DSH).
     if (running) {
       applyQueue([...queueRef.current, { text, context }]);
@@ -242,31 +274,31 @@ export function ConversationPage({
   };
 
   const regenerate = () => {
-    if (!conversationId || running) return;
+    if (!sessionId || running) return;
     const last = [...turns].reverse().find((turn) => turn.ask.trim());
     if (!last) return;
     void dispatchSend(last.ask, last.context ?? [], { skipTitle: true });
   };
 
   const stop = () => {
-    if (!conversationId) return;
+    if (!sessionId) return;
     setApproval(null);
     // Stop 后不再产生用户可见 TextDelta。
     acceptStreamRef.current = false;
     setStreamText("");
     setProgress(null);
     setRunStartedAt(null);
-    void stopRun(conversationId).catch((failure) => {
+    void stopRun(sessionId).catch((failure) => {
       setApprovalError(`停止失败：${errorMessage(failure)}`);
     });
   };
 
   const decide = (approved: boolean) => {
-    if (!conversationId || !approval) return;
+    if (!sessionId || !approval) return;
     const pending = approval;
     setApproval(null);
     setApprovalError(null);
-    void respondApproval(conversationId, pending.step, approved).catch((failure) => {
+    void respondApproval(sessionId, pending.step, approved).catch((failure) => {
       setApprovalError(
         `审批响应失败：${errorMessage(failure)}（${approved ? "允许" : "拒绝"} step ${pending.step}）`,
       );
@@ -278,12 +310,12 @@ export function ConversationPage({
   };
 
   const rename = (next: string) => {
-    if (!conversationId) return;
+    if (!sessionId) return;
     const previous = title;
     setTitle(next);
     setRenaming(false);
     setPageError(null);
-    void Promise.resolve(onRetitle(conversationId, next)).catch((failure) => {
+    void Promise.resolve(onRetitle(sessionId, next)).catch((failure) => {
       setTitle(previous);
       setPageError({
         message: `重命名失败：${errorMessage(failure)}`,
@@ -305,13 +337,13 @@ export function ConversationPage({
   };
 
   useEffect(() => {
-    if (!conversationId || demoMode) return;
+    if (!sessionId || demoMode) return;
 
     let alive = true;
     let stop: (() => void) | null = null;
 
     void onRunEvent((event) => {
-      if (event.session !== conversationId) return;
+      if (event.session !== sessionId) return;
       if (event.type === "approvalRequest") {
         setApproval({
           step: event.step,
@@ -321,6 +353,7 @@ export function ConversationPage({
           riskCategory: event.riskCategory,
           reason: event.reason,
         });
+        setProgress({ phase: "等待审批", detail: "请确认后继续执行" });
         return;
       }
       if (event.type === "textDelta") {
@@ -333,6 +366,22 @@ export function ConversationPage({
         setProgress({ phase: event.phase, detail: event.detail });
         return;
       }
+      if (event.type === "failover" || event.type === "providerSwitch") {
+        const notice = {
+          fromProvider: event.fromProvider,
+          fromModel: event.fromModel,
+          errorClass: event.errorClass,
+          error: event.error,
+          toProvider: event.toProvider,
+          toModel: event.toModel,
+        };
+        setFailover(notice);
+        setFailovers((current) => [
+          ...current,
+          `已从 ${event.fromProvider}（${event.fromModel}）切换到 ${event.toProvider}（${event.toModel}）· ${event.errorClass}`,
+        ]);
+        return;
+      }
       if (event.type === "itemCompleted" && event.item.kind === "agentMessage") {
         setStreamText("");
       }
@@ -340,6 +389,8 @@ export function ConversationPage({
         acceptStreamRef.current = true;
         setStreamText("");
         setProgress(null);
+        setFailovers([]);
+        setFailover(null);
         setRunStartedAt((current) => current ?? Date.now());
       }
       setTurns((current) => reduce(current, event));
@@ -359,16 +410,20 @@ export function ConversationPage({
 
     return () => {
       alive = false;
-      stop?.();
+      void Promise.resolve(stop?.()).catch(() => {
+        // The Tauri event bridge can finish registering after the view has
+        // already moved to the newly-created session. Cleanup is best effort.
+      });
     };
-  }, [conversationId, demoMode]);
+  }, [sessionId, demoMode]);
 
   // Follow the live turn: stick to bottom only while the reader is already there.
   useEffect(() => {
+    if (demoMode) return;
     const el = scrollRef.current;
     if (!el || !stickToBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
-  }, [turns, streamText, progress, queue, running]);
+  }, [demoMode, turns, streamText, progress, queue, running]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -378,22 +433,22 @@ export function ConversationPage({
   };
 
   const liveSnapshot = useMemo(() => {
-    if (demoMode || !conversationId) return null;
+    if (demoMode || !sessionId) return null;
     const last = turns[turns.length - 1] ?? null;
-    return snapshotFromTurn(conversationId, title || "新对话", projectName, projectPath, last, running);
-  }, [demoMode, conversationId, turns, title, running, projectName, projectPath]);
+    return snapshotFromTurn(sessionId, title || "新对话", projectName, projectPath, last, running);
+  }, [demoMode, sessionId, turns, title, running, projectName, projectPath]);
 
   useEffect(() => {
-    onSnapshot?.(demoMode || !conversationId ? null : liveSnapshot);
-  }, [onSnapshot, liveSnapshot, demoMode, conversationId]);
+    onSnapshot?.(demoMode || !sessionId ? null : liveSnapshot);
+  }, [onSnapshot, liveSnapshot, demoMode, sessionId]);
 
   const heading = demoMode && demo
     ? demo.conversation.title
     : title || "新对话";
-  const liveSession = !demoMode && conversationId !== null;
+  const liveSession = !demoMode && sessionId !== null;
   const demoReply = demo ? demoReplyFrom(demo) : null;
   // Centered first-run stage: empty live conversation, no demo payload, no approval bar.
-  const showWelcome = liveSession && turns.length === 0 && !approval && !pageError && queue.length === 0;
+  const showWelcome = !demoMode && turns.length === 0 && !approval && !pageError && queue.length === 0 && Boolean(projectPath);
 
   const composer = (
     <Composer
@@ -401,7 +456,7 @@ export function ConversationPage({
       providers={providers}
       onSelectProvider={onSelectProvider}
       onSelectProviderModel={onSelectProviderModel}
-      ready={!demoMode && conversationId !== null}
+      ready={!demoMode && (sessionId !== null || Boolean(projectPath))}
       running={running}
       projectPath={projectPath}
       contexts={contexts}
@@ -413,14 +468,14 @@ export function ConversationPage({
           message,
           action: {
             label: "打开设置",
-            run: () => navigateSettings(),
+            run: () => openSettings(),
           },
         })
       }
       onSend={(text, context) => send(text, context)}
       onStop={stop}
       providerWarning={providerWarning}
-      onOpenProviderSettings={() => navigateSettings()}
+      onOpenProviderSettings={openSettings}
     />
   );
 
@@ -437,7 +492,7 @@ export function ConversationPage({
                 autoFocus
                 onChange={(event) => setDraftTitle(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" && draftTitle.trim() && conversationId) {
+                  if (event.key === "Enter" && draftTitle.trim() && sessionId) {
                     rename(draftTitle.trim());
                   }
                   if (event.key === "Escape") setRenaming(false);
@@ -487,7 +542,7 @@ export function ConversationPage({
                       danger
                       onSelect={() => {
                         close();
-                        if (conversationId) archive(conversationId);
+                        if (sessionId) archive(sessionId);
                       }}
                     />
                     <MenuItem
@@ -530,6 +585,26 @@ export function ConversationPage({
             </div>
           )}
 
+          {failover && (
+            <div className="action-error" role="status" data-testid="failover-notice">
+              <span className="action-error-msg">
+                Failover · {failover.fromProvider}/{failover.fromModel} → {failover.toProvider}/
+                {failover.toModel} · {failover.errorClass}
+                {failover.error ? ` — ${failover.error.slice(0, 160)}` : ""}
+              </span>
+              <div className="action-error-actions">
+                <button
+                  type="button"
+                  className="btn btn--sm"
+                  data-testid="failover-dismiss"
+                  onClick={() => setFailover(null)}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          )}
+
           {showWelcome ? (
             <div className="welcome-stage" data-testid="welcome">
               <div className="welcome-copy">
@@ -554,6 +629,7 @@ export function ConversationPage({
                     time={demo.conversation.assistant.time}
                     reply={demoReply}
                     running={false}
+                    failovers={[]}
                     onViewFiles={onViewFiles}
                   />
                 </>
@@ -576,6 +652,8 @@ export function ConversationPage({
                         streamText={running && last ? streamText : ""}
                         progress={running && last ? progress : null}
                         elapsed={running && last ? elapsed : null}
+                        waitingApproval={running && last ? Boolean(approval) : false}
+                        failovers={last ? failovers : []}
                         onViewFiles={onViewFiles}
                         onRegenerate={liveSession && last && !running ? regenerate : null}
                       />
@@ -619,7 +697,7 @@ export function ConversationPage({
             <div className="approval-bar" role="alertdialog" aria-label="审批工具步骤" data-testid="approval-bar">
               <div className="approval-text">
                 <strong>
-                  需要批准 · {approval.kind}
+                  需要批准 · {approval.kind === "FileChange" ? "修改文件" : approval.kind}
                   {approval.riskCategory ? ` · ${approval.riskCategory}` : ""}
                 </strong>
                 <code data-testid="approval-command">{approval.detail || "继续执行该步骤"}</code>
@@ -635,7 +713,7 @@ export function ConversationPage({
                 )}
                 {approval.riskCategory && (
                   <span className="approval-risk" data-testid="approval-risk">
-                    risk: {approval.riskCategory}
+                    风险：{approval.riskCategory}
                   </span>
                 )}
               </div>
@@ -708,7 +786,7 @@ function UserMessage({ time, text, context }: { time?: string; text: string; con
 }
 
 function blank(ask: string, context: string[] = []): TurnDto {
-  return { ask, context, items: [], done: false, stopped: false, error: null };
+  return { ask, context, items: [], done: false, stopped: false, interrupted: false, error: null };
 }
 
 function reduce(turns: TurnDto[], event: RunEventDto): TurnDto[] {
@@ -736,8 +814,6 @@ function updateLast(turns: TurnDto[], change: (turn: TurnDto) => TurnDto): TurnD
 
 function upsert(items: ItemDto[], item: ItemDto): ItemDto[] {
   const index = items.findIndex((existing) => existing.id === item.id);
-  if (index === -1) return [...items, item];
-  const next = [...items];
-  next[index] = item;
-  return next;
+  const next = index === -1 ? [...items, item] : items.map((existing, position) => (position === index ? item : existing));
+  return next.sort((left, right) => left.id - right.id);
 }

@@ -74,6 +74,8 @@ pub struct TurnView {
     pub items: Vec<ItemView>,
     pub done: bool,
     pub stopped: bool,
+    /// Set when recovery reclassified a killed run's open items as interrupted.
+    pub interrupted: bool,
     pub error: Option<String>,
 }
 
@@ -233,6 +235,7 @@ impl From<session::Session> for SessionView {
                     items: turn.items.into_iter().map(Into::into).collect(),
                     done: turn.done,
                     stopped: turn.stopped,
+                    interrupted: turn.interrupted,
                     error: turn.error,
                 })
                 .collect(),
@@ -287,6 +290,7 @@ pub enum RunEvent {
         /// Structured risk: Safe | FilesystemWrite | Network | PackageInstall |
         /// DestructiveGit | ProcessControl | SensitiveData | Dangerous.
         #[serde(default)]
+        #[serde(rename = "riskCategory")]
         risk_category: String,
         /// Human-readable reason for the risk.
         #[serde(default)]
@@ -302,6 +306,21 @@ pub enum RunEvent {
         session: String,
         phase: String,
         detail: String,
+    },
+    /// Provider switch on the streaming path: failed side, error class, next side.
+    Failover {
+        session: String,
+        #[serde(rename = "fromProvider")]
+        from_provider: String,
+        #[serde(rename = "fromModel")]
+        from_model: String,
+        #[serde(rename = "errorClass")]
+        error_class: String,
+        error: String,
+        #[serde(rename = "toProvider")]
+        to_provider: String,
+        #[serde(rename = "toModel")]
+        to_model: String,
     },
 }
 
@@ -482,6 +501,26 @@ mod tests {
     }
 
     #[test]
+    fn failover_event_carries_both_sides_and_class() {
+        let event = super::RunEvent::Failover {
+            session: "s1".into(),
+            from_provider: "GPT-4o".into(),
+            from_model: "gpt-4o".into(),
+            error_class: "RateLimit".into(),
+            error: "429".into(),
+            to_provider: "Claude".into(),
+            to_model: "claude-sonnet".into(),
+        };
+        let value = serde_json::to_value(event).expect("serialize");
+        assert_eq!(value["type"], json!("failover"));
+        assert_eq!(value["fromProvider"], json!("GPT-4o"));
+        assert_eq!(value["fromModel"], json!("gpt-4o"));
+        assert_eq!(value["errorClass"], json!("RateLimit"));
+        assert_eq!(value["toProvider"], json!("Claude"));
+        assert_eq!(value["toModel"], json!("claude-sonnet"));
+    }
+
+    #[test]
     fn a_session_view_carries_its_turns() {
         let session = kodo_core::session::Session {
             id: "abc".to_owned(),
@@ -497,6 +536,7 @@ mod tests {
                 })],
                 done: true,
                 stopped: false,
+                interrupted: false,
                 error: None,
             }],
         };

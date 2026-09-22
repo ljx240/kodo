@@ -25,8 +25,8 @@ import { Menu, MenuItem } from "./Menu";
 
 /** The two destinations that sit above the project tree. */
 const NAV: { name: RouteName; label: string; Icon: typeof Archive }[] = [
-  { name: "conversation", label: "Conversations", Icon: MessageCircle },
-  { name: "archive", label: "Archive", Icon: Archive },
+  { name: "conversation", label: "New Task", Icon: MessageCircle },
+  { name: "skills", label: "Skills", Icon: Sparkles },
 ];
 
 type Props = {
@@ -34,6 +34,8 @@ type Props = {
   inspectorOpen: boolean;
   activeConversationId: string | null;
   onSelectConversation: (id: string) => void;
+  onNewTask: () => void;
+  onOpenSettings: () => void;
   /** Creates a new conversation under the given project and selects it. */
   onStartConversation: (projectPath: string) => void;
   onRenameConversation?: (id: string, title: string) => Promise<void> | void;
@@ -46,6 +48,8 @@ export function Sidebar({
   inspectorOpen,
   activeConversationId,
   onSelectConversation,
+  onNewTask,
+  onOpenSettings,
   onStartConversation,
   onRenameConversation,
   onArchiveConversation,
@@ -105,6 +109,7 @@ export function Sidebar({
       href={hrefTo(name, inspectorOpen)}
       onClick={(event) => {
         event.preventDefault();
+        if (name === "conversation") onNewTask();
         navigate(hrefTo(name, inspectorOpen));
       }}
     >
@@ -406,7 +411,12 @@ export function Sidebar({
 
       {/* Kodo has no account, so the foot of the sidebar carries the way into
           Settings instead of a user row. */}
-      <div className="sidebar-foot">{navItem("settings", "Settings", Settings)}</div>
+      <div className="sidebar-foot">
+        <button type="button" className="nav-item sidebar-settings" onClick={onOpenSettings}>
+          <Settings size={16} strokeWidth={1.8} />
+          <span>Settings</span>
+        </button>
+      </div>
     </aside>
   );
 }

@@ -55,14 +55,58 @@ test("+ opens a menu, not an inline file list", async ({ page }) => {
   expect(gap!).toBeLessThanOrEqual(16);
 });
 
-test("+ lists builtin skills and inserts a skill tag into the draft", async ({ page }) => {
+test("+ child panels stay joined to the action menu", async ({ page }) => {
+  await stubShell(page, liveCore({ files: ["src/app.ts"] }));
+  await openLiveConversation(page);
+
+  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator(".composer-plus-menu").getByRole("menuitem", { name: "项目文件" }).click();
+  await expect(page.locator(".composer-files-panel")).toBeVisible();
+
+  const geometry = await page.evaluate(() => {
+    const root = document.querySelector(".composer-plus-root")?.getBoundingClientRect();
+    const menu = document.querySelector(".composer-plus-menu")?.getBoundingClientRect();
+    const panel = document.querySelector(".composer-plus-panel")?.getBoundingClientRect();
+    if (!root || !menu || !panel) return null;
+    return {
+      root,
+      horizontalGap: panel.left - menu.right,
+      bottomDelta: Math.abs(panel.bottom - menu.bottom),
+    };
+  });
+  expect(geometry).not.toBeNull();
+  expect(geometry!.root.width).toBeGreaterThan(geometry!.root.height);
+  expect(geometry!.horizontalGap).toBe(0);
+  expect(geometry!.bottomDelta).toBeLessThanOrEqual(1);
+});
+
+test("+ lists builtin skills as a removable chip and serializes it on send", async ({ page }) => {
   await stubShell(page, liveCore());
   await openLiveConversation(page);
 
   await page.locator('.composer button[aria-label="Composer menu"]').click();
   await page.locator(".composer-plus-menu", { hasText: "技能" }).getByRole("menuitem", { name: "技能" }).click();
   await page.locator('[data-skill-id="bug-fix"]').click();
-  await expect(page.locator(".composer-input")).toHaveValue("【技能：bug-fix】 ");
+
+  await expect(page.locator(".composer-input")).toHaveValue("");
+  await expect(page.locator('.composer-skill[data-skill-id="bug-fix"]')).toContainText("bug-fix");
+  await expect(page.locator('[aria-label="Remove skill bug-fix"]')).toBeVisible();
+  await page.locator('[aria-label="Remove skill bug-fix"]').click();
+  await expect(page.locator(".composer-skill")).toHaveCount(0);
+
+  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator(".composer-plus-menu", { hasText: "技能" }).getByRole("menuitem", { name: "技能" }).click();
+  await page.locator('[data-skill-id="bug-fix"]').click();
+
+  await page.locator('.composer-input').fill("修复这个问题");
+  await page.locator('.composer-input').press("Enter");
+  await expect(page.locator(".composer-skill")).toHaveCount(0);
+
+  const log = await page.evaluate(
+    () => (window as unknown as { __sendLog?: Array<{ text: string; context: string[] }> }).__sendLog ?? [],
+  );
+  expect(log).toHaveLength(1);
+  expect(log[0].text).toBe("【技能：bug-fix】\n修复这个问题");
 });
 
 test("add context chip via 添加照片和文件 filesystem picker", async ({ page }) => {

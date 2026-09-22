@@ -103,6 +103,10 @@ fn step_kind_label(kind: StepKind) -> &'static str {
     }
 }
 
+fn step_failed(step: &Step, denied: bool) -> bool {
+    denied || matches!(step, Step::Command { exit_code: Some(code), .. } if *code != 0)
+}
+
 fn to_item_kind(step: &Step) -> ItemKind {
     match step {
         Step::Reasoning { summary } => ItemKind::Reasoning {
@@ -223,26 +227,34 @@ pub fn start(
                 drop(seq);
                 let (ticket, rx) = approve_approvals.wait_point(&approve_id, step);
                 let risk = kodo_agent::tools::classify_command_risk(command);
-                let reason = agent::dangerous_reason(command).unwrap_or(risk.reason);
-                let risk_category = if risk.destructive_git {
-                    "DestructiveGit"
-                } else if risk.dangerous {
-                    "Dangerous"
-                } else if risk.network_sensitive {
-                    "Network"
-                } else if matches!(kind, StepKind::FileChange) {
-                    "FilesystemWrite"
-                } else {
-                    "Safe"
+                let reason = agent::tools::redact_secrets(
+                    agent::dangerous_reason(command).unwrap_or_else(|| risk.reason()),
+                );
+                let risk_category = match risk {
+                    kodo_agent::tools::CommandRisk::Catastrophic => "Catastrophic",
+                    kodo_agent::tools::CommandRisk::DestructiveGit => "DestructiveGit",
+                    kodo_agent::tools::CommandRisk::SensitiveData => "SensitiveData",
+                    kodo_agent::tools::CommandRisk::ProcessControl => "ProcessControl",
+                    kodo_agent::tools::CommandRisk::PackageInstall => "PackageInstall",
+                    kodo_agent::tools::CommandRisk::Network => "Network",
+                    kodo_agent::tools::CommandRisk::FilesystemWrite => "FilesystemWrite",
+                    kodo_agent::tools::CommandRisk::ReadOnly => {
+                        if matches!(kind, StepKind::FileChange) {
+                            "FilesystemWrite"
+                        } else {
+                            "Safe"
+                        }
+                    }
                 };
                 let cwd = approve_project.to_string_lossy().into_owned();
+                let safe_command = kodo_agent::tools::redact_secrets(command);
                 let _ = approve_app.emit(
                     "run:event",
                     RunEvent::ApprovalRequest {
                         session: approve_id.clone(),
                         step,
                         kind: step_kind_label(kind).to_owned(),
-                        detail: format!("{command}  ·  {reason}"),
+                        detail: format!("{safe_command}  ·  {reason}"),
                         cwd,
                         risk_category: risk_category.to_owned(),
                         reason: reason.to_owned(),
@@ -305,6 +317,28 @@ pub fn start(
                     );
                     record_runs.is_live(&record_id)
                 }
+                SinkEvent::Failover {
+                    from_provider,
+                    from_model,
+                    error_class,
+                    error,
+                    to_provider,
+                    to_model,
+                } => {
+                    let _ = record_app.emit(
+                        "run:event",
+                        RunEvent::Failover {
+                            session: record_id.clone(),
+                            from_provider,
+                            from_model,
+                            error_class,
+                            error,
+                            to_provider,
+                            to_model,
+                        },
+                    );
+                    record_runs.is_live(&record_id)
+                }
                 SinkEvent::Started { step } => {
                     seq += 1;
                     open_id = Some(seq);
@@ -340,7 +374,7 @@ pub fn start(
                         seq
                     });
                     let at = session::now();
-                    if denied {
+                    if step_failed(&step, denied) {
                         let failed = Item {
                             id,
                             at,
@@ -428,10 +462,11 @@ pub fn start(
                 }
             }
             Err(error) => {
-                let _ = session::record_error(&args.dir, &args.id, session::now(), &error);
+                let safe_error = kodo_agent::tools::redact_secrets(&error);
+                let _ = session::record_error(&args.dir, &args.id, session::now(), &safe_error);
                 notify(RunEvent::Error {
                     session: args.id.clone(),
-                    message: error,
+                    message: safe_error,
                 });
             }
         }
@@ -446,4 +481,27 @@ pub fn permission_from_settings(value: Option<String>) -> Permission {
     value
         .map(|raw| Permission::parse(&raw))
         .unwrap_or(Permission::Ask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_zero_command_exit_is_a_failed_step() {
+        let command = Step::Command {
+            command: "check".into(),
+            cwd: "/tmp".into(),
+            output: "FAIL".into(),
+            exit_code: Some(1),
+        };
+        assert!(step_failed(&command, false));
+        assert!(step_failed(&command, true));
+        assert!(!step_failed(
+            &Step::Reasoning {
+                summary: "ok".into()
+            },
+            false
+        ));
+    }
 }

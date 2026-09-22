@@ -507,6 +507,7 @@ impl ContextManager {
 
     /// Range read: lines `[start_line, end_line]` inclusive, 1-based.
     /// Records a versioned Observation and refreshes path staleness.
+    /// Absolute paths are allowed for user-pinned external context (e.g. ~/Downloads).
     pub fn read_range(
         &mut self,
         path: &str,
@@ -517,10 +518,14 @@ impl ContextManager {
         if path.trim().is_empty() {
             return Err("empty path".into());
         }
-        if path.contains("..") || Path::new(path).is_absolute() {
+        if path.contains("..") {
             return Err("path escapes the project root".into());
         }
-        let full = self.root.join(path);
+        let full = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            self.root.join(path)
+        };
         if !full.is_file() {
             return Err(format!("file not found: {path}"));
         }
@@ -1347,6 +1352,32 @@ mod tests {
         f.write_all(&[0x89, b'P', b'N', b'G', 0, 0, 0, 0]).unwrap();
         assert!(m.read_range("blob.png", 1, 5, "x").is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn range_read_allows_absolute_external_pin() {
+        let root = make_fixture();
+        let external_dir = std::env::temp_dir().join(format!("kodo_ext_{}", std::process::id()));
+        fs::create_dir_all(&external_dir).expect("temp dir");
+        let external = external_dir.join("notes.txt");
+        fs::write(&external, "hello from outside\nsecond line\n").expect("write external");
+        let abs = external.to_string_lossy().into_owned();
+
+        let mut m = manager(&root);
+        let span = m
+            .read_range(&abs, 1, 2, "pinned by user")
+            .expect("absolute external read");
+        assert_eq!(span.snippet, "hello from outside\nsecond line");
+        assert_eq!(span.path, abs);
+
+        m.scan(&|| true).expect("scan");
+        let pin = m.read_range(&abs, 1, 2, "pinned by user").expect("re-read");
+        m.pin(pin);
+        let out = m.collect(UNIQUE, &|| true).expect("collect");
+        assert!(out.iter().any(|s| s.pinned && s.path == abs));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&external_dir);
     }
 
     #[test]

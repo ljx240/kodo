@@ -6,7 +6,7 @@ import { isDesktop } from "./api";
  * Plain `location` reads keep this dependency-free; the app never needs a
  * router for four static screens.
  */
-export type RouteName = "conversation" | "trace" | "archive" | "settings";
+export type RouteName = "conversation" | "skills" | "trace" | "archive" | "settings";
 
 export type Route = {
   name: RouteName;
@@ -21,6 +21,7 @@ export type Route = {
 
 const NAMES: Record<string, RouteName> = {
   conversation: "conversation",
+  skills: "skills",
   trace: "trace",
   archive: "archive",
   settings: "settings",

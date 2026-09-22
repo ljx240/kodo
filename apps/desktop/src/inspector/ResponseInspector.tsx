@@ -1,10 +1,10 @@
-import { BarChart3, Check, Folder, History, Sparkles, Terminal, Undo2 } from "lucide-react";
+import { BarChart3, Check, Folder, History, Minus, Sparkles, Square, Terminal, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { turnChanges, undoTurn, type TurnChangeDto } from "../api";
 import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
 import { changesFromReply, commandsFromTurn, llmFromTurn, toolsFromTurn } from "../data/liveContext";
-import { formatDuration } from "../conversation/trace";
+import { formatDuration, type ReplyStatus } from "../conversation/trace";
 import { FileRow, MetaRow, Section, ToolRow } from "./Section";
 
 export type InspectorData = {
@@ -19,6 +19,36 @@ function EmptyBody({ note }: { note: string }) {
     <div className="ins-body">
       <p className="ins-note">{note}</p>
     </div>
+  );
+}
+
+function StatusPill({ status }: { status: ReplyStatus }) {
+  const labels: Record<ReplyStatus, string> = {
+    empty: "—",
+    working: "Working",
+    completed: "Completed",
+    stopped: "Stopped",
+    interrupted: "Interrupted",
+    failed: "Failed",
+  };
+  const mark =
+    status === "completed" ? (
+      <Check size={9} strokeWidth={4} />
+    ) : status === "working" ? (
+      "…"
+    ) : status === "stopped" ? (
+      <Square size={8} strokeWidth={2.5} />
+    ) : status === "interrupted" ? (
+      <Minus size={10} strokeWidth={3} />
+    ) : status === "failed" ? (
+      <X size={9} strokeWidth={3} />
+    ) : null;
+
+  return (
+    <span className={`status-pill status-pill--${status}`}>
+      <span className="status-mark">{mark}</span>
+      <span>{labels[status]}</span>
+    </span>
   );
 }
 
@@ -169,7 +199,15 @@ export function ThisResponse({ demo, demoState, live }: InspectorData) {
   const fixture = demo ? demoState?.conversation : undefined;
   if (!demo && live) {
     const reply = live.reply;
+    if (!live.turn && !live.running) {
+      return (
+        <Section icon={<History size={14} strokeWidth={1.7} />} title="This response">
+          <EmptyBody note="尚未开始响应，发送消息后会在这里显示执行摘要。" />
+        </Section>
+      );
+    }
     const steps = reply?.steps.length ?? 0;
+    const status = reply?.status ?? (live.running ? "working" : "empty");
     return (
       <Section
         icon={<History size={14} strokeWidth={1.7} />}
@@ -178,10 +216,7 @@ export function ThisResponse({ demo, demoState, live }: InspectorData) {
       >
         <div className="ins-body">
           <MetaRow label="Status">
-            <span className="status-pill">
-              <span className="status-mark">{live.running ? "…" : <Check size={9} strokeWidth={4} />}</span>
-              <span>{live.running ? "Working" : live.turn?.stopped ? "Stopped" : live.turn?.done ? "Completed" : "—"}</span>
-            </span>
+            <StatusPill status={status} />
           </MetaRow>
           <MetaRow label="Conversation">{live.title}</MetaRow>
           <MetaRow label="Total steps">{steps}</MetaRow>
@@ -351,12 +386,13 @@ export function TerminalSection({ demo, demoState, live }: InspectorData) {
 
 export function ResponseOverview(props: InspectorData & { onShowAllFiles?: () => void }) {
   const { onShowAllFiles, ...data } = props;
+  const emptyLive = !data.demo && !data.live?.turn && !data.live?.running;
   return (
     <>
       <ThisResponse {...data} />
-      <ChangedFilesSection {...data} limit={5} onShowAll={onShowAllFiles} />
-      <ToolsSection {...data} />
-      <LlmSection {...data} />
+      {!emptyLive && <ChangedFilesSection {...data} limit={5} onShowAll={onShowAllFiles} />}
+      {!emptyLive && <ToolsSection {...data} />}
+      {!emptyLive && <LlmSection {...data} />}
       <CurrentProjectSection {...data} />
     </>
   );

@@ -6,6 +6,8 @@ export type Core = {
   workspace?: unknown;
   /** The `load_session` payload. */
   session?: unknown;
+  /** Additional sessions keyed by id for project-switching tests. */
+  sessions?: Record<string, unknown>;
   /** What `git_branch` reports. */
   branch?: string | null;
   /** `list_archived` payload. */
@@ -67,7 +69,7 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             if (config.workspace === null) throw "HOME is not set, so there is nowhere to keep the project list";
             return workspace;
           case "load_session":
-            return session;
+            return (config.sessions as Record<string, unknown> | undefined)?.[String(args?.id ?? "")] ?? session;
           case "git_branch":
             return config.branch ?? null;
           case "list_archived":
@@ -136,7 +138,7 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
               text: String(args?.text ?? ""),
               context: contextPaths,
             });
-            return null;
+            return String(args?.id ?? "") || "created-session";
           }
           case "stop_run":
             return null;

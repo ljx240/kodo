@@ -19,8 +19,11 @@ import type { ArchiveSelection } from "./inspector/ArchiveInspector";
 import { ArchivePage } from "./pages/ArchivePage";
 import { ConversationPage } from "./pages/ConversationPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { SkillsPage } from "./pages/SkillsPage";
 import { TracePage } from "./pages/TracePage";
 import { TopBar } from "./shell/TopBar";
+
+const LAST_PROJECT_KEY = "kodo:last-project";
 
 export function App() {
   const route = useRoute();
@@ -32,7 +35,9 @@ export function App() {
     route.demo && demoState ? demoState.conversation.id : null,
   );
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() =>
-    route.demo && demoState ? demoState.project.id : null,
+    route.demo && demoState
+      ? demoState.project.id
+      : window.localStorage.getItem(LAST_PROJECT_KEY),
   );
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("summary");
   const [coreVersion, setCoreVersion] = useState<string | null>(null);
@@ -45,6 +50,7 @@ export function App() {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [activeProviderIndex, setActiveProviderIndex] = useState(0);
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [autoGitBranch] = useSetting("auto-detect-git-branch", "true");
   const [density] = useSetting("density", "compact");
   const [lineNumbers] = useSetting("show-line-numbers", "true");
@@ -67,35 +73,6 @@ export function App() {
     setActiveProjectId(null);
   }, [route.demo, demoState]);
 
-  // Ensure a conversation is open so send / Add context are usable without an
-  // extra sidebar click. Prefer an existing session; otherwise open one under
-  // the first project that has a real path.
-  const sessionBootstrapped = useRef(false);
-  const startSession = workspace.startSession;
-  useEffect(() => {
-    if (route.demo || route.name !== "conversation" || activeConversationId) return;
-    if (sessionBootstrapped.current) return;
-    const existing = workspace.projects.flatMap((project) => project.conversations)[0];
-    if (existing) {
-      setActiveConversationId(existing.id);
-      return;
-    }
-    const project = workspace.projects.find((item) => item.path);
-    if (!project?.path || !workspace.live) return;
-    sessionBootstrapped.current = true;
-    void startSession(project.path).then((id) => {
-      if (id) setActiveConversationId(id);
-      else sessionBootstrapped.current = false;
-    });
-  }, [
-    route.demo,
-    route.name,
-    activeConversationId,
-    workspace.projects,
-    workspace.live,
-    startSession,
-  ]);
-
   // Runtime consumer for the Appearance theme control (not just persisted state).
   useEffect(() => {
     const apply = (mode: string) => {
@@ -107,7 +84,7 @@ export function App() {
           : mode === "dark"
             ? "dark"
             : "light";
-      document.documentElement.dataset.theme = resolved;
+      document.documentElement.setAttribute("data-theme", resolved);
     };
     apply(theme);
     if (theme !== "system") return;
@@ -146,6 +123,26 @@ export function App() {
   );
   const activeProject =
     owner ?? workspace.projects.find((project) => project.id === activeProjectId) ?? workspace.projects[0] ?? null;
+
+  const traceBootstrapped = useRef(false);
+  useEffect(() => {
+    if (route.demo || route.name !== "trace") {
+      traceBootstrapped.current = false;
+      return;
+    }
+    if (activeConversationId || traceBootstrapped.current) return;
+
+    const existing = activeProject?.conversations[0] ?? workspace.projects.flatMap((project) => project.conversations)[0];
+    if (!existing) return;
+    traceBootstrapped.current = true;
+    setActiveConversationId(existing.id);
+  }, [route.demo, route.name, activeConversationId, activeProject?.id, workspace.projects]);
+
+  useEffect(() => {
+    if (!owner) return;
+    setActiveProjectId(owner.id);
+    window.localStorage.setItem(LAST_PROJECT_KEY, owner.id);
+  }, [owner?.id]);
 
   useEffect(() => {
     if (route.demo) {
@@ -200,11 +197,22 @@ export function App() {
   const newChat = async (projectPath?: string) => {
     const path = projectPath ?? activeProject?.path;
     if (!path) return;
-    const id = await workspace.startSession(path);
-    if (id) {
-      setActiveConversationId(id);
-      setActiveProjectId(path);
+    setActiveConversationId(null);
+    setActiveProjectId(path);
+    window.localStorage.setItem(LAST_PROJECT_KEY, path);
+  };
+
+  const selectProject = (id: string) => {
+    const project = workspace.projects.find((item) => item.id === id);
+    if (!project) return;
+    setActiveProjectId(id);
+    window.localStorage.setItem(LAST_PROJECT_KEY, id);
+    const latest = project.conversations[0];
+    if (latest) {
+      setActiveConversationId(latest.id);
+      return;
     }
+    setActiveConversationId(null);
   };
 
   const setInspectorOpen = (open: boolean) =>
@@ -243,6 +251,8 @@ export function App() {
         inspectorOpen={route.inspectorOpen}
         activeConversationId={activeConversationId}
         onSelectConversation={setActiveConversationId}
+        onNewTask={() => void newChat()}
+        onOpenSettings={() => setSettingsOpen(true)}
         onStartConversation={(path) => void newChat(path)}
         onRenameConversation={async (id, title) => {
           await workspace.retitle(id, title);
@@ -259,7 +269,7 @@ export function App() {
           <TopBar
             projects={workspace.projects}
             activeProjectId={activeProject?.id ?? null}
-            onSelectProject={setActiveProjectId}
+            onSelectProject={selectProject}
             projectName={projectName}
             branch={branch}
             provider={activeProvider}
@@ -282,6 +292,15 @@ export function App() {
               onViewFiles={openFiles}
               onOpenTrace={openTrace}
               onSnapshot={onSnapshot}
+              onConversationCreated={(id) => {
+                setActiveConversationId(id);
+                if (activeProject?.path) {
+                  setActiveProjectId(activeProject.path);
+                  window.localStorage.setItem(LAST_PROJECT_KEY, activeProject.path);
+                }
+              }}
+              onConversationCommitted={() => workspace.refresh()}
+              onOpenSettings={() => setSettingsOpen(true)}
               projectName={projectName}
               projectPath={activeProject?.path ?? ""}
               demo={demoState}
@@ -295,6 +314,7 @@ export function App() {
               }}
             />
           )}
+          {route.name === "skills" && <SkillsPage />}
           {route.name === "trace" && (
             <TracePage demo={demoState} conversationId={activeConversationId} />
           )}
@@ -323,7 +343,41 @@ export function App() {
                   }
                 });
               }}
+              onOpenArchive={() => navigate(workspace.live ? "/archive" : "/ui-demo/archive")}
             />
+          )}
+
+          {settingsOpen && (
+            <div className="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
+              <button
+                type="button"
+                className="settings-modal-backdrop"
+                aria-label="关闭设置"
+                onClick={() => setSettingsOpen(false)}
+              />
+              <SettingsPage
+                modal
+                onClose={() => setSettingsOpen(false)}
+                onOpenArchive={() => {
+                  setSettingsOpen(false);
+                  navigate(workspace.live ? "/archive" : "/ui-demo/archive");
+                }}
+                model={model}
+                onSelectModel={selectModel}
+                onProvidersSaved={(list) => {
+                  setProviders(list);
+                  void loadActiveIndex().then((idx) => {
+                    const index = idx < list.length ? idx : 0;
+                    setActiveProviderIndex(index);
+                    const active = list[index];
+                    if (active?.model) {
+                      setModel(active.model);
+                      void setSetting(MODEL_SETTING, active.model);
+                    }
+                  });
+                }}
+              />
+            </div>
           )}
 
           <Inspector

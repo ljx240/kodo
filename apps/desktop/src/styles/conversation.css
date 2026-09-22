@@ -63,6 +63,24 @@
   font-size: var(--kodo-font-md);
 }
 
+.reply-stopped,
+.reply-failed {
+  margin: 0 0 8px 34px;
+  color: var(--kodo-error);
+  font-size: var(--kodo-font-md);
+}
+
+.reply-stopped {
+  color: var(--kodo-warning-text);
+}
+
+/* Provider switch observed on the streaming path (failed → next + class). */
+.reply-failover {
+  margin: 0 0 8px 34px;
+  color: var(--kodo-text-muted, var(--kodo-text-secondary, #666));
+  font-size: var(--kodo-font-sm, 12px);
+}
+
 /* ---------------------------------------------------------------- trace -- */
 
 /* `padding: 0` clears the ordered list's default 40px inline start, which
@@ -83,6 +101,7 @@
 .trace-row-inner {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   min-height: 36px;
@@ -114,10 +133,12 @@
 .trace-line {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 14px;
   padding: 8px 0 8px 10px;
+  flex-wrap: wrap;
 }
 
 .trace-mark {
@@ -143,6 +164,16 @@
   border-top-color: transparent;
 }
 
+.trace-mark--interrupted {
+  background: var(--kodo-warning);
+  color: #fff;
+}
+
+.trace-mark--stopped {
+  background: var(--kodo-warning-text);
+  color: #fff;
+}
+
 /* The reference lets each step's content follow its own label rather than
    aligning every row to a shared label column. */
 .trace-label {
@@ -159,7 +190,15 @@
   gap: 14px;
 }
 
+.trace-body > .code-chip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .trace-detail {
+  flex: 0 1 auto;
+  min-width: 0;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
   white-space: nowrap;
@@ -168,6 +207,10 @@
 }
 
 .trace-tokens {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
   white-space: nowrap;
@@ -177,8 +220,10 @@
    block. `max-width` is what keeps the reference's longest line unwrapped and
    leaves the step's detail room to sit beside the box. */
 .trace-output {
-  flex: none;
-  max-width: 340px;
+  flex: 1 1 100%;
+  min-width: 0;
+  width: 100%;
+  max-width: none;
   max-height: 72px;
   overflow: hidden;
   margin: 4px 0;
@@ -288,7 +333,7 @@
 
 .composer {
   flex: none;
-  padding: 8px 20px 16px;
+  padding: 10px 20px 18px;
   min-width: 0;
 }
 
@@ -298,22 +343,56 @@
   border: 1px solid var(--kodo-border-strong);
   border-radius: var(--kodo-radius-popover);
   background: var(--kodo-canvas);
+  box-shadow: 0 4px 14px rgb(23 32 51 / 5%);
   overflow: hidden;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .composer-box:has(.menu),
-.composer-box:has(.composer-plus-root) {
+.composer-box:has(.composer-plus-root),
+.composer-box:has(.composer-slash) {
   overflow: visible;
 }
 
 .composer-box:has(.composer-input:focus) {
-  border-color: var(--kodo-border-strong);
+  border-color: var(--kodo-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--kodo-accent) 14%, transparent),
+    0 4px 14px rgb(23 32 51 / 5%);
 }
 
 /* ── Row 1: textarea ─────────────────────────────────────────────────────── */
 
 .composer-row {
   padding: 12px 14px 4px;
+}
+
+.composer-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 14px 0;
+}
+
+.composer-skill {
+  height: 24px;
+  max-width: 260px;
+  padding: 0 4px 0 8px;
+  border-color: color-mix(in srgb, var(--kodo-accent) 28%, var(--kodo-border));
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-xs);
+}
+
+.composer-skill-label {
+  color: var(--kodo-text-secondary);
+}
+
+.composer-skill code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kodo-font-mono);
 }
 
 /* A textarea so a draft can hold more than one line. It grows with its content
@@ -351,7 +430,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 8px 8px;
+  padding: 5px 8px 8px;
   min-height: 36px;
   min-width: 0;
   gap: 4px;
@@ -383,7 +462,8 @@
   transition: background 0.1s;
 }
 
-.composer-perm-trigger:hover {
+.composer-perm-trigger:hover,
+.composer-perm-trigger[aria-expanded="true"] {
   background: var(--kodo-hover);
 }
 
@@ -428,7 +508,7 @@
   z-index: 41;
   display: flex;
   align-items: flex-end;
-  gap: 6px;
+  gap: 0;
 }
 
 .composer-plus-menu,
@@ -442,6 +522,7 @@
 .composer-plus-menu {
   min-width: 220px;
   max-width: min(320px, calc(100vw - 40px));
+  box-shadow: 0 8px 24px rgb(23 32 51 / 12%);
 }
 
 .composer-plus-panel {
@@ -449,6 +530,20 @@
   max-height: 280px;
   padding: 0;
   overflow: hidden;
+  box-shadow: 0 8px 24px rgb(23 32 51 / 12%);
+}
+
+.composer-plus-root--panel-open .composer-plus-menu {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  box-shadow: 0 8px 24px rgb(23 32 51 / 12%);
+}
+
+.composer-plus-root--panel-open .composer-plus-panel {
+  border-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  box-shadow: 0 8px 24px rgb(23 32 51 / 12%);
 }
 
 /* Browser-only hidden input; opens the OS chooser when Tauri dialog is absent. */
@@ -533,6 +628,13 @@
   border-radius: var(--kodo-radius-sm);
   background: var(--kodo-accent);
   color: #fff;
+  box-shadow: 0 1px 2px rgb(37 99 235 / 22%);
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.composer-send:not(:disabled):hover {
+  background: var(--kodo-accent-hover);
+  transform: translateY(-1px);
 }
 
 /* An empty draft cannot be sent, and the button should not look as if it can. */
@@ -597,7 +699,7 @@
   padding: 6px 10px;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-sm);
-  background: var(--kodo-surface, var(--kodo-secondary));
+  background: var(--kodo-surface);
   font-size: var(--kodo-font-sm);
   color: var(--kodo-text-secondary);
 }
@@ -644,7 +746,17 @@
 
   .composer-plus-root {
     left: 0;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    max-width: calc(100vw - 24px);
+  }
+
+  .composer-plus-root .composer-plus-menu {
+    min-width: min(220px, calc(100vw - 24px));
+  }
+
+  .composer-plus-root .composer-plus-panel {
+    width: min(280px, max(140px, calc(100vw - 244px)));
+    min-width: 0;
   }
 }
 
@@ -708,7 +820,7 @@
 .approval-cwd {
   display: block;
   font-size: var(--kodo-font-xs);
-  color: var(--kodo-ink-muted, #5b6570);
+  color: var(--kodo-text-secondary);
   margin-top: 4px;
 }
 
@@ -798,6 +910,9 @@
 }
 
 .trace-expand {
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-left: 34px;
   margin-top: 6px;
 }
 
@@ -919,11 +1034,16 @@
 }
 
 .composer-slash {
-  margin: 0 12px 6px;
+  position: absolute;
+  right: 12px;
+  bottom: calc(100% + 8px);
+  left: 12px;
+  z-index: 42;
+  margin: 0;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-sm);
   background: var(--kodo-canvas);
-  box-shadow: 0 8px 24px rgba(23, 32, 51, 0.08);
+  box-shadow: 0 8px 24px rgb(23 32 51 / 12%);
   max-height: 200px;
   overflow: auto;
 }

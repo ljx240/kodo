@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { AgentTrace } from "./AgentTrace";
 import { ChangedFilesSummary } from "./ChangedFilesSummary";
 import { Markdown } from "./Markdown";
-import type { Reply } from "./trace";
+import { sanitizeAssistantText, type Reply } from "./trace";
 
 type Props = {
   time: string;
@@ -16,6 +16,10 @@ type Props = {
   progress?: { phase: string; detail: string } | null;
   /** Seconds since the running turn started, or null when idle. */
   elapsed?: number | null;
+  /** True while the runner is waiting for an approval decision. */
+  waitingApproval?: boolean;
+  /** One line per provider switch observed on the streaming path. */
+  failovers?: string[];
   onViewFiles: () => void;
   /** Re-send the last ask (regenerate). Omitted for demo or incomplete turns. */
   onRegenerate?: (() => void) | null;
@@ -28,6 +32,8 @@ export function AssistantReply({
   streamText = "",
   progress = null,
   elapsed = null,
+  waitingApproval = false,
+  failovers = [],
   onViewFiles,
   onRegenerate = null,
 }: Props) {
@@ -52,7 +58,9 @@ export function AssistantReply({
     }
   };
 
-  const statusLine = progress
+  const statusLine = waitingApproval
+    ? "等待你的批准后继续执行"
+    : progress
     ? `${progress.phase}${progress.detail ? ` · ${progress.detail}` : ""}`
     : running
       ? elapsed != null
@@ -106,9 +114,15 @@ export function AssistantReply({
         </p>
       )}
 
+      {failovers.map((line) => (
+        <p key={line} className="reply-failover" data-testid="failover-note">
+          {line}
+        </p>
+      ))}
+
       {running && streamText && (
         <div className="final stream-preview" data-testid="stream-preview">
-          <p className="final-text">{streamText}</p>
+          <p className="final-text">{sanitizeAssistantText(streamText)}</p>
         </div>
       )}
 
@@ -119,7 +133,7 @@ export function AssistantReply({
         </p>
       )}
       {reply.error && (
-        <div className="reply-error" role="alert" data-testid="reply-error">
+        <div className="reply-error reply-failed" role="alert" data-testid="reply-error">
           <CircleAlert size={14} strokeWidth={1.9} />
           <span>{reply.error}</span>
         </div>
