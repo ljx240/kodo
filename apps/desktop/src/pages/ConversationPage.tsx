@@ -1,5 +1,5 @@
 import { Archive, Folder, MoreVertical, Pencil } from "lucide-react";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   loadSession,
   onRunEvent,
@@ -12,8 +12,8 @@ import {
 } from "../api";
 import { AssistantReply } from "../conversation/AssistantReply";
 import { Composer } from "../conversation/Composer";
-import { toReply, type Reply } from "../conversation/trace";
-import { changedFiles, conversation, projects, summary } from "../data/fixture";
+import { titleFromAsk, toReply, type Reply } from "../conversation/trace";
+import { type DemoState } from "../data/demoState";
 import { snapshotFromTurn, type LiveSnapshot } from "../data/liveContext";
 import { type ProviderConfig } from "../data/providers";
 import { navigate } from "../routes";
@@ -24,6 +24,7 @@ type Props = {
   provider: ProviderConfig | null;
   providers: ProviderConfig[];
   onSelectProvider: (index: number) => void;
+  onSelectProviderModel: (providerIndex: number, modelId: string, displayName: string) => void;
   onViewFiles: () => void;
   onRetitle: (id: string, title: string) => Promise<void> | void;
   onArchive: (id: string) => Promise<void> | void;
@@ -31,9 +32,21 @@ type Props = {
   onSnapshot?: (snapshot: LiveSnapshot | null) => void;
   projectName?: string;
   projectPath?: string;
+  /**
+   * Deterministic fixture for `/ui-demo` only. Live routes pass null and must
+   * never import data/fixture or data/demo themselves.
+   */
+  demo?: DemoState | null;
 };
 
-type Approval = { step: number; kind: string; detail: string };
+type Approval = {
+  step: number;
+  kind: string;
+  detail: string;
+  cwd?: string;
+  riskCategory?: string;
+  reason?: string;
+};
 
 /** Recoverable failure: message + optional retry / recovery action. */
 type ActionErrorState = {
@@ -43,22 +56,31 @@ type ActionErrorState = {
   action?: { label: string; run: () => void };
 };
 
-const demoReply: Reply = {
-  steps: conversation.assistant.trace,
-  final: conversation.assistant.final,
-  checks: conversation.assistant.checks,
-  changes: changedFiles,
-  files: summary.files_changed,
-  added: summary.added,
-  removed: summary.removed,
-  interrupted: false,
-};
+type PendingSend = { text: string; context: string[] };
+
+function demoReplyFrom(demo: DemoState): Reply {
+  return {
+    steps: demo.conversation.assistant.trace,
+    final: demo.conversation.assistant.final,
+    checks: demo.conversation.assistant.checks,
+    changes: demo.changedFiles,
+    files: demo.summary.files_changed,
+    added: demo.summary.added,
+    removed: demo.summary.removed,
+    interrupted: false,
+    stopped: false,
+    error: null,
+    models: demo.summary.llm_calls.map((call) => call.model),
+    tokens: null,
+  };
+}
 
 export function ConversationPage({
   conversationId,
   provider,
   providers,
   onSelectProvider,
+  onSelectProviderModel,
   onViewFiles,
   onRetitle,
   onArchive,
@@ -66,8 +88,9 @@ export function ConversationPage({
   onSnapshot,
   projectName = "",
   projectPath = "",
+  demo = null,
 }: Props) {
-  const isFixture = conversationId === conversation.id;
+  const demoMode = Boolean(demo);
   const [turns, setTurns] = useState<TurnDto[]>([]);
   const [title, setTitle] = useState("");
   const [running, setRunning] = useState(false);
@@ -77,9 +100,26 @@ export function ConversationPage({
   const [contexts, setContexts] = useState<string[]>([]);
   const [pageError, setPageError] = useState<ActionErrorState | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [streamText, setStreamText] = useState("");
+  const [progress, setProgress] = useState<{ phase: string; detail: string } | null>(null);
+  const [queue, setQueueState] = useState<PendingSend[]>([]);
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState<number | null>(null);
+  /** False after Stop — late TextDelta races must not repaint the preview. */
+  const acceptStreamRef = useRef(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
+  /** Queue lives in a ref so drain never double-fires under StrictMode. */
+  const queueRef = useRef<PendingSend[]>([]);
+  const drainingRef = useRef(false);
+
+  const applyQueue = (next: PendingSend[]) => {
+    queueRef.current = next;
+    setQueueState(next);
+  };
 
   const providerWarning = useMemo(() => {
-    if (isFixture) return null;
+    if (demoMode) return null;
     if (providers.length === 0) return "尚未配置 AI Provider";
     const active = provider;
     if (!active) return "当前 Provider 不可用";
@@ -87,14 +127,21 @@ export function ConversationPage({
       return "当前 Provider 缺少 API Key";
     }
     return null;
-  }, [isFixture, providers, provider]);
+  }, [demoMode, providers, provider]);
 
   useEffect(() => {
     setApproval(null);
     setPageError(null);
     setContexts([]);
     setApprovalError(null);
-    if (!conversationId || isFixture) {
+    setStreamText("");
+    setProgress(null);
+    applyQueue([]);
+    setRunStartedAt(null);
+    setElapsed(null);
+    acceptStreamRef.current = true;
+    stickToBottomRef.current = true;
+    if (!conversationId || demoMode) {
       setTurns([]);
       setTitle("");
       setRunning(false);
@@ -115,58 +162,50 @@ export function ConversationPage({
     return () => {
       alive = false;
     };
-  }, [conversationId, isFixture]);
+  }, [conversationId, demoMode, onSnapshot]);
 
+  // Elapsed clock for the live turn status line.
   useEffect(() => {
-    if (!conversationId || isFixture) return;
+    if (runStartedAt === null || !running) {
+      setElapsed(null);
+      return;
+    }
+    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - runStartedAt) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [runStartedAt, running]);
 
-    let alive = true;
-    let stop: (() => void) | null = null;
-
-    void onRunEvent((event) => {
-      if (event.session !== conversationId) return;
-      if (event.type === "approvalRequest") {
-        setApproval({ step: event.step, kind: event.kind, detail: event.detail ?? "" });
-        return;
-      }
-      setTurns((current) => reduce(current, event));
-      if (event.type === "turnComplete" || event.type === "stopped" || event.type === "error") {
-        setRunning(false);
-        setApproval(null);
-      }
-    }).then((off) => {
-      if (alive) stop = off;
-      else off();
+  const adoptAskTitle = (ask: string) => {
+    if (!conversationId || demoMode) return;
+    if (title && title !== "新对话") return;
+    const next = titleFromAsk(ask);
+    if (!next) return;
+    setTitle(next);
+    void Promise.resolve(onRetitle(conversationId, next)).catch(() => {
+      /* title is cosmetic; keep the turn usable if retitle fails */
     });
+  };
 
-    return () => {
-      alive = false;
-      stop?.();
-    };
-  }, [conversationId, isFixture]);
-
-  const liveSnapshot = useMemo(() => {
-    if (isFixture || !conversationId) return null;
-    const last = turns[turns.length - 1] ?? null;
-    return snapshotFromTurn(conversationId, title || "新对话", projectName, projectPath, last, running);
-  }, [isFixture, conversationId, turns, title, running, projectName, projectPath]);
-
-  useEffect(() => {
-    onSnapshot?.(isFixture || !conversationId ? null : liveSnapshot);
-  }, [onSnapshot, liveSnapshot, isFixture, conversationId]);
-
-  const send = async (text: string, context: string[]) => {
+  const dispatchSend = async (text: string, context: string[], opts?: { skipTitle?: boolean }) => {
     if (!conversationId) return;
     const payload = { text, context };
     setPageError(null);
     setTurns((current) => [...current, blank(text, context)]);
     setRunning(true);
+    setRunStartedAt(Date.now());
+    acceptStreamRef.current = true;
+    setStreamText("");
+    setProgress(null);
+    stickToBottomRef.current = true;
+    if (!opts?.skipTitle) adoptAskTitle(text);
     try {
       await sendMessage(conversationId, text, context);
       // Context is consumed for this turn only; the user re-pins if needed.
       setContexts([]);
     } catch (failure) {
       setRunning(false);
+      setRunStartedAt(null);
       const message = errorMessage(failure);
       setTurns((current) => updateLast(current, (turn) => ({ ...turn, error: message })));
       setPageError({
@@ -174,15 +213,49 @@ export function ConversationPage({
         retryLabel: "重试发送",
         retry: () => {
           setPageError(null);
-          void send(payload.text, payload.context);
+          void dispatchSend(payload.text, payload.context, { skipTitle: true });
         },
       });
     }
   };
 
+  const drainQueue = () => {
+    if (drainingRef.current) return;
+    const pending = queueRef.current;
+    if (pending.length === 0) return;
+    drainingRef.current = true;
+    const [next, ...rest] = pending;
+    applyQueue(rest);
+    void dispatchSend(next.text, next.context, { skipTitle: true }).finally(() => {
+      drainingRef.current = false;
+    });
+  };
+
+  const send = (text: string, context: string[]) => {
+    if (!conversationId) return;
+    // Running: queue the follow-up instead of dropping the draft (codex/DSH).
+    if (running) {
+      applyQueue([...queueRef.current, { text, context }]);
+      return;
+    }
+    void dispatchSend(text, context);
+  };
+
+  const regenerate = () => {
+    if (!conversationId || running) return;
+    const last = [...turns].reverse().find((turn) => turn.ask.trim());
+    if (!last) return;
+    void dispatchSend(last.ask, last.context ?? [], { skipTitle: true });
+  };
+
   const stop = () => {
     if (!conversationId) return;
     setApproval(null);
+    // Stop 后不再产生用户可见 TextDelta。
+    acceptStreamRef.current = false;
+    setStreamText("");
+    setProgress(null);
+    setRunStartedAt(null);
     void stopRun(conversationId).catch((failure) => {
       setApprovalError(`停止失败：${errorMessage(failure)}`);
     });
@@ -231,12 +304,129 @@ export function ConversationPage({
     });
   };
 
-  const heading = isFixture ? titleOf(conversationId) : title || "新对话";
-  const liveSession = !isFixture && conversationId !== null;
+  useEffect(() => {
+    if (!conversationId || demoMode) return;
+
+    let alive = true;
+    let stop: (() => void) | null = null;
+
+    void onRunEvent((event) => {
+      if (event.session !== conversationId) return;
+      if (event.type === "approvalRequest") {
+        setApproval({
+          step: event.step,
+          kind: event.kind,
+          detail: event.detail ?? "",
+          cwd: event.cwd,
+          riskCategory: event.riskCategory,
+          reason: event.reason,
+        });
+        return;
+      }
+      if (event.type === "textDelta") {
+        if (acceptStreamRef.current) {
+          setStreamText((current) => current + event.text);
+        }
+        return;
+      }
+      if (event.type === "progress") {
+        setProgress({ phase: event.phase, detail: event.detail });
+        return;
+      }
+      if (event.type === "itemCompleted" && event.item.kind === "agentMessage") {
+        setStreamText("");
+      }
+      if (event.type === "turnStarted") {
+        acceptStreamRef.current = true;
+        setStreamText("");
+        setProgress(null);
+        setRunStartedAt((current) => current ?? Date.now());
+      }
+      setTurns((current) => reduce(current, event));
+      if (event.type === "turnComplete" || event.type === "stopped" || event.type === "error") {
+        acceptStreamRef.current = false;
+        setRunning(false);
+        setApproval(null);
+        setStreamText("");
+        setProgress(null);
+        setRunStartedAt(null);
+        if (event.type === "turnComplete") drainQueue();
+      }
+    }).then((off) => {
+      if (alive) stop = off;
+      else off();
+    });
+
+    return () => {
+      alive = false;
+      stop?.();
+    };
+  }, [conversationId, demoMode]);
+
+  // Follow the live turn: stick to bottom only while the reader is already there.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !stickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [turns, streamText, progress, queue, running]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distance < 48;
+  };
+
+  const liveSnapshot = useMemo(() => {
+    if (demoMode || !conversationId) return null;
+    const last = turns[turns.length - 1] ?? null;
+    return snapshotFromTurn(conversationId, title || "新对话", projectName, projectPath, last, running);
+  }, [demoMode, conversationId, turns, title, running, projectName, projectPath]);
+
+  useEffect(() => {
+    onSnapshot?.(demoMode || !conversationId ? null : liveSnapshot);
+  }, [onSnapshot, liveSnapshot, demoMode, conversationId]);
+
+  const heading = demoMode && demo
+    ? demo.conversation.title
+    : title || "新对话";
+  const liveSession = !demoMode && conversationId !== null;
+  const demoReply = demo ? demoReplyFrom(demo) : null;
+  // Centered first-run stage: empty live conversation, no demo payload, no approval bar.
+  const showWelcome = liveSession && turns.length === 0 && !approval && !pageError && queue.length === 0;
+
+  const composer = (
+    <Composer
+      provider={provider}
+      providers={providers}
+      onSelectProvider={onSelectProvider}
+      onSelectProviderModel={onSelectProviderModel}
+      ready={!demoMode && conversationId !== null}
+      running={running}
+      projectPath={projectPath}
+      contexts={contexts}
+      queueCount={queue.length}
+      onAddContext={addContext}
+      onRemoveContext={(path) => setContexts((current) => current.filter((item) => item !== path))}
+      onContextError={(message) =>
+        setPageError({
+          message,
+          action: {
+            label: "打开设置",
+            run: () => navigateSettings(),
+          },
+        })
+      }
+      onSend={(text, context) => send(text, context)}
+      onStop={stop}
+      providerWarning={providerWarning}
+      onOpenProviderSettings={() => navigateSettings()}
+    />
+  );
 
   return (
-    <main className="main">
-      <div className="scroll">
+    <main className={showWelcome ? "main main--welcome" : "main"}>
+      <div className="scroll" ref={scrollRef} onScroll={onScroll} data-testid="conversation-scroll">
         <div className="page-inner">
           <div className="conv-head">
             <Folder size={16} strokeWidth={1.7} />
@@ -340,47 +530,120 @@ export function ConversationPage({
             </div>
           )}
 
-          {isFixture ? (
-            <>
-              <UserMessage time={conversation.user.time} text={conversation.user.content} />
-              <AssistantReply
-                time={conversation.assistant.time}
-                reply={demoReply}
-                running={false}
-                onViewFiles={onViewFiles}
-              />
-            </>
-          ) : turns.length === 0 ? (
-            <p className="empty-note">发一条消息开始这次对话。</p>
+          {showWelcome ? (
+            <div className="welcome-stage" data-testid="welcome">
+              <div className="welcome-copy">
+                <h2 className="welcome-title">今天想做什么？</h2>
+                <p className="welcome-sub empty-note">
+                  描述任务或粘贴报错，我会在当前项目里读代码、改代码。
+                </p>
+                <div className="welcome-hints" data-testid="welcome-hints">
+                  <span className="welcome-hint">/ 调用技能</span>
+                  <span className="welcome-hint">+ 附加文件</span>
+                  <span className="welcome-hint">运行中可排队下一条</span>
+                </div>
+              </div>
+              {composer}
+            </div>
           ) : (
-            turns.map((turn, index) => {
-              const last = index === turns.length - 1;
-              return (
-                <Fragment key={index}>
-                  <UserMessage text={turn.ask} context={turn.context} />
+            <>
+              {demoMode && demo && demoReply ? (
+                <>
+                  <UserMessage time={demo.conversation.user.time} text={demo.conversation.user.content} />
                   <AssistantReply
-                    time=""
-                    reply={toReply(turn, running && last)}
-                    running={running && last}
+                    time={demo.conversation.assistant.time}
+                    reply={demoReply}
+                    running={false}
                     onViewFiles={onViewFiles}
                   />
-                </Fragment>
-              );
-            })
+                </>
+              ) : turns.length === 0 && queue.length === 0 ? (
+                <p className="empty-note">发一条消息开始这次对话。</p>
+              ) : (
+                turns.map((turn, index) => {
+                  const last = index === turns.length - 1;
+                  return (
+                    <Fragment key={index}>
+                      <UserMessage
+                        text={turn.ask}
+                        context={turn.context}
+                        time={formatTurnTime(turn)}
+                      />
+                      <AssistantReply
+                        time=""
+                        reply={toReply(turn, running && last)}
+                        running={running && last}
+                        streamText={running && last ? streamText : ""}
+                        progress={running && last ? progress : null}
+                        elapsed={running && last ? elapsed : null}
+                        onViewFiles={onViewFiles}
+                        onRegenerate={liveSession && last && !running ? regenerate : null}
+                      />
+                    </Fragment>
+                  );
+                })
+              )}
+            </>
+          )}
+
+          {queue.length > 0 && (
+            <div className="send-queue" data-testid="send-queue">
+              <div className="send-queue-head">
+                <strong>待发送 · {queue.length}</strong>
+                <button type="button" className="btn btn--sm" data-testid="queue-clear" onClick={() => applyQueue([])}>
+                  清空
+                </button>
+              </div>
+              <ul className="send-queue-list">
+                {queue.map((item, index) => (
+                  <li key={`${item.text}-${index}`}>
+                    <span className="send-queue-text">{item.text}</span>
+                    <button
+                      type="button"
+                      className="icon-btn icon-btn--sm"
+                      aria-label={`移出队列 ${index + 1}`}
+                      onClick={() =>
+                        applyQueue(queueRef.current.filter((_, position) => position !== index))
+                      }
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
 
           {/* Approval sits outside the turn list so it also shows on an empty turn. */}
           {liveSession && approval && (
-            <div className="approval-bar" role="alertdialog" aria-label="审批工具步骤">
+            <div className="approval-bar" role="alertdialog" aria-label="审批工具步骤" data-testid="approval-bar">
               <div className="approval-text">
-                <strong>需要批准 · {approval.kind}</strong>
-                <code>{approval.detail || "继续执行该步骤"}</code>
+                <strong>
+                  需要批准 · {approval.kind}
+                  {approval.riskCategory ? ` · ${approval.riskCategory}` : ""}
+                </strong>
+                <code data-testid="approval-command">{approval.detail || "继续执行该步骤"}</code>
+                {approval.reason && (
+                  <span className="approval-reason" data-testid="approval-reason">
+                    原因：{approval.reason}
+                  </span>
+                )}
+                {approval.cwd && (
+                  <span className="approval-cwd" data-testid="approval-cwd">
+                    cwd: {approval.cwd}
+                  </span>
+                )}
+                {approval.riskCategory && (
+                  <span className="approval-risk" data-testid="approval-risk">
+                    risk: {approval.riskCategory}
+                  </span>
+                )}
               </div>
               <div className="approval-actions">
-                <button type="button" className="btn" onClick={() => decide(false)}>
+                <button type="button" className="btn" data-testid="approval-deny" onClick={() => decide(false)}>
                   拒绝
                 </button>
-                <button type="button" className="btn btn--primary" onClick={() => decide(true)}>
+                <button type="button" className="btn btn--primary" data-testid="approval-allow" onClick={() => decide(true)}>
                   允许
                 </button>
               </div>
@@ -399,30 +662,7 @@ export function ConversationPage({
         </div>
       </div>
 
-      <Composer
-        provider={provider}
-        providers={providers}
-        onSelectProvider={onSelectProvider}
-        ready={!isFixture && conversationId !== null}
-        running={running}
-        projectPath={projectPath}
-        contexts={contexts}
-        onAddContext={addContext}
-        onRemoveContext={(path) => setContexts((current) => current.filter((item) => item !== path))}
-        onContextError={(message) =>
-          setPageError({
-            message,
-            action: {
-              label: "打开设置",
-              run: () => navigateSettings(),
-            },
-          })
-        }
-        onSend={(text, context) => void send(text, context)}
-        onStop={stop}
-        providerWarning={providerWarning}
-        onOpenProviderSettings={() => navigateSettings()}
-      />
+      {!showWelcome && composer}
     </main>
   );
 }
@@ -434,6 +674,15 @@ function errorMessage(failure: unknown): string {
 
 function navigateSettings() {
   navigate(window.location.pathname.startsWith("/ui-demo") ? "/ui-demo/settings" : "/settings");
+}
+
+function formatTurnTime(turn: TurnDto): string | undefined {
+  const at = turn.items[0]?.at;
+  if (!at) return undefined;
+  // core `at` is unix seconds
+  const date = new Date(at < 1e12 ? at * 1000 : at);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
 function UserMessage({ time, text, context }: { time?: string; text: string; context?: string[] }) {
@@ -491,13 +740,4 @@ function upsert(items: ItemDto[], item: ItemDto): ItemDto[] {
   const next = [...items];
   next[index] = item;
   return next;
-}
-
-function titleOf(conversationId: string | null): string {
-  if (!conversationId) return "新对话";
-  for (const project of projects) {
-    const match = project.conversations.find((item) => item.id === conversationId);
-    if (match) return match.title;
-  }
-  return conversation.title;
 }

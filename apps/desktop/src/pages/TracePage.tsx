@@ -7,20 +7,20 @@ import {
   Pencil,
   Play,
   Search,
-  Share2,
   Sparkles,
-  MoreHorizontal,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { loadSession, type SessionDto } from "../api";
 import { formatDuration, formatTokens } from "../conversation/trace";
-import { changedFiles, conversation, project } from "../data/fixture";
-import { timeline, type TimelineRow } from "../data/demo";
+import { type DemoState, type DemoState as Demo } from "../data/demoState";
+import type { ChangedFile } from "../data/types";
 import { ReplyMeta } from "../inspector/TraceInspector";
 import { FileRow } from "../inspector/Section";
 
 const TABS = ["Timeline", "Logs", "Artifacts"] as const;
 type Tab = (typeof TABS)[number];
+
+type TimelineRow = Demo["timeline"][number];
 
 const TYPE_ICONS: Record<TimelineRow["type"], typeof Circle> = {
   Thinking: Circle,
@@ -47,7 +47,7 @@ function liveTimeline(session: SessionDto): {
   rows: TimelineRow[];
   final: string;
   checks: string[];
-  files: typeof changedFiles;
+  files: ChangedFile[];
   done: boolean;
   stopped: boolean;
 } {
@@ -57,7 +57,7 @@ function liveTimeline(session: SessionDto): {
   }
   let final = "";
   let checks: string[] = [];
-  const files: typeof changedFiles = [];
+  const files: ChangedFile[] = [];
   const rows: TimelineRow[] = [];
 
   turn.items.forEach((item, index) => {
@@ -132,15 +132,17 @@ export function TracePage({
   conversationId,
   live,
 }: {
-  demo: boolean;
+  /** Fixture bundle for `/ui-demo` only; live routes pass null. */
+  demo: DemoState | null;
   conversationId: string | null;
   live?: SessionDto | null;
 }) {
+  const demoMode = Boolean(demo);
   const [tab, setTab] = useState<Tab>("Timeline");
   const [session, setSession] = useState<SessionDto | null>(live ?? null);
 
   useEffect(() => {
-    if (demo) {
+    if (demoMode) {
       setSession(null);
       return;
     }
@@ -159,9 +161,9 @@ export function TracePage({
     return () => {
       alive = false;
     };
-  }, [demo, conversationId, live]);
+  }, [demoMode, conversationId, live]);
 
-  if (!demo && !conversationId) {
+  if (!demoMode && !conversationId) {
     return (
       <main className="main">
         <div className="scroll">
@@ -171,7 +173,7 @@ export function TracePage({
     );
   }
 
-  if (!demo && !session) {
+  if (!demoMode && !session) {
     return (
       <main className="main">
         <div className="scroll">
@@ -181,16 +183,16 @@ export function TracePage({
     );
   }
 
-  const data = demo
+  const data = demoMode && demo
     ? {
-        rows: timeline,
-        final: conversation.assistant.final,
+        rows: demo.timeline,
+        final: demo.conversation.assistant.final,
         checks: [] as string[],
-        files: changedFiles,
+        files: demo.changedFiles,
         done: true,
         stopped: false,
-        crumbProject: project.name,
-        crumbTitle: conversation.title,
+        crumbProject: demo.project.name,
+        crumbTitle: demo.conversation.title,
       }
     : (() => {
         const mapped = liveTimeline(session!);
@@ -201,7 +203,7 @@ export function TracePage({
         };
       })();
 
-  if (!demo && data.rows.length === 0) {
+  if (!demoMode && data.rows.length === 0) {
     return (
       <main className="main">
         <div className="scroll">
@@ -211,7 +213,7 @@ export function TracePage({
     );
   }
 
-  const statusLabel = demo ? "Completed" : data.stopped ? "Stopped" : data.done ? "Completed" : "Interrupted";
+  const statusLabel = demoMode ? "Completed" : data.stopped ? "Stopped" : data.done ? "Completed" : "Interrupted";
   const logs = data.rows.map((row) => {
     const detail = row.chip ?? row.chips?.join(" ") ?? "";
     return `${row.time}  ${String(row.duration).padStart(4)}  ${row.type.padEnd(9)} ${row.title}${detail ? ` ${detail}` : ""}`;
@@ -229,13 +231,6 @@ export function TracePage({
           <span className="crumb-current">Response Trace</span>
         </nav>
         <span className="spacer" />
-        <button type="button" className="btn">
-          <Share2 size={15} strokeWidth={1.9} />
-          <span>Share</span>
-        </button>
-        <button type="button" className="icon-btn" aria-label="More">
-          <MoreHorizontal size={16} strokeWidth={1.7} />
-        </button>
       </header>
 
       <div className="scroll">
@@ -255,15 +250,23 @@ export function TracePage({
             </div>
 
             <div className="reply-card-body">
-              <ReplyMeta demo={demo} live={demo ? null : {
-                conversationId: session!.id,
-                title: session!.title,
-                projectName: data.crumbProject,
-                projectPath: session!.project,
-                turn: session!.turns[session!.turns.length - 1] ?? null,
-                reply: null,
-                running: false,
-              }} />
+              <ReplyMeta
+                demo={demoMode}
+                demoState={demo}
+                live={
+                  demoMode
+                    ? null
+                    : {
+                        conversationId: session!.id,
+                        title: session!.title,
+                        projectName: data.crumbProject,
+                        projectPath: session!.project,
+                        turn: session!.turns[session!.turns.length - 1] ?? null,
+                        reply: null,
+                        running: false,
+                      }
+                }
+              />
               <div className="reply-summary">
                 <h4>Final response summary</h4>
                 <p>{data.final || "（无最终回复）"}</p>

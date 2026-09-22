@@ -60,6 +60,13 @@ pub struct Budget {
     pub rounds_used: usize,
     pub tool_calls_used: usize,
     pub repairs_used: usize,
+    /// Wall-clock budget for repair cycles (ms). Default 120s.
+    pub max_repair_wall_ms: u64,
+    /// Repair wall-clock consumed so far (ms).
+    pub repair_wall_ms: u64,
+    /// Soft context budget: max packed context chars charged this turn.
+    pub max_context_chars: usize,
+    pub context_chars_used: usize,
 }
 
 impl Default for Budget {
@@ -71,6 +78,10 @@ impl Default for Budget {
             rounds_used: 0,
             tool_calls_used: 0,
             repairs_used: 0,
+            max_repair_wall_ms: 120_000,
+            repair_wall_ms: 0,
+            max_context_chars: 80_000,
+            context_chars_used: 0,
         }
     }
 }
@@ -88,6 +99,27 @@ impl Budget {
         self.repairs_used >= self.max_repairs
     }
 
+    pub fn repair_wall_exhausted(&self) -> bool {
+        self.repair_wall_ms >= self.max_repair_wall_ms
+    }
+
+    pub fn context_exhausted(&self) -> bool {
+        self.context_chars_used >= self.max_context_chars
+    }
+
+    /// Any hard budget hit — never open a new repair cycle.
+    pub fn repair_budget_exhausted(&self) -> bool {
+        self.repairs_exhausted() || self.repair_wall_exhausted() || self.context_exhausted()
+    }
+
+    pub fn charge_repair_wall(&mut self, ms: u64) {
+        self.repair_wall_ms = self.repair_wall_ms.saturating_add(ms);
+    }
+
+    pub fn charge_context(&mut self, chars: usize) {
+        self.context_chars_used = self.context_chars_used.saturating_add(chars);
+    }
+
     /// Auto-trip Failed only for rounds/tools; repair caps are checked on the
     /// repair transition itself (so denial→Plan is not stolen by BudgetExhausted).
     pub fn any_exhausted(&self) -> bool {
@@ -96,13 +128,15 @@ impl Budget {
 
     pub fn summary(&self) -> String {
         format!(
-            "rounds {}/{} · tools {}/{} · repairs {}/{}",
+            "rounds {}/{} · tools {}/{} · repairs {}/{} · repair_wall {}/{}ms",
             self.rounds_used,
             self.max_rounds,
             self.tool_calls_used,
             self.max_tool_calls,
             self.repairs_used,
-            self.max_repairs
+            self.max_repairs,
+            self.repair_wall_ms,
+            self.max_repair_wall_ms
         )
     }
 }
@@ -196,6 +230,14 @@ impl AgentMachine {
         &self.evidence
     }
 
+    pub fn evidence_mut(&mut self) -> Option<&mut AcceptanceEvidence> {
+        Some(&mut self.evidence)
+    }
+
+    pub fn budget_mut(&mut self) -> &mut Budget {
+        &mut self.budget
+    }
+
     pub fn last_acceptance(&self) -> Option<&AcceptanceReport> {
         self.last_acceptance.as_ref()
     }
@@ -213,34 +255,48 @@ impl AgentMachine {
     /// Feed one event. Budget is re-checked after successful handling.
     pub fn handle(&mut self, event: AgentEvent) -> Transition {
         if self.state.is_terminal() {
-            return Transition::AlreadyTerminal { state: self.state.clone() };
+            return Transition::AlreadyTerminal {
+                state: self.state.clone(),
+            };
         }
 
         // Cancel wins from any non-terminal state.
         if matches!(event, AgentEvent::Cancel) {
             let from = std::mem::replace(&mut self.state, AgentState::Cancelled);
-            return Transition::Advanced { from, to: AgentState::Cancelled };
+            return Transition::Advanced {
+                from,
+                to: AgentState::Cancelled,
+            };
         }
 
         let from = self.state.clone();
         let next = match self.step(event) {
             Ok(next) => next,
             Err(reason) => {
-                return Transition::Rejected { state: self.state.clone(), reason };
+                return Transition::Rejected {
+                    state: self.state.clone(),
+                    reason,
+                };
             }
         };
 
         // Budget trip after applying the event (except when already failing/cancel).
-        if !matches!(next, AgentState::Failed { .. } | AgentState::Cancelled | AgentState::Finish)
-            && self.budget.any_exhausted()
+        if !matches!(
+            next,
+            AgentState::Failed { .. } | AgentState::Cancelled | AgentState::Finish
+        ) && self.budget.any_exhausted()
         {
-            let to = AgentState::Failed { reason: FailReason::BudgetExhausted };
+            let to = AgentState::Failed {
+                reason: FailReason::BudgetExhausted,
+            };
             self.state = to.clone();
             return Transition::Advanced { from, to };
         }
 
         if next == self.state {
-            Transition::Stayed { state: self.state.clone() }
+            Transition::Stayed {
+                state: self.state.clone(),
+            }
         } else {
             self.state = next.clone();
             Transition::Advanced { from, to: next }
@@ -265,9 +321,12 @@ impl AgentMachine {
             // --- GatherContext ---
             (S::GatherContext, ModelRequestedTools { count }) => {
                 if self.budget.tools_exhausted() {
-                    return Ok(S::Failed { reason: FailReason::BudgetExhausted });
+                    return Ok(S::Failed {
+                        reason: FailReason::BudgetExhausted,
+                    });
                 }
                 self.pending_tool_count = count;
+                self.plan.mark_current_running();
                 Ok(S::Execute)
             }
             (S::GatherContext, ModelClaimedDone) => {
@@ -283,9 +342,12 @@ impl AgentMachine {
             // --- Execute ---
             (S::Execute, ModelRequestedTools { count }) => {
                 if self.budget.tools_exhausted() {
-                    return Ok(S::Failed { reason: FailReason::BudgetExhausted });
+                    return Ok(S::Failed {
+                        reason: FailReason::BudgetExhausted,
+                    });
                 }
                 self.pending_tool_count = count;
+                self.plan.mark_current_running();
                 Ok(S::Execute)
             }
             (S::Execute, ToolsFinished { results }) => {
@@ -298,6 +360,12 @@ impl AgentMachine {
             }
             (S::Execute, VerifyFinished { ok }) => {
                 // Direct verify without explicit Verify state (loop shortcut).
+                if !ok && self.evidence.verify_infra_failure {
+                    self.evidence.verify_ok = Some(false);
+                    return Ok(S::Failed {
+                        reason: FailReason::Unrecoverable,
+                    });
+                }
                 self.evidence.verify_ok = Some(ok);
                 if ok {
                     self.plan.mark_verify_done();
@@ -309,6 +377,13 @@ impl AgentMachine {
 
             // --- Verify ---
             (S::Verify, VerifyFinished { ok }) => {
+                // Infrastructure failure is not a product regression — Block.
+                if !ok && self.evidence.verify_infra_failure {
+                    self.evidence.verify_ok = Some(false);
+                    return Ok(S::Failed {
+                        reason: FailReason::Unrecoverable,
+                    });
+                }
                 self.evidence.verify_ok = Some(ok);
                 if ok {
                     self.plan.mark_verify_done();
@@ -319,6 +394,7 @@ impl AgentMachine {
             }
             (S::Verify, ModelRequestedTools { .. }) => {
                 // Unexpected mid-verify tools — allow but stay.
+                self.plan.mark_current_running();
                 Ok(S::Verify)
             }
             (S::Verify, ToolsFinished { results }) => {
@@ -335,6 +411,7 @@ impl AgentMachine {
             (S::Repair, RepairApplied) => Ok(S::Execute),
             (S::Repair, ModelRequestedTools { count }) => {
                 self.pending_tool_count = count;
+                self.plan.mark_current_running();
                 Ok(S::Execute)
             }
             (S::Repair, ToolsFinished { results }) => {
@@ -346,6 +423,12 @@ impl AgentMachine {
                 Err("cannot Finish from Repair; re-verify first".to_owned())
             }
             (S::Repair, VerifyFinished { ok }) => {
+                if !ok && self.evidence.verify_infra_failure {
+                    self.evidence.verify_ok = Some(false);
+                    return Ok(S::Failed {
+                        reason: FailReason::Unrecoverable,
+                    });
+                }
                 self.evidence.verify_ok = Some(ok);
                 if ok {
                     self.plan.mark_verify_done();
@@ -356,14 +439,20 @@ impl AgentMachine {
             }
 
             // --- Budget / explicit fail ---
-            (_, BudgetExceeded) => Ok(S::Failed { reason: FailReason::BudgetExhausted }),
+            (_, BudgetExceeded) => Ok(S::Failed {
+                reason: FailReason::BudgetExhausted,
+            }),
 
             // --- Terminal-adjacent rejections ---
             (S::Finish | S::Failed { .. } | S::Cancelled, _) => {
                 unreachable!("terminal handled above")
             }
 
-            (state, event) => Err(format!("illegal transition {:?} + {:?}", state.name(), event)),
+            (state, event) => Err(format!(
+                "illegal transition {:?} + {:?}",
+                state.name(),
+                event
+            )),
         }
     }
 
@@ -375,11 +464,27 @@ impl AgentMachine {
             .max(self.budget.tool_calls_used);
         // Charge at least pending_tool_count if results shorter (rejections collapsed).
         if results.is_empty() && self.pending_tool_count > 0 {
-            self.budget.tool_calls_used =
-                self.budget.tool_calls_used.saturating_add(self.pending_tool_count);
+            self.budget.tool_calls_used = self
+                .budget
+                .tool_calls_used
+                .saturating_add(self.pending_tool_count);
         }
+        // Use the active Command subtask's expectation so expected-failure
+        // reproduction commands become typed evidence, not silent noise.
+        let expectation = self
+            .plan
+            .subtasks
+            .iter()
+            .find(|s| !s.is_done() && matches!(s.kind, crate::plan::SubtaskKind::Command))
+            .and_then(|s| match &s.effective_requirement().evidence {
+                crate::evidence::EvidenceRequirement::CommandOutcome { expectation, .. } => {
+                    Some(expectation.clone())
+                }
+                _ => None,
+            });
         self.plan.absorb_tool_results(&results);
-        self.evidence.absorb_results(&results);
+        self.evidence
+            .absorb_results_with_expectation(&results, expectation.as_ref());
         self.pending_tool_count = 0;
     }
 
@@ -391,7 +496,9 @@ impl AgentMachine {
                 // Back to Plan so the loop can re-plan around the denial.
                 return Ok(AgentState::Plan);
             }
-            return Ok(AgentState::Failed { reason: FailReason::Unrecoverable });
+            return Ok(AgentState::Failed {
+                reason: FailReason::Unrecoverable,
+            });
         }
 
         if self.plan.requires_verify && self.evidence.verify_ok != Some(true) {
@@ -419,7 +526,9 @@ impl AgentMachine {
         if report.ok {
             Ok(AgentState::Finish)
         } else if self.budget.rounds_exhausted() {
-            Ok(AgentState::Failed { reason: FailReason::BudgetExhausted })
+            Ok(AgentState::Failed {
+                reason: FailReason::BudgetExhausted,
+            })
         } else {
             // Not enough evidence — stay so the loop can gather more.
             // If we were forced to finish-like claim, caller may BudgetExceeded.
@@ -429,8 +538,11 @@ impl AgentMachine {
     }
 
     fn begin_repair(&mut self, from: AgentState) -> Result<AgentState, String> {
-        if self.budget.repairs_exhausted() {
-            return Ok(AgentState::Failed { reason: FailReason::BudgetExhausted });
+        // Limited repair: attempts + tool calls (via any_exhausted) + wall clock + context.
+        if self.budget.repair_budget_exhausted() {
+            return Ok(AgentState::Failed {
+                reason: FailReason::BudgetExhausted,
+            });
         }
         self.budget.repairs_used += 1;
         let _ = from;
@@ -456,6 +568,7 @@ fn evidence_summary(e: &AcceptanceEvidence) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use crate::protocol::{ToolArgs, ToolCall, ToolCallId, ToolError, ToolName, ToolRegistry};
@@ -474,7 +587,9 @@ mod tests {
 
     impl FakeProvider {
         fn new(script: Vec<FakeReply>) -> Self {
-            Self { script: script.into() }
+            Self {
+                script: script.into(),
+            }
         }
 
         fn next(&mut self) -> FakeReply {
@@ -503,11 +618,17 @@ mod tests {
         }
 
         fn verify_fails() -> Self {
-            Self { verify_ok: false, ..Self::ok() }
+            Self {
+                verify_ok: false,
+                ..Self::ok()
+            }
         }
 
         fn deny_writes() -> Self {
-            Self { deny_write: true, ..Self::ok() }
+            Self {
+                deny_write: true,
+                ..Self::ok()
+            }
         }
 
         fn execute(&self, call: &ToolCall) -> ToolResult {
@@ -553,19 +674,14 @@ mod tests {
                         )
                     }
                 }
-                (name, args) => ToolResult::success(
-                    call.id.clone(),
-                    name.label(),
-                    args.label(),
-                    "ok",
-                ),
+                (name, args) => {
+                    ToolResult::success(call.id.clone(), name.label(), args.label(), "ok")
+                }
             }
         }
     }
 
-    fn parse_tools_json(
-        json: &serde_json::Value,
-    ) -> Option<Vec<crate::protocol::ToolInvocation>> {
+    fn parse_tools_json(json: &serde_json::Value) -> Option<Vec<crate::protocol::ToolInvocation>> {
         let text = json.to_string();
         let turn = crate::protocol::parse_model_turn(&text, &ToolRegistry::standard());
         match turn {
@@ -582,10 +698,7 @@ mod tests {
 
     #[test]
     fn simple_read_only_task_finishes_directly() {
-        let mut m = AgentMachine::new(
-            "Summarize the repository layout for me",
-            Budget::default(),
-        );
+        let mut m = AgentMachine::new("Summarize the repository layout for me", Budget::default());
         m.handle(AgentEvent::TaskReceived);
         m.handle(AgentEvent::PlanReady);
         m.handle(AgentEvent::ContextGathered);
@@ -626,7 +739,9 @@ mod tests {
 
         // Model asks tools → Execute
         let reply = p.next();
-        let FakeReply::Tools(json) = reply else { panic!("expected tools") };
+        let FakeReply::Tools(json) = reply else {
+            panic!("expected tools")
+        };
         let calls = parse_tools_json(&json).expect("calls");
         m.handle(AgentEvent::ModelRequestedTools { count: calls.len() });
         assert_eq!(m.state(), &AgentState::Execute);
@@ -642,7 +757,12 @@ mod tests {
         assert_eq!(m.state(), &AgentState::Verify, "writes require verify");
 
         m.handle(AgentEvent::VerifyFinished { ok: true });
-        assert_eq!(m.state(), &AgentState::Finish, "failures={:?}", m.last_acceptance());
+        assert_eq!(
+            m.state(),
+            &AgentState::Finish,
+            "failures={:?}",
+            m.last_acceptance()
+        );
         assert!(m.last_acceptance().map(|r| r.ok).unwrap_or(false));
     }
 
@@ -674,7 +794,10 @@ mod tests {
 
     #[test]
     fn repair_limit_yields_failed_budget() {
-        let budget = Budget { max_repairs: 2, ..Budget::default() };
+        let budget = Budget {
+            max_repairs: 2,
+            ..Budget::default()
+        };
         let mut m = AgentMachine::new("Please update the README file", budget);
         m.handle(AgentEvent::TaskReceived);
         m.handle(AgentEvent::PlanReady);
@@ -711,12 +834,168 @@ mod tests {
 
         assert_eq!(
             m.state(),
-            &AgentState::Failed { reason: FailReason::BudgetExhausted },
+            &AgentState::Failed {
+                reason: FailReason::BudgetExhausted
+            },
             "state={:?} repairs={}",
             m.state(),
             m.budget().repairs_used
         );
         assert!(m.budget().repairs_used >= 2);
+    }
+
+    #[test]
+    fn repair_test_fail_then_repair_then_pass() {
+        // Use the same happy-path task shape as failed_verify_with_fake_tools_…
+        let mut m = AgentMachine::new("fix tests", Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w"),
+                ToolName::WriteFile.label(),
+                "lib.rs",
+                "wrote",
+            )],
+        });
+        assert_eq!(m.state(), &AgentState::Verify);
+
+        // Product test fail → Repair (not Blocked).
+        m.handle(AgentEvent::VerifyFinished { ok: false });
+        assert_eq!(m.state(), &AgentState::Repair);
+        assert_eq!(m.budget().repairs_used, 1);
+
+        m.handle(AgentEvent::RepairApplied);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w2"),
+                ToolName::WriteFile.label(),
+                "lib.rs",
+                "y",
+            )],
+        });
+        assert_eq!(m.state(), &AgentState::Verify);
+
+        // Targeted re-run passes → Finish.
+        m.handle(AgentEvent::VerifyFinished { ok: true });
+        assert_eq!(
+            m.state(),
+            &AgentState::Finish,
+            "failures={:?}",
+            m.last_acceptance()
+        );
+        assert!(m.last_acceptance().map(|r| r.ok).unwrap_or(false));
+    }
+
+    #[test]
+    fn repair_test_fail_budget_exhausted_yields_failed_not_verified() {
+        let budget = Budget {
+            max_repairs: 1,
+            ..Budget::default()
+        };
+        let mut m = AgentMachine::new("Please update README", budget);
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w"),
+                ToolName::WriteFile.label(),
+                "README.md",
+                "wrote",
+            )],
+        });
+        // First fail uses up the single repair.
+        m.handle(AgentEvent::VerifyFinished { ok: false });
+        assert_eq!(m.state(), &AgentState::Repair);
+        m.handle(AgentEvent::RepairApplied);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w2"),
+                ToolName::WriteFile.label(),
+                "README.md",
+                "y",
+            )],
+        });
+        // Second fail: budget exhausted → Failed{BudgetExhausted}, not Finish.
+        m.handle(AgentEvent::VerifyFinished { ok: false });
+        assert_eq!(
+            m.state(),
+            &AgentState::Failed {
+                reason: FailReason::BudgetExhausted
+            },
+            "budget out must not Verify or Finish: {:?}",
+            m.state()
+        );
+        assert_ne!(m.state(), &AgentState::Finish);
+        assert_ne!(m.state(), &AgentState::Verify);
+    }
+
+    #[test]
+    fn repair_infra_failure_blocks_not_product_repair() {
+        let mut m = AgentMachine::new("Please update README", Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w"),
+                ToolName::WriteFile.label(),
+                "src/lib.rs",
+                "wrote",
+            )],
+        });
+        assert_eq!(m.state(), &AgentState::Verify);
+        {
+            let ev = m.evidence_mut().unwrap();
+            ev.verify_infra_failure = true;
+        }
+        m.handle(AgentEvent::VerifyFinished { ok: false });
+        assert_eq!(
+            m.state(),
+            &AgentState::Failed {
+                reason: FailReason::Unrecoverable
+            },
+            "infra failure must Block, not enter Repair: {:?}",
+            m.state()
+        );
+        assert_eq!(m.budget().repairs_used, 0, "no product repair for infra");
+    }
+
+    #[test]
+    fn repair_wall_clock_budget_exhausts() {
+        let budget = Budget {
+            max_repairs: 10,
+            max_repair_wall_ms: 0, // already exhausted
+            ..Budget::default()
+        };
+        let mut m = AgentMachine::new("Please fix", budget);
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w"),
+                ToolName::WriteFile.label(),
+                "a.md",
+                "x",
+            )],
+        });
+        m.handle(AgentEvent::VerifyFinished { ok: false });
+        assert_eq!(
+            m.state(),
+            &AgentState::Failed {
+                reason: FailReason::BudgetExhausted
+            },
+            "wall-clock repair budget must fail closed"
+        );
     }
 
     #[test]
@@ -782,7 +1061,13 @@ mod tests {
             assert_eq!(m.state(), &setup, "setup reached for {setup:?}");
             let t = m.handle(AgentEvent::Cancel);
             assert!(
-                matches!(t, Transition::Advanced { to: AgentState::Cancelled, .. }),
+                matches!(
+                    t,
+                    Transition::Advanced {
+                        to: AgentState::Cancelled,
+                        ..
+                    }
+                ),
                 "cancel from {setup:?} → {t:?}"
             );
             assert_eq!(m.state(), &AgentState::Cancelled);
@@ -832,7 +1117,12 @@ mod tests {
                 )],
             });
         }
-        assert_eq!(m.state(), &AgentState::Failed { reason: FailReason::Unrecoverable });
+        assert_eq!(
+            m.state(),
+            &AgentState::Failed {
+                reason: FailReason::Unrecoverable
+            }
+        );
     }
 
     #[test]
@@ -843,12 +1133,93 @@ mod tests {
         m.handle(AgentEvent::ContextGathered);
         // No writes, no verify — model claims done.
         m.handle(AgentEvent::ModelClaimedDone);
-        assert_ne!(m.state(), &AgentState::Finish, "claim without evidence must not Finish");
+        assert_ne!(
+            m.state(),
+            &AgentState::Finish,
+            "claim without evidence must not Finish"
+        );
+    }
+
+    #[test]
+    fn semantic_completion_model_done_plus_unrelated_tool_cannot_finish() {
+        let mut m = AgentMachine::new("Please update README with badges", Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        // Unrelated successful command (git status) is not acceptance evidence.
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("git"),
+                ToolName::RunCommand.label(),
+                "git status --short",
+                " M notes.md",
+            )],
+        });
+        m.handle(AgentEvent::ModelClaimedDone);
+        assert_ne!(
+            m.state(),
+            &AgentState::Finish,
+            "model claim + unrelated tool must not Finish: {:?}",
+            m.last_acceptance()
+        );
+        assert!(m.last_acceptance().map(|r| !r.ok).unwrap_or(true));
+        // Claim never injects evidence items.
+        assert!(m.evidence().bag.items.iter().all(|i| i.source != "model"));
+    }
+
+    #[test]
+    fn semantic_completion_claim_with_tests_but_unresolved_criterion_not_finish() {
+        // Build a plan with an unresolvable free-form criterion alongside verify.
+        let mut plan = TaskPlan::from_task("Please update README with badges");
+        plan.criteria
+            .push(crate::evidence::AcceptanceCriterion::new(
+                "m_cX",
+                "Make the experience feel magical",
+                crate::plan::infer_criterion_req("Make the experience feel magical"),
+            ));
+        assert!(plan.criteria.iter().any(|c| c.is_unresolved()));
+        let mut m =
+            AgentMachine::with_plan("Please update README with badges", plan, Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w"),
+                ToolName::WriteFile.label(),
+                "README.md",
+                "wrote",
+            )],
+        });
+        assert_eq!(m.state(), &AgentState::Verify);
+        m.handle(AgentEvent::VerifyFinished { ok: true });
+        // Tests passed + model claim, but functional criterion unresolved.
+        m.handle(AgentEvent::ModelClaimedDone);
+        assert_ne!(
+            m.state(),
+            &AgentState::Finish,
+            "unresolved criterion must block Finish: {:?}",
+            m.last_acceptance()
+        );
+        assert!(m.evidence().model_claimed_done || m.last_acceptance().is_some());
+        assert!(
+            m.last_acceptance()
+                .map(|r| r
+                    .failures
+                    .iter()
+                    .any(|f| f.contains("unresolved") || f.contains("m_cX")))
+                .unwrap_or(true)
+                || m.state() != &AgentState::Finish
+        );
     }
 
     #[test]
     fn tool_budget_exhaustion_fails_explicitly() {
-        let budget = Budget { max_tool_calls: 2, ..Budget::default() };
+        let budget = Budget {
+            max_tool_calls: 2,
+            ..Budget::default()
+        };
         let mut m = AgentMachine::new("touch many files", budget);
         m.handle(AgentEvent::TaskReceived);
         m.handle(AgentEvent::PlanReady);
@@ -864,18 +1235,28 @@ mod tests {
             matches!(
                 t,
                 Transition::Advanced {
-                    to: AgentState::Failed { reason: FailReason::BudgetExhausted },
+                    to: AgentState::Failed {
+                        reason: FailReason::BudgetExhausted
+                    },
                     ..
                 }
             ),
             "got {t:?}"
         );
-        assert_eq!(m.state(), &AgentState::Failed { reason: FailReason::BudgetExhausted });
+        assert_eq!(
+            m.state(),
+            &AgentState::Failed {
+                reason: FailReason::BudgetExhausted
+            }
+        );
     }
 
     #[test]
     fn round_budget_exhaustion_fails_explicitly() {
-        let budget = Budget { max_rounds: 0, ..Budget::default() };
+        let budget = Budget {
+            max_rounds: 0,
+            ..Budget::default()
+        };
         let mut m = AgentMachine::new("read only", budget);
         m.handle(AgentEvent::TaskReceived);
         m.handle(AgentEvent::PlanReady);
@@ -891,7 +1272,9 @@ mod tests {
         // rounds_used is 0; max 0 → any_exhausted after absorb? rounds_used still 0, max 0 → 0>=0 true
         assert_eq!(
             m.state(),
-            &AgentState::Failed { reason: FailReason::BudgetExhausted }
+            &AgentState::Failed {
+                reason: FailReason::BudgetExhausted
+            }
         );
     }
 
@@ -929,7 +1312,9 @@ mod tests {
         m.handle(AgentEvent::ContextGathered);
 
         let reply = p.next();
-        let FakeReply::Tools(json) = reply else { panic!() };
+        let FakeReply::Tools(json) = reply else {
+            panic!()
+        };
         let calls = parse_tools_json(&json).unwrap();
         m.handle(AgentEvent::ModelRequestedTools { count: calls.len() });
         let results: Vec<ToolResult> = calls
@@ -941,7 +1326,9 @@ mod tests {
             .collect();
         m.handle(AgentEvent::ToolsFinished { results });
         assert_eq!(m.state(), &AgentState::Verify);
-        m.handle(AgentEvent::VerifyFinished { ok: tools.verify_ok });
+        m.handle(AgentEvent::VerifyFinished {
+            ok: tools.verify_ok,
+        });
         assert_eq!(m.state(), &AgentState::Finish);
     }
 

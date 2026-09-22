@@ -108,11 +108,14 @@ pub fn apply_patch(project: &Path, args: &ApplyPatchArgs) -> Result<PatchOutcome
     })?;
 
     if args.old.is_empty() {
-        return Err(ToolError::invalid_args("apply_patch requires non-empty `old` context"));
+        return Err(ToolError::invalid_args(
+            "apply_patch requires non-empty `old` context",
+        ));
     }
 
     let old_content = if full.is_file() {
-        fs::read_to_string(&full).map_err(|e| conflict(format!("re-read required: cannot open {}: {e}", args.path)))?
+        fs::read_to_string(&full)
+            .map_err(|e| conflict(format!("re-read required: cannot open {}: {e}", args.path)))?
     } else {
         return Err(conflict(format!(
             "patch conflict: file does not exist: {} (re-read the tree; use create_file)",
@@ -122,7 +125,10 @@ pub fn apply_patch(project: &Path, args: &ApplyPatchArgs) -> Result<PatchOutcome
 
     // Reject binary-ish content.
     if old_content.bytes().take(4096).any(|b| b == 0) {
-        return Err(ToolError::execution(format!("binary file refused: {}", args.path)));
+        return Err(ToolError::execution(format!(
+            "binary file refused: {}",
+            args.path
+        )));
     }
 
     let mut hits = find_all(&old_content, &args.old);
@@ -184,10 +190,13 @@ pub fn replace_range(project: &Path, args: &ReplaceRangeArgs) -> Result<PatchOut
             args.path
         )));
     }
-    let old_content = fs::read_to_string(&full)
-        .map_err(|e| conflict(format!("re-read required: {e}")))?;
+    let old_content =
+        fs::read_to_string(&full).map_err(|e| conflict(format!("re-read required: {e}")))?;
     if old_content.bytes().take(4096).any(|b| b == 0) {
-        return Err(ToolError::execution(format!("binary file refused: {}", args.path)));
+        return Err(ToolError::execution(format!(
+            "binary file refused: {}",
+            args.path
+        )));
     }
 
     let lines: Vec<&str> = old_content.lines().collect();
@@ -213,12 +222,15 @@ pub fn replace_range(project: &Path, args: &ReplaceRangeArgs) -> Result<PatchOut
     let end = args.end_line.min(total);
     if args.end_line > total {
         // Clamp but note: still a conflict-style guard if wildly off
-        if args.end_line > total + 0 && args.start_line > total {
+        if args.end_line > total && args.start_line > total {
             return Err(conflict("range outside file"));
         }
     }
 
-    let mut new_lines: Vec<String> = lines[..args.start_line - 1].iter().map(|s| s.to_string()).collect();
+    let mut new_lines: Vec<String> = lines[..args.start_line - 1]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     // new_text may be multi-line; empty means delete the range
     if !args.new_text.is_empty() {
         for l in args.new_text.lines() {
@@ -230,10 +242,8 @@ pub fn replace_range(project: &Path, args: &ReplaceRangeArgs) -> Result<PatchOut
     }
 
     let mut new_content = new_lines.join("\n");
-    if old_content.ends_with('\n') || !new_content.is_empty() {
-        if !new_content.ends_with('\n') {
-            new_content.push('\n');
-        }
+    if (old_content.ends_with('\n') || !new_content.is_empty()) && !new_content.ends_with('\n') {
+        new_content.push('\n');
     }
 
     let (added, removed) = line_diff_counts(&old_content, &new_content);

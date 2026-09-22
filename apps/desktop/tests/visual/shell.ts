@@ -16,6 +16,10 @@ export type Core = {
   settings?: Record<string, string>;
   /** Project-relative files for Add context (`list_project_files`). */
   files?: string[];
+  /** Paths returned by the OS file dialog (`pick_files`) for 添加照片和文件. */
+  pickFiles?: string[];
+  /** Absolute external files the stub treats as readable. */
+  externalFiles?: string[];
   /** When true, `send_message` always rejects (failed-send recovery UX). */
   failSend?: boolean;
   /** When true, `respond_approval` always rejects. */
@@ -100,21 +104,37 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             const q = String(args?.query ?? "").toLowerCase();
             return files.filter((f) => !q || f.toLowerCase().includes(q));
           }
+          case "pick_files":
+            // "添加照片和文件" — absolute paths the user would pick in the OS dialog.
+            return (config as { pickFiles?: string[] }).pickFiles ?? files;
           case "read_context_file": {
             if (config.failContextRead) throw "cannot read file outside project";
             const path = String(args?.path ?? "");
-            if (!path || path.includes("..") || path.startsWith("/")) {
-              throw `path must stay inside the project: ${path}`;
+            if (!path || path.includes("..")) {
+              throw `invalid path: ${path}`;
+            }
+            if (path.startsWith("/")) {
+              // Absolute external path is allowed when listed as pickable in the stub.
+              const external = (config as { externalFiles?: string[] }).externalFiles ?? [];
+              if (!external.includes(path)) throw `file not found: ${path}`;
+              return `// preview of ${path}`;
             }
             if (!files.includes(path)) throw `file not found: ${path}`;
             return `// preview of ${path}`;
           }
           case "send_message": {
             if (config.failSend) throw "send failed: provider unavailable";
+            const contextPaths = Array.isArray(args?.context) ? (args.context as string[]) : [];
+            for (const p of contextPaths) {
+              if (!p || p.includes("..")) throw `invalid context path: ${p}`;
+              if (p.startsWith("/") && !(config as { externalFiles?: string[] }).externalFiles?.includes(p)) {
+                throw `context file not found: ${p}`;
+              }
+            }
             sendLog.push({
               id: String(args?.id ?? ""),
               text: String(args?.text ?? ""),
-              context: Array.isArray(args?.context) ? (args.context as string[]) : [],
+              context: contextPaths,
             });
             return null;
           }

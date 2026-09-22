@@ -47,7 +47,30 @@ test("the composer sends on Enter, clears, and stops claiming to be working", as
   await page.locator(".tree-conversation").click();
   await expect(page.locator(".conv-title")).toHaveText("修复路由");
 
-  await expect(page.locator(".empty-note")).toBeVisible();
+  await expect(page.locator('[data-testid="welcome"]')).toBeVisible();
+  await expect(page.locator(".welcome-title")).toHaveText("今天想做什么？");
+
+  // Empty stage: welcome + composer sit in the middle of the pane, not stuck at the bottom.
+  const stage = await page.evaluate(() => {
+    const main = document.querySelector(".main");
+    const welcome = document.querySelector('[data-testid="welcome"]');
+    const composer = document.querySelector(".composer");
+    if (!main || !welcome || !composer) return null;
+    const mainBox = main.getBoundingClientRect();
+    const welcomeBox = welcome.getBoundingClientRect();
+    const composerBox = composer.getBoundingClientRect();
+    return {
+      mainMid: mainBox.top + mainBox.height / 2,
+      welcomeMid: welcomeBox.top + welcomeBox.height / 2,
+      composerBottomFromMainBottom: mainBox.bottom - composerBox.bottom,
+      mainHeight: mainBox.height,
+    };
+  });
+  expect(stage).not.toBeNull();
+  // Centered within ~120px of the pane midline (heading + composer as one group).
+  expect(Math.abs(stage!.welcomeMid - stage!.mainMid)).toBeLessThan(120);
+  // Not flush to the bottom edge like the post-message layout.
+  expect(stage!.composerBottomFromMainBottom).toBeGreaterThan(48);
 
   const composer = page.locator(".composer-input");
   await expect(page.locator(".composer-send")).toBeDisabled();

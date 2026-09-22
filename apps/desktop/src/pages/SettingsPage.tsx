@@ -8,7 +8,6 @@ import {
   Palette,
   Pencil,
   Plus,
-  Search,
   Settings,
   SlidersHorizontal,
   SquareTerminal,
@@ -26,6 +25,8 @@ import {
   saveProviders,
   uid,
   maskApiKey,
+  migrateProviderConfig,
+  providerModelLabel,
 } from "../data/providers";
 import { useSetting, useSettingBool } from "../data/useSetting";
 
@@ -155,11 +156,6 @@ export function SettingsPage({ model, onSelectModel, onProvidersSaved }: Props) 
           <p>Customize Kodo to fit your workflow</p>
         </div>
         <span className="spacer" />
-        <div className="search-field search-field--inline">
-          <Search size={15} strokeWidth={1.7} />
-          <input placeholder="Search settings..." />
-          <kbd>⌘F</kbd>
-        </div>
       </header>
 
       <div className="settings-layout">
@@ -257,7 +253,7 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
             <div className="provider-row-info">
               <span className="provider-row-name">{p.name}</span>
               <span className="code-chip">{t.name}</span>
-              {p.model && <span className="provider-row-model">{p.model}</span>}
+              {p.model && <span className="provider-row-model">{providerModelLabel(p) || p.model}</span>}
               <span className="provider-row-model">{maskApiKey(p.apiKey, p.hasKey)}</span>
             </div>
             <div className="provider-row-actions">
@@ -298,19 +294,24 @@ function ProviderEditor({
   const [name, setName] = useState(initial?.name ?? "");
   const [apiKey, setApiKey] = useState(initial?.apiKey ?? "");
   const [endpoint, setEndpoint] = useState(initial?.endpoint ?? "");
-  const [model, setModel] = useState(initial?.model ?? "");
+  const [modelId, setModelId] = useState(initial?.modelId || initial?.model || "");
+  const [displayName, setDisplayName] = useState(initial?.displayName || "");
 
   const tmpl = templateById(templateId);
 
   const save = () => {
-    onSave({
+    const selected = tmpl.models.find((m) => m.model_id === modelId);
+    const migrated = migrateProviderConfig({
       id: initial?.id ?? uid(),
       name: name || tmpl.name,
       template: templateId,
       apiKey,
       endpoint,
-      model: model || tmpl.models[0] || "",
+      model: modelId || tmpl.models[0]?.model_id || "",
+      modelId: modelId || tmpl.models[0]?.model_id || "",
+      displayName: displayName || selected?.display_name || tmpl.models[0]?.display_name || "",
     });
+    onSave(migrated);
   };
 
   return (
@@ -350,17 +351,39 @@ function ProviderEditor({
           <input className="input" placeholder="https://api.example.com/v1" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
         </Field>
       )}
-      <Field label="Model" wide>
+      <Field
+        label="Model"
+        hint={tmpl.models.length > 0 ? "界面显示名称；后端发送 model_id" : "请直接填写 API model id，例如 gpt-4o"}
+        hintBelow
+        wide
+      >
         {tmpl.models.length > 0 ? (
-          <select className="select" value={model || tmpl.models[0]} onChange={(e) => setModel(e.target.value)}>
+          <select
+            className="select"
+            value={modelId || tmpl.models[0].model_id}
+            onChange={(e) => {
+              const next = e.target.value;
+              setModelId(next);
+              const opt = tmpl.models.find((m) => m.model_id === next);
+              if (opt) setDisplayName(opt.display_name);
+            }}
+          >
             {tmpl.models.map((m) => (
-              <option key={m} value={m}>
-                {m}
+              <option key={m.model_id} value={m.model_id}>
+                {m.display_name} — {m.model_id}
               </option>
             ))}
           </select>
         ) : (
-          <input className="input" placeholder="model-id" value={model} onChange={(e) => setModel(e.target.value)} />
+          <input
+            className="input"
+            placeholder="model-id"
+            value={modelId}
+            onChange={(e) => {
+              setModelId(e.target.value);
+              setDisplayName(e.target.value);
+            }}
+          />
         )}
       </Field>
       <div className="provider-row-actions" style={{ marginTop: 8 }}>
@@ -382,11 +405,16 @@ function ToolsBody() {
       <Field
         icon={<SquareTerminal size={20} strokeWidth={1.6} />}
         label="Permission mode"
-        hint="Shell、文件与 git 步骤共用此策略"
+        hint="Shell、文件与 git 步骤共用此策略（写入 permission，由 run driver 读取）"
         hintBelow
         wide
       >
-        <select className="select" value={permission} onChange={(e) => setPermission(e.target.value)}>
+        <select
+          className="select"
+          value={permission}
+          onChange={(e) => setPermission(e.target.value)}
+          aria-label="Permission mode"
+        >
           {PERMISSIONS.map((item) => (
             <option key={item.value} value={item.value}>
               {item.label} — {item.description}
@@ -394,8 +422,13 @@ function ToolsBody() {
           ))}
         </select>
       </Field>
-      <Field icon={<FileText size={20} strokeWidth={1.6} />} label="File write access" hint="由 Permission mode 统一约束" hintBelow wide>
-        <select className="select" value={permission} onChange={(e) => setPermission(e.target.value)}>
+      <Field icon={<FileText size={20} strokeWidth={1.6} />} label="File write access" hint="由 Permission mode 统一约束（同一 runtime key）" hintBelow wide>
+        <select
+          className="select"
+          value={permission}
+          onChange={(e) => setPermission(e.target.value)}
+          aria-label="File write access"
+        >
           {PERMISSIONS.map((item) => (
             <option key={item.value} value={item.value}>
               {item.label}
@@ -403,8 +436,13 @@ function ToolsBody() {
           ))}
         </select>
       </Field>
-      <Field icon={<GitBranch size={20} strokeWidth={1.6} />} label="Git access" hint="由 Permission mode 统一约束" hintBelow wide>
-        <select className="select" value={permission} onChange={(e) => setPermission(e.target.value)}>
+      <Field icon={<GitBranch size={20} strokeWidth={1.6} />} label="Git access" hint="由 Permission mode 统一约束（同一 runtime key）" hintBelow wide>
+        <select
+          className="select"
+          value={permission}
+          onChange={(e) => setPermission(e.target.value)}
+          aria-label="Git access"
+        >
           {PERMISSIONS.map((item) => (
             <option key={item.value} value={item.value}>
               {item.label}
@@ -419,12 +457,6 @@ function ToolsBody() {
 function StorageBody() {
   return (
     <>
-      <SwitchRow
-        label="Keep full traces"
-        hint="归档统计尽量保留 tools/commands/file changes（已接 list_archived 派生）"
-        trailing
-        settingKey="keep-full-traces"
-      />
       <Field
         label="Local state"
         hint="项目、会话与设置使用 append-only 日志；API Key 在 credentials.log"
@@ -444,20 +476,25 @@ function AppearanceBody() {
   const [density, setDensity] = useSetting("density", "compact");
   return (
     <>
-      <Field label="Theme" hint="V1 仅浅色；选择会保存供后续主题使用" hintBelow wide>
-        <select className="select" value={theme} onChange={(e) => setTheme(e.target.value)}>
+      <Field
+        label="Theme"
+        hint="写入 settings.log 并应用到 <html data-theme>；System 跟随系统深色偏好"
+        hintBelow
+        wide
+      >
+        <select className="select" value={theme} onChange={(e) => setTheme(e.target.value)} aria-label="Theme">
           <option value="light">Light</option>
-          <option value="system">System (仅浅色生效)</option>
+          <option value="system">System（跟随系统）</option>
         </select>
       </Field>
-      <Field label="Interface density" hint="compact 为设计默认密度" hintBelow wide>
+      <Field label="Interface density" hint="应用到 app 的 data-density" hintBelow wide>
         <select className="select" value={density} onChange={(e) => setDensity(e.target.value)}>
           <option value="compact">Compact</option>
           <option value="comfortable">Comfortable</option>
         </select>
       </Field>
-      <SwitchRow label="Show line numbers" hint="代码块展示偏好（已保存）" trailing settingKey="show-line-numbers" />
-      <SwitchRow label="Use system font" hint="使用系统 UI 字体（设计默认）" trailing settingKey="use-system-font" />
+      <SwitchRow label="Show line numbers" hint="应用到 data-line-numbers 属性" trailing settingKey="show-line-numbers" />
+      <SwitchRow label="Use system font" hint="应用 app--system-font 类" trailing settingKey="use-system-font" />
     </>
   );
 }
@@ -515,8 +552,6 @@ function GeneralBody({ model, onSelectModel }: { model: string; onSelectModel: (
       <Field label="Fallback behavior" hint="If the selected model is unavailable" hintBelow wide>
         <FallbackSelect />
       </Field>
-      <SwitchRow label="Show inline citations" hint="Link to source files, commands and tools" settingKey="show-inline-citations" />
-      <SwitchRow label="Auto-save conversations" hint="会话日志始终追加写入" trailing settingKey="auto-save-conversations" />
     </>
   );
 }

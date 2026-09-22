@@ -52,7 +52,9 @@ impl std::fmt::Display for Error {
         match self {
             Error::BadName(name) => write!(f, "not a usable project name: {name:?}"),
             Error::Exists(path) => write!(f, "already exists: {}", path.display()),
-            Error::NotADirectory(path) => write!(f, "not an existing directory: {}", path.display()),
+            Error::NotADirectory(path) => {
+                write!(f, "not an existing directory: {}", path.display())
+            }
             Error::Io(error) => write!(f, "{error}"),
         }
     }
@@ -107,7 +109,7 @@ fn fold(lines: &[String]) -> Vec<Project> {
             }
             ("order", paths) => {
                 let mut ordered: Vec<Project> = Vec::with_capacity(projects.len());
-                for wanted in paths.iter().map(|path| PathBuf::from(path)) {
+                for wanted in paths.iter().map(PathBuf::from) {
                     if let Some(index) = projects.iter().position(|entry| entry.path == wanted) {
                         ordered.push(projects.remove(index));
                     }
@@ -160,7 +162,10 @@ pub fn reorder(log: &Path, project: &Path, index: usize) -> Result<(), Error> {
     let to = index.min(projects.len());
     projects.insert(to, moved);
 
-    let paths: Vec<String> = projects.iter().map(|entry| entry.path.to_string_lossy().into_owned()).collect();
+    let paths: Vec<String> = projects
+        .iter()
+        .map(|entry| entry.path.to_string_lossy().into_owned())
+        .collect();
     let mut fields: Vec<&str> = Vec::with_capacity(paths.len() + 1);
     fields.push("order");
     fields.extend(paths.iter().map(String::as_str));
@@ -329,7 +334,11 @@ mod tests {
 
         reorder(&log, &tmp.path().join("three"), 0).expect("reorder");
 
-        let names: Vec<String> = load(&log).expect("load").into_iter().map(|entry| entry.name).collect();
+        let names: Vec<String> = load(&log)
+            .expect("load")
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
         assert_eq!(names, vec!["three", "one", "two"]);
     }
 
@@ -343,7 +352,11 @@ mod tests {
 
         reorder(&log, &tmp.path().join("one"), 99).expect("reorder");
 
-        let names: Vec<String> = load(&log).expect("load").into_iter().map(|entry| entry.name).collect();
+        let names: Vec<String> = load(&log)
+            .expect("load")
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
         assert_eq!(names, vec!["two", "one"]);
     }
 
@@ -361,10 +374,19 @@ mod tests {
     fn a_damaged_line_costs_only_itself() {
         let (_tmp, log, _dir) = seeded(
             "ws-damaged",
-            &["add\t/one", "this line is nonsense", "rename\tonly-one-field", "add\t/two"],
+            &[
+                "add\t/one",
+                "this line is nonsense",
+                "rename\tonly-one-field",
+                "add\t/two",
+            ],
         );
 
-        let paths: Vec<PathBuf> = load(&log).expect("load").into_iter().map(|entry| entry.path).collect();
+        let paths: Vec<PathBuf> = load(&log)
+            .expect("load")
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
         assert_eq!(paths, vec![PathBuf::from("/one"), PathBuf::from("/two")]);
     }
 
@@ -390,14 +412,25 @@ mod tests {
     #[test]
     fn create_refuses_names_that_are_not_one_component() {
         let tmp = TempDir::new("ws-create-bad");
-        for name in ["", ".", "..", "a/b", "../escape", "/etc/passwd", "nested/../x"] {
+        for name in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "../escape",
+            "/etc/passwd",
+            "nested/../x",
+        ] {
             assert!(
                 matches!(create(tmp.path(), name), Err(Error::BadName(_))),
                 "{name:?} should have been refused",
             );
         }
         // Nothing was created anywhere.
-        assert_eq!(fs::read_dir(tmp.path()).expect("read the temp dir").count(), 0);
+        assert_eq!(
+            fs::read_dir(tmp.path()).expect("read the temp dir").count(),
+            0
+        );
     }
 
     #[test]
@@ -407,7 +440,10 @@ mod tests {
         fs::write(existing.join("keep.txt"), "important").expect("seed a file");
 
         assert!(matches!(create(tmp.path(), "taken"), Err(Error::Exists(_))));
-        assert!(existing.join("keep.txt").is_file(), "the directory was clobbered");
+        assert!(
+            existing.join("keep.txt").is_file(),
+            "the directory was clobbered"
+        );
     }
 
     #[test]
@@ -425,7 +461,10 @@ mod tests {
         add(&log, &dir).expect("add");
         rename(&log, &dir, "修复 k2k-rust 未知表路由").expect("rename");
 
-        assert_eq!(load(&log).expect("load")[0].name, "修复 k2k-rust 未知表路由");
+        assert_eq!(
+            load(&log).expect("load")[0].name,
+            "修复 k2k-rust 未知表路由"
+        );
     }
 
     #[test]
@@ -445,13 +484,19 @@ mod tests {
     fn a_branch_name_may_contain_slashes() {
         let tmp = TempDir::new("ws-branch-slash");
         tmp.file("repo/.git/HEAD", "ref: refs/heads/feat/k2k-routing\n");
-        assert_eq!(branch(&tmp.path().join("repo")).as_deref(), Some("feat/k2k-routing"));
+        assert_eq!(
+            branch(&tmp.path().join("repo")).as_deref(),
+            Some("feat/k2k-routing")
+        );
     }
 
     #[test]
     fn a_detached_head_reports_a_short_commit() {
         let tmp = TempDir::new("ws-branch-detached");
-        tmp.file("repo/.git/HEAD", "9f2c1ab4d5e6f708192a3b4c5d6e7f8091a2b3c4\n");
+        tmp.file(
+            "repo/.git/HEAD",
+            "9f2c1ab4d5e6f708192a3b4c5d6e7f8091a2b3c4\n",
+        );
         assert_eq!(branch(&tmp.path().join("repo")).as_deref(), Some("9f2c1ab"));
     }
 
@@ -460,11 +505,19 @@ mod tests {
         let tmp = TempDir::new("ws-branch-worktree");
         // The real git directory lives elsewhere and `.git` only records where.
         tmp.file("repo/.git", "gitdir: /somewhere/else/.git/worktrees/repo\n");
-        assert_eq!(branch(&tmp.path().join("repo")), None, "an absent target is not a branch");
+        assert_eq!(
+            branch(&tmp.path().join("repo")),
+            None,
+            "an absent target is not a branch"
+        );
 
         let real = tmp.dir("real");
         fs::write(real.join("HEAD"), "ref: refs/heads/work\n").expect("write HEAD");
-        fs::write(tmp.path().join("repo/.git"), format!("gitdir: {}\n", real.display())).expect("point");
+        fs::write(
+            tmp.path().join("repo/.git"),
+            format!("gitdir: {}\n", real.display()),
+        )
+        .expect("point");
         assert_eq!(branch(&tmp.path().join("repo")).as_deref(), Some("work"));
     }
 

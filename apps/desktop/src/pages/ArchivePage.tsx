@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { Archive, ArrowDownUp, MessageCircle, MoreHorizontal, Search } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Archive, ArrowDownUp, MessageCircle, Search } from "lucide-react";
 import { isDesktop, listArchived, type ArchivedItemDto } from "../api";
-import { archiveFooter, archivedConversations } from "../data/demo";
+import type { DemoState } from "../data/demoState";
 
 type Row = {
   id: string;
@@ -24,11 +24,14 @@ function formatWhen(at: number): string {
 
 export function ArchivePage({
   demo,
+  demoState,
   selectedId,
   reloadToken = 0,
   onSelect,
 }: {
+  /** True on `/ui-demo`; demo rows then come from `demoState`. */
   demo: boolean;
+  demoState?: DemoState | null;
   selectedId: string | null;
   /** Bump after restore/archive so the table refetches. */
   reloadToken?: number;
@@ -42,21 +45,47 @@ export function ArchivePage({
   }) => void;
 }) {
   const live = !demo && isDesktop();
-  const [rows, setRows] = useState<Row[]>(() =>
-    archivedConversations.map((item) => ({
-      id: item.id,
-      title: item.title,
-      summary: item.summary,
-      archivedAt: item.archivedAt,
-      model: item.model,
-      added: item.added,
-      removed: item.removed,
-      filesChanged: item.added + item.removed > 0 ? 7 : 0,
-      projectName: "—",
-      live: false,
-    })),
+  const demoRows = useMemo<Row[]>(
+    () =>
+      (demoState?.archivedConversations ?? []).map((item) => ({
+        id: item.id,
+        title: item.title,
+        summary: item.summary,
+        archivedAt: item.archivedAt,
+        model: item.model,
+        added: item.added,
+        removed: item.removed,
+        filesChanged: item.added + item.removed > 0 ? 7 : 0,
+        projectName: "—",
+        live: false,
+      })),
+    [demoState],
   );
-  const [total, setTotal] = useState(archiveFooter.total);
+  const [rows, setRows] = useState<Row[]>(demoRows);
+  const [total, setTotal] = useState(demoState?.archiveFooter.total ?? 0);
+  const [query, setQuery] = useState("");
+  const [reverse, setReverse] = useState(false);
+
+  useEffect(() => {
+    if (demo) {
+      setRows(demoRows);
+      setTotal(demoState?.archiveFooter.total ?? demoRows.length);
+    }
+  }, [demo, demoRows, demoState]);
+
+  const visibleRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let list = q
+      ? rows.filter(
+          (row) =>
+            row.title.toLowerCase().includes(q) ||
+            row.summary.toLowerCase().includes(q) ||
+            row.projectName.toLowerCase().includes(q),
+        )
+      : rows;
+    if (reverse) list = [...list].reverse();
+    return list;
+  }, [rows, query, reverse]);
 
   useEffect(() => {
     if (!live) return;
@@ -100,57 +129,40 @@ export function ArchivePage({
         </div>
         <span className="spacer" />
         <span className="page-meta">{total} archived conversations</span>
-        <button type="button" className="icon-btn" aria-label="Archive actions">
-          <MoreHorizontal size={16} strokeWidth={1.7} />
-        </button>
       </header>
 
       <div className="scroll">
         <div className="page-inner page-inner--wide">
           <div className="search-field">
             <Search size={15} strokeWidth={1.7} />
-            <input placeholder="搜索归档的对话..." />
+            <input
+              placeholder="搜索归档的对话..."
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              aria-label="搜索归档的对话"
+            />
           </div>
 
           <div className="filters">
-            <label className="field">
-              <span className="field-label">Project</span>
-              <select className="select" defaultValue="all">
-                <option value="all">All projects</option>
-              </select>
-            </label>
-            <label className="field">
-              <span className="field-label">Time range</span>
-              <select className="select" defaultValue="all">
-                <option value="all">All time</option>
-              </select>
-            </label>
-            <label className="field">
-              <span className="field-label">Model</span>
-              <select className="select" defaultValue="all">
-                <option value="all">All models</option>
-              </select>
-            </label>
-            <label className="field">
-              <span className="field-label">Sort by</span>
-              <select className="select" defaultValue="archived">
-                <option value="archived">Archived at (newest)</option>
-              </select>
-            </label>
-            <button type="button" className="icon-btn icon-btn--boxed" aria-label="Reverse sort order">
+            <button
+              type="button"
+              className="icon-btn icon-btn--boxed"
+              aria-label="Reverse sort order"
+              title="反转排序"
+              onClick={() => setReverse((value) => !value)}
+            >
               <ArrowDownUp size={15} strokeWidth={1.7} />
             </button>
           </div>
 
-          {rows.length === 0 ? (
-            <p className="empty-note">{live ? "还没有归档的对话。" : "（演示数据）"}</p>
+          {visibleRows.length === 0 ? (
+            <p className="empty-note">
+              {live ? (query ? "没有匹配的归档对话。" : "还没有归档的对话。") : "（演示数据）"}
+            </p>
           ) : (
             <table className="archive-table">
               <thead>
                 <tr>
-                  <th>
-                    <input type="checkbox" aria-label="Select all" />
-                  </th>
                   <th>Conversation</th>
                   <th>Summary</th>
                   <th>Archived at ↓</th>
@@ -160,7 +172,7 @@ export function ArchivePage({
                 </tr>
               </thead>
               <tbody>
-                {rows.map((item) => (
+                {visibleRows.map((item) => (
                   <tr
                     key={item.id}
                     className={selectedId === item.id ? "row--selected" : undefined}
@@ -175,9 +187,6 @@ export function ArchivePage({
                       })
                     }
                   >
-                    <td>
-                      <input type="checkbox" defaultChecked={selectedId === item.id} aria-label={`Select ${item.title}`} />
-                    </td>
                     <td>
                       <span className="arc-title">
                         <MessageCircle size={14} strokeWidth={1.8} />
@@ -211,7 +220,7 @@ export function ArchivePage({
 
           <footer className="table-foot">
             <span>
-              {rows.length === 0 ? 0 : 1}–{rows.length} of {total} conversations
+              {visibleRows.length === 0 ? 0 : 1}–{visibleRows.length} of {total} conversations
             </span>
             <span className="spacer" />
             <span className="setting-hint">Restore 在 Inspector 中操作</span>

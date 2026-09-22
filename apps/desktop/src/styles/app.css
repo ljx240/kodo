@@ -41,6 +41,11 @@ select {
   outline-offset: var(--kodo-focus-offset);
 }
 
+/* The draft box is framed by the composer border — no inner ring. */
+.composer-input:focus-visible {
+  outline: none !important;
+}
+
 :focus:not(:focus-visible) {
   outline: none;
 }
@@ -415,6 +420,53 @@ p {
   color: var(--kodo-accent);
 }
 
+/* Conversation row + trailing ⋯. The button is the primary target; the menu
+   sits beside it without nesting another navigation surface. */
+.tree-conversation-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.tree-conversation-row--active {
+  background: var(--kodo-selected);
+  border-radius: var(--kodo-radius);
+}
+
+.tree-conversation-row .tree-conversation {
+  flex: 1;
+  min-width: 0;
+  border-radius: var(--kodo-radius) 0 0 var(--kodo-radius);
+}
+
+.tree-conversation-row--active .tree-conversation {
+  background: transparent;
+}
+
+.tree-conversation-more {
+  flex: none;
+  opacity: 0;
+  margin-right: 4px;
+}
+
+.tree-conversation-row:hover .tree-conversation-more,
+.tree-conversation-more:focus-visible {
+  opacity: 1;
+}
+
+.welcome-hints {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 12px;
+  margin-top: 12px;
+}
+
+.welcome-hint {
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-muted);
+}
+
 /* Shown only when a real scan found nothing, so it never reaches a screenshot.
    The root is a path, so it has to be allowed to break anywhere. */
 .tree-empty {
@@ -613,8 +665,13 @@ p {
   color: var(--kodo-text-secondary);
 }
 
-.icon-btn:hover {
+.icon-btn:hover:not(:disabled) {
   background: var(--kodo-hover);
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* Menu toggles report open state to assistive tech from one place. */
@@ -842,6 +899,59 @@ p {
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
   text-align: center;
+}
+
+/* ── Empty conversation: welcome + composer in the middle of the pane ───── */
+
+.main--welcome .scroll {
+  display: flex;
+  flex-direction: column;
+}
+
+.main--welcome .page-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.welcome-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 18px;
+  /* Optical center: a little low of true middle, matching mainstream agents. */
+  padding: 48px 0 72px;
+  min-height: min(420px, 100%);
+}
+
+.welcome-copy {
+  text-align: center;
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.welcome-title {
+  margin: 0 0 8px;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--kodo-text);
+  letter-spacing: -0.01em;
+}
+
+.welcome-sub {
+  margin: 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  line-height: 1.55;
+}
+
+.welcome-stage .composer {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  padding: 0;
 }
 
 .conv-title-input {
@@ -1081,4 +1191,18 @@ p {
 
 .btn--ghost:hover {
   background: var(--kodo-hover);
+}
+
+.app[data-density="comfortable"] {
+  --kodo-space-1: 6px;
+  --kodo-space-2: 10px;
+  --kodo-space-3: 16px;
+}
+
+.app--system-font {
+  --kodo-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.app[data-line-numbers="false"] .line-no {
+  display: none;
 }

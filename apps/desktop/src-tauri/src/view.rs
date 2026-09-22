@@ -134,18 +134,59 @@ pub struct ChangeView {
     pub removed: u32,
 }
 
+/// One Kodo-touched file with its unified diff for the inspector.
+#[derive(serde::Serialize, Clone)]
+pub struct TurnChangeView {
+    pub path: String,
+    pub diff: String,
+    #[serde(rename = "userPreexisting")]
+    pub user_preexisting: bool,
+    /// Live undo state: "clean" | "already_baseline" | "diverged" | "missing".
+    pub undo_state: String,
+    /// True when the recorded after-hash no longer matches the working tree.
+    pub conflict: bool,
+}
+
+/// Safe undo outcome: restored paths + per-file conflicts (state C).
+#[derive(serde::Serialize, Clone)]
+pub struct UndoReportView {
+    pub restored: Vec<String>,
+    pub conflicts: Vec<UndoConflictView>,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct UndoConflictView {
+    pub path: String,
+    pub reason: String,
+    pub message: String,
+}
+
 impl From<session::Item> for ItemView {
     fn from(item: session::Item) -> Self {
         let detail = match item.kind {
             session::ItemKind::Reasoning { summary } => ItemDetail::Reasoning { summary },
             session::ItemKind::Search { query, detail } => ItemDetail::Search { query, detail },
             session::ItemKind::FileRead { path, detail } => ItemDetail::FileRead { path, detail },
-            session::ItemKind::CommandExecution { command, cwd, output, exit_code } => {
-                ItemDetail::CommandExecution { command, cwd, output, exit_code }
-            }
-            session::ItemKind::ModelCall { model, input_tokens, output_tokens } => {
-                ItemDetail::ModelCall { model, input_tokens, output_tokens }
-            }
+            session::ItemKind::CommandExecution {
+                command,
+                cwd,
+                output,
+                exit_code,
+            } => ItemDetail::CommandExecution {
+                command,
+                cwd,
+                output,
+                exit_code,
+            },
+            session::ItemKind::ModelCall {
+                model,
+                input_tokens,
+                output_tokens,
+            } => ItemDetail::ModelCall {
+                model,
+                input_tokens,
+                output_tokens,
+            },
             session::ItemKind::FileChange { changes } => ItemDetail::FileChange {
                 changes: changes
                     .into_iter()
@@ -156,7 +197,9 @@ impl From<session::Item> for ItemView {
                     })
                     .collect(),
             },
-            session::ItemKind::AgentMessage { text, checks } => ItemDetail::AgentMessage { text, checks },
+            session::ItemKind::AgentMessage { text, checks } => {
+                ItemDetail::AgentMessage { text, checks }
+            }
         };
 
         ItemView {
@@ -210,18 +253,54 @@ impl From<session::Session> for SessionView {
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum RunEvent {
-    TurnStarted { session: String },
-    ItemStarted { session: String, item: ItemView },
-    ItemCompleted { session: String, item: ItemView },
-    TurnComplete { session: String },
-    Stopped { session: String },
-    Error { session: String, message: String },
+    TurnStarted {
+        session: String,
+    },
+    ItemStarted {
+        session: String,
+        item: ItemView,
+    },
+    ItemCompleted {
+        session: String,
+        item: ItemView,
+    },
+    TurnComplete {
+        session: String,
+    },
+    Stopped {
+        session: String,
+    },
+    Error {
+        session: String,
+        message: String,
+    },
     /// The runner is waiting for the user to approve or deny a step.
     ApprovalRequest {
         session: String,
         step: u32,
         kind: String,
         /// Command or short detail when the step has one.
+        detail: String,
+        /// Working directory the command would run in.
+        #[serde(default)]
+        cwd: String,
+        /// Structured risk: Safe | FilesystemWrite | Network | PackageInstall |
+        /// DestructiveGit | ProcessControl | SensitiveData | Dangerous.
+        #[serde(default)]
+        risk_category: String,
+        /// Human-readable reason for the risk.
+        #[serde(default)]
+        reason: String,
+    },
+    /// Incremental assistant text while the model streams (not persisted).
+    TextDelta {
+        session: String,
+        text: String,
+    },
+    /// Structured agent progress phase (never chain-of-thought).
+    Progress {
+        session: String,
+        phase: String,
         detail: String,
     },
 }
@@ -255,6 +334,14 @@ pub struct ProviderView {
     pub api_key: String,
     pub endpoint: String,
     pub model: String,
+    #[serde(default, rename = "modelId", skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(
+        default,
+        rename = "displayName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_name: Option<String>,
     /// True when a secret exists in credentials.log.
     #[serde(default)]
     #[serde(rename = "hasKey")]
@@ -268,7 +355,13 @@ mod tests {
     use serde_json::json;
 
     fn item(kind: ItemKind) -> Item {
-        Item { id: 3, at: 1_700_000_000, status: Status::Done, duration_ms: Some(1_234), kind }
+        Item {
+            id: 3,
+            at: 1_700_000_000,
+            status: Status::Done,
+            duration_ms: Some(1_234),
+            kind,
+        }
     }
 
     fn to_json(item: Item) -> serde_json::Value {
@@ -292,12 +385,17 @@ mod tests {
         assert_eq!(value["kind"], json!("commandExecution"));
         assert_eq!(value["command"], json!("cargo check"));
         assert_eq!(value["exitCode"], json!(0));
-        assert!(value.get("detail").is_none(), "the payload was nested: {value}");
+        assert!(
+            value.get("detail").is_none(),
+            "the payload was nested: {value}"
+        );
     }
 
     #[test]
     fn a_running_item_has_no_duration() {
-        let mut running = item(ItemKind::Reasoning { summary: "先看目录".to_owned() });
+        let mut running = item(ItemKind::Reasoning {
+            summary: "先看目录".to_owned(),
+        });
         running.status = Status::Running;
         running.duration_ms = None;
         let value = to_json(running);
@@ -311,9 +409,26 @@ mod tests {
     #[test]
     fn every_kind_uses_the_tag_the_gui_switches_on() {
         let cases = vec![
-            (ItemKind::Reasoning { summary: String::new() }, "reasoning"),
-            (ItemKind::Search { query: String::new(), detail: String::new() }, "search"),
-            (ItemKind::FileRead { path: String::new(), detail: String::new() }, "fileRead"),
+            (
+                ItemKind::Reasoning {
+                    summary: String::new(),
+                },
+                "reasoning",
+            ),
+            (
+                ItemKind::Search {
+                    query: String::new(),
+                    detail: String::new(),
+                },
+                "search",
+            ),
+            (
+                ItemKind::FileRead {
+                    path: String::new(),
+                    detail: String::new(),
+                },
+                "fileRead",
+            ),
             (
                 ItemKind::CommandExecution {
                     command: String::new(),
@@ -324,11 +439,26 @@ mod tests {
                 "commandExecution",
             ),
             (
-                ItemKind::ModelCall { model: String::new(), input_tokens: 0, output_tokens: 0 },
+                ItemKind::ModelCall {
+                    model: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
                 "modelCall",
             ),
-            (ItemKind::FileChange { changes: Vec::new() }, "fileChange"),
-            (ItemKind::AgentMessage { text: String::new(), checks: Vec::new() }, "agentMessage"),
+            (
+                ItemKind::FileChange {
+                    changes: Vec::new(),
+                },
+                "fileChange",
+            ),
+            (
+                ItemKind::AgentMessage {
+                    text: String::new(),
+                    checks: Vec::new(),
+                },
+                "agentMessage",
+            ),
         ];
 
         for (kind, expected) in cases {
@@ -340,7 +470,9 @@ mod tests {
     fn a_run_event_carries_its_lifecycle_tag() {
         let event = RunEvent::ItemStarted {
             session: "abc".to_owned(),
-            item: ItemView::from(item(ItemKind::Reasoning { summary: "s".to_owned() })),
+            item: ItemView::from(item(ItemKind::Reasoning {
+                summary: "s".to_owned(),
+            })),
         };
         let value = serde_json::to_value(event).expect("an event should serialize");
 
@@ -360,7 +492,9 @@ mod tests {
             turns: vec![kodo_core::session::Turn {
                 ask: "帮我看一下".to_owned(),
                 context: vec!["src/lib.rs".to_owned()],
-                items: vec![item(ItemKind::Reasoning { summary: "s".to_owned() })],
+                items: vec![item(ItemKind::Reasoning {
+                    summary: "s".to_owned(),
+                })],
                 done: true,
                 stopped: false,
                 error: None,

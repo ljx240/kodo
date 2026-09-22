@@ -1934,6 +1934,7 @@ dependencies = [
 name = "kodo-agent"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "ureq",
@@ -1955,6 +1956,15 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+]
+
+[[package]]
+name = "kodo-evals"
+version = "0.0.1"
+dependencies = [
+ "kodo-agent",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

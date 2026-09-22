@@ -42,6 +42,10 @@ pub enum ToolName {
     ReplaceRange,
     CreateFile,
     DeleteFile,
+    ListFiles,
+    FindSymbol,
+    FindReferences,
+    ReadRange,
 }
 
 impl ToolName {
@@ -55,6 +59,10 @@ impl ToolName {
             Self::ReplaceRange => "replace_range",
             Self::CreateFile => "create_file",
             Self::DeleteFile => "delete_file",
+            Self::ListFiles => "list_files",
+            Self::FindSymbol => "find_symbol",
+            Self::FindReferences => "find_references",
+            Self::ReadRange => "read_range",
         }
     }
 
@@ -68,6 +76,10 @@ impl ToolName {
             "replace_range" | "replace" => Some(Self::ReplaceRange),
             "create_file" | "create" => Some(Self::CreateFile),
             "delete_file" | "delete" => Some(Self::DeleteFile),
+            "list_files" => Some(Self::ListFiles),
+            "find_symbol" => Some(Self::FindSymbol),
+            "find_references" => Some(Self::FindReferences),
+            "read_range" => Some(Self::ReadRange),
             _ => None,
         }
     }
@@ -76,7 +88,11 @@ impl ToolName {
     pub fn is_mutation(self) -> bool {
         matches!(
             self,
-            Self::WriteFile | Self::ApplyPatch | Self::ReplaceRange | Self::CreateFile | Self::DeleteFile
+            Self::WriteFile
+                | Self::ApplyPatch
+                | Self::ReplaceRange
+                | Self::CreateFile
+                | Self::DeleteFile
         )
     }
 }
@@ -84,14 +100,52 @@ impl ToolName {
 /// Typed arguments — never a free-form map past the protocol boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolArgs {
-    Search { query: String },
-    ReadFile { path: String },
-    WriteFile { path: String, content: String },
-    RunCommand { command: String },
-    ApplyPatch { path: String, old: String, new: String, start_line: Option<usize> },
-    ReplaceRange { path: String, start_line: usize, end_line: usize, new_text: String },
-    CreateFile { path: String, content: String },
-    DeleteFile { path: String },
+    Search {
+        query: String,
+    },
+    ReadFile {
+        path: String,
+    },
+    WriteFile {
+        path: String,
+        content: String,
+    },
+    RunCommand {
+        command: String,
+    },
+    ApplyPatch {
+        path: String,
+        old: String,
+        new: String,
+        start_line: Option<usize>,
+    },
+    ReplaceRange {
+        path: String,
+        start_line: usize,
+        end_line: usize,
+        new_text: String,
+    },
+    CreateFile {
+        path: String,
+        content: String,
+    },
+    DeleteFile {
+        path: String,
+    },
+    ListFiles {
+        prefix: Option<String>,
+    },
+    FindSymbol {
+        name: String,
+    },
+    FindReferences {
+        name: String,
+    },
+    ReadRange {
+        path: String,
+        start_line: usize,
+        end_line: usize,
+    },
 }
 
 impl ToolArgs {
@@ -131,6 +185,20 @@ impl ToolArgs {
             ToolName::DeleteFile => Ok(Self::DeleteFile {
                 path: require_string(args, "path")?,
             }),
+            ToolName::ListFiles => Ok(Self::ListFiles {
+                prefix: optional_string(args, "prefix")?,
+            }),
+            ToolName::FindSymbol => Ok(Self::FindSymbol {
+                name: require_string(args, "name")?,
+            }),
+            ToolName::FindReferences => Ok(Self::FindReferences {
+                name: require_string(args, "name")?,
+            }),
+            ToolName::ReadRange => Ok(Self::ReadRange {
+                path: require_string(args, "path")?,
+                start_line: require_usize(args, "start_line")?,
+                end_line: require_usize(args, "end_line")?,
+            }),
         }
     }
 
@@ -142,7 +210,23 @@ impl ToolArgs {
             Self::WriteFile { path, .. } | Self::CreateFile { path, .. } => path.clone(),
             Self::RunCommand { command } => command.clone(),
             Self::ApplyPatch { path, .. } => path.clone(),
-            Self::ReplaceRange { path, start_line, end_line, .. } => {
+            Self::ReplaceRange {
+                path,
+                start_line,
+                end_line,
+                ..
+            } => {
+                format!("{path}:{start_line}-{end_line}")
+            }
+            Self::ListFiles { prefix } => {
+                format!("list:{}", prefix.as_deref().unwrap_or("*"))
+            }
+            Self::FindSymbol { name } | Self::FindReferences { name } => name.clone(),
+            Self::ReadRange {
+                path,
+                start_line,
+                end_line,
+            } => {
                 format!("{path}:{start_line}-{end_line}")
             }
         }
@@ -153,12 +237,16 @@ fn require_string(args: &Value, key: &str) -> Result<String, ToolError> {
     match args {
         Value::Object(map) => match map.get(key) {
             Some(Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
-            Some(Value::String(_)) => Err(ToolError::invalid_args(format!("`{key}` must be a non-empty string"))),
+            Some(Value::String(_)) => Err(ToolError::invalid_args(format!(
+                "`{key}` must be a non-empty string"
+            ))),
             Some(other) => Err(ToolError::invalid_args(format!(
                 "`{key}` must be a string, got {}",
                 type_name(other)
             ))),
-            None => Err(ToolError::invalid_args(format!("missing required field `{key}`"))),
+            None => Err(ToolError::invalid_args(format!(
+                "missing required field `{key}`"
+            ))),
         },
         Value::Null => Err(ToolError::invalid_args("arguments must be a JSON object")),
         other => Err(ToolError::invalid_args(format!(
@@ -186,15 +274,16 @@ fn require_usize(args: &Value, key: &str) -> Result<usize, ToolError> {
     match args {
         Value::Object(map) => match map.get(key) {
             Some(Value::Number(n)) if n.as_u64().is_some() => Ok(n.as_u64().unwrap() as usize),
-            Some(Value::String(s)) => s
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| ToolError::invalid_args(format!("`{key}` must be a positive integer"))),
+            Some(Value::String(s)) => s.trim().parse::<usize>().map_err(|_| {
+                ToolError::invalid_args(format!("`{key}` must be a positive integer"))
+            }),
             Some(other) => Err(ToolError::invalid_args(format!(
                 "`{key}` must be an integer, got {}",
                 type_name(other)
             ))),
-            None => Err(ToolError::invalid_args(format!("missing required field `{key}`"))),
+            None => Err(ToolError::invalid_args(format!(
+                "missing required field `{key}`"
+            ))),
         },
         _ => Err(ToolError::invalid_args("arguments must be a JSON object")),
     }
@@ -204,7 +293,9 @@ fn optional_usize(args: &Value, key: &str) -> Result<Option<usize>, ToolError> {
     match args {
         Value::Object(map) => match map.get(key) {
             None | Some(Value::Null) => Ok(None),
-            Some(Value::Number(n)) if n.as_u64().is_some() => Ok(Some(n.as_u64().unwrap() as usize)),
+            Some(Value::Number(n)) if n.as_u64().is_some() => {
+                Ok(Some(n.as_u64().unwrap() as usize))
+            }
             Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
             Some(Value::String(s)) => s
                 .trim()
@@ -253,7 +344,10 @@ pub enum ToolErrorCode {
 
 impl ToolError {
     pub fn new(code: ToolErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 
     pub fn invalid_args(message: impl Into<String>) -> Self {
@@ -261,7 +355,10 @@ impl ToolError {
     }
 
     pub fn unknown_tool(name: impl Into<String>) -> Self {
-        Self::new(ToolErrorCode::UnknownTool, format!("unknown tool: {}", name.into()))
+        Self::new(
+            ToolErrorCode::UnknownTool,
+            format!("unknown tool: {}", name.into()),
+        )
     }
 
     pub fn execution(message: impl Into<String>) -> Self {
@@ -523,12 +620,68 @@ impl ToolRegistry {
                         "additionalProperties": false
                     }),
                 },
+                ToolDefinition {
+                    name: "list_files",
+                    description: "List project files from the repo map (fast orientation). Optional path prefix filter.",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "prefix": { "type": "string", "description": "Optional path prefix like `crates/`" }
+                        },
+                        "additionalProperties": false
+                    }),
+                },
+                ToolDefinition {
+                    name: "find_symbol",
+                    description: "Find symbol definitions (fn/struct/enum/class/…) in the RepoMap index: returns symbol, kind, file, line/range. Prefer this before reading files.",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Symbol name or substring" }
+                        },
+                        "required": ["name"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolDefinition {
+                    name: "find_references",
+                    description: "Find references to a symbol with confidence=high (word-boundary) or confidence=lexical (fallback). Definition lines are marked. Do not assume precision when labeled lexical.",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Symbol name" }
+                        },
+                        "required": ["name"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolDefinition {
+                    name: "read_range",
+                    description: "Read inclusive 1-based lines [start_line, end_line] of a project file (cheaper than full read).",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "start_line": { "type": "integer" },
+                            "end_line": { "type": "integer" }
+                        },
+                        "required": ["path", "start_line", "end_line"],
+                        "additionalProperties": false
+                    }),
+                },
             ],
         }
     }
 
     pub fn definitions(&self) -> &[ToolDefinition] {
         &self.defs
+    }
+
+    /// Keep only definitions whose name passes `keep` (skill allowlists).
+    pub fn filtered<F: Fn(&str) -> bool>(&self, keep: F) -> Self {
+        Self {
+            defs: self.defs.iter().filter(|d| keep(d.name)).cloned().collect(),
+        }
     }
 
     pub fn find(&self, name: &str) -> Option<&ToolDefinition> {
@@ -557,7 +710,11 @@ impl ToolRegistry {
             });
         }
         match ToolArgs::from_json(name, args) {
-            Ok(typed) => ToolInvocation::Ready(ToolCall { id, name, args: typed }),
+            Ok(typed) => ToolInvocation::Ready(ToolCall {
+                id,
+                name,
+                args: typed,
+            }),
             Err(error) => ToolInvocation::Rejected(RejectedCall {
                 id,
                 name: name.label().to_owned(),
@@ -648,7 +805,10 @@ fn next_id(provided: Option<String>, index: usize) -> ToolCallId {
 }
 
 /// Convert wire calls into invocations using the registry (never panics).
-pub fn invocations_from_wire(registry: &ToolRegistry, wire: Vec<WireToolCall>) -> Vec<ToolInvocation> {
+pub fn invocations_from_wire(
+    registry: &ToolRegistry,
+    wire: Vec<WireToolCall>,
+) -> Vec<ToolInvocation> {
     wire.into_iter()
         .enumerate()
         .map(|(index, call)| {
@@ -671,7 +831,9 @@ pub fn parse_model_turn(text: &str, registry: &ToolRegistry) -> ModelTurn {
     if looks_like_json_tool_protocol(text) {
         match parse_json_protocol(text) {
             Ok(wire) => {
-                return ModelTurn::Tools { calls: invocations_from_wire(registry, wire) };
+                return ModelTurn::Tools {
+                    calls: invocations_from_wire(registry, wire),
+                };
             }
             Err(_) => {
                 // Malformed tool JSON — recover via fence parser, else treat as text.
@@ -698,7 +860,9 @@ pub fn parse_model_turn(text: &str, registry: &ToolRegistry) -> ModelTurn {
         };
     }
 
-    ModelTurn::Final { text: text.to_owned() }
+    ModelTurn::Final {
+        text: text.to_owned(),
+    }
 }
 
 fn looks_like_json_tool_protocol(text: &str) -> bool {
@@ -778,20 +942,18 @@ pub fn parse_fence_invocations(text: &str, registry: &ToolRegistry) -> Vec<ToolI
         };
         let id = ToolCallId::new(format!("fence_{}", calls.len()));
         let invocation = match name {
-            "write_file" => {
-                match parse_write_block(block) {
-                    Some((path, content)) => registry.accept(
-                        id,
-                        name,
-                        &serde_json::json!({ "path": path, "content": content }),
-                    ),
-                    None => ToolInvocation::Rejected(RejectedCall {
-                        id,
-                        name: name.to_owned(),
-                        error: ToolError::invalid_args("write fence missing path/content"),
-                    }),
-                }
-            }
+            "write_file" => match parse_write_block(block) {
+                Some((path, content)) => registry.accept(
+                    id,
+                    name,
+                    &serde_json::json!({ "path": path, "content": content }),
+                ),
+                None => ToolInvocation::Rejected(RejectedCall {
+                    id,
+                    name: name.to_owned(),
+                    error: ToolError::invalid_args("write fence missing path/content"),
+                }),
+            },
             "read_file" => {
                 let path = parse_path_block(block);
                 if path.is_empty() {
@@ -972,14 +1134,28 @@ mod tests {
         match parse_model_turn(text, &registry()) {
             ModelTurn::Tools { calls } => {
                 assert_eq!(calls.len(), 2);
-                let ToolInvocation::Ready(c0) = &calls[0] else { panic!("expected ready") };
+                let ToolInvocation::Ready(c0) = &calls[0] else {
+                    panic!("expected ready")
+                };
                 assert_eq!(c0.id.as_str(), "a1");
                 assert_eq!(c0.name, ToolName::ReadFile);
-                assert_eq!(c0.args, ToolArgs::ReadFile { path: "src/lib.rs".into() });
-                let ToolInvocation::Ready(c1) = &calls[1] else { panic!("expected ready") };
+                assert_eq!(
+                    c0.args,
+                    ToolArgs::ReadFile {
+                        path: "src/lib.rs".into()
+                    }
+                );
+                let ToolInvocation::Ready(c1) = &calls[1] else {
+                    panic!("expected ready")
+                };
                 assert_eq!(c1.id.as_str(), "a2");
                 assert_eq!(c1.name, ToolName::Search);
-                assert_eq!(c1.args, ToolArgs::Search { query: "fn main".into() });
+                assert_eq!(
+                    c1.args,
+                    ToolArgs::Search {
+                        query: "fn main".into()
+                    }
+                );
             }
             other => panic!("expected tools, got {other:?}"),
         }
@@ -1021,7 +1197,8 @@ mod tests {
 
     #[test]
     fn scenario_d_unknown_tool_yields_rejected() {
-        let text = r#"{"tool_calls":[{"id":"u","name":"drop_database","arguments":{"query":"x"}}]}"#;
+        let text =
+            r#"{"tool_calls":[{"id":"u","name":"drop_database","arguments":{"query":"x"}}]}"#;
         match parse_model_turn(text, &registry()) {
             ModelTurn::Tools { calls } => match &calls[0] {
                 ToolInvocation::Rejected(r) => {
@@ -1070,7 +1247,9 @@ mod tests {
         let text = r#"{"tool_calls":[{"name":"search","arguments":{"query":42}}]}"#;
         match parse_model_turn(text, &registry()) {
             ModelTurn::Tools { calls } => match &calls[0] {
-                ToolInvocation::Rejected(r) => assert_eq!(r.error.code, ToolErrorCode::InvalidArguments),
+                ToolInvocation::Rejected(r) => {
+                    assert_eq!(r.error.code, ToolErrorCode::InvalidArguments)
+                }
                 other => panic!("expected rejection, got {other:?}"),
             },
             other => panic!("expected tools, got {other:?}"),
@@ -1124,7 +1303,11 @@ mod tests {
     #[test]
     fn registry_rejects_unknown_and_accepts_known() {
         let reg = registry();
-        let ok = reg.accept(ToolCallId::new("1"), "read_file", &serde_json::json!({"path":"a"}));
+        let ok = reg.accept(
+            ToolCallId::new("1"),
+            "read_file",
+            &serde_json::json!({"path":"a"}),
+        );
         assert!(matches!(ok, ToolInvocation::Ready(_)));
         let bad = reg.accept(ToolCallId::new("2"), "nope", &serde_json::json!({}));
         assert!(matches!(bad, ToolInvocation::Rejected(_)));
@@ -1166,7 +1349,10 @@ mod tests {
         let result = inv.into_result();
         assert!(!result.ok);
         assert_eq!(result.id.as_str(), "r1");
-        assert_eq!(result.error.as_ref().unwrap().code, ToolErrorCode::UnknownTool);
+        assert_eq!(
+            result.error.as_ref().unwrap().code,
+            ToolErrorCode::UnknownTool
+        );
     }
 
     #[test]

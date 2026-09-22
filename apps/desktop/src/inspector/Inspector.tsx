@@ -1,5 +1,6 @@
 import { BarChart3, ChevronRight, FileText, Info, Terminal, Wrench, X } from "lucide-react";
 import type { RouteName } from "../routes";
+import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
 import { ArchiveOverview, type ArchiveSelection } from "./ArchiveInspector";
 import { HelpOverview } from "./HelpInspector";
@@ -70,17 +71,19 @@ function contentFor(
   route: RouteName,
   tab: InspectorTab,
   demo: boolean,
+  demoState: DemoState | null,
   live: LiveSnapshot | null,
   archiveSelection: ArchiveSelection,
   onArchiveRestore: () => void,
   onOpenTrace: () => void,
+  onSelectTab: (tab: InspectorTab) => void,
 ) {
-  const data = { demo, live };
+  const data = { demo, demoState, live };
   if (route === "conversation") {
     if (tab === "files") return <ChangedFilesSection {...data} />;
     if (tab === "tools") return <ToolsSection {...data} />;
     if (tab === "llm") return <LlmSection {...data} detailed />;
-    return <ResponseOverview {...data} />;
+    return <ResponseOverview {...data} onShowAllFiles={() => onSelectTab("files")} />;
   }
   if (route === "trace") {
     return tab === "terminal" ? <TerminalSection {...data} /> : <TraceOverview {...data} />;
@@ -89,6 +92,7 @@ function contentFor(
     return (
       <ArchiveOverview
         demo={demo}
+        demoState={demoState}
         selection={archiveSelection}
         onRestore={onArchiveRestore}
         onOpenTrace={onOpenTrace}
@@ -106,6 +110,7 @@ type Props = {
   onOpen: () => void;
   onClose: () => void;
   demo: boolean;
+  demoState?: DemoState | null;
   live: LiveSnapshot | null;
   archiveSelection?: ArchiveSelection;
   onArchiveRestore?: () => void;
@@ -120,6 +125,7 @@ export function Inspector({
   onOpen,
   onClose,
   demo,
+  demoState = null,
   live,
   archiveSelection = null,
   onArchiveRestore = () => {},
@@ -177,7 +183,17 @@ export function Inspector({
           )}
 
           <div className="ins-content" role="tabpanel">
-            {contentFor(route, active, demo, live, archiveSelection, onArchiveRestore, onOpenTrace)}
+            {contentFor(
+              route,
+              active,
+              demo,
+              demoState,
+              live,
+              archiveSelection,
+              onArchiveRestore,
+              onOpenTrace,
+              onSelectTab,
+            )}
           </div>
         </div>
       )}

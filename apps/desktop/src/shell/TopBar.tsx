@@ -1,4 +1,4 @@
-import { ChevronDown, Folder, GitBranch, MoreHorizontal, PanelLeft, PanelRight, Plus, Search, Sparkles } from "lucide-react";
+import { ChevronDown, Folder, GitBranch, PanelLeft, PanelRight, Plus, Sparkles } from "lucide-react";
 import type { ProviderConfig } from "../data/providers";
 import { templateById } from "../data/providers";
 import type { Project } from "../data/types";
@@ -121,10 +121,6 @@ export function TopBar({
           </Menu>
         )}
 
-        <button type="button" className="icon-btn icon-btn--boxed" aria-label="Search">
-          <Search size={16} strokeWidth={1.7} />
-        </button>
-
         <button
           type="button"
           className={`icon-btn icon-btn--boxed${inspectorOpen ? " icon-btn--active" : ""}`}
@@ -134,12 +130,6 @@ export function TopBar({
           onClick={onToggleInspector}
         >
           <PanelRight size={16} strokeWidth={1.7} />
-        </button>
-      </div>
-
-      <div className="topbar-menu">
-        <button type="button" className="icon-btn" aria-label="More">
-          <MoreHorizontal size={16} strokeWidth={1.7} />
         </button>
       </div>
     </header>

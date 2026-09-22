@@ -1,8 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { coreInfo, gitBranch, setting, setSetting } from "./api";
-import { conversation, project as fixtureProject } from "./data/fixture";
+import { loadDemoState, type DemoState } from "./data/demoState";
 import { DEFAULT_MODEL, MODEL_SETTING, MODELS } from "./data/models";
-import { type ProviderConfig, loadProviders, loadActiveIndex, saveActiveIndex } from "./data/providers";
+import {
+  type ProviderConfig,
+  loadProviders,
+  loadActiveIndex,
+  saveActiveIndex,
+  saveProviders,
+} from "./data/providers";
 import { useSetting } from "./data/useSetting";
 import type { LiveSnapshot } from "./data/liveContext";
 import { useWorkspace } from "./data/workspace";
@@ -19,12 +25,14 @@ import { TopBar } from "./shell/TopBar";
 export function App() {
   const route = useRoute();
   const workspace = useWorkspace(route.demo);
+  /** Fixture lives only behind `/ui-demo`; production pages get it as a prop. */
+  const demoState = useMemo<DemoState | null>(() => (route.demo ? loadDemoState() : null), [route.demo]);
 
   const [activeConversationId, setActiveConversationId] = useState<string | null>(() =>
-    route.demo ? conversation.id : null,
+    route.demo && demoState ? demoState.conversation.id : null,
   );
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() =>
-    route.demo ? fixtureProject.id : null,
+    route.demo && demoState ? demoState.project.id : null,
   );
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("summary");
   const [coreVersion, setCoreVersion] = useState<string | null>(null);
@@ -38,15 +46,76 @@ export function App() {
   const [activeProviderIndex, setActiveProviderIndex] = useState(0);
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [autoGitBranch] = useSetting("auto-detect-git-branch", "true");
+  const [density] = useSetting("density", "compact");
+  const [lineNumbers] = useSetting("show-line-numbers", "true");
+  const [systemFont] = useSetting("use-system-font", "true");
+  const [theme] = useSetting("theme", "light");
 
   const onSnapshot = useCallback((snapshot: LiveSnapshot | null) => {
     setLiveSnapshot(snapshot);
   }, []);
 
   useEffect(() => {
-    setActiveConversationId(route.demo ? conversation.id : null);
-    setActiveProjectId(route.demo ? fixtureProject.id : null);
-  }, [route.demo]);
+    if (route.demo && demoState) {
+      setActiveConversationId(demoState.conversation.id);
+      setActiveProjectId(demoState.project.id);
+      return;
+    }
+    // Live route: never clobber a conversation the user already opened.
+    if (!route.demo) return;
+    setActiveConversationId(null);
+    setActiveProjectId(null);
+  }, [route.demo, demoState]);
+
+  // Ensure a conversation is open so send / Add context are usable without an
+  // extra sidebar click. Prefer an existing session; otherwise open one under
+  // the first project that has a real path.
+  const sessionBootstrapped = useRef(false);
+  const startSession = workspace.startSession;
+  useEffect(() => {
+    if (route.demo || route.name !== "conversation" || activeConversationId) return;
+    if (sessionBootstrapped.current) return;
+    const existing = workspace.projects.flatMap((project) => project.conversations)[0];
+    if (existing) {
+      setActiveConversationId(existing.id);
+      return;
+    }
+    const project = workspace.projects.find((item) => item.path);
+    if (!project?.path || !workspace.live) return;
+    sessionBootstrapped.current = true;
+    void startSession(project.path).then((id) => {
+      if (id) setActiveConversationId(id);
+      else sessionBootstrapped.current = false;
+    });
+  }, [
+    route.demo,
+    route.name,
+    activeConversationId,
+    workspace.projects,
+    workspace.live,
+    startSession,
+  ]);
+
+  // Runtime consumer for the Appearance theme control (not just persisted state).
+  useEffect(() => {
+    const apply = (mode: string) => {
+      const resolved =
+        mode === "system"
+          ? window.matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light"
+          : mode === "dark"
+            ? "dark"
+            : "light";
+      document.documentElement.dataset.theme = resolved;
+    };
+    apply(theme);
+    if (theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => apply("system");
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [theme]);
 
   const reloadProviders = useCallback(() => {
     void loadProviders().then((list) => {
@@ -80,7 +149,7 @@ export function App() {
 
   useEffect(() => {
     if (route.demo) {
-      setBranch(fixtureProject.branch);
+      setBranch(demoState?.project.branch ?? null);
       return;
     }
     if (!activeProject?.path || autoGitBranch !== "true") {
@@ -95,7 +164,7 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [route.demo, activeProject?.path, autoGitBranch]);
+  }, [route.demo, demoState, activeProject?.path, autoGitBranch]);
 
   const selectModel = (name: string) => {
     setModel(name);
@@ -110,6 +179,22 @@ export function App() {
       setModel(p.model);
       void setSetting(MODEL_SETTING, p.model);
     }
+  };
+
+  /** Switch model inside a provider from the composer without leaving the conversation. */
+  const selectProviderModel = (providerIndex: number, modelId: string, displayName: string) => {
+    const next = providers.map((item, index) =>
+      index === providerIndex
+        ? { ...item, model: modelId, modelId, displayName }
+        : item,
+    );
+    setProviders(next);
+    setActiveProviderIndex(providerIndex);
+    void saveActiveIndex(providerIndex);
+    void saveProviders(next).then(() => {
+      setModel(modelId);
+      void setSetting(MODEL_SETTING, modelId);
+    });
   };
 
   const newChat = async (projectPath?: string) => {
@@ -142,13 +227,16 @@ export function App() {
   };
 
   const activeProvider = providers[activeProviderIndex] ?? null;
-  const projectName = activeProject?.name ?? (route.demo ? fixtureProject.name : "未选择项目");
+  const projectName = activeProject?.name ?? (route.demo && demoState ? demoState.project.name : "未选择项目");
 
   return (
     <div
-      className={`app${sidebarVisible ? "" : " app--sidebar-hidden"}`}
+      className={`app${sidebarVisible ? "" : " app--sidebar-hidden"}${
+        systemFont === "true" ? " app--system-font" : ""
+      }`}
       data-core={coreVersion ?? undefined}
-      data-density={undefined}
+      data-density={density}
+      data-line-numbers={lineNumbers}
     >
       <Sidebar
         route={route.name}
@@ -156,6 +244,13 @@ export function App() {
         activeConversationId={activeConversationId}
         onSelectConversation={setActiveConversationId}
         onStartConversation={(path) => void newChat(path)}
+        onRenameConversation={async (id, title) => {
+          await workspace.retitle(id, title);
+        }}
+        onArchiveConversation={async (id) => {
+          await workspace.archive(id);
+          if (activeConversationId === id) setActiveConversationId(null);
+        }}
         workspace={workspace}
       />
 
@@ -183,11 +278,13 @@ export function App() {
               provider={activeProvider}
               providers={providers}
               onSelectProvider={selectProvider}
+              onSelectProviderModel={selectProviderModel}
               onViewFiles={openFiles}
               onOpenTrace={openTrace}
               onSnapshot={onSnapshot}
               projectName={projectName}
               projectPath={activeProject?.path ?? ""}
+              demo={demoState}
               onRetitle={async (id, title) => {
                 await workspace.retitle(id, title);
               }}
@@ -199,11 +296,12 @@ export function App() {
             />
           )}
           {route.name === "trace" && (
-            <TracePage demo={route.demo} conversationId={activeConversationId} />
+            <TracePage demo={demoState} conversationId={activeConversationId} />
           )}
           {route.name === "archive" && (
             <ArchivePage
               demo={route.demo}
+              demoState={demoState}
               selectedId={archiveSelection?.id ?? null}
               reloadToken={archiveReload}
               onSelect={setArchiveSelection}
@@ -236,6 +334,7 @@ export function App() {
             onOpen={() => setInspectorOpen(true)}
             onClose={() => setInspectorOpen(false)}
             demo={route.demo}
+            demoState={demoState}
             live={liveSnapshot}
             archiveSelection={archiveSelection}
             onArchiveRestore={() => {

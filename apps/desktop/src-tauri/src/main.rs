@@ -14,7 +14,7 @@ use run::{Approvals, Runs, StartArgs};
 mod run;
 mod view;
 
-use view::{ArchivedItemView, ProviderView, ProjectView, SessionRefView, SessionView, Workspace};
+use view::{ArchivedItemView, ProjectView, ProviderView, SessionRefView, SessionView, Workspace};
 
 #[derive(serde::Serialize)]
 struct CoreInfo {
@@ -25,7 +25,10 @@ struct CoreInfo {
 #[tauri::command]
 fn core_info() -> CoreInfo {
     let info = kodo_core::info();
-    CoreInfo { name: info.name, version: info.version }
+    CoreInfo {
+        name: info.name,
+        version: info.version,
+    }
 }
 
 #[tauri::command]
@@ -96,7 +99,9 @@ fn git_branch(path: String) -> Option<String> {
 
 #[tauri::command]
 fn reveal_project(app: AppHandle, path: String) -> Result<(), String> {
-    app.opener().reveal_item_in_dir(Path::new(&path)).map_err(|error| error.to_string())
+    app.opener()
+        .reveal_item_in_dir(Path::new(&path))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -169,10 +174,10 @@ fn list_archived() -> Result<Vec<ArchivedItemView>, String> {
                             }
                         }
                     }
-                    kodo_core::session::ItemKind::AgentMessage { text, .. } => {
-                        if !text.trim().is_empty() {
-                            summary = text.clone();
-                        }
+                    kodo_core::session::ItemKind::AgentMessage { text, .. }
+                        if !text.trim().is_empty() =>
+                    {
+                        summary = text.clone();
                     }
                     _ => {}
                 }
@@ -270,7 +275,12 @@ fn save_providers(providers: Vec<ProviderView>) -> Result<Vec<ProviderView>, Str
             template: provider.template,
             api_key: String::new(),
             endpoint: provider.endpoint,
-            model: provider.model,
+            model: provider.model.clone(),
+            model_id: provider
+                .model_id
+                .clone()
+                .or_else(|| Some(provider.model.clone())),
+            display_name: provider.display_name.clone(),
             has_key: !secret.is_empty(),
         });
     }
@@ -287,6 +297,8 @@ fn save_providers(providers: Vec<ProviderView>) -> Result<Vec<ProviderView>, Str
                 "apiKey": "",
                 "endpoint": p.endpoint,
                 "model": p.model,
+                "modelId": p.model_id,
+                "displayName": p.display_name,
             })
         })
         .collect();
@@ -314,9 +326,7 @@ fn send_message(
     let context_paths: Vec<String> = context.unwrap_or_default();
     // Reject paths that try to leave the project before any I/O.
     for path in &context_paths {
-        if path.trim().is_empty()
-            || path.contains("..")
-            || std::path::Path::new(path).is_absolute()
+        if path.trim().is_empty() || path.contains("..") || std::path::Path::new(path).is_absolute()
         {
             return Err(format!("context path must stay inside the project: {path}"));
         }
@@ -326,27 +336,53 @@ fn send_message(
     let found = session::load(&dir, &id).map_err(|error| error.to_string())?;
 
     let settings_path = settings::settings_path();
-    let read_setting = |key: &str| settings_path.as_ref().and_then(|path| settings::read(path, key));
+    let read_setting = |key: &str| {
+        settings_path
+            .as_ref()
+            .and_then(|path| settings::read(path, key))
+    };
 
     let permission = run::permission_from_settings(read_setting("permission"));
 
     let provider = load_providers().ok().and_then(|list| {
-        let active = read_setting("active-provider").and_then(|raw| raw.parse::<usize>().ok()).unwrap_or(0);
-        let chosen = list.get(active).cloned().or_else(|| list.iter().find(|p| p.has_key).cloned());
-        chosen.and_then(|p| {
-            // Keys live only in credentials; the shell re-reads them here.
-            let creds = settings::credentials_path()?;
+        let active = read_setting("active-provider")
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(0);
+        let chosen = list
+            .get(active)
+            .cloned()
+            .or_else(|| list.iter().find(|p| p.has_key).cloned());
+        let creds = settings::credentials_path()?;
+        let build = |p: &ProviderView| -> Option<AgentProvider> {
             let api_key = settings::read_credential(&creds, &p.id).unwrap_or_default();
             if api_key.is_empty() {
                 return None;
             }
-            Some(AgentProvider {
-                template: p.template,
+            Some(AgentProvider::new(
+                p.template.clone(),
                 api_key,
-                endpoint: p.endpoint,
-                model: p.model,
-            })
-        })
+                p.endpoint.clone(),
+                p.model_id
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| p.model.clone()),
+            ))
+        };
+        let primary = chosen.as_ref().and_then(build);
+        let mut primary = primary?;
+        // Populate the failover chain when the user asked to try the next best
+        // model (fallback-behavior != fail). Auth/invalid-model never failover.
+        if read_setting("fallback-behavior").as_deref() != Some("fail") {
+            for p in &list {
+                if Some(&p.id) == chosen.as_ref().map(|c| &c.id) {
+                    continue;
+                }
+                if let Some(fb) = build(p) {
+                    primary.fallbacks.push(fb);
+                }
+            }
+        }
+        Some(primary)
     });
 
     let max_output_tokens = read_setting("max-output-tokens")
@@ -387,15 +423,26 @@ fn list_project_files(project: String, query: Option<String>) -> Result<Vec<Stri
         root.to_path_buf(),
         kodo_agent::TurnContextBudget::default(),
     );
-    manager.scan(&|| true).map_err(|_| "cancelled while listing project files".to_owned())?;
+    manager
+        .scan(&|| true)
+        .map_err(|_| "cancelled while listing project files".to_owned())?;
     let query = query.unwrap_or_default();
     let mut paths: Vec<String> = if query.trim().is_empty() {
-        manager.file_map().iter().map(|entry| entry.path.clone()).collect()
+        manager
+            .file_map()
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect()
     } else {
         manager
             .file_map()
             .iter()
-            .filter(|entry| entry.path.to_ascii_lowercase().contains(&query.to_ascii_lowercase()))
+            .filter(|entry| {
+                entry
+                    .path
+                    .to_ascii_lowercase()
+                    .contains(&query.to_ascii_lowercase())
+            })
             .map(|entry| entry.path.clone())
             .collect()
     };
@@ -415,7 +462,7 @@ fn read_context_file(project: String, path: String) -> Result<String, String> {
     if path.trim().is_empty() || path.contains("..") || std::path::Path::new(&path).is_absolute() {
         return Err(format!("path must stay inside the project: {path}"));
     }
-    let manager = kodo_agent::ContextManager::new(
+    let mut manager = kodo_agent::ContextManager::new(
         root.to_path_buf(),
         kodo_agent::TurnContextBudget::default(),
     );
@@ -423,7 +470,6 @@ fn read_context_file(project: String, path: String) -> Result<String, String> {
     manager
         .read_range(&path, 1, 40, "context preview")
         .map(|span| span.snippet)
-        .map_err(|error| error)
 }
 
 #[tauri::command]
@@ -437,6 +483,51 @@ fn respond_approval(approvals: State<'_, Approvals>, id: String, step: u32, appr
     approvals.resolve(&id, step, approved);
 }
 
+/// Per-file unified diffs for the turn's Kodo changes (empty when none).
+/// Each entry reports pre-existing user dirt and live undo-conflict state.
+#[tauri::command]
+fn turn_changes(project: String, id: String) -> Result<Vec<view::TurnChangeView>, String> {
+    let root = Path::new(&project);
+    let changeset = kodo_agent::load_changeset(root, &id)?;
+    let mut out = Vec::new();
+    for path in changeset.kodo_changes() {
+        let user_preexisting = changeset.was_pre_existing(path);
+        let undo_state = match changeset.undo_file_state(root, path) {
+            kodo_agent::UndoFileState::Clean => "clean",
+            kodo_agent::UndoFileState::AlreadyBaseline => "already_baseline",
+            kodo_agent::UndoFileState::Diverged => "diverged",
+            kodo_agent::UndoFileState::Missing => "missing",
+        };
+        out.push(view::TurnChangeView {
+            path: path.clone(),
+            diff: changeset.diffs.get(path).cloned().unwrap_or_default(),
+            user_preexisting,
+            undo_state: undo_state.to_owned(),
+            conflict: undo_state == "diverged" || undo_state == "missing",
+        });
+    }
+    Ok(out)
+}
+
+/// Undo only Kodo's changes for this session. Never touches user-only edits
+/// and never snapshot-overwrites post-turn user edits (returns conflicts).
+#[tauri::command]
+fn undo_turn(project: String, id: String) -> Result<view::UndoReportView, String> {
+    let report = kodo_agent::undo_session_changes(Path::new(&project), &id)?;
+    Ok(view::UndoReportView {
+        restored: report.restored,
+        conflicts: report
+            .conflicts
+            .into_iter()
+            .map(|c| view::UndoConflictView {
+                path: c.path,
+                reason: c.reason.label().to_owned(),
+                message: c.message,
+            })
+            .collect(),
+    })
+}
+
 fn log() -> Result<PathBuf, String> {
     workspace::log_path()
         .ok_or_else(|| "HOME is not set, so there is nowhere to keep the project list".to_owned())
@@ -447,7 +538,9 @@ fn sessions() -> Result<PathBuf, String> {
 }
 
 fn load(dir: &Path, id: &str) -> Result<SessionView, String> {
-    session::load(dir, id).map(SessionView::from).map_err(|error| error.to_string())
+    session::load(dir, id)
+        .map(SessionView::from)
+        .map_err(|error| error.to_string())
 }
 
 fn snapshot() -> Result<Workspace, String> {
@@ -491,6 +584,8 @@ fn main() {
             respond_approval,
             list_project_files,
             read_context_file,
+            turn_changes,
+            undo_turn,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Kodo");
