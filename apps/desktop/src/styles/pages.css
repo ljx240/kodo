@@ -284,14 +284,21 @@
   background: var(--kodo-hover);
 }
 
-.archive-table th:nth-child(1) { width: 42px; }
-.archive-table th:nth-child(2) { width: 194px; }
-.archive-table th:nth-child(3) { width: 210px; }
-.archive-table th:nth-child(4) { width: 112px; }
-.archive-table th:nth-child(5) { width: 100px; }
-.archive-table th:nth-child(6) { width: 98px; }
-.archive-table th:nth-child(7) { width: 107px; }
-.archive-table th:nth-child(8) { width: 33px; }
+/* Six columns per LAYOUT §7. The old track map still carried eight columns
+   from a previous table shape and crushed Conversation to ~50px, which pushed
+   its header into Summary. Percentages track the table width at any viewport. */
+.archive-table th:nth-child(1) { width: 26%; }
+.archive-table th:nth-child(2) { width: 22%; }
+.archive-table th:nth-child(3) { width: 15%; }
+.archive-table th:nth-child(4) { width: 14%; }
+.archive-table th:nth-child(5) { width: 13%; }
+.archive-table th:nth-child(6) { width: 10%; }
+
+.archive-table th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .archive-table .row--selected {
   background: var(--kodo-selected);
@@ -311,11 +318,30 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .arc-title svg {
   flex: none;
   color: var(--kodo-text-secondary);
+}
+
+/* The text sits in its own span so the flex row can shrink and the title
+   truncates instead of overflowing the fixed column. */
+.arc-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-pill {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .arc-summary {
@@ -462,6 +488,13 @@
 .settings-nav-item svg {
   flex: none;
   color: var(--kodo-text-secondary);
+}
+
+/* Category list emptied by the page-head search. */
+.settings-nav-empty {
+  padding: 8px 10px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
 }
 
 .settings-nav-item:hover {

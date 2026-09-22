@@ -44,6 +44,13 @@ follows the documentation and appearance follows the image; these are geometry,
 so the documentation wins. The difference is recorded here rather than silently
 resolved.
 
+One row-level difference goes the other way. `LAYOUT.md` §6 puts Timeline rows
+at "approximately 38–42px", but the reference images draw them on a 60px pitch
+(pixel-measured from the border rules in `02-response-trace.png`), and the
+implementation matches the images — `pages.css` carries the same note. Row
+pitch is density, which is what the image governs, so here the images win and
+the §6 line is stale. Also recorded rather than silently resolved.
+
 ## Regenerating baselines
 
 The Playwright baselines in `apps/desktop/tests/visual/pages.spec.ts-snapshots/`

@@ -416,80 +416,10 @@ export function Composer({
           </div>
         )}
 
-        {/* Row 1: textarea */}
+        {/* One row: attach/permission, draft, model/send — a single ~60px bar
+            (LAYOUT §3's 54–60px collapsed height), not two stacked rows. */}
         <div className="composer-row">
-          <textarea
-            ref={input}
-            className="composer-input"
-            rows={1}
-            placeholder="描述任务，输入 / 调用技能"
-            value={draft}
-            data-testid="composer-input"
-            onChange={(event) => setDraft(event.target.value)}
-            onPaste={(event) => void onComposerPaste(event)}
-            onKeyDown={(event) => {
-              if (slashOpen && (event.key === "Enter" || event.key === "Tab")) {
-                event.preventDefault();
-                applySkillFromSlash(slashMatches[0].id);
-                return;
-              }
-              if (slashOpen && event.key === "Escape") {
-                event.preventDefault();
-                setDraft("");
-                return;
-              }
-              // Enter sends, Shift+Enter breaks the line.
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                send();
-              }
-            }}
-          />
-        </div>
-
-        {/* Slash skill suggestions — progressive disclosure, not a second sidebar. */}
-        {slashOpen && (
-          <div className="composer-slash" role="listbox" aria-label="技能" data-testid="composer-slash">
-            {slashMatches.map((skill) => (
-              <button
-                key={skill.id}
-                type="button"
-                role="option"
-                className="menu-item"
-                data-slash-id={skill.id}
-                onClick={() => applySkillFromSlash(skill.id)}
-              >
-                <Puzzle size={14} strokeWidth={1.8} />
-                <span>{skill.label}</span>
-                <span className="menu-item-hint">/{skill.id}</span>
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Pinned context chips — paths only, never file bodies. */}
-        {contexts.length > 0 && (
-          <div className="composer-contexts" data-testid="composer-contexts">
-            {contexts.map((path) => (
-              <span key={path} className="chip chip--context" data-context-path={path}>
-                <FileText size={13} strokeWidth={1.8} className="chip-icon" />
-                <span className="chip-label">{path}</span>
-                <button
-                  type="button"
-                  className="chip-remove"
-                  aria-label={`Remove context ${path}`}
-                  onClick={() => onRemoveContext(path)}
-                >
-                  <X size={12} strokeWidth={2} />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Row 2: controls */}
-        <div className="composer-controls">
-          {/* Left side */}
+          {/* Left: attachment menu + permission */}
           <div className="composer-left">
             <div
               className="menu-anchor composer-plus"
@@ -677,7 +607,35 @@ export function Composer({
             </Menu>
           </div>
 
-          {/* Right side */}
+          <textarea
+            ref={input}
+            className="composer-input"
+            rows={1}
+            placeholder="描述任务，输入 / 调用技能"
+            value={draft}
+            data-testid="composer-input"
+            onChange={(event) => setDraft(event.target.value)}
+            onPaste={(event) => void onComposerPaste(event)}
+            onKeyDown={(event) => {
+              if (slashOpen && (event.key === "Enter" || event.key === "Tab")) {
+                event.preventDefault();
+                applySkillFromSlash(slashMatches[0].id);
+                return;
+              }
+              if (slashOpen && event.key === "Escape") {
+                event.preventDefault();
+                setDraft("");
+                return;
+              }
+              // Enter sends, Shift+Enter breaks the line.
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                send();
+              }
+            }}
+          />
+
+          {/* Right: model picker + send */}
           <div className="composer-right">
             {/* Model / provider picker — provider groups, models within each. */}
             <div className="menu-anchor composer-model-anchor">
@@ -813,6 +771,46 @@ export function Composer({
             )}
           </div>
         </div>
+
+        {/* Slash skill suggestions — progressive disclosure, not a second sidebar. */}
+        {slashOpen && (
+          <div className="composer-slash" role="listbox" aria-label="技能" data-testid="composer-slash">
+            {slashMatches.map((skill) => (
+              <button
+                key={skill.id}
+                type="button"
+                role="option"
+                className="menu-item"
+                data-slash-id={skill.id}
+                onClick={() => applySkillFromSlash(skill.id)}
+              >
+                <Puzzle size={14} strokeWidth={1.8} />
+                <span>{skill.label}</span>
+                <span className="menu-item-hint">/{skill.id}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Pinned context chips — paths only, never file bodies. */}
+        {contexts.length > 0 && (
+          <div className="composer-contexts" data-testid="composer-contexts">
+            {contexts.map((path) => (
+              <span key={path} className="chip chip--context" data-context-path={path}>
+                <FileText size={13} strokeWidth={1.8} className="chip-icon" />
+                <span className="chip-label">{path}</span>
+                <button
+                  type="button"
+                  className="chip-remove"
+                  aria-label={`Remove context ${path}`}
+                  onClick={() => onRemoveContext(path)}
+                >
+                  <X size={12} strokeWidth={2} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
 
       </div>
 

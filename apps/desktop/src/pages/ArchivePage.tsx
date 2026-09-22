@@ -190,7 +190,7 @@ export function ArchivePage({
                     <td>
                       <span className="arc-title">
                         <MessageCircle size={14} strokeWidth={1.8} />
-                        {item.title}
+                        <span className="arc-title-text">{item.title}</span>
                       </span>
                     </td>
                     <td className="arc-summary">{item.summary}</td>
@@ -223,7 +223,7 @@ export function ArchivePage({
               {visibleRows.length === 0 ? 0 : 1}–{visibleRows.length} of {total} conversations
             </span>
             <span className="spacer" />
-            <span className="setting-hint">Restore 在 Inspector 中操作</span>
+            <span className="setting-hint">Restore is an Inspector action</span>
           </footer>
         </div>
       </div>

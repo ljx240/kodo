@@ -289,7 +289,7 @@ p {
   display: flex;
   align-items: center;
   width: 100%;
-  height: 34px;
+  height: 30px;
   padding: 0 4px 0 13px;
   border-radius: var(--kodo-radius);
   font-size: var(--kodo-font-md);
@@ -341,7 +341,7 @@ p {
   display: flex;
   align-items: center;
   gap: 11px;
-  height: 34px;
+  height: 30px;
   padding: 0 4px 0 13px;
 }
 
@@ -383,7 +383,7 @@ p {
   align-items: center;
   gap: 11px;
   width: 100%;
-  height: 33px;
+  height: 28px;
   padding: 0 8px 0 12px;
   border-radius: var(--kodo-radius);
   font-size: var(--kodo-font-sm);

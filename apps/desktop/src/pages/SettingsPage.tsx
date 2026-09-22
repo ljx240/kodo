@@ -9,13 +9,14 @@ import {
   Palette,
   Pencil,
   Plus,
+  Search,
   Settings,
   SlidersHorizontal,
   SquareTerminal,
   Trash2,
   Wrench,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { MODELS } from "../data/models";
 import { PERMISSIONS, PERMISSION_SETTING } from "../data/models";
 import {
@@ -147,7 +148,39 @@ type Props = {
 
 export function SettingsPage({ model, onSelectModel, onProvidersSaved, onOpenArchive, onClose, modal = false }: Props) {
   const [active, setActive] = useState(SECTIONS[0].id);
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const section = SECTIONS.find((item) => item.id === active) ?? SECTIONS[0];
+
+  const needle = query.trim().toLowerCase();
+  const matches = (item: (typeof SECTIONS)[number]) =>
+    item.title.toLowerCase().includes(needle) || item.subtitle.toLowerCase().includes(needle);
+  const visibleSections = needle ? SECTIONS.filter(matches) : SECTIONS;
+  const noMatch = needle.length > 0 && visibleSections.length === 0;
+
+  // Keep the open category while it still matches; otherwise jump to the first
+  // category that does, so the detail pane never shows a hidden section.
+  useEffect(() => {
+    if (!needle) return;
+    const current = SECTIONS.find((item) => item.id === active);
+    if (current && matches(current)) return;
+    const first = SECTIONS.find(matches);
+    if (first) setActive(first.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needle, active]);
+
+  // ⌘F / Ctrl+F focuses the page-head search while Settings is on screen.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <main className={`main${modal ? " settings-modal-panel" : ""}`}>
@@ -160,6 +193,17 @@ export function SettingsPage({ model, onSelectModel, onProvidersSaved, onOpenArc
           <p>Customize Kodo to fit your workflow</p>
         </div>
         <span className="spacer" />
+        <div className="search-field search-field--inline">
+          <Search size={15} strokeWidth={1.7} />
+          <input
+            ref={searchRef}
+            placeholder="Search settings…"
+            value={query}
+            aria-label="Search settings"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <kbd>⌘F</kbd>
+        </div>
         {modal && onClose && (
           <button type="button" className="icon-btn" aria-label="关闭设置" onClick={onClose}>
             ×
@@ -169,7 +213,7 @@ export function SettingsPage({ model, onSelectModel, onProvidersSaved, onOpenArc
 
       <div className="settings-layout">
         <nav className="settings-nav">
-          {SECTIONS.map(({ id, title, icon }) => (
+          {visibleSections.map(({ id, title, icon }) => (
             <button
               key={id}
               type="button"
@@ -181,23 +225,30 @@ export function SettingsPage({ model, onSelectModel, onProvidersSaved, onOpenArc
               <span>{title}</span>
             </button>
           ))}
+          {noMatch && <p className="settings-nav-empty">No matches</p>}
         </nav>
 
         <div className="scroll">
           <div className="page-inner page-inner--wide">
-            <section className="settings-detail">
-              <header className="settings-section-head">
-                <span className="settings-card-icon">{section.icon}</span>
-                <div>
-                  <h2>{section.title}</h2>
-                  <p>{section.subtitle}</p>
-                </div>
-              </header>
+            {noMatch ? (
+              <section className="settings-detail">
+                <p className="empty-note">No settings match “{query.trim()}”.</p>
+              </section>
+            ) : (
+              <section className="settings-detail">
+                <header className="settings-section-head">
+                  <span className="settings-card-icon">{section.icon}</span>
+                  <div>
+                    <h2>{section.title}</h2>
+                    <p>{section.subtitle}</p>
+                  </div>
+                </header>
 
-              <div className="settings-card-body">
-                {body(active, model, onSelectModel, onProvidersSaved, onOpenArchive)}
-              </div>
-            </section>
+                <div className="settings-card-body">
+                  {body(active, model, onSelectModel, onProvidersSaved, onOpenArchive)}
+                </div>
+              </section>
+            )}
           </div>
         </div>
       </div>

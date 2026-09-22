@@ -247,7 +247,7 @@
   background: var(--kodo-hover);
   color: var(--kodo-text-secondary);
   font-family: var(--kodo-font-mono);
-  font-size: 9px;
+  font-size: var(--kodo-font-xs);
   line-height: 16px;
   white-space: pre-wrap;
 }
@@ -799,7 +799,7 @@
 
 .composer {
   flex: none;
-  padding: 10px 20px 18px;
+  padding: 4px 20px 8px;
   min-width: 0;
 }
 
@@ -826,10 +826,14 @@
     0 4px 14px rgb(23 32 51 / 5%);
 }
 
-/* ── Row 1: textarea ─────────────────────────────────────────────────────── */
+/* ── The single row: attach/permission · draft · model/send ──────────────── */
 
 .composer-row {
-  padding: 12px 14px 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 8px 10px;
+  min-width: 0;
 }
 
 /* A new task chooses its project directly below the dialog. The row disappears
@@ -900,7 +904,9 @@
    up to `MAX_HEIGHT` in Composer.tsx and scrolls past that, which is what the
    `resize: none` and the scrollbar-free default would otherwise fight. */
 .composer-input {
+  flex: 1;
   width: 100%;
+  min-width: 120px;
   min-height: 24px;
   max-height: 160px;
   border: 0;
@@ -925,24 +931,13 @@
   color: var(--kodo-text-secondary);
 }
 
-/* ── Row 2: controls bar ─────────────────────────────────────────────────── */
-
-.composer-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 5px 8px 8px;
-  min-height: 36px;
-  min-width: 0;
-  gap: 4px;
-}
-
 .composer-left,
 .composer-right {
   display: flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
+  flex: none;
 }
 
 /* ── Permission trigger (dropdown style) ─────────────────────────────────── */
@@ -1209,11 +1204,11 @@
 
 @media (max-width: 1199px) {
   .composer {
-    padding: 8px 12px 12px;
+    padding: 6px 12px 10px;
     min-width: 0;
   }
 
-  .composer-controls {
+  .composer-row {
     flex-wrap: wrap;
     gap: 6px;
   }

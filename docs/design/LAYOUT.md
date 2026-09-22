@@ -347,6 +347,7 @@ Categories, in the order the left column lists them:
 
 - General
 - Models
+- AI Provider
 - Tools & Permissions
 - Projects
 - Archive & Storage
