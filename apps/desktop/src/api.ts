@@ -76,6 +76,8 @@ export type TurnDto = {
   items: ItemDto[];
   done: boolean;
   stopped: boolean;
+  /** Recovery stamped a killed run as interrupted (never Completed). */
+  interrupted?: boolean;
   error: string | null;
 };
 
@@ -120,7 +122,28 @@ export type RunEventDto =
       reason?: string;
     }
   | { type: "textDelta"; session: string; text: string }
-  | { type: "progress"; session: string; phase: string; detail: string };
+  | { type: "progress"; session: string; phase: string; detail: string }
+  | {
+      type: "failover";
+      session: string;
+      fromProvider: string;
+      fromModel: string;
+      errorClass: string;
+      error: string;
+      toProvider: string;
+      toModel: string;
+    }
+  /** Compatibility alias for older runners; new runners emit `failover`. */
+  | {
+      type: "providerSwitch";
+      session: string;
+      fromProvider: string;
+      fromModel: string;
+      errorClass: string;
+      error: string;
+      toProvider: string;
+      toModel: string;
+    };
 
 export const RUN_EVENT = "run:event";
 
@@ -137,8 +160,13 @@ function write<T>(command: string, args?: Record<string, unknown>): Promise<T | 
   return invoke<T>(command, args);
 }
 
-export function sendMessage(id: string, text: string, context: string[] = []): Promise<void> {
-  return invoke<void>("send_message", { id, text, context });
+export function sendMessage(
+  id: string,
+  text: string,
+  context: string[] = [],
+  project?: string,
+): Promise<string> {
+  return invoke<string>("send_message", { id, text, context, project });
 }
 
 export function stopRun(id: string): Promise<void | null> {

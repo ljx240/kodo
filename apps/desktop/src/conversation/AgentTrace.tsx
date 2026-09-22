@@ -1,4 +1,4 @@
-import { Check, ChevronRight } from "lucide-react";
+import { Check, ChevronRight, Minus, Square } from "lucide-react";
 import { useState } from "react";
 import { splitDetail, type TraceStep } from "../data/types";
 
@@ -12,6 +12,20 @@ function StatusMark({ status }: { status: TraceStep["status"] }) {
   }
   if (status === "failed") {
     return <span className="trace-mark trace-mark--failed" />;
+  }
+  if (status === "interrupted") {
+    return (
+      <span className="trace-mark trace-mark--interrupted">
+        <Minus size={11} strokeWidth={3} />
+      </span>
+    );
+  }
+  if (status === "stopped") {
+    return (
+      <span className="trace-mark trace-mark--stopped">
+        <Square size={8} strokeWidth={2.5} />
+      </span>
+    );
   }
   return <span className="trace-mark trace-mark--running" />;
 }
@@ -177,11 +191,12 @@ function TraceItem({
 
           {shown && <Expanded step={step} fileDiffs={fileDiffs} />}
 
-          <span className="trace-duration">{step.duration}</span>
+          <span className="trace-duration">{step.duration || "—"}</span>
 
           <span className="trace-disclosure">
             <ChevronRight size={14} strokeWidth={1.9} className={shown ? "rot-90" : undefined} />
           </span>
+
         </div>
       </div>
     </li>

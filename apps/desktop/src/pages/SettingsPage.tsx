@@ -1,4 +1,5 @@
 import {
+  Archive,
   Box,
   Cloud,
   Database,
@@ -139,14 +140,17 @@ type Props = {
   model: string;
   onSelectModel: (model: string) => void;
   onProvidersSaved?: (providers: ProviderConfig[]) => void;
+  onOpenArchive?: () => void;
+  onClose?: () => void;
+  modal?: boolean;
 };
 
-export function SettingsPage({ model, onSelectModel, onProvidersSaved }: Props) {
+export function SettingsPage({ model, onSelectModel, onProvidersSaved, onOpenArchive, onClose, modal = false }: Props) {
   const [active, setActive] = useState(SECTIONS[0].id);
   const section = SECTIONS.find((item) => item.id === active) ?? SECTIONS[0];
 
   return (
-    <main className="main">
+    <main className={`main${modal ? " settings-modal-panel" : ""}`}>
       <header className="page-head">
         <span className="page-head-mark">
           <Settings size={18} strokeWidth={1.7} />
@@ -156,6 +160,11 @@ export function SettingsPage({ model, onSelectModel, onProvidersSaved }: Props) 
           <p>Customize Kodo to fit your workflow</p>
         </div>
         <span className="spacer" />
+        {modal && onClose && (
+          <button type="button" className="icon-btn" aria-label="关闭设置" onClick={onClose}>
+            ×
+          </button>
+        )}
       </header>
 
       <div className="settings-layout">
@@ -185,7 +194,9 @@ export function SettingsPage({ model, onSelectModel, onProvidersSaved }: Props) 
                 </div>
               </header>
 
-              <div className="settings-card-body">{body(active, model, onSelectModel, onProvidersSaved)}</div>
+              <div className="settings-card-body">
+                {body(active, model, onSelectModel, onProvidersSaved, onOpenArchive)}
+              </div>
             </section>
           </div>
         </div>
@@ -454,12 +465,12 @@ function ToolsBody() {
   );
 }
 
-function StorageBody() {
+function StorageBody({ onOpenArchive }: { onOpenArchive?: () => void }) {
   return (
     <>
       <Field
         label="Local state"
-        hint="项目、会话与设置使用 append-only 日志；API Key 在 credentials.log"
+        hint="项目、会话与设置写入 settings.log（append-only）；API Key 在 credentials.log"
         hintBelow
         block
       >
@@ -467,6 +478,12 @@ function StorageBody() {
           macOS 目录：<code>~/Library/Application Support/Kodo</code>。不使用 SQLite；自动归档天数与导出将在后续版本接入。
         </p>
       </Field>
+      {onOpenArchive && (
+        <button type="button" className="btn" onClick={onOpenArchive}>
+          <Archive size={15} strokeWidth={1.8} />
+          <span>查看归档</span>
+        </button>
+      )}
     </>
   );
 }
@@ -502,6 +519,9 @@ function AppearanceBody() {
 function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m: string) => void }) {
   return (
     <>
+      <Field label="Fallback behavior" hint="所选模型不可用时" hintBelow wide>
+        <FallbackSelect />
+      </Field>
       <Field label="Default model" hint="Used for new conversations" hintBelow wide>
         <select className="select" value={model} onChange={(event) => onSelectModel(event.target.value)}>
           {MODELS.map((name) => (
@@ -510,9 +530,6 @@ function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m
             </option>
           ))}
         </select>
-      </Field>
-      <Field label="Fallback behavior" hint="所选模型不可用时" hintBelow wide>
-        <FallbackSelect />
       </Field>
       <SwitchRow label="Extended thinking" hint="Allow models to think step by step" trailing settingKey="extended-thinking" />
       <Field label="Max output tokens" hint="Default for new conversations" hintBelow wide>
@@ -561,6 +578,7 @@ function body(
   model: string,
   onSelectModel: (m: string) => void,
   onProvidersSaved?: (providers: ProviderConfig[]) => void,
+  onOpenArchive?: () => void,
 ) {
   switch (active) {
     case "models":
@@ -579,7 +597,7 @@ function body(
         />
       );
     case "storage":
-      return <StorageBody />;
+      return <StorageBody onOpenArchive={onOpenArchive} />;
     case "appearance":
       return <AppearanceBody />;
     default:

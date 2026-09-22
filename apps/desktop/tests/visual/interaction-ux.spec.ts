@@ -32,14 +32,22 @@ async function openLiveConversation(page: import("@playwright/test").Page) {
   await expect(page.locator(".conv-title")).toHaveText("新对话");
 }
 
-test("slash inserts a skill tag from the composer popup", async ({ page }) => {
+test("slash selects a structured skill chip from the composer popup", async ({ page }) => {
   await stubShell(page, liveCore());
   await openLiveConversation(page);
 
   await page.locator('[data-testid="composer-input"]').fill("/");
   await expect(page.locator('[data-testid="composer-slash"]')).toBeVisible();
   await page.locator('[data-slash-id="bug-fix"]').click();
-  await expect(page.locator('[data-testid="composer-input"]')).toHaveValue("【技能：bug-fix】");
+  await expect(page.locator('[data-testid="composer-input"]')).toHaveValue("");
+  await expect(page.locator('.composer-skill[data-skill-id="bug-fix"]')).toContainText("bug-fix");
+
+  await page.locator('[data-testid="composer-input"]').fill("修复这个问题");
+  await page.locator('[data-testid="composer-input"]').press("Enter");
+  const log = await page.evaluate(
+    () => (window as unknown as { __sendLog?: Array<{ text: string; context: string[] }> }).__sendLog ?? [],
+  );
+  expect(log[0]?.text).toBe("【技能：bug-fix】\n修复这个问题");
 });
 
 test("running composer queues the next ask and drains after turnComplete", async ({ page }) => {

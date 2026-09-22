@@ -82,7 +82,7 @@ const PERM_CONFIG: Record<Permission, { label: string; color: string }> = {
 const openSettings = () => navigate(isDesktop() ? "/settings" : "/ui-demo/settings");
 
 /** Builtin agent skills mirrored from skills/<id>/SKILL.md (runtime SkillRegistry). */
-const BUILTIN_SKILLS: { id: string; label: string }[] = [
+export const BUILTIN_SKILLS: { id: string; label: string }[] = [
   { id: "bug-fix", label: "缺陷修复" },
   { id: "feature", label: "功能开发" },
   { id: "test", label: "测试" },
@@ -118,6 +118,8 @@ export function Composer({
   const [plusOpen, setPlusOpen] = useState(false);
   /** Side panel next to the + menu (skills list / project files). */
   const [plusPanel, setPlusPanel] = useState<"skills" | "files" | null>(null);
+  /** Skills selected from the + menu stay structured until send. */
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [fileQuery, setFileQuery] = useState("");
   const [projectFiles, setProjectFiles] = useState<string[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
@@ -203,19 +205,17 @@ export function Composer({
     onAddContext(path);
   };
 
-  /** Skill id is written into the draft so the runtime SkillRegistry can match it. */
+  /** Skills selected from + are rendered as removable chips and serialized on send. */
   const applySkill = (skillId: string) => {
-    const tag = `【技能：${skillId}】`;
-    setDraft((current) => (current.trim() ? `${current.trimEnd()}\n${tag}` : `${tag} `));
+    setSelectedSkills((current) => (current.includes(skillId) ? current : [...current, skillId]));
     closePlus();
     requestAnimationFrame(() => input.current?.focus());
   };
 
-  /** Slash insert keeps the caret at the end of a one-line draft. */
+  /** Slash selection uses the same structured chip as the + menu. */
   const applySkillFromSlash = (skillId: string) => {
-    const tag = `【技能：${skillId}】`;
-    setDraft(tag);
-    requestAnimationFrame(() => input.current?.focus());
+    setDraft("");
+    applySkill(skillId);
   };
 
   // Stable handle for async drop/paste/file-dialog handlers that must see the latest pickFile.
@@ -348,11 +348,13 @@ export function Composer({
   const send = () => {
     // Slash menu owns Enter while it is open.
     if (slashOpen) return;
-    const text = draft.trim();
+    const skillText = selectedSkills.map((skillId) => `【技能：${skillId}】`).join("\n");
+    const text = [skillText, draft.trim()].filter(Boolean).join("\n");
     if (!text || !ready) return;
     // Running still queues: the draft is intentional work, not a mis-click.
     if (running && text.startsWith("/")) return;
     setDraft("");
+    setSelectedSkills([]);
     onSend(text, [...contexts]);
   };
 
@@ -372,6 +374,26 @@ export function Composer({
         }}
         onDrop={(event) => void onComposerDrop(event)}
       >
+        {selectedSkills.length > 0 && (
+          <div className="composer-skills" data-testid="composer-skills" aria-label="已选择技能">
+            {selectedSkills.map((skillId) => (
+              <span key={skillId} className="chip composer-skill" data-skill-id={skillId}>
+                <Puzzle size={13} strokeWidth={1.8} className="chip-icon" />
+                <span className="composer-skill-label">技能</span>
+                <code>{skillId}</code>
+                <button
+                  type="button"
+                  className="chip-remove"
+                  aria-label={`Remove skill ${skillId}`}
+                  onClick={() => setSelectedSkills((current) => current.filter((id) => id !== skillId))}
+                >
+                  <X size={12} strokeWidth={2} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
         {/* Row 1: textarea */}
         <div className="composer-row">
           <textarea
@@ -479,7 +501,7 @@ export function Composer({
               {plusOpen && (
                 <>
                   <div className="menu-backdrop" onClick={() => closePlus()} />
-                  <div className="composer-plus-root">
+                  <div className={`composer-plus-root${plusPanel ? " composer-plus-root--panel-open" : ""}`}>
                     <div id="composer-plus-menu" className="menu composer-plus-menu" role="menu">
                       <button
                         type="button"
@@ -769,6 +791,7 @@ export function Composer({
             )}
           </div>
         </div>
+
       </div>
 
       {(queueCount > 0 || running) && (

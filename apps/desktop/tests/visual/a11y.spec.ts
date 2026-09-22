@@ -133,6 +133,8 @@ test("Tab reaches core controls and focus is visible", async ({ page }) => {
     });
     if (reachedComposer) break;
   }
+  // Keyboard focus reaches the draft box (ring itself is suppressed on the
+  // input by design; other controls keep the global :focus-visible ring).
   expect(reachedComposer).toBe(true);
 
   // Ring is suppressed on the draft box by design; other controls keep it.

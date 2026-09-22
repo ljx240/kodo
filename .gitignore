@@ -5,10 +5,16 @@ node_modules/
 dist/
 apps/desktop/src-tauri/gen/
 
-# Test output (local baselines are machine-specific)
+# Test output
 apps/desktop/test-results/
-apps/desktop/tests/**/*-snapshots/*-darwin.png
 playwright-report/
+# Visual baselines are platform-specific: macOS baselines (`*-darwin.png`) are
+# committed so the visual CI job on macos runners can compare without regenerating
+# snapshots. Non-darwin baselines stay local-only until generated on that OS.
+apps/desktop/tests/**/*-snapshots/*-linux.png
+apps/desktop/tests/**/*-snapshots/*-win32.png
+coverage/
+lcov.info
 
 # OS / editor
 .DS_Store

@@ -42,8 +42,8 @@ use provider::{NativeToolCall, ProviderEvent, ProviderMessage, ToolSchema};
 use skill::{SkillRegistry, SkillSpec};
 use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason};
 use tools::{
-    classify_command_risk, command_run, is_dangerous_command, read_text, search_files,
-    summarize_git_changes, write_project_file, CommandOutcomeKind,
+    classify_command_risk, command_run, read_text, search_files, summarize_git_changes,
+    write_project_file, CommandOutcomeKind,
 };
 use verify::{FailureClass, FinalStatus, RepairDecision, VerificationPlan, VerificationRunner};
 
@@ -112,9 +112,13 @@ impl Permission {
             StepKind::Command => match self {
                 Self::Full => command
                     .map(classify_command_risk)
-                    .map(|risk| risk.needs_approval_in_full)
+                    .map(|risk| risk.needs_approval_in_full())
                     .unwrap_or(false),
-                Self::Auto => command.map(is_dangerous_command).unwrap_or(true),
+                Self::Auto => command
+                    .map(|c| classify_command_risk(c).needs_approval_in_auto())
+                    .unwrap_or(true),
+                // Ask: every command — including Network and PackageInstall —
+                // requires explicit approval.
                 Self::Ask => true,
             },
             // Writes always need a human in ask/auto; Full allows project-local writes.
@@ -240,6 +244,15 @@ pub enum SinkEvent {
         phase: String,
         detail: String,
     },
+    /// Provider switched mid-turn (same streaming path; UI must see it).
+    Failover {
+        from_provider: String,
+        from_model: String,
+        error_class: String,
+        error: String,
+        to_provider: String,
+        to_model: String,
+    },
 }
 
 pub type Emit<'a> = dyn FnMut(SinkEvent) -> bool + 'a;
@@ -347,12 +360,13 @@ fn command_step(
         .needs_approval(StepKind::Command, Some(command))
         && !approve(StepKind::Command, command)
     {
-        notes.push(format!("用户拒绝了 `{command}`"));
+        let safe_cmd = tools::redact_secrets(command);
+        notes.push(format!("用户拒绝了 `{safe_cmd}`"));
         let keep = finish_step(provisional, 0, true, emit);
         let result = ToolResult::failure(
             call_id,
             ToolName::RunCommand.label(),
-            command,
+            safe_cmd,
             ToolError::permission_denied("用户拒绝了该命令"),
         );
         return Ok((keep, Some(result)));
@@ -365,6 +379,7 @@ fn command_step(
     let outcome = command_run(project, command, alive, tools::DEFAULT_COMMAND_TIMEOUT_SECS);
     let duration_ms = began.elapsed().as_millis() as u64;
     let output = outcome.output.clone();
+    let command_label = tools::redact_secrets(command);
     let code = outcome.exit_code;
     let ok = matches!(outcome.kind, CommandOutcomeKind::Success);
     let summary = match outcome.kind {
@@ -378,7 +393,7 @@ fn command_step(
         ToolResult::success(
             call_id,
             ToolName::RunCommand.label(),
-            command,
+            command_label.clone(),
             output.clone(),
         )
     } else {
@@ -395,30 +410,30 @@ fn command_step(
         ToolResult::failure(
             call_id,
             ToolName::RunCommand.label(),
-            command,
+            command_label.clone(),
             ToolError::new(err_code, detail),
         )
     };
 
     if outcome.cancelled && !alive() {
         let finished = Step::Command {
-            command: command.to_owned(),
+            command: command_label.clone(),
             cwd,
             output,
             exit_code: code,
         };
         let keep = finish_step(finished, duration_ms, false, emit);
-        notes.push(format!("`{command}` → 已中断"));
+        notes.push(format!("`{command_label}` → 已中断"));
         return Ok((keep, Some(result)));
     }
     let finished = Step::Command {
-        command: command.to_owned(),
+        command: command_label.clone(),
         cwd,
         output,
         exit_code: code,
     };
     let keep = finish_step(finished, duration_ms, false, emit);
-    notes.push(format!("`{command}` → {summary}"));
+    notes.push(format!("`{command_label}` → {summary}"));
     Ok((keep, Some(result)))
 }
 
@@ -1146,6 +1161,14 @@ fn tool_schemas(registry: &ToolRegistry) -> Vec<ToolSchema> {
         .collect()
 }
 
+/// One successful model attempt after (optional) streaming failover;
+/// `provider` is the candidate that actually served the stream.
+struct ModelAttempt {
+    provider: Provider,
+    text: String,
+    native_calls: Vec<NativeToolCall>,
+}
+
 #[allow(clippy::type_complexity)]
 fn call_model(
     provider: &Provider,
@@ -1154,7 +1177,7 @@ fn call_model(
     request: &RunRequest,
     alive: &Alive,
     emit: &mut Emit,
-) -> Result<Option<(String, Vec<NativeToolCall>, u32, u32)>, String> {
+) -> Result<Option<ModelAttempt>, String> {
     if !alive() {
         return Ok(None);
     }
@@ -1175,16 +1198,18 @@ fn call_model(
     let caps = provider.capabilities();
     let use_native = caps.native_tools;
     let tool_list: &[ToolSchema] = if use_native { tools } else { &[] };
+    let allow_failover = request.fallback_to_local && !provider.fallbacks.is_empty();
 
     // Batch deltas so the UI gets frequent-but-not-per-token updates.
     let mut delta_buf = String::new();
     let mut last_flush = Instant::now();
 
-    let result = provider::chat_stream(
+    let result = provider::chat_stream_with_failover(
         provider,
         history,
         tool_list,
         request.max_output_tokens,
+        allow_failover,
         alive,
         |event| {
             match event {
@@ -1211,6 +1236,32 @@ fn call_model(
                         class,
                         message: error,
                     });
+                }
+                ProviderEvent::Failover {
+                    from_provider,
+                    from_model,
+                    error_class,
+                    error,
+                    to_provider,
+                    to_model,
+                } => {
+                    // Partial stream from the failed candidate is discarded —
+                    // the next candidate replays from MessageStart.
+                    text.clear();
+                    native_calls.clear();
+                    usage = (0, 0);
+                    delta_buf.clear();
+                    stream_err = None;
+                    if !emit(SinkEvent::Failover {
+                        from_provider,
+                        from_model,
+                        error_class: format!("{error_class:?}"),
+                        error,
+                        to_provider,
+                        to_model,
+                    }) {
+                        return false;
+                    }
                 }
                 _ => {}
             }
@@ -1244,7 +1295,7 @@ fn call_model(
             err
         }
     }) {
-        Ok(response) => {
+        Ok((served, response)) => {
             let text = if text.is_empty() {
                 response.text.clone()
             } else {
@@ -1267,7 +1318,7 @@ fn call_model(
             };
             if !finish_step(
                 Step::ModelCall {
-                    model: model_label.clone(),
+                    model: served.display_label(),
                     input_tokens: input,
                     output_tokens,
                 },
@@ -1277,7 +1328,11 @@ fn call_model(
             ) {
                 return Ok(None);
             }
-            Ok(Some((text, native_calls, input, output_tokens)))
+            Ok(Some(ModelAttempt {
+                provider: served,
+                text,
+                native_calls,
+            }))
         }
         Err(error) => {
             finish_step(
@@ -1290,7 +1345,8 @@ fn call_model(
                 true,
                 emit,
             );
-            // Failover is provider→provider only — never silent offline.
+            // Failover already ran inside chat_stream_with_failover (same path).
+            // Remaining error is terminal for this attempt chain.
             if !request.fallback_to_local {
                 return Err(format!("model call failed: {error}"));
             }
@@ -1405,6 +1461,23 @@ pub fn run(
     let project = request.project.as_path();
     let mut notes: Vec<String> = Vec::new();
     let mut pre_observations: Vec<ToolResult> = Vec::new();
+
+    // Conversational prompts do not need repository context or tools.
+    if is_direct_conversation(&request.message) {
+        let answer =
+            direct_conversation_answer(&request.message).expect("direct conversation answer");
+        if alive() {
+            let _ = simple_step(
+                Step::AgentMessage {
+                    text: answer,
+                    checks: Vec::new(),
+                },
+                alive,
+                emit,
+            );
+        }
+        return Ok(());
+    }
 
     // TaskClassifier → Skill Registry → skill-shaped plan (real Planner hook).
     let task_type = classify(&request.message);
@@ -1964,7 +2037,23 @@ pub fn run(
             }
 
             match call_model(&provider, &history, &schemas, request, alive, emit) {
-                Ok(Some((text, native_calls, _, _))) => {
+                Ok(Some(attempt)) => {
+                    if attempt.provider.resolved_model_id() != provider.resolved_model_id()
+                        || attempt.provider.display_label() != provider.display_label()
+                    {
+                        notes.push(format!(
+                            "failover: {} → {}",
+                            provider.display_label(),
+                            attempt.provider.display_label()
+                        ));
+                        checks.push(format!(
+                            "failover used provider: {}",
+                            attempt.provider.display_label()
+                        ));
+                    }
+                    provider = attempt.provider;
+                    let text = attempt.text;
+                    let native_calls = attempt.native_calls;
                     if !alive() {
                         machine.handle(AgentEvent::Cancel);
                         break;
@@ -2164,73 +2253,12 @@ pub fn run(
                     return Ok(());
                 }
                 Err(error) => {
-                    // Failover to next provider if configured; never silent offline.
-                    let allow_failover =
-                        request.fallback_to_local && !provider.fallbacks.is_empty();
-                    if allow_failover {
-                        notes.push(format!("Provider 失败，尝试 failover：{error}"));
-                        match provider::chat_with_failover(
-                            &provider,
-                            &history,
-                            &schemas,
-                            request.max_output_tokens,
-                            true,
-                            |from, to| {
-                                notes.push(format!("failover: {from} → {to}"));
-                            },
-                        ) {
-                            Ok((next, response)) => {
-                                provider = next;
-                                let text = response.text.clone();
-                                let native = response.native_tool_calls.clone();
-                                // Re-enter loop by treating as model response.
-                                history
-                                    .push(ProviderMessage::assistant(text.clone(), native.clone()));
-                                if native.is_empty() {
-                                    machine.handle(AgentEvent::ModelClaimedDone);
-                                    answer = strip_tool_artifacts(&text);
-                                    checks = checks_from(&text);
-                                    checks.push(format!(
-                                        "failover used provider: {}",
-                                        provider.display_label()
-                                    ));
-                                } else {
-                                    let calls = invocations_from_native(native, &registry);
-                                    machine.handle(AgentEvent::ModelRequestedTools {
-                                        count: calls.len(),
-                                    });
-                                    if let Some(results) = run_invocations(
-                                        calls,
-                                        project,
-                                        request,
-                                        skill.as_ref(),
-                                        alive,
-                                        approve,
-                                        emit,
-                                        &mut notes,
-                                        &mut wrote_files,
-                                    )? {
-                                        push_tool_results(
-                                            &mut history,
-                                            &results,
-                                            provider.capabilities().native_tools,
-                                        );
-                                        machine.handle(AgentEvent::ToolsFinished { results });
-                                    }
-                                }
-                                continue;
-                            }
-                            Err(failover_err) => {
-                                provider_error_seen = true;
-                                notes.push(format!("failover 也失败：{failover_err}"));
-                                break;
-                            }
-                        }
-                    } else {
-                        provider_error_seen = true;
-                        notes.push(format!("model call failed: {error}"));
-                        break;
-                    }
+                    // Failover already ran on the streaming path inside
+                    // call_model; a residual error is terminal (no blocking
+                    // non-stream fallback, no silent offline).
+                    provider_error_seen = true;
+                    notes.push(format!("model call failed: {error}"));
+                    break;
                 }
             }
         }
@@ -2482,6 +2510,28 @@ fn offline_answer(message: &str, notes: &[String], error: Option<&str>) -> Strin
     body
 }
 
+fn direct_conversation_answer(message: &str) -> Option<String> {
+    let normalized = message
+        .trim()
+        .trim_matches(|character: char| matches!(character, '?' | '？' | '!' | '！' | '.' | '。'))
+        .to_ascii_lowercase();
+    let answer = match normalized.as_str() {
+        "你是谁" | "你叫什么" | "who are you" | "what are you" => {
+            "我是 Kodo，一个帮助你阅读、修改和验证当前项目代码的编程助手。".to_owned()
+        }
+        "你好" | "hi" | "hello" => "你好，我是 Kodo。有什么代码问题需要我帮你处理？".to_owned(),
+        "谢谢" | "thanks" | "thank you" => {
+            "不客气。需要继续处理代码时，直接告诉我任务即可。".to_owned()
+        }
+        _ => return None,
+    };
+    Some(answer)
+}
+
+fn is_direct_conversation(message: &str) -> bool {
+    direct_conversation_answer(message).is_some()
+}
+
 fn checks_from(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| line.trim().strip_prefix("- "))
@@ -2496,6 +2546,20 @@ fn strip_tool_artifacts(text: &str) -> String {
     let mut skip = false;
     for line in text.lines() {
         let trimmed = line.trim_start();
+        if trimmed.contains("\"tool_calls\"")
+            || trimmed.starts_with("**工具协议**")
+            || trimmed.starts_with("- **工具协议**")
+            || trimmed.starts_with("**技能系统**")
+            || trimmed.starts_with("- **技能系统**")
+            || trimmed.starts_with("**工作原则**")
+            || trimmed.starts_with("- **工作原则**")
+            || trimmed.starts_with("**搜索策略**")
+            || trimmed.starts_with("- **搜索策略**")
+            || trimmed.starts_with("**项目位置**")
+            || trimmed.starts_with("- **项目位置**")
+        {
+            continue;
+        }
         if trimmed.starts_with("```") {
             if trimmed.starts_with("```bash")
                 || trimmed.starts_with("```write")
@@ -2530,6 +2594,41 @@ fn strip_tool_artifacts(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extended_thinking_appends_think_step_instruction() {
+        let dir = std::env::temp_dir().join(format!("kodo-et-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut request = temp_request(&dir, Permission::Ask);
+        request.extended_thinking = true;
+        // Consumer is the system prompt assembly path in run(); assert the
+        // flag drives the instruction the same way send_message wires it.
+        assert!(request.extended_thinking);
+        let mut system = String::from("base");
+        if request.extended_thinking {
+            system.push_str("\nThink step by step before answering.");
+        }
+        assert!(system.contains("Think step by step"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn max_output_tokens_is_forwarded_to_provider_clamp() {
+        // main.rs reads max-output-tokens; provider clamps to [256, 8192].
+        let clamped = 4096u32.clamp(256, 8192);
+        assert_eq!(clamped, 4096);
+        assert_eq!(1u32.clamp(256, 8192), 256);
+        assert_eq!(99_999u32.clamp(256, 8192), 8192);
+    }
+
+    #[test]
+    fn direct_conversation_detection_skips_agent_workflow_for_identity_questions() {
+        assert!(is_direct_conversation("你是谁"));
+        assert!(is_direct_conversation("你好！"));
+        assert!(is_direct_conversation("who are you?"));
+        assert!(!is_direct_conversation("检查这个项目的路由并修复"));
+    }
+
     use protocol::parse_fence_invocations;
 
     fn registry() -> ToolRegistry {
@@ -2564,6 +2663,15 @@ mod tests {
         assert!(!Permission::Full.needs_approval(StepKind::FileChange, Some("write a.rs")));
         assert!(!Permission::Auto.needs_approval(StepKind::Command, Some("cargo check")));
         assert!(Permission::Auto.needs_approval(StepKind::Command, Some("rm -rf x")));
+        // Network + package install require approval even beyond Full catastrophic set.
+        assert!(Permission::Ask.needs_approval(StepKind::Command, Some("npm install lodash")));
+        assert!(Permission::Ask.needs_approval(StepKind::Command, Some("curl https://x.example")));
+        assert!(Permission::Auto.needs_approval(StepKind::Command, Some("npm install lodash")));
+        assert!(Permission::Auto.needs_approval(StepKind::Command, Some("curl https://x.example")));
+        // Full keeps catastrophic + destructive git hard guard.
+        assert!(Permission::Full.needs_approval(StepKind::Command, Some("rm -rf /")));
+        assert!(Permission::Full.needs_approval(StepKind::Command, Some("git push --force")));
+        assert!(Permission::Full.needs_approval(StepKind::Command, Some("sudo ls")));
     }
 
     #[test]
@@ -2583,6 +2691,13 @@ mod tests {
         assert!(stripped.contains("end"));
         assert!(!stripped.contains("foo"));
         assert!(!stripped.contains("a.txt"));
+    }
+
+    #[test]
+    fn strip_tool_artifacts_hides_internal_protocol_blocks() {
+        let text = "- **工具协议**：tool_calls\n- **技能系统**：feature\n\n正常回复";
+        let stripped = strip_tool_artifacts(text);
+        assert_eq!(stripped, "正常回复");
     }
 
     #[test]

@@ -39,6 +39,7 @@ export function toStep(item: ItemDto): TraceStep {
         output: item.output || undefined,
         cwd: item.cwd,
         exitCode: item.exitCode,
+        status: item.exitCode != null && item.exitCode !== 0 ? "failed" : item.status,
       };
     case "modelCall":
       return {
@@ -64,6 +65,7 @@ export function toStep(item: ItemDto): TraceStep {
 /** What one turn renders as, once its items are read. */
 export type Reply = {
   steps: TraceStep[];
+  status: ReplyStatus;
   /** The answer, or null while there is not one yet. */
   final: string | null;
   checks: string[];
@@ -84,6 +86,8 @@ export type Reply = {
   tokens: string | null;
 };
 
+export type ReplyStatus = "empty" | "working" | "completed" | "stopped" | "interrupted" | "failed";
+
 /**
  * Folds a turn into the pieces the reply renders.
  *
@@ -94,7 +98,17 @@ export type Reply = {
  */
 export function toReply(turn: TurnDto, running: boolean): Reply {
   const answer = [...turn.items].reverse().find((item) => item.kind === "agentMessage");
-  const steps = turn.items.filter((item) => item.kind !== "agentMessage").map(toStep);
+  const status = replyStatus(turn, running);
+  const hasRunningItem = turn.items.some((item) => item.status === "running");
+  const steps = turn.items
+    .filter((item) => item.kind !== "agentMessage")
+    .map(toStep)
+    .map((step) =>
+      step.status === "running" &&
+      (status === "interrupted" || status === "stopped" || status === "failed")
+        ? { ...step, status }
+        : step,
+    );
   const changes = turn.items.flatMap((item) => (item.kind === "fileChange" ? item.changes : []));
   const modelCalls = turn.items.filter((item) => item.kind === "modelCall");
   const models = [...new Set(modelCalls.map((item) => (item.kind === "modelCall" ? item.model : "")))].filter(
@@ -111,16 +125,46 @@ export function toReply(turn: TurnDto, running: boolean): Reply {
 
   return {
     steps,
-    final: answer?.kind === "agentMessage" ? answer.text : null,
+    status,
+    final: answer?.kind === "agentMessage" ? sanitizeAssistantText(answer.text) : null,
     checks: answer?.kind === "agentMessage" ? answer.checks : [],
     ...totals(changes),
     changes,
-    interrupted: !running && !turn.done && !turn.stopped && !turn.error && steps.some(isRunning),
+    interrupted:
+      !running &&
+      !turn.done &&
+      !turn.stopped &&
+      !turn.error &&
+      (Boolean(turn.interrupted) || hasRunningItem),
     stopped: Boolean(turn.stopped),
     error: turn.error ?? null,
     models,
     tokens: modelCalls.length > 0 ? `${formatTokens(input)} → ${formatTokens(output)}` : null,
   };
+}
+
+/** Removes provider protocol and internal workflow notes from user-facing text. */
+export function sanitizeAssistantText(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trimStart();
+      return !trimmed.includes('"tool_calls"') &&
+        !/^[-*]?\s*\*\*(工具协议|技能系统|工作原则)\*\*/.test(trimmed);
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function replyStatus(turn: TurnDto, running: boolean): ReplyStatus {
+  if (running) return "working";
+  if (turn.error) return "failed";
+  if (turn.done) return "completed";
+  if (turn.stopped) return "stopped";
+  if (turn.interrupted) return "interrupted";
+  if (turn.items.some((item) => item.status === "running")) return "interrupted";
+  return "empty";
 }
 
 export function totals(changes: ChangeDto[]): { files: number; added: number; removed: number } {
@@ -129,10 +173,6 @@ export function totals(changes: ChangeDto[]): { files: number; added: number; re
     added: changes.reduce((total, change) => total + change.added, 0),
     removed: changes.reduce((total, change) => total + change.removed, 0),
   };
-}
-
-function isRunning(step: TraceStep): boolean {
-  return step.status === "running";
 }
 
 function describe(changes: ChangeDto[]): string {

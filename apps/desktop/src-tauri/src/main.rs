@@ -77,6 +77,26 @@ async fn pick_folder(app: AppHandle) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+/// OS file picker for "添加照片和文件" (photos and files from the filesystem).
+#[tauri::command]
+async fn pick_files(app: AppHandle) -> Option<Vec<String>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("添加照片和文件")
+        .blocking_pick_files()?;
+    let paths = picked
+        .into_iter()
+        .filter_map(|path| path.into_path().ok())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
+}
+
 #[tauri::command]
 fn setting(key: String) -> Option<String> {
     settings::settings_path().and_then(|path| settings::read(&path, &key))
@@ -113,8 +133,14 @@ fn open_session(project: String, title: String) -> Result<SessionView, String> {
 }
 
 #[tauri::command]
-fn load_session(id: String) -> Result<SessionView, String> {
-    load(&sessions()?, &id)
+fn load_session(runs: State<'_, Runs>, id: String) -> Result<SessionView, String> {
+    let dir = sessions()?;
+    // A killed run must not read as Running forever (and never as Completed).
+    // Recovery only stamps `interrupted` — items, changes, and verification stay.
+    if !runs.is_live(&id) {
+        let _ = session::recover_interrupted_session(&dir, &id, session::now());
+    }
+    load(&dir, &id)
 }
 
 #[tauri::command]
@@ -321,14 +347,26 @@ fn send_message(
     id: String,
     text: String,
     context: Option<Vec<String>>,
-) -> Result<(), String> {
+    project: Option<String>,
+) -> Result<String, String> {
     let dir = sessions()?;
+    let id = if id.trim().is_empty() {
+        let project = project.ok_or_else(|| "请选择项目后再发送任务".to_owned())?;
+        session::open(&dir, Path::new(&project), "新对话", session::now())
+            .map_err(|error| error.to_string())?
+    } else {
+        id
+    };
     let context_paths: Vec<String> = context.unwrap_or_default();
-    // Reject paths that try to leave the project before any I/O.
+    // Reject path traversal; absolute paths outside the project are allowed
+    // (e.g. ~/Downloads) when they resolve to an existing regular file.
     for path in &context_paths {
-        if path.trim().is_empty() || path.contains("..") || std::path::Path::new(path).is_absolute()
-        {
-            return Err(format!("context path must stay inside the project: {path}"));
+        if path.trim().is_empty() || path.contains("..") {
+            return Err(format!("invalid context path: {path}"));
+        }
+        let candidate = std::path::Path::new(path);
+        if candidate.is_absolute() && !candidate.is_file() {
+            return Err(format!("context file not found: {path}"));
         }
     }
     session::record_ask_with_context(&dir, &id, session::now(), &text, &context_paths)
@@ -382,6 +420,21 @@ fn send_message(
                 }
             }
         }
+        // Default model is a runtime consumer: override the primary model so the
+        // Settings control is what the next call actually sends.
+        if let Some(model) = read_setting("default-model") {
+            let model = model.trim().to_owned();
+            if !model.is_empty() {
+                let mut next = AgentProvider::new(
+                    primary.template.clone(),
+                    primary.api_key.clone(),
+                    primary.endpoint.clone(),
+                    model,
+                );
+                next.fallbacks = std::mem::take(&mut primary.fallbacks);
+                primary = next;
+            }
+        }
         Some(primary)
     });
 
@@ -398,7 +451,7 @@ fn send_message(
         approvals.inner(),
         StartArgs {
             dir,
-            id,
+            id: id.clone(),
             project: found.project,
             message: text,
             context: context_paths,
@@ -408,7 +461,9 @@ fn send_message(
             max_output_tokens,
             extended_thinking,
         },
-    )
+    )?;
+
+    Ok(id)
 }
 
 /// Lists project-relative files for the composer's Add context picker.
@@ -451,16 +506,28 @@ fn list_project_files(project: String, query: Option<String>) -> Result<Vec<Stri
     Ok(paths)
 }
 
-/// Validates that a context path is inside the project and returns a short preview.
-/// Never returns file bodies to the React layer beyond this bounded preview.
+/// Validates that a context path exists and returns a short preview.
+/// Relative paths stay inside the project; absolute paths (external files) are readable too.
 #[tauri::command]
 fn read_context_file(project: String, path: String) -> Result<String, String> {
+    if path.trim().is_empty() || path.contains("..") {
+        return Err(format!("invalid path: {path}"));
+    }
+    let candidate = std::path::Path::new(&path);
+    if candidate.is_absolute() {
+        if !candidate.is_file() {
+            return Err(format!("file not found: {path}"));
+        }
+        let text = std::fs::read_to_string(candidate).map_err(|e| format!("read failed: {e}"))?;
+        if text.bytes().take(2048).any(|b| b == 0) {
+            return Err(format!("binary file refused: {path}"));
+        }
+        return Ok(text.lines().take(40).collect::<Vec<_>>().join("\n"));
+    }
+
     let root = std::path::Path::new(&project);
     if !root.is_dir() {
         return Err(format!("project is not a directory: {project}"));
-    }
-    if path.trim().is_empty() || path.contains("..") || std::path::Path::new(&path).is_absolute() {
-        return Err(format!("path must stay inside the project: {path}"));
     }
     let mut manager = kodo_agent::ContextManager::new(
         root.to_path_buf(),
@@ -560,6 +627,13 @@ fn snapshot() -> Result<Workspace, String> {
 }
 
 fn main() {
+    // App restart: any Running persisted session becomes Interrupted here —
+    // never Completed. No live runs exist yet, so the live set is empty.
+    if let Some(dir) = session::dir() {
+        let live = std::collections::HashSet::new();
+        let _ = session::recover_interrupted(&dir, &live);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -574,6 +648,7 @@ fn main() {
             rename_project,
             reorder_project,
             pick_folder,
+            pick_files,
             setting,
             set_setting,
             git_branch,

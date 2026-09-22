@@ -50,10 +50,11 @@ function liveTimeline(session: SessionDto): {
   files: ChangedFile[];
   done: boolean;
   stopped: boolean;
+  interrupted: boolean;
 } {
   const turn = session.turns[session.turns.length - 1];
   if (!turn) {
-    return { rows: [], final: "", checks: [], files: [], done: false, stopped: false };
+    return { rows: [], final: "", checks: [], files: [], done: false, stopped: false, interrupted: false };
   }
   let final = "";
   let checks: string[] = [];
@@ -124,7 +125,19 @@ function liveTimeline(session: SessionDto): {
     }
   });
 
-  return { rows, final, checks, files, done: turn.done, stopped: turn.stopped };
+  return {
+    rows,
+    final,
+    checks,
+    files,
+    done: turn.done,
+    stopped: turn.stopped,
+    interrupted:
+      !turn.done &&
+      !turn.stopped &&
+      !turn.error &&
+      (Boolean(turn.interrupted) || turn.items.some((item) => item.status === "running")),
+  };
 }
 
 export function TracePage({
@@ -191,6 +204,7 @@ export function TracePage({
         files: demo.changedFiles,
         done: true,
         stopped: false,
+        interrupted: false,
         crumbProject: demo.project.name,
         crumbTitle: demo.conversation.title,
       }
@@ -213,7 +227,15 @@ export function TracePage({
     );
   }
 
-  const statusLabel = demoMode ? "Completed" : data.stopped ? "Stopped" : data.done ? "Completed" : "Interrupted";
+  const statusLabel = demoMode
+    ? "Completed"
+    : data.stopped
+      ? "Stopped"
+      : data.done
+        ? "Completed"
+        : data.interrupted
+          ? "Interrupted"
+          : "Interrupted";
   const logs = data.rows.map((row) => {
     const detail = row.chip ?? row.chips?.join(" ") ?? "";
     return `${row.time}  ${String(row.duration).padStart(4)}  ${row.type.padEnd(9)} ${row.title}${detail ? ` ${detail}` : ""}`;

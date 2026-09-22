@@ -604,6 +604,15 @@ pub enum ProviderEvent {
         error: String,
         class: ProviderFailureClass,
     },
+    /// Switching providers mid-stream: same runtime path, visible to the UI.
+    Failover {
+        from_provider: String,
+        from_model: String,
+        error_class: ProviderFailureClass,
+        error: String,
+        to_provider: String,
+        to_model: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -725,6 +734,11 @@ pub fn chat(
     chat_ir(provider, &ir, &[], max_tokens)
 }
 
+/// Output-token ceiling shared by every provider payload path.
+pub fn effective_max_tokens(max_tokens: u32) -> u32 {
+    max_tokens.clamp(256, 8192)
+}
+
 /// Full native (or JSON-fallback) model request.
 pub fn chat_ir(
     provider: &Provider,
@@ -733,8 +747,16 @@ pub fn chat_ir(
     max_tokens: u32,
 ) -> Result<ChatResponse, ProviderError> {
     let model_id = provider.validate_model()?;
-    let max_tokens = max_tokens.clamp(256, 8192);
+    let max_tokens = effective_max_tokens(max_tokens);
     let caps = provider.capabilities();
+
+    // Deterministic local provider used by the offline agent benchmark. The
+    // endpoint is a JSONL file path, never a network URL; one response is
+    // consumed per model call. It intentionally stays on the text path so
+    // benchmark scripts exercise the same protocol parser as custom providers.
+    if provider.template == "fake" {
+        return fake_text(provider, &model_id);
+    }
 
     if caps.native_tools && !tools.is_empty() {
         match provider.template.as_str() {
@@ -763,6 +785,38 @@ pub fn chat_ir(
             _ => openai_text(provider, &model_id, &flat, max_tokens),
         }
     }
+}
+
+fn fake_text(provider: &Provider, model_id: &str) -> Result<ChatResponse, ProviderError> {
+    let path = provider.endpoint.trim();
+    let content = std::fs::read_to_string(path).map_err(|error| ProviderError {
+        class: ProviderFailureClass::Unknown,
+        message: format!("fake provider script read failed: {error}"),
+    })?;
+    let (line, rest) = content.split_once('\n').unwrap_or((content.as_str(), ""));
+    std::fs::write(path, rest).map_err(|error| ProviderError {
+        class: ProviderFailureClass::Unknown,
+        message: format!("fake provider script update failed: {error}"),
+    })?;
+    let payload: Value = serde_json::from_str(line.trim()).map_err(|error| ProviderError {
+        class: ProviderFailureClass::MalformedResponse,
+        message: format!("fake provider response is not JSON: {error}"),
+    })?;
+    let text = payload
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProviderError {
+            class: ProviderFailureClass::MalformedResponse,
+            message: "fake provider response must contain a string `text` field".to_owned(),
+        })?;
+    Ok(ChatResponse {
+        text: text.to_owned(),
+        input_tokens: 0,
+        output_tokens: 0,
+        native_tool_calls: Vec::new(),
+        model_id: model_id.to_owned(),
+        finish_reason: "stop".to_owned(),
+    })
 }
 
 /// Streaming chat. When capabilities.streaming is false, emits a single
@@ -1018,7 +1072,64 @@ impl SseEventAssembler {
 }
 
 /// Chat with optional failover across configured providers.
-/// `fallback_to_local` is NOT implemented here — failover is provider→provider only.
+///
+/// Uses the **same** `chat_stream` path as primary streaming — never a blocking
+/// non-stream fallback the UI cannot see. Bounded: walks the candidate list at
+/// most once (no infinite provider chain). Auth / InvalidModel / ContextTooLong /
+/// Cancelled do not cascade; RateLimit / Timeout / ServerError / transient
+/// classes may.
+pub fn chat_stream_with_failover(
+    primary: &Provider,
+    messages: &[ProviderMessage],
+    tools: &[ToolSchema],
+    max_tokens: u32,
+    allow_failover: bool,
+    alive: &dyn Fn() -> bool,
+    mut on_event: impl FnMut(ProviderEvent) -> bool,
+) -> Result<(Provider, ChatResponse), ProviderError> {
+    let mut candidates: Vec<Provider> = Vec::with_capacity(1 + primary.fallbacks.len());
+    candidates.push(primary.clone());
+    if allow_failover {
+        candidates.extend(primary.fallbacks.iter().cloned());
+    }
+
+    let total = candidates.len();
+    let mut last: Option<ProviderError> = None;
+    for (index, provider) in candidates.iter().enumerate() {
+        match chat_stream(provider, messages, tools, max_tokens, alive, &mut on_event) {
+            Ok(response) => return Ok((provider.clone(), response)),
+            Err(err) => {
+                if err.class == ProviderFailureClass::Cancelled || !alive() {
+                    return Err(err);
+                }
+                let is_last = index + 1 >= total;
+                if !allow_failover || !err.class.allows_failover() || is_last {
+                    return Err(err);
+                }
+                let next = &candidates[index + 1];
+                let switch = ProviderEvent::Failover {
+                    from_provider: provider.display_label(),
+                    from_model: provider.resolved_model_id(),
+                    error_class: err.class,
+                    error: err.message.clone(),
+                    to_provider: next.display_label(),
+                    to_model: next.resolved_model_id(),
+                };
+                if !on_event(switch) {
+                    return Err(cancelled_err("cancelled at failover switch"));
+                }
+                last = Some(err);
+            }
+        }
+    }
+    Err(last.unwrap_or(ProviderError {
+        class: ProviderFailureClass::Unknown,
+        message: "no provider available".into(),
+    }))
+}
+
+/// Blocking failover retained for tests and non-stream call sites.
+/// Production agent turns must use [`chat_stream_with_failover`].
 pub fn chat_with_failover(
     primary: &Provider,
     messages: &[ProviderMessage],
@@ -1077,14 +1188,15 @@ fn map_ureq_err(error: ureq::Error) -> ProviderError {
             let body = response
                 .into_string()
                 .unwrap_or_else(|_| format!("HTTP {status}"));
+            let body = crate::tools::redact_secrets(&body);
             let class = classify_failure(&body, Some(status));
             ProviderError {
                 class,
-                message: format!("HTTP {status}: {body}"),
+                message: crate::tools::redact_secrets(&format!("HTTP {status}: {body}")),
             }
         }
         ureq::Error::Transport(t) => {
-            let message = t.to_string();
+            let message = crate::tools::redact_secrets(&t.to_string());
             let class = classify_failure(&message, None);
             ProviderError { class, message }
         }
@@ -2242,7 +2354,7 @@ pub fn openai_request_json(
         "tools": openai_tool_payload(tools),
         "tool_choice": "auto",
         "temperature": 0.2,
-        "max_tokens": max_tokens.clamp(256, 8192),
+        "max_tokens": effective_max_tokens(max_tokens),
     }))
 }
 
@@ -2258,7 +2370,7 @@ pub fn anthropic_request_json(
     let (system, rest) = anthropic_messages(messages);
     Ok(json!({
         "model": model_id,
-        "max_tokens": max_tokens.clamp(256, 8192),
+        "max_tokens": effective_max_tokens(max_tokens),
         "system": system,
         "messages": rest,
         "tools": anthropic_tools(tools),
@@ -3071,6 +3183,146 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.class, ProviderFailureClass::Auth);
+    }
+
+    #[test]
+    fn streaming_failover_does_not_cascade_on_auth() {
+        let primary = Provider {
+            api_key: String::new(),
+            fallbacks: vec![openai_provider()],
+            ..openai_provider()
+        };
+        let mut switches = 0;
+        let mut events = Vec::new();
+        let err = chat_stream_with_failover(
+            &primary,
+            &[ProviderMessage::user("x")],
+            &[],
+            256,
+            true,
+            &|| true,
+            |event| {
+                if matches!(event, ProviderEvent::Failover { .. }) {
+                    switches += 1;
+                }
+                events.push(event);
+                true
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.class, ProviderFailureClass::Auth);
+        assert_eq!(switches, 0, "Auth must not try the next provider");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::Failover { .. })),
+            "no Failover event for non-retryable class"
+        );
+    }
+
+    #[test]
+    fn streaming_failover_is_bounded_by_configured_chain() {
+        // Auth on primary stops immediately; even with many fallbacks we never
+        // walk them (no infinite loop, no blind cascade).
+        let primary = Provider {
+            api_key: String::new(),
+            fallbacks: (0..8).map(|_| openai_provider()).collect(),
+            ..openai_provider()
+        };
+        let attempts = std::cell::Cell::new(0usize);
+        let _ = chat_stream_with_failover(
+            &primary,
+            &[ProviderMessage::user("x")],
+            &[],
+            256,
+            true,
+            &|| {
+                attempts.set(attempts.get() + 1);
+                true
+            },
+            |_| true,
+        );
+        // validate_model fails before HTTP; alive() checked once per candidate
+        // attempt start — Auth returns without walking the chain.
+        assert!(
+            attempts.get() <= 2,
+            "bounded chain, got {} alive checks",
+            attempts.get()
+        );
+    }
+
+    #[test]
+    fn streaming_failover_disables_when_setting_is_fail() {
+        // fallback-behavior=fail → allow_failover=false → single candidate.
+        let primary = Provider {
+            api_key: String::new(),
+            fallbacks: vec![openai_provider()],
+            ..openai_provider()
+        };
+        let mut events = Vec::new();
+        let err = chat_stream_with_failover(
+            &primary,
+            &[ProviderMessage::user("x")],
+            &[],
+            256,
+            false,
+            &|| true,
+            |event| {
+                events.push(event);
+                true
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.class, ProviderFailureClass::Auth);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::Failover { .. })),
+            "allow_failover=false must not emit a switch"
+        );
+    }
+
+    #[test]
+    fn failover_event_payload_reports_both_sides_and_class() {
+        // Unit-level contract for the Failover event fields the UI renders.
+        let event = ProviderEvent::Failover {
+            from_provider: "GPT-4o".into(),
+            from_model: "gpt-4o".into(),
+            error_class: ProviderFailureClass::RateLimit,
+            error: "429".into(),
+            to_provider: "Claude Sonnet 5".into(),
+            to_model: "claude-sonnet-4-5".into(),
+        };
+        match event {
+            ProviderEvent::Failover {
+                from_provider,
+                from_model,
+                error_class,
+                to_provider,
+                to_model,
+                ..
+            } => {
+                assert_eq!(from_provider, "GPT-4o");
+                assert_eq!(from_model, "gpt-4o");
+                assert_eq!(error_class, ProviderFailureClass::RateLimit);
+                assert_eq!(to_provider, "Claude Sonnet 5");
+                assert_eq!(to_model, "claude-sonnet-4-5");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn context_too_long_is_not_failover() {
+        assert!(!ProviderFailureClass::ContextTooLong.allows_failover());
+        assert!(!ProviderFailureClass::Cancelled.allows_failover());
+    }
+
+    #[test]
+    fn effective_max_tokens_clamps_to_provider_bounds() {
+        assert_eq!(effective_max_tokens(1), 256);
+        assert_eq!(effective_max_tokens(4096), 4096);
+        assert_eq!(effective_max_tokens(100_000), 8192);
     }
 
     // -----------------------------------------------------------------------
