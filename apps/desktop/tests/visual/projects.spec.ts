@@ -58,8 +58,49 @@ test("Kodo has no account row, and Settings sits at the foot", async ({ page }) 
 
   await expect(page.locator(".account")).toHaveCount(0);
   await expect(page.locator(".sidebar-foot .nav-item")).toHaveText("Settings");
-  // Conversations and Archive stay above the tree; Settings is not among them.
-  await expect(page.locator(".nav .nav-item")).toHaveText(["Conversations", "Archive"]);
+  // New Task and Skills stay above the tree; Settings is opened as a modal.
+  await expect(page.locator(".nav .nav-item")).toHaveText(["New Task", "Skills"]);
+});
+
+test("Skills is available directly below New Task", async ({ page }) => {
+  await page.goto("/ui-demo/conversation");
+
+  await page.getByRole("link", { name: "Skills" }).click();
+  await expect(page).toHaveURL(/\/ui-demo\/skills$/);
+  await expect(page.locator(".skill-row")).toHaveCount(7);
+  await expect(page.locator(".skill-row").first()).toContainText("缺陷修复");
+});
+
+test("New Task opens an empty composer without selecting an existing task", async ({ page }) => {
+  await stubShell(page, {
+    workspace: {
+      projects: PROJECTS,
+      sessions: [sessionRef("s1", "/tmp/ws/alpha", "已有任务")],
+    },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "已有任务",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [],
+    },
+  });
+  await page.goto("/");
+  await page.locator(".tree-project-main").first().click();
+  await page.locator(".tree-conversation").click();
+  await expect(page.locator(".conv-title")).toHaveText("已有任务");
+  await page.getByRole("link", { name: "New Task" }).click();
+  await expect(page.locator('[data-testid="welcome"]')).toBeVisible();
+  await expect(page.locator(".conv-title")).toHaveText("新对话");
+  await expect(page.locator(".tree-conversation--active")).toHaveCount(0);
+  await page.locator(".composer-input").fill("开始任务");
+  await page.locator(".composer-input").press("Enter");
+  await expect(page.locator(".msg-bubble")).toHaveText("开始任务");
+  const log = await page.evaluate(
+    () => (window as unknown as { __sendLog?: Array<{ id: string; text: string }> }).__sendLog ?? [],
+  );
+  expect(log[0]?.id).toBe("");
 });
 
 test("the demo routes keep the deterministic fixture", async ({ page }) => {

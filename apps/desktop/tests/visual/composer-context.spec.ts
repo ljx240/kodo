@@ -55,6 +55,31 @@ test("+ opens a menu, not an inline file list", async ({ page }) => {
   expect(gap!).toBeLessThanOrEqual(16);
 });
 
+test("+ child panels stay joined to the action menu", async ({ page }) => {
+  await stubShell(page, liveCore({ files: ["src/app.ts"] }));
+  await openLiveConversation(page);
+
+  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator(".composer-plus-menu").getByRole("menuitem", { name: "项目文件" }).click();
+  await expect(page.locator(".composer-files-panel")).toBeVisible();
+
+  const geometry = await page.evaluate(() => {
+    const root = document.querySelector(".composer-plus-root")?.getBoundingClientRect();
+    const menu = document.querySelector(".composer-plus-menu")?.getBoundingClientRect();
+    const panel = document.querySelector(".composer-plus-panel")?.getBoundingClientRect();
+    if (!root || !menu || !panel) return null;
+    return {
+      root,
+      horizontalGap: panel.left - menu.right,
+      bottomDelta: Math.abs(panel.bottom - menu.bottom),
+    };
+  });
+  expect(geometry).not.toBeNull();
+  expect(geometry!.root.width).toBeGreaterThan(geometry!.root.height);
+  expect(geometry!.horizontalGap).toBe(0);
+  expect(geometry!.bottomDelta).toBeLessThanOrEqual(1);
+});
+
 test("+ lists builtin skills as a removable chip and serializes it on send", async ({ page }) => {
   await stubShell(page, liveCore());
   await openLiveConversation(page);

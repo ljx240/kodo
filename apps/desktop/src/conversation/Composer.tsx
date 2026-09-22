@@ -82,7 +82,7 @@ const PERM_CONFIG: Record<Permission, { label: string; color: string }> = {
 const openSettings = () => navigate(isDesktop() ? "/settings" : "/ui-demo/settings");
 
 /** Builtin agent skills mirrored from skills/<id>/SKILL.md (runtime SkillRegistry). */
-const BUILTIN_SKILLS: { id: string; label: string }[] = [
+export const BUILTIN_SKILLS: { id: string; label: string }[] = [
   { id: "bug-fix", label: "缺陷修复" },
   { id: "feature", label: "功能开发" },
   { id: "test", label: "测试" },
@@ -212,11 +212,10 @@ export function Composer({
     requestAnimationFrame(() => input.current?.focus());
   };
 
-  /** Slash insert keeps the caret at the end of a one-line draft. */
+  /** Slash selection uses the same structured chip as the + menu. */
   const applySkillFromSlash = (skillId: string) => {
-    const tag = `【技能：${skillId}】`;
-    setDraft(tag);
-    requestAnimationFrame(() => input.current?.focus());
+    setDraft("");
+    applySkill(skillId);
   };
 
   // Stable handle for async drop/paste/file-dialog handlers that must see the latest pickFile.
@@ -502,7 +501,7 @@ export function Composer({
               {plusOpen && (
                 <>
                   <div className="menu-backdrop" onClick={() => closePlus()} />
-                  <div className="composer-plus-root">
+                  <div className={`composer-plus-root${plusPanel ? " composer-plus-root--panel-open" : ""}`}>
                     <div id="composer-plus-menu" className="menu composer-plus-menu" role="menu">
                       <button
                         type="button"

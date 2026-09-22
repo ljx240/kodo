@@ -170,6 +170,35 @@ test("a run draws itself in one step at a time, from the events", async ({ page 
   await expect(page.locator(".reply-interrupted")).toHaveCount(0);
 });
 
+test("trace rows follow step ids when events arrive out of order", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "顺序")] },
+    session: { id: "s1", project: "/tmp/ws/alpha", title: "顺序", at: 1_700_000_000, archived: false, turns: [] },
+  });
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+  await page.locator(".composer-input").fill("执行");
+  await page.locator(".composer-input").press("Enter");
+  const item = (id: number, command: string) => ({
+    id,
+    at: 1_700_000_000,
+    status: "done" as const,
+    duration: 1,
+    kind: "commandExecution" as const,
+    command,
+    cwd: "/tmp/ws/alpha",
+    output: "ok",
+    exitCode: 0,
+  });
+  await emit(page, { type: "itemCompleted", session: "s1", item: item(2, "second") });
+  await emit(page, { type: "itemCompleted", session: "s1", item: item(1, "first") });
+  await expect(page.locator(".trace-label")).toHaveCount(2);
+  await expect(page.locator(".code-chip").filter({ hasText: "first" }).first()).toBeVisible();
+  const commands = await page.locator(".trace-row .code-chip").allTextContents();
+  expect(commands).toEqual(["first", "second"]);
+});
+
 test("a killed run is reported as interrupted, not as finished or working", async ({ page }) => {
   await stubShell(page, {
     workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },
@@ -267,6 +296,124 @@ test("a failed run does not leave a spinner on its last step", async ({ page }) 
   await expect(page.locator(".trace-mark--running")).toHaveCount(0);
   await expect(page.locator(".reply-failed")).toContainText("模型服务不可用");
   await expect(page.locator(".status-pill--failed")).toContainText("Failed");
+});
+
+test("a completed command with a non-zero exit code is rendered as failed", async ({ page }) => {
+  await stubShell(
+    page,
+    {
+      workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "检查")] },
+      session: {
+        id: "s1",
+        project: "/tmp/ws/alpha",
+        title: "检查",
+        at: 1_700_000_000,
+        archived: false,
+        turns: [
+          {
+            ask: "检查",
+            context: [],
+            items: [
+              {
+                id: 1,
+                at: 1_700_000_000,
+                status: "done",
+                duration: 40,
+                kind: "commandExecution",
+                command: "identity-check",
+                cwd: "/tmp/ws/alpha",
+                output: "FAIL",
+                exitCode: 1,
+              },
+            ],
+            done: true,
+            stopped: false,
+            error: null,
+          },
+        ],
+      },
+    },
+  );
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+  await expect(page.locator(".trace-mark--failed")).toHaveCount(1);
+  await expect(page.locator(".trace-mark--done")).toHaveCount(0);
+});
+
+test("switching the top project opens that project's latest conversation", async ({ page }) => {
+  await stubShell(page, {
+    workspace: {
+      projects: [project("/tmp/ws/alpha", "alpha"), project("/tmp/ws/beta", "beta")],
+      sessions: [sessionRef("s1", "/tmp/ws/alpha", "Alpha 会话"), sessionRef("s2", "/tmp/ws/beta", "Beta 会话")],
+    },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "Alpha 会话",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [],
+    },
+    sessions: {
+      s2: {
+        id: "s2",
+        project: "/tmp/ws/beta",
+        title: "Beta 会话",
+        at: 1_700_000_001,
+        archived: false,
+        turns: [],
+      },
+    },
+  });
+  await page.goto("/");
+  await page.locator(".tree-project-main").first().click();
+  await page.locator(".tree-conversation").first().click();
+  await expect(page.locator(".conv-title")).toHaveText("Alpha 会话");
+  await page.locator(".topbar .chip").first().click();
+  await page.getByRole("menuitem", { name: "beta" }).click();
+  await expect(page.locator(".conv-title")).toHaveText("Beta 会话");
+  await expect(page.locator(".topbar .chip").first()).toContainText("beta");
+});
+
+test("final replies hide internal tool protocol notes", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "身份")] },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "身份",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        {
+          ask: "你是谁",
+          context: [],
+          items: [
+            {
+              id: 1,
+              at: 1_700_000_000,
+              status: "done",
+              duration: 0,
+              kind: "agentMessage",
+              text: "我是 Kodo。\n**工具协议**：不要展示\n{\"tool_calls\":[{\"name\":\"write_file\"}]}\n欢迎使用。",
+              checks: [],
+            },
+          ],
+          done: true,
+          stopped: false,
+          error: null,
+        },
+      ],
+    },
+  });
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+  await expect(page.locator(".final")).toContainText("我是 Kodo。");
+  await expect(page.locator(".final")).toContainText("欢迎使用。");
+  await expect(page.locator(".final")).not.toContainText("tool_calls");
+  await expect(page.locator(".final")).not.toContainText("工具协议");
 });
 
 test("a recovered turn stamped interrupted paints interrupted, never working", async ({ page }) => {
@@ -440,7 +587,8 @@ test("settings toggles persist through the stubbed settings store", async ({ pag
   await page.goto("/");
 
   await page.locator(".sidebar-foot .nav-item").click();
-  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.locator(".settings-modal")).toBeVisible();
+  await expect(page).not.toHaveURL(/\/settings$/);
 
   await page.locator(".settings-nav-item", { hasText: "Projects" }).click();
   const toggle = page.locator(".settings-detail .toggle").first();

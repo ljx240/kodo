@@ -39,6 +39,7 @@ export function toStep(item: ItemDto): TraceStep {
         output: item.output || undefined,
         cwd: item.cwd,
         exitCode: item.exitCode,
+        status: item.exitCode != null && item.exitCode !== 0 ? "failed" : item.status,
       };
     case "modelCall":
       return {
@@ -125,7 +126,7 @@ export function toReply(turn: TurnDto, running: boolean): Reply {
   return {
     steps,
     status,
-    final: answer?.kind === "agentMessage" ? answer.text : null,
+    final: answer?.kind === "agentMessage" ? sanitizeAssistantText(answer.text) : null,
     checks: answer?.kind === "agentMessage" ? answer.checks : [],
     ...totals(changes),
     changes,
@@ -140,6 +141,20 @@ export function toReply(turn: TurnDto, running: boolean): Reply {
     models,
     tokens: modelCalls.length > 0 ? `${formatTokens(input)} → ${formatTokens(output)}` : null,
   };
+}
+
+/** Removes provider protocol and internal workflow notes from user-facing text. */
+export function sanitizeAssistantText(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trimStart();
+      return !trimmed.includes('"tool_calls"') &&
+        !/^[-*]?\s*\*\*(工具协议|技能系统|工作原则)\*\*/.test(trimmed);
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export function replyStatus(turn: TurnDto, running: boolean): ReplyStatus {

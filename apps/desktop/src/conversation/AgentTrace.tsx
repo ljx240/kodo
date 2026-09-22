@@ -162,13 +162,13 @@ function TraceItem({ step }: { step: TraceStep }) {
             )}
           </span>
 
-          {shown && <Expanded step={step} />}
-
           <span className="trace-duration">{step.duration || "—"}</span>
 
           <span className="trace-disclosure">
             <ChevronRight size={14} strokeWidth={1.9} className={shown ? "rot-90" : undefined} />
           </span>
+
+          {shown && <Expanded step={step} />}
         </div>
       </div>
     </li>

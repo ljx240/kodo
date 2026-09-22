@@ -4,6 +4,8 @@
   margin: 28px 0 8px;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
+  background: var(--kodo-canvas);
+  box-shadow: 0 2px 8px rgb(23 32 51 / 3%);
 }
 
 .reply-card-head {
@@ -141,6 +143,14 @@
   vertical-align: middle;
 }
 
+.timeline tbody tr {
+  transition: background 120ms ease;
+}
+
+.timeline tbody tr:hover {
+  background: var(--kodo-hover);
+}
+
 .timeline .col-n {
   width: 44px;
   color: var(--kodo-text-secondary);
@@ -266,6 +276,14 @@
   text-overflow: ellipsis;
 }
 
+.archive-table tbody tr {
+  transition: background 120ms ease;
+}
+
+.archive-table tbody tr:not(.row--selected):hover {
+  background: var(--kodo-hover);
+}
+
 .archive-table th:nth-child(1) { width: 42px; }
 .archive-table th:nth-child(2) { width: 194px; }
 .archive-table th:nth-child(3) { width: 210px; }
@@ -330,6 +348,60 @@
 }
 
 /* -------------------------------------------------------------- settings -- */
+
+.settings-modal {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+}
+
+.settings-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgb(23 32 51 / 24%);
+  cursor: default;
+}
+
+.settings-modal-panel {
+  position: relative;
+  z-index: 1;
+  width: min(980px, 100%);
+  height: min(720px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: 14px;
+  background: var(--kodo-canvas);
+  box-shadow: 0 24px 70px rgb(23 32 51 / 20%);
+}
+
+.settings-modal-panel .page-head { height: 64px; }
+
+.skills-card {
+  width: min(760px, 100%);
+  margin: 24px auto;
+  overflow: hidden;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-canvas);
+}
+
+.skill-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--kodo-border);
+  color: var(--kodo-text-secondary);
+}
+
+.skill-row:last-child { border-bottom: 0; }
+.skill-row-label { color: var(--kodo-text); font-size: var(--kodo-font-md); }
+.skill-row code { margin-left: auto; color: var(--kodo-text-secondary); }
 
 /* A category column and the detail beside it. The column is fixed so switching
    categories never moves the text the user is reading. */
@@ -407,9 +479,13 @@
 }
 
 .settings-detail {
-  margin-top: 16px;
+  width: min(760px, 100%);
+  min-height: 290px;
+  margin: 16px auto 0;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
+  background: var(--kodo-canvas);
+  box-shadow: 0 2px 8px rgb(23 32 51 / 3%);
 }
 
 .settings-section-head {
@@ -444,6 +520,10 @@
   flex-direction: column;
   gap: 15px;
   padding: 2px 16px 16px;
+}
+
+.settings-nav-item {
+  transition: background 120ms ease, color 120ms ease;
 }
 
 .setting-row {

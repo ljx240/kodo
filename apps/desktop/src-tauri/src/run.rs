@@ -103,6 +103,10 @@ fn step_kind_label(kind: StepKind) -> &'static str {
     }
 }
 
+fn step_failed(step: &Step, denied: bool) -> bool {
+    denied || matches!(step, Step::Command { exit_code: Some(code), .. } if *code != 0)
+}
+
 fn to_item_kind(step: &Step) -> ItemKind {
     match step {
         Step::Reasoning { summary } => ItemKind::Reasoning {
@@ -370,7 +374,7 @@ pub fn start(
                         seq
                     });
                     let at = session::now();
-                    if denied {
+                    if step_failed(&step, denied) {
                         let failed = Item {
                             id,
                             at,
@@ -477,4 +481,27 @@ pub fn permission_from_settings(value: Option<String>) -> Permission {
     value
         .map(|raw| Permission::parse(&raw))
         .unwrap_or(Permission::Ask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_zero_command_exit_is_a_failed_step() {
+        let command = Step::Command {
+            command: "check".into(),
+            cwd: "/tmp".into(),
+            output: "FAIL".into(),
+            exit_code: Some(1),
+        };
+        assert!(step_failed(&command, false));
+        assert!(step_failed(&command, true));
+        assert!(!step_failed(
+            &Step::Reasoning {
+                summary: "ok".into()
+            },
+            false
+        ));
+    }
 }

@@ -369,7 +369,7 @@ p {
 
 /* Conversations hang off a thread line drawn below their project. */
 .tree-conversations {
-  margin-left: 35px;
+  margin-left: 28px;
   border-left: 1px solid var(--kodo-border);
 }
 
@@ -486,6 +486,14 @@ p {
   flex: none;
   padding: 10px 12px 12px;
   border-top: 1px solid var(--kodo-border);
+}
+
+.sidebar-settings {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
 }
 
 .avatar {
@@ -949,10 +957,12 @@ p {
 .main--welcome .scroll {
   display: flex;
   flex-direction: column;
+  background: linear-gradient(180deg, var(--kodo-canvas) 0%, var(--kodo-surface) 140%);
 }
 
 .main--welcome .page-inner {
   flex: 1;
+  width: 100%;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -964,7 +974,7 @@ p {
   flex-direction: column;
   justify-content: center;
   align-items: stretch;
-  gap: 18px;
+  gap: 20px;
   /* Optical center: a little low of true middle, matching mainstream agents. */
   padding: 48px 0 72px;
   min-height: min(420px, 100%);
@@ -972,36 +982,73 @@ p {
 
 .welcome-copy {
   text-align: center;
-  max-width: 520px;
+  max-width: 620px;
   margin: 0 auto;
 }
 
 .welcome-title {
   margin: 0 0 8px;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 600;
   color: var(--kodo-text);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.025em;
 }
 
 .welcome-sub {
   margin: 0;
+  max-width: 600px;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
   line-height: 1.55;
 }
 
 .welcome-stage .composer {
-  width: min(760px, 100%);
+  width: min(680px, 100%);
   margin: 0 auto;
   padding: 0;
+}
+
+.main--welcome .composer-box {
+  min-height: 108px;
+}
+
+.main--welcome .composer-row {
+  padding: 16px 16px 8px;
+}
+
+.main--welcome .composer-input {
+  min-height: 30px;
+  font-size: 15px;
+}
+
+.main--welcome .composer-controls {
+  padding: 6px 10px 10px;
+}
+
+.main--welcome .composer-send {
+  width: 32px;
+  height: 32px;
+}
+
+.welcome-hints {
+  margin-top: 14px;
+  gap: 8px;
+}
+
+.welcome-hint {
+  padding: 4px 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--kodo-canvas) 78%, var(--kodo-surface));
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
 }
 
 .conv-title-input {
   border: 1px solid var(--kodo-border-strong);
   border-radius: var(--kodo-radius-sm);
   padding: 2px 8px;
-  font-size: var(--kodo-font-lg);
+  font-size: var(--kodo-font-title);
   font-weight: 600;
   min-width: 220px;
 }
@@ -1014,7 +1061,7 @@ p {
   margin: 12px 0;
   padding: 10px 12px;
   border: 1px solid var(--kodo-accent);
-  border-radius: var(--kodo-radius-md);
+  border-radius: var(--kodo-radius);
   background: var(--kodo-selected, #eef5ff);
 }
 

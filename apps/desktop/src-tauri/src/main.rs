@@ -347,8 +347,16 @@ fn send_message(
     id: String,
     text: String,
     context: Option<Vec<String>>,
-) -> Result<(), String> {
+    project: Option<String>,
+) -> Result<String, String> {
     let dir = sessions()?;
+    let id = if id.trim().is_empty() {
+        let project = project.ok_or_else(|| "请选择项目后再发送任务".to_owned())?;
+        session::open(&dir, Path::new(&project), "新对话", session::now())
+            .map_err(|error| error.to_string())?
+    } else {
+        id
+    };
     let context_paths: Vec<String> = context.unwrap_or_default();
     // Reject path traversal; absolute paths outside the project are allowed
     // (e.g. ~/Downloads) when they resolve to an existing regular file.
@@ -443,7 +451,7 @@ fn send_message(
         approvals.inner(),
         StartArgs {
             dir,
-            id,
+            id: id.clone(),
             project: found.project,
             message: text,
             context: context_paths,
@@ -453,7 +461,9 @@ fn send_message(
             max_output_tokens,
             extended_thinking,
         },
-    )
+    )?;
+
+    Ok(id)
 }
 
 /// Lists project-relative files for the composer's Add context picker.

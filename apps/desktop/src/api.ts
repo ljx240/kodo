@@ -159,8 +159,13 @@ function write<T>(command: string, args?: Record<string, unknown>): Promise<T | 
   return invoke<T>(command, args);
 }
 
-export function sendMessage(id: string, text: string, context: string[] = []): Promise<void> {
-  return invoke<void>("send_message", { id, text, context });
+export function sendMessage(
+  id: string,
+  text: string,
+  context: string[] = [],
+  project?: string,
+): Promise<string> {
+  return invoke<string>("send_message", { id, text, context, project });
 }
 
 export function stopRun(id: string): Promise<void | null> {

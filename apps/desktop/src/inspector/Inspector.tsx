@@ -30,6 +30,7 @@ const TABS: Record<RouteName, { tab: InspectorTab; label: string }[]> = {
     { tab: "tools", label: "Tools" },
     { tab: "llm", label: "LLM" },
   ],
+  skills: [{ tab: "summary", label: "Skills" }],
   trace: [
     { tab: "summary", label: "Inspector" },
     { tab: "terminal", label: "Terminal" },

@@ -1462,6 +1462,23 @@ pub fn run(
     let mut notes: Vec<String> = Vec::new();
     let mut pre_observations: Vec<ToolResult> = Vec::new();
 
+    // Conversational prompts do not need repository context or tools.
+    if is_direct_conversation(&request.message) {
+        let answer =
+            direct_conversation_answer(&request.message).expect("direct conversation answer");
+        if alive() {
+            let _ = simple_step(
+                Step::AgentMessage {
+                    text: answer,
+                    checks: Vec::new(),
+                },
+                alive,
+                emit,
+            );
+        }
+        return Ok(());
+    }
+
     // TaskClassifier → Skill Registry → skill-shaped plan (real Planner hook).
     let task_type = classify(&request.message);
     let skill = SkillRegistry::builtin().select(task_type).cloned();
@@ -2493,6 +2510,28 @@ fn offline_answer(message: &str, notes: &[String], error: Option<&str>) -> Strin
     body
 }
 
+fn direct_conversation_answer(message: &str) -> Option<String> {
+    let normalized = message
+        .trim()
+        .trim_matches(|character: char| matches!(character, '?' | '？' | '!' | '！' | '.' | '。'))
+        .to_ascii_lowercase();
+    let answer = match normalized.as_str() {
+        "你是谁" | "你叫什么" | "who are you" | "what are you" => {
+            "我是 Kodo，一个帮助你阅读、修改和验证当前项目代码的编程助手。".to_owned()
+        }
+        "你好" | "hi" | "hello" => "你好，我是 Kodo。有什么代码问题需要我帮你处理？".to_owned(),
+        "谢谢" | "thanks" | "thank you" => {
+            "不客气。需要继续处理代码时，直接告诉我任务即可。".to_owned()
+        }
+        _ => return None,
+    };
+    Some(answer)
+}
+
+fn is_direct_conversation(message: &str) -> bool {
+    direct_conversation_answer(message).is_some()
+}
+
 fn checks_from(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| line.trim().strip_prefix("- "))
@@ -2507,6 +2546,20 @@ fn strip_tool_artifacts(text: &str) -> String {
     let mut skip = false;
     for line in text.lines() {
         let trimmed = line.trim_start();
+        if trimmed.contains("\"tool_calls\"")
+            || trimmed.starts_with("**工具协议**")
+            || trimmed.starts_with("- **工具协议**")
+            || trimmed.starts_with("**技能系统**")
+            || trimmed.starts_with("- **技能系统**")
+            || trimmed.starts_with("**工作原则**")
+            || trimmed.starts_with("- **工作原则**")
+            || trimmed.starts_with("**搜索策略**")
+            || trimmed.starts_with("- **搜索策略**")
+            || trimmed.starts_with("**项目位置**")
+            || trimmed.starts_with("- **项目位置**")
+        {
+            continue;
+        }
         if trimmed.starts_with("```") {
             if trimmed.starts_with("```bash")
                 || trimmed.starts_with("```write")
@@ -2566,6 +2619,14 @@ mod tests {
         assert_eq!(clamped, 4096);
         assert_eq!(1u32.clamp(256, 8192), 256);
         assert_eq!(99_999u32.clamp(256, 8192), 8192);
+    }
+
+    #[test]
+    fn direct_conversation_detection_skips_agent_workflow_for_identity_questions() {
+        assert!(is_direct_conversation("你是谁"));
+        assert!(is_direct_conversation("你好！"));
+        assert!(is_direct_conversation("who are you?"));
+        assert!(!is_direct_conversation("检查这个项目的路由并修复"));
     }
 
     use protocol::parse_fence_invocations;
@@ -2630,6 +2691,13 @@ mod tests {
         assert!(stripped.contains("end"));
         assert!(!stripped.contains("foo"));
         assert!(!stripped.contains("a.txt"));
+    }
+
+    #[test]
+    fn strip_tool_artifacts_hides_internal_protocol_blocks() {
+        let text = "- **工具协议**：tool_calls\n- **技能系统**：feature\n\n正常回复";
+        let stripped = strip_tool_artifacts(text);
+        assert_eq!(stripped, "正常回复");
     }
 
     #[test]
