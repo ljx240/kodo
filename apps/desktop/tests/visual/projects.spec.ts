@@ -25,6 +25,20 @@ test("a live shell renders the projects the core listed", async ({ page }) => {
   await expect(page.locator('[data-testid="composer-branch"]')).toHaveText("无分支");
 });
 
+test("the project picker reserves enough width for its label", async ({ page }) => {
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/realtime-lakehouse", "realtime-lakehouse")], sessions: [] },
+    branch: "main",
+  });
+
+  await page.goto("/");
+  const picker = page.locator('[data-testid="composer-project-picker"]');
+  const box = await picker.boundingBox();
+
+  expect(box).not.toBeNull();
+  expect(box!.width).toBeGreaterThanOrEqual(160);
+});
+
 test("a fresh New Task does not reuse the remembered project", async ({ page }) => {
   await stubShell(page, {
     workspace: { projects: PROJECTS, sessions: [] },

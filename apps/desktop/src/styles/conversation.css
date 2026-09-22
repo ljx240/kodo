@@ -843,6 +843,8 @@
 }
 
 .composer-project-picker {
+  width: 180px;
+  min-width: 160px;
   max-width: min(320px, 70%);
   overflow: hidden;
   color: var(--kodo-text);
@@ -850,6 +852,8 @@
 }
 
 .composer-project-picker span {
+  min-width: 0;
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
 }
