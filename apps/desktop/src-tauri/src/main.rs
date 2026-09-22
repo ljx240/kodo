@@ -9,7 +9,7 @@ use tauri_plugin_opener::OpenerExt;
 use kodo_agent::Provider as AgentProvider;
 use kodo_core::{session, settings, workspace};
 
-use run::{Approvals, Runs, StartArgs};
+use run::{ApprovalChoice, Approvals, Runs, StartArgs};
 
 mod run;
 mod view;
@@ -479,8 +479,15 @@ fn stop_run(runs: State<'_, Runs>, approvals: State<'_, Approvals>, id: String) 
 }
 
 #[tauri::command]
-fn respond_approval(approvals: State<'_, Approvals>, id: String, step: u32, approved: bool) {
-    approvals.resolve(&id, step, approved);
+fn respond_approval(
+    approvals: State<'_, Approvals>,
+    id: String,
+    step: u32,
+    approved: bool,
+    session_wide: Option<bool>,
+) {
+    let choice = ApprovalChoice::from_parts(approved, session_wide.unwrap_or(false));
+    approvals.resolve(&id, step, choice);
 }
 
 /// Per-file unified diffs for the turn's Kodo changes (empty when none).

@@ -43,20 +43,59 @@ impl Runs {
     }
 }
 
-#[allow(clippy::type_complexity)]
+/// One approval decision from the user. `AllowSession` remembers the command
+/// fingerprint for the rest of the conversation (codex-style graduated allow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalChoice {
+    Deny,
+    AllowOnce,
+    AllowSession,
+}
+
+impl ApprovalChoice {
+    pub fn from_parts(approved: bool, session_wide: bool) -> Self {
+        match (approved, session_wide) {
+            (false, _) => Self::Deny,
+            (true, true) => Self::AllowSession,
+            (true, false) => Self::AllowOnce,
+        }
+    }
+
+    pub fn allows(self) -> bool {
+        matches!(self, Self::AllowOnce | Self::AllowSession)
+    }
+}
+
+type WaitMap = HashMap<(String, u32), Sender<ApprovalChoice>>;
+type AllowMap = HashMap<String, HashSet<String>>;
+
 #[derive(Default, Clone)]
-pub struct Approvals(Arc<Mutex<HashMap<(String, u32), Sender<bool>>>>);
+pub struct Approvals {
+    waits: Arc<Mutex<WaitMap>>,
+    /// session id → command fingerprints the user allowed for the whole session.
+    session_allows: Arc<Mutex<AllowMap>>,
+}
 
 impl Approvals {
-    fn lock(&self) -> MutexGuard<'_, HashMap<(String, u32), Sender<bool>>> {
-        self.0
+    fn waits(&self) -> MutexGuard<'_, WaitMap> {
+        self.waits
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    pub fn wait_point(&self, session: &str, step: u32) -> (ApprovalTicket, Receiver<bool>) {
+    fn allows(&self) -> MutexGuard<'_, AllowMap> {
+        self.session_allows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn wait_point(
+        &self,
+        session: &str,
+        step: u32,
+    ) -> (ApprovalTicket, Receiver<ApprovalChoice>) {
         let (tx, rx) = mpsc::channel();
-        self.lock().insert((session.to_owned(), step), tx);
+        self.waits().insert((session.to_owned(), step), tx);
         (
             ApprovalTicket {
                 session: session.to_owned(),
@@ -67,16 +106,35 @@ impl Approvals {
         )
     }
 
-    pub fn resolve(&self, session: &str, step: u32, approved: bool) -> bool {
-        match self.lock().remove(&(session.to_owned(), step)) {
-            Some(tx) => tx.send(approved).is_ok(),
+    pub fn resolve(&self, session: &str, step: u32, choice: ApprovalChoice) -> bool {
+        match self.waits().remove(&(session.to_owned(), step)) {
+            Some(tx) => tx.send(choice).is_ok(),
             None => false,
         }
     }
 
-    pub fn clear_session(&self, session: &str) {
-        self.lock().retain(|(id, _), _| id != session);
+    pub fn remember_session_allow(&self, session: &str, fingerprint: &str) {
+        self.allows()
+            .entry(session.to_owned())
+            .or_default()
+            .insert(fingerprint.to_owned());
     }
+
+    pub fn is_session_allowed(&self, session: &str, fingerprint: &str) -> bool {
+        self.allows()
+            .get(session)
+            .map(|set| set.contains(fingerprint))
+            .unwrap_or(false)
+    }
+
+    pub fn clear_session(&self, session: &str) {
+        self.waits().retain(|(id, _), _| id != session);
+    }
+}
+
+/// Stable fingerprint for "this exact step" when the user picks Allow for session.
+fn approval_fingerprint(kind: StepKind, command: &str) -> String {
+    format!("{}::{command}", step_kind_label(kind))
 }
 
 pub struct ApprovalTicket {
@@ -87,7 +145,7 @@ pub struct ApprovalTicket {
 
 impl Drop for ApprovalTicket {
     fn drop(&mut self) {
-        self.map.lock().remove(&(self.session.clone(), self.step));
+        self.map.waits().remove(&(self.session.clone(), self.step));
     }
 }
 
@@ -213,6 +271,11 @@ pub fn start(
                 if !permission.needs_approval(kind, Some(command)) {
                     return true;
                 }
+                // Session-wide allow from an earlier "本会话允许".
+                let fingerprint = approval_fingerprint(kind, command);
+                if approve_approvals.is_session_allowed(&approve_id, &fingerprint) {
+                    return true;
+                }
                 // Run already cancelled — never wait for an approval ticket.
                 if !approve_runs.is_live(&approve_id) {
                     return false;
@@ -243,6 +306,7 @@ pub fn start(
                         step,
                         kind: step_kind_label(kind).to_owned(),
                         detail: format!("{command}  ·  {reason}"),
+                        command: command.to_owned(),
                         cwd,
                         risk_category: risk_category.to_owned(),
                         reason: reason.to_owned(),
@@ -251,7 +315,7 @@ pub fn start(
                 // Approval wait must respond to run cancellation — poll in
                 // short slices instead of one 300s blocking recv.
                 let deadline = std::time::Instant::now() + Duration::from_secs(300);
-                let mut decided = false;
+                let mut choice = ApprovalChoice::Deny;
                 while std::time::Instant::now() < deadline {
                     if !approve_runs.is_live(&approve_id) {
                         // Cancelled during approval → deny, do not run the step.
@@ -259,7 +323,7 @@ pub fn start(
                     }
                     match rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(value) => {
-                            decided = value;
+                            choice = value;
                             break;
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -267,7 +331,10 @@ pub fn start(
                     }
                 }
                 drop(ticket);
-                decided
+                if choice == ApprovalChoice::AllowSession {
+                    approve_approvals.remember_session_allow(&approve_id, &fingerprint);
+                }
+                choice.allows()
             }
         };
 

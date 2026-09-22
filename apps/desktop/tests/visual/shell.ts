@@ -31,6 +31,10 @@ export type Core = {
   failContextRead?: boolean;
   /** Captured `send_message` payloads for assertions. */
   sendLog?: Array<{ id: string; text: string; context: string[] }>;
+  /** Captured `respond_approval` payloads. */
+  approvalLog?: Array<{ id: string; step: number; approved: boolean; sessionWide: boolean }>;
+  /** `turn_changes` payload for inline diffs. */
+  turnChanges?: Array<{ path: string; diff: string; userPreexisting?: boolean; undoState?: string; conflict?: boolean }>;
 };
 
 /**
@@ -50,6 +54,8 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     const files = config.files ?? ["src/app.ts", "src/util.ts", "README.md", "package.json"];
     const sendLog: Array<{ id: string; text: string; context: string[] }> = [];
     (window as unknown as { __sendLog?: unknown }).__sendLog = sendLog;
+    const approvalLog: Array<{ id: string; step: number; approved: boolean; sessionWide: boolean }> = [];
+    (window as unknown as { __approvalLog?: unknown }).__approvalLog = approvalLog;
 
     (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
       transformCallback: (callback: (event: unknown) => void) => {
@@ -99,7 +105,21 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             return workspace;
           case "respond_approval":
             if (config.failApproval) throw "approval response failed";
+            approvalLog.push({
+              id: String(args?.id ?? ""),
+              step: Number(args?.step ?? 0),
+              approved: Boolean(args?.approved),
+              sessionWide: Boolean((args as { sessionWide?: unknown })?.sessionWide),
+            });
             return null;
+          case "turn_changes":
+            return (config.turnChanges ?? []).map((c) => ({
+              path: c.path,
+              diff: c.diff,
+              userPreexisting: c.userPreexisting ?? false,
+              undoState: c.undoState ?? "clean",
+              conflict: c.conflict ?? false,
+            }));
           case "list_project_files": {
             const q = String(args?.query ?? "").toLowerCase();
             return files.filter((f) => !q || f.toLowerCase().includes(q));
