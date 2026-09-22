@@ -23,6 +23,8 @@ type Props = {
   onViewFiles: () => void;
   /** Re-send the last ask (regenerate). Omitted for demo or incomplete turns. */
   onRegenerate?: (() => void) | null;
+  /** Unified diffs for file-change steps. */
+  fileDiffs?: Record<string, string> | null;
 };
 
 export function AssistantReply({
@@ -36,6 +38,7 @@ export function AssistantReply({
   failovers = [],
   onViewFiles,
   onRegenerate = null,
+  fileDiffs = null,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<number | null>(null);
@@ -144,7 +147,7 @@ export function AssistantReply({
         </p>
       )}
 
-      <AgentTrace steps={reply.steps} />
+      <AgentTrace steps={reply.steps} fileDiffs={fileDiffs} />
 
       {reply.final && (
         <div className="final">

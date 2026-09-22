@@ -264,3 +264,78 @@ test("regenerate re-sends the last ask", async ({ page }) => {
   );
   expect(log.some((entry) => entry.text === "检查路由")).toBe(true);
 });
+
+test("approval offers session-wide allow and records it on the invoke", async ({ page }) => {
+  await stubShell(page, liveCore());
+  await openLiveConversation(page);
+
+  await page.locator(".composer-input").fill("跑一下");
+  await page.locator(".composer-input").press("Enter");
+  await emit(page, {
+    type: "approvalRequest",
+    session: "s1",
+    step: 1,
+    kind: "run command",
+    detail: "cargo test  ·  测试",
+    command: "cargo test",
+  });
+
+  await expect(page.locator('[data-testid="approval-allow-session"]')).toBeVisible();
+  await page.locator('[data-testid="approval-allow-session"]').click();
+
+  const log = await page.evaluate(
+    () =>
+      (window as unknown as { __approvalLog?: Array<{ approved: boolean; sessionWide: boolean }> })
+        .__approvalLog ?? [],
+  );
+  expect(log).toHaveLength(1);
+  expect(log[0].approved).toBe(true);
+  expect(log[0].sessionWide).toBe(true);
+});
+
+test("edit step expands to the unified diff from turn_changes", async ({ page }) => {
+  await stubShell(
+    page,
+    liveCore({
+      turnChanges: [
+        {
+          path: "src/app.ts",
+          diff: "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n",
+        },
+      ],
+      session: {
+        id: "s1",
+        project: "/tmp/ws/alpha",
+        title: "改文件",
+        at: 1_700_000_000,
+        archived: false,
+        turns: [
+          {
+            ask: "改一下",
+            context: [],
+            items: [
+              {
+                id: 1,
+                at: 1_700_000_000,
+                status: "done",
+                duration: 400,
+                kind: "fileChange",
+                changes: [{ path: "src/app.ts", added: 1, removed: 1 }],
+              },
+            ],
+            done: true,
+            stopped: false,
+            error: null,
+          },
+        ],
+      },
+    }),
+  );
+
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+
+  await expect(page.locator('[data-testid="trace-file-list"]')).toBeVisible();
+  await expect(page.locator('[data-testid="trace-diff-src/app.ts"]')).toContainText("+new");
+});

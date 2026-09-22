@@ -284,6 +284,9 @@ pub enum RunEvent {
         kind: String,
         /// Command or short detail when the step has one.
         detail: String,
+        /// Exact command/label used for the session allowlist fingerprint.
+        #[serde(default)]
+        command: String,
         /// Working directory the command would run in.
         #[serde(default)]
         cwd: String,
