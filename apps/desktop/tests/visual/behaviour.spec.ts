@@ -8,24 +8,26 @@ test("a step row opens from anywhere along it, not just its chevron", async ({ p
   const rows = page.locator(".trace-row");
   await expect(rows).toHaveCount(7);
 
-  await expect(page.locator(".trace-output")).toHaveCount(2);
+  // Completed steps hide their output/diffs until asked for — every open row
+  // renders one `.trace-expand` panel, whatever kind of step it is.
+  await expect(page.locator(".trace-expand")).toHaveCount(0);
 
   const first = rows.first();
   await first.locator(".trace-label").click();
-  await expect(page.locator(".trace-output")).toHaveCount(3);
+  await expect(page.locator(".trace-expand")).toHaveCount(1);
 
   await first.locator(".trace-label").click();
-  await expect(page.locator(".trace-output")).toHaveCount(2);
+  await expect(page.locator(".trace-expand")).toHaveCount(0);
 
   await first.locator(".trace-row-inner").focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator(".trace-output")).toHaveCount(3);
+  await expect(page.locator(".trace-expand")).toHaveCount(1);
 
   // Space toggles the row the same way Enter does.
   await page.keyboard.press(" ");
-  await expect(page.locator(".trace-output")).toHaveCount(2);
+  await expect(page.locator(".trace-expand")).toHaveCount(0);
   await page.keyboard.press(" ");
-  await expect(page.locator(".trace-output")).toHaveCount(3);
+  await expect(page.locator(".trace-expand")).toHaveCount(1);
 });
 
 test("every row reports whether it is open", async ({ page }) => {
@@ -33,7 +35,9 @@ test("every row reports whether it is open", async ({ page }) => {
   await page.waitForSelector(".trace-row");
 
   await expect(page.locator(".trace-row-inner[aria-expanded]")).toHaveCount(7);
-  await expect(page.locator('.trace-row-inner[aria-expanded="true"]')).toHaveCount(2);
+  // Only running / failed / denied rows open on their own; the demo's rows are
+  // all completed, so none of them starts open.
+  await expect(page.locator('.trace-row-inner[aria-expanded="true"]')).toHaveCount(0);
 });
 
 test("the composer sends on Enter, clears, and stops claiming to be working", async ({ page }) => {
@@ -99,13 +103,13 @@ test("an empty live conversation keeps Inspector summary cards out of the respon
   await page.locator(".tree-conversation").click();
 
   await expect(page.locator('[data-testid="welcome"]')).toBeVisible();
-  await expect(page.locator(".ins-section", { hasText: "This response" })).toContainText("尚未开始响应");
+  await expect(page.locator(".ins-section-title")).toHaveText(["本轮", "当前项目"]);
+  await expect(page.locator(".ins-section", { hasText: "尚未开始响应" })).toBeVisible();
   await expect(page.locator(".status-pill")).toHaveCount(0);
-  await expect(page.locator(".ins-section", { hasText: "Total steps" })).toHaveCount(0);
-  await expect(page.locator(".ins-section", { hasText: "Changed files" })).toHaveCount(0);
-  await expect(page.locator(".ins-section", { hasText: "Tools used" })).toHaveCount(0);
-  await expect(page.locator(".ins-section", { hasText: "LLM calls" })).toHaveCount(0);
-  await expect(page.locator(".ins-section", { hasText: "Current project" })).toBeVisible();
+  await expect(page.locator(".ins-section", { hasText: "修改文件" })).toHaveCount(0);
+  await expect(page.locator(".ins-section", { hasText: "使用工具" })).toHaveCount(0);
+  await expect(page.locator(".ins-section", { hasText: "模型调用" })).toHaveCount(0);
+  await expect(page.locator(".ins-section", { hasText: "当前项目" })).toBeVisible();
 });
 
 test("Shift+Enter inserts a newline instead of sending", async ({ page }) => {
@@ -151,7 +155,7 @@ test("a run draws itself in one step at a time, from the events", async ({ page 
 
   await expect(page.locator(".trace-row")).toHaveCount(1);
   await expect(page.locator(".trace-mark--running")).toHaveCount(1);
-  await expect(page.locator(".trace-label")).toHaveText("Run command");
+  await expect(page.locator(".trace-label")).toHaveText("运行命令");
 
   await emit(page, {
     type: "itemCompleted",
@@ -162,6 +166,9 @@ test("a run draws itself in one step at a time, from the events", async ({ page 
   await expect(page.locator(".trace-mark--running")).toHaveCount(0);
   await expect(page.locator(".trace-mark--done")).toHaveCount(1);
   await expect(page.locator(".trace-duration")).toHaveText("1.5s");
+  // A finished command collapses its output until the reader asks for it.
+  await expect(page.locator(".trace-output")).toHaveCount(0);
+  await page.locator(".trace-row-inner").click();
   await expect(page.locator(".trace-output")).toContainText("Finished dev profile");
 
   await emit(page, { type: "turnComplete", session: "s1" });
@@ -230,7 +237,7 @@ test("a killed run is reported as interrupted, not as finished or working", asyn
   await expect(page.locator(".trace-duration")).toHaveText("—");
   await expect(page.locator(".reply-interrupted")).toBeVisible();
   await expect(page.locator(".reply-working")).toHaveCount(0);
-  await expect(page.locator(".status-pill--interrupted")).toContainText("Interrupted");
+  await expect(page.locator(".status-pill--interrupted")).toContainText("已中断");
 });
 
 test("a user-stopped run is marked stopped in the trace and Inspector", async ({ page }) => {
@@ -264,7 +271,7 @@ test("a user-stopped run is marked stopped in the trace and Inspector", async ({
   await expect(page.locator(".reply-stopped")).toBeVisible();
   await expect(page.locator(".reply-working")).toHaveCount(0);
   await expect(page.locator(".reply-interrupted")).toHaveCount(0);
-  await expect(page.locator(".status-pill--stopped")).toContainText("Stopped");
+  await expect(page.locator(".status-pill--stopped")).toContainText("已停止");
 });
 
 test("a failed run does not leave a spinner on its last step", async ({ page }) => {
@@ -295,7 +302,7 @@ test("a failed run does not leave a spinner on its last step", async ({ page }) 
   await expect(page.locator(".trace-mark--failed")).toHaveCount(1);
   await expect(page.locator(".trace-mark--running")).toHaveCount(0);
   await expect(page.locator(".reply-failed")).toContainText("模型服务不可用");
-  await expect(page.locator(".status-pill--failed")).toContainText("Failed");
+  await expect(page.locator(".status-pill--failed")).toContainText("失败");
 });
 
 test("a completed command with a non-zero exit code is rendered as failed", async ({ page }) => {
@@ -341,7 +348,7 @@ test("a completed command with a non-zero exit code is rendered as failed", asyn
   await expect(page.locator(".trace-mark--done")).toHaveCount(0);
 });
 
-test("switching the top project opens that project's latest conversation", async ({ page }) => {
+test("choosing a project in a new task does not open an existing conversation", async ({ page }) => {
   await stubShell(page, {
     workspace: {
       projects: [project("/tmp/ws/alpha", "alpha"), project("/tmp/ws/beta", "beta")],
@@ -367,13 +374,12 @@ test("switching the top project opens that project's latest conversation", async
     },
   });
   await page.goto("/");
-  await page.locator(".tree-project-main").first().click();
-  await page.locator(".tree-conversation").first().click();
-  await expect(page.locator(".conv-title")).toHaveText("Alpha 会话");
-  await page.locator(".topbar .chip").first().click();
+  await page.getByRole("link", { name: "New Task" }).click();
+  await page.locator('[data-testid="composer-project-picker"]').click();
   await page.getByRole("menuitem", { name: "beta" }).click();
-  await expect(page.locator(".conv-title")).toHaveText("Beta 会话");
-  await expect(page.locator(".topbar .chip").first()).toContainText("beta");
+  await expect(page.locator(".conv-title")).toHaveText("新对话");
+  await expect(page.locator(".tree-conversation--active")).toHaveCount(0);
+  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("beta");
 });
 
 test("final replies hide internal tool protocol notes", async ({ page }) => {
@@ -510,7 +516,10 @@ test("an Inspector card's chevron opens and closes it", async ({ page }) => {
   await page.goto("/ui-demo/conversation");
   await page.locator(".rail-btn").first().click();
 
-  const card = page.locator(".ins-section", { hasText: "Changed files" });
+  // Match the section by its own title — 使用工具 also lists a 修改文件 tool row.
+  const card = page
+    .locator(".ins-section")
+    .filter({ has: page.locator(".ins-section-title", { hasText: /^修改文件$/ }) });
   const head = card.locator(".ins-section-head");
   await expect(head).toHaveAttribute("aria-expanded", "true");
   await expect(card.locator(".file-row").first()).toBeVisible();
@@ -716,9 +725,9 @@ test("recovered interrupted turn is not shown as completed or working", async ({
 
   await expect(page.locator(".reply-interrupted")).toBeVisible();
   await expect(page.locator(".reply-working")).toHaveCount(0);
-  // Trace status on a live session never claims Completed for interrupted turn.
+  // Trace status on a live session never claims 已完成 for interrupted turn.
   await page.goto("/trace");
-  await expect(page.locator(".status-pill")).toContainText("Interrupted");
+  await expect(page.locator(".status-pill")).toContainText("已中断");
 });
 
 test("trace page reads persisted session items (trace persistence chain)", async ({ page }) => {
@@ -748,7 +757,7 @@ test("trace page reads persisted session items (trace persistence chain)", async
   });
 
   await page.goto("/trace");
-  await expect(page.locator(".status-pill")).toContainText("Completed");
+  await expect(page.locator(".status-pill")).toContainText("已完成");
   await expect(page.locator(".timeline, .trace").first()).toBeVisible();
 });
 

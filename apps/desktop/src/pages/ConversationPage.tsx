@@ -7,16 +7,31 @@ import {
   sendMessage,
   stopRun,
   turnChanges,
+  undoTurn,
   type ItemDto,
   type RunEventDto,
   type TurnDto,
 } from "../api";
 import { AssistantReply } from "../conversation/AssistantReply";
 import { Composer } from "../conversation/Composer";
-import { titleFromAsk, toReply, type Reply } from "../conversation/trace";
+import {
+  durationMsOf,
+  groupPhases,
+  mergeChanges,
+  mergeFailures,
+  outcomeFor,
+  titleFromAsk,
+  toReply,
+  totals,
+  verifyCounts,
+  type Reply,
+  type RunStatus,
+} from "../conversation/trace";
 import { type DemoState } from "../data/demoState";
 import { snapshotFromTurn, type LiveSnapshot } from "../data/liveContext";
 import { type ProviderConfig } from "../data/providers";
+import type { Project } from "../data/types";
+import { T } from "../i18n";
 import { navigate } from "../routes";
 import { Menu, MenuItem } from "../shell/Menu";
 
@@ -34,8 +49,12 @@ type Props = {
   onConversationCreated?: (id: string) => void;
   onConversationCommitted?: () => Promise<void> | void;
   onOpenSettings?: () => void;
+  projects: Project[];
+  onSelectProject: (id: string | null) => void;
+  onAddProject: () => Promise<void>;
   projectName?: string;
   projectPath?: string;
+  branch: string | null;
   /**
    * Deterministic fixture for `/ui-demo` only. Live routes pass null and must
    * never import data/fixture or data/demo themselves.
@@ -72,20 +91,41 @@ type FailoverNotice = {
 };
 
 function demoReplyFrom(demo: DemoState): Reply {
+  // Fixture list is the source of truth; totals re-derive so the card never
+  // claims a file count the list does not show. Fixture steps predate the
+  // structured fields: labels come from the central copy table and durations
+  // are parsed back into milliseconds for the phase headers.
+  const steps = demo.conversation.assistant.trace.map((step) => ({
+    ...step,
+    label: T.step[step.type],
+    durationMs: step.durationMs ?? durationMsOf(step.duration),
+  }));
+  const changes = mergeChanges(demo.changedFiles.map((file) => ({ ...file, edits: 1 })));
+  const verify = verifyCounts(steps);
+  const status: RunStatus = {
+    lifecycle: "completed",
+    delivery: "ready",
+    // The fixture records its acceptance checks as passing.
+    verification: verify.failed > 0 ? "failed" : "passed",
+    outcome: "completed",
+  };
+  status.outcome = outcomeFor(status.lifecycle, status.delivery, status.verification, changes.length > 0);
   return {
-    steps: demo.conversation.assistant.trace,
-    status: "completed",
+    steps,
+    phases: groupPhases(steps),
+    status,
     final: demo.conversation.assistant.final,
     checks: demo.conversation.assistant.checks,
-    changes: demo.changedFiles,
-    files: demo.summary.files_changed,
-    added: demo.summary.added,
-    removed: demo.summary.removed,
+    changes,
+    ...totals(changes),
     interrupted: false,
     stopped: false,
     error: null,
     models: demo.summary.llm_calls.map((call) => call.model),
     tokens: null,
+    tokensPending: false,
+    verify,
+    failureGroups: mergeFailures(steps),
   };
 }
 
@@ -103,8 +143,12 @@ export function ConversationPage({
   onConversationCreated,
   onConversationCommitted,
   onOpenSettings,
+  projects,
+  onSelectProject,
+  onAddProject,
   projectName = "",
   projectPath = "",
+  branch,
   demo = null,
 }: Props) {
   const demoMode = Boolean(demo);
@@ -127,6 +171,12 @@ export function ConversationPage({
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(null);
   const [fileDiffs, setFileDiffs] = useState<Record<string, string> | null>(null);
+  /** Paths the user had already dirtied / where undo would conflict. */
+  const [turnMeta, setTurnMeta] = useState<{ preExisting: string[]; conflicts: string[] }>({
+    preExisting: [],
+    conflicts: [],
+  });
+  const [undoingChanges, setUndoingChanges] = useState(false);
   /** False after Stop — late TextDelta races must not repaint the preview. */
   const acceptStreamRef = useRef(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -266,7 +316,10 @@ export function ConversationPage({
   };
 
   const send = (text: string, context: string[]) => {
-    if (!sessionId && !projectPath) return;
+    if (!projectPath) {
+      setPageError({ message: "请选择项目后再发送" });
+      return;
+    }
     // Running: queue the follow-up instead of dropping the draft (codex/DSH).
     if (running) {
       applyQueue([...queueRef.current, { text, context }]);
@@ -295,6 +348,26 @@ export function ConversationPage({
     });
   };
 
+  /** Undo only this turn's Kodo edits; conflicts keep the user's later work. */
+  const undoChanges = () => {
+    if (!sessionId || !projectPath || undoingChanges || running) return;
+    setPageError(null);
+    setUndoingChanges(true);
+    void undoTurn(projectPath, sessionId)
+      .then((report) => {
+        if (!report) throw new Error("未得到撤销报告");
+        // Success is visible as a restored tree / cleared conflict markers in
+        // the Inspector; the turn log still records what was edited.
+        return loadSession(sessionId).then((loaded) => {
+          if (loaded) setTurns(loaded.turns);
+        });
+      })
+      .catch((failure: unknown) => {
+        setPageError({ message: `撤销失败：${errorMessage(failure)}` });
+      })
+      .finally(() => setUndoingChanges(false));
+  };
+
   const decide = (approved: boolean, sessionWide = false) => {
     if (!sessionId || !approval) return;
     const pending = approval;
@@ -310,6 +383,13 @@ export function ConversationPage({
 
   const addContext = (path: string) => {
     setContexts((current) => (current.includes(path) ? current : [...current, path]));
+  };
+
+  const addProject = () => {
+    setPageError(null);
+    void onAddProject().catch((failure) => {
+      setPageError({ message: `添加项目失败：${errorMessage(failure)}` });
+    });
   };
 
   const rename = (next: string) => {
@@ -436,6 +516,8 @@ export function ConversationPage({
   };
 
   // Load per-file unified diffs for Edit steps once a turn recorded changes.
+  // The same payload carries which paths the user had already modified and
+  // where undo would conflict — the reply card must not blur those together.
   useEffect(() => {
     if (demoMode || !conversationId || !projectPath || running) return;
     const hasEdit = turns.some((turn) => turn.items.some((item) => item.kind === "fileChange"));
@@ -445,10 +527,15 @@ export function ConversationPage({
       .then((list) => {
         if (!alive || !list) return;
         const map: Record<string, string> = {};
+        const preExisting: string[] = [];
+        const conflicts: string[] = [];
         for (const change of list) {
           if (change.diff) map[change.path] = change.diff;
+          if (change.userPreexisting) preExisting.push(change.path);
+          if (change.conflict) conflicts.push(change.path);
         }
         setFileDiffs(map);
+        setTurnMeta({ preExisting, conflicts });
       })
       .catch(() => {
         /* diffs are progressive disclosure; the path list still stands */
@@ -461,8 +548,12 @@ export function ConversationPage({
   const liveSnapshot = useMemo(() => {
     if (demoMode || !sessionId) return null;
     const last = turns[turns.length - 1] ?? null;
-    return snapshotFromTurn(sessionId, title || "新对话", projectName, projectPath, last, running);
-  }, [demoMode, sessionId, turns, title, running, projectName, projectPath]);
+    return snapshotFromTurn(sessionId, title || "新对话", projectName, projectPath, last, running, {
+      onUndo: undoChanges,
+      undoing: undoingChanges,
+      onRetry: regenerate,
+    });
+  }, [demoMode, sessionId, turns, title, running, projectName, projectPath, undoingChanges]);
 
   useEffect(() => {
     onSnapshot?.(demoMode || !sessionId ? null : liveSnapshot);
@@ -474,7 +565,8 @@ export function ConversationPage({
   const liveSession = !demoMode && sessionId !== null;
   const demoReply = demo ? demoReplyFrom(demo) : null;
   // Centered first-run stage: empty live conversation, no demo payload, no approval bar.
-  const showWelcome = !demoMode && turns.length === 0 && !approval && !pageError && queue.length === 0 && Boolean(projectPath);
+  const showWelcome = !demoMode && turns.length === 0 && !approval && !pageError && queue.length === 0;
+  const showProjectContext = !demoMode && sessionId === null && turns.length === 0;
 
   const composer = (
     <Composer
@@ -482,7 +574,13 @@ export function ConversationPage({
       providers={providers}
       onSelectProvider={onSelectProvider}
       onSelectProviderModel={onSelectProviderModel}
-      ready={!demoMode && (sessionId !== null || Boolean(projectPath))}
+      projects={projects}
+      onSelectProject={onSelectProject}
+      onAddProject={addProject}
+      projectName={projectName}
+      branch={branch}
+      showProjectContext={showProjectContext}
+      ready={!demoMode}
       running={running}
       projectPath={projectPath}
       contexts={contexts}
@@ -657,6 +755,7 @@ export function ConversationPage({
                     running={false}
                     failovers={[]}
                     onViewFiles={onViewFiles}
+                    onOpenLogs={onOpenTrace}
                     fileDiffs={fileDiffs}
                   />
                 </>
@@ -674,7 +773,7 @@ export function ConversationPage({
                       />
                       <AssistantReply
                         time=""
-                        reply={toReply(turn, running && last)}
+                        reply={toReply(turn, running && last, running && last && Boolean(approval))}
                         running={running && last}
                         streamText={running && last ? streamText : ""}
                         progress={running && last ? progress : null}
@@ -683,7 +782,13 @@ export function ConversationPage({
                         failovers={last ? failovers : []}
                         onViewFiles={onViewFiles}
                         onRegenerate={liveSession && last && !running ? regenerate : null}
+                        onRetryEnvironment={liveSession && last && !running ? regenerate : null}
+                        onOpenLogs={onOpenTrace}
                         fileDiffs={fileDiffs}
+                        onUndoChanges={liveSession && last && !running && Boolean(projectPath) ? undoChanges : null}
+                        undoingChanges={undoingChanges}
+                        preExisting={last ? turnMeta.preExisting : []}
+                        conflicts={last ? turnMeta.conflicts : []}
                       />
                     </Fragment>
                   );

@@ -51,16 +51,32 @@ test("900px: sidebar toggles; inspector opens as overlay without squeezing main"
   await page.goto("/ui-demo/conversation");
   await page.waitForLoadState("networkidle");
 
-  // Sidebar hideable via top-bar toggle (kept in DOM so aria-controls stays valid).
+  // Collapsed via the control at the top of the left menu (kept in DOM for aria-controls).
   await expect(page.locator(".sidebar")).toBeVisible();
-  await page.locator('button[aria-label="Toggle sidebar"]').click();
+  await expect(page.locator(".topbar-nav-icons")).toHaveCount(0);
+  await expect(page.locator(".topbar button[aria-label='Toggle sidebar']")).toHaveCount(0);
+  await page.locator('.sidebar button[aria-label="Toggle sidebar"]').click();
   await expect(page.locator(".sidebar")).toBeHidden();
-  await expect(page.locator('button[aria-label="Toggle sidebar"]')).toHaveAttribute(
+  // Scope to the top-bar control: the sidebar's own toggle stays in the DOM
+  // (hidden) so its aria-controls target remains valid.
+  await expect(page.locator('.topbar button[aria-label="Toggle sidebar"]')).toHaveAttribute(
     "aria-expanded",
     "false",
   );
-  await page.locator('button[aria-label="Toggle sidebar"]').click();
+  // Collapsed destinations sit immediately right of the expand control.
+  await expect(page.locator(".topbar-nav-icons")).toBeVisible();
+  const strip = await page.evaluate(() => {
+    const toggle = document
+      .querySelector('.topbar button[aria-label="Toggle sidebar"]')
+      ?.getBoundingClientRect();
+    const strip = document.querySelector(".topbar-nav-icons")?.getBoundingClientRect();
+    return { toggleRight: toggle?.right ?? 0, stripLeft: strip?.left ?? 0 };
+  });
+  expect(strip.toggleRight).toBeGreaterThan(0);
+  expect(strip.stripLeft).toBeGreaterThanOrEqual(strip.toggleRight);
+  await page.locator('.topbar button[aria-label="Toggle sidebar"]').click();
   await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".topbar-nav-icons")).toHaveCount(0);
 
   // Main width stays stable when the inspector panel opens (overlay).
   const before = await page.locator(".main").evaluate((el) => el.getBoundingClientRect().width);

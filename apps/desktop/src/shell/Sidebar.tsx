@@ -10,6 +10,7 @@ import {
   FolderPlus,
   MessageCircle,
   MoreHorizontal,
+  PanelLeft,
   Pencil,
   Plus,
   Settings,
@@ -36,6 +37,7 @@ type Props = {
   onSelectConversation: (id: string) => void;
   onNewTask: () => void;
   onOpenSettings: () => void;
+  onToggleSidebar: () => void;
   /** Creates a new conversation under the given project and selects it. */
   onStartConversation: (projectPath: string) => void;
   onRenameConversation?: (id: string, title: string) => Promise<void> | void;
@@ -50,6 +52,7 @@ export function Sidebar({
   onSelectConversation,
   onNewTask,
   onOpenSettings,
+  onToggleSidebar,
   onStartConversation,
   onRenameConversation,
   onArchiveConversation,
@@ -121,8 +124,20 @@ export function Sidebar({
   return (
     <aside className="sidebar" id="kodo-sidebar">
       {/* The window draws its title bar over this strip, so the space beside the
-          traffic lights has to carry the drag region itself. */}
-      <div className="sidebar-strip" data-tauri-drag-region />
+          traffic lights has to carry the drag region itself. The collapse control
+          sits at the top-right of the left menu, clear of the traffic lights. */}
+      <div className="sidebar-strip" data-tauri-drag-region>
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label="Toggle sidebar"
+          aria-expanded
+          aria-controls="kodo-sidebar"
+          onClick={onToggleSidebar}
+        >
+          <PanelLeft size={16} strokeWidth={1.7} />
+        </button>
+      </div>
 
       <div className="brand">
         <span className="brand-mark">K</span>

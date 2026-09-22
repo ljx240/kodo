@@ -3,7 +3,10 @@ import {
   ArrowUp,
   ChevronDown,
   FileText,
+  Folder,
   FolderSearch,
+  FolderPlus,
+  GitBranch,
   Paperclip,
   Plus,
   Puzzle,
@@ -31,6 +34,7 @@ import {
   providerModelId,
   templateById,
 } from "../data/providers";
+import type { Project } from "../data/types";
 import { type Permission, PERMISSIONS, PERMISSION_SETTING, DEFAULT_PERMISSION } from "../data/models";
 import { Menu, MenuItem } from "../shell/Menu";
 import { navigate } from "../routes";
@@ -43,11 +47,23 @@ type Props = {
   provider: ProviderConfig | null;
   /** All configured providers. */
   providers: ProviderConfig[];
+  /** Registered projects available to a new conversation. */
+  projects: Project[];
+  /** Select the project context for a new conversation. */
+  onSelectProject: (id: string | null) => void;
+  /** Open the existing project registration flow for a new conversation. */
+  onAddProject: () => void;
+  /** Current project display name. */
+  projectName: string;
+  /** Current project's git branch, when available. */
+  branch: string | null;
+  /** Project and branch context is only shown before the first turn. */
+  showProjectContext: boolean;
   /** Switch to a different provider. */
   onSelectProvider: (index: number) => void;
   /** Switch model inside a provider without leaving the composer. */
   onSelectProviderModel: (providerIndex: number, modelId: string, displayName: string) => void;
-  /** False when there is nowhere to send to — a demo route, or no session. */
+  /** False on demo routes; live sends validate the selected project in the page. */
   ready: boolean;
   running: boolean;
   /** Project root for Add context; empty disables the picker. */
@@ -95,6 +111,12 @@ export const BUILTIN_SKILLS: { id: string; label: string }[] = [
 export function Composer({
   provider,
   providers,
+  projects,
+  onSelectProject,
+  onAddProject,
+  projectName,
+  branch,
+  showProjectContext,
   onSelectProvider,
   onSelectProviderModel,
   ready,
@@ -793,6 +815,72 @@ export function Composer({
         </div>
 
       </div>
+
+      {showProjectContext && (
+        <div className="composer-project-context" data-testid="composer-project-context">
+          <Menu
+            trigger={({ open, toggle }) => (
+              <button
+                type="button"
+                className="chip composer-project-picker"
+                data-testid="composer-project-picker"
+                aria-label="选择项目"
+                aria-expanded={open}
+                onClick={toggle}
+              >
+                <Folder size={14} strokeWidth={1.7} />
+                <span data-testid="composer-project-name">{projectName || "未选择项目"}</span>
+                <ChevronDown size={13} strokeWidth={1.9} />
+              </button>
+            )}
+          >
+            {(close) =>
+              <>
+                {projects.length > 0 ? (
+                  projects.map((project) => (
+                    <MenuItem
+                      key={project.id}
+                      icon={<Folder size={14} strokeWidth={1.8} />}
+                      label={project.name}
+                      onSelect={() => {
+                        close();
+                        onSelectProject(project.id);
+                      }}
+                    />
+                  ))
+                ) : (
+                  <div className="menu-item menu-item--static">暂无可用项目</div>
+                )}
+
+                <div className="menu-separator" />
+                <MenuItem
+                  icon={<FolderPlus size={14} strokeWidth={1.8} />}
+                  label="添加新项目"
+                  onSelect={() => {
+                    close();
+                    onAddProject();
+                  }}
+                />
+                {projectPath && (
+                  <MenuItem
+                    icon={<X size={14} strokeWidth={1.9} />}
+                    label="移除当前项目"
+                    onSelect={() => {
+                      close();
+                      onSelectProject(null);
+                    }}
+                  />
+                )}
+              </>
+            }
+          </Menu>
+
+          <span className="chip chip--static composer-branch" data-testid="composer-branch">
+            <GitBranch size={14} strokeWidth={1.7} />
+            <span>{branch ?? "无分支"}</span>
+          </span>
+        </div>
+      )}
 
       {(queueCount > 0 || running) && (
         <div className="composer-status" data-testid="composer-status">

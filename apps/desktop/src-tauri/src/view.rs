@@ -77,6 +77,166 @@ pub struct TurnView {
     /// Set when recovery reclassified a killed run's open items as interrupted.
     pub interrupted: bool,
     pub error: Option<String>,
+    /// Three orthogonal status axes, computed here so the GUI never guesses.
+    pub status: TurnStatusView,
+}
+
+/// The run state model: lifecycle × delivery × verification, plus one
+/// high-level outcome token for the headline copy.
+#[derive(serde::Serialize, Clone)]
+pub struct TurnStatusView {
+    /// queued | working | awaiting_approval | completed | stopped |
+    /// interrupted | failed (persisted turns never report the live values).
+    pub lifecycle: &'static str,
+    /// ready | partial | blocked | failed — did the answer land?
+    pub delivery: &'static str,
+    /// not_run | running | passed | failed | blocked — did acceptance land?
+    pub verification: &'static str,
+    /// working | partially_completed | blocked_by_environment | completed |
+    /// failed | stopped | interrupted
+    pub outcome: &'static str,
+}
+
+/// Map a final verification status code pair to the headline outcome.
+fn outcome_for(
+    lifecycle: &'static str,
+    delivery: &'static str,
+    verification: &'static str,
+    wrote_files: bool,
+) -> &'static str {
+    match lifecycle {
+        "stopped" => "stopped",
+        "interrupted" => "interrupted",
+        "failed" => "failed",
+        _ => match verification {
+            "blocked" => "blocked_by_environment",
+            _ => match delivery {
+                "failed" => "failed",
+                "ready" if verification == "passed" => "completed",
+                // Pure Q&A that never needed acceptance checks reads complete.
+                "ready" if verification == "not_run" && !wrote_files => "completed",
+                _ => "partially_completed",
+            },
+        },
+    }
+}
+
+/// Derive the three axes for a persisted turn. Delivery/verification come from
+/// the answer's structured outcome when present; otherwise they are derived
+/// from structured item facts (denial flags, exit codes, failure classes) —
+/// never from display strings.
+fn turn_status(turn: &session::Turn) -> TurnStatusView {
+    let has_running = turn
+        .items
+        .iter()
+        .any(|item| item.status == session::Status::Running);
+    let lifecycle = if turn.error.is_some() {
+        "failed"
+    } else if turn.stopped {
+        "stopped"
+    } else if turn.interrupted || has_running || (!turn.done && !turn.stopped) {
+        "interrupted"
+    } else {
+        "completed"
+    };
+
+    let wrote_files = turn
+        .items
+        .iter()
+        .any(|item| matches!(item.kind, session::ItemKind::FileChange { .. }));
+
+    let mut delivery = "";
+    let mut verification = "";
+    for item in &turn.items {
+        if let session::ItemKind::AgentMessage {
+            delivery: d,
+            verification: v,
+            ..
+        } = &item.kind
+        {
+            if !d.is_empty() {
+                delivery = d.as_str();
+            }
+            if !v.is_empty() {
+                verification = v.as_str();
+            }
+        }
+    }
+
+    // Fallbacks for legacy turns whose answer predates the outcome fields.
+    let mut failed_commands = 0usize;
+    let mut blocked_commands = 0usize;
+    let mut ok_commands = 0usize;
+    for item in &turn.items {
+        if let session::ItemKind::CommandExecution {
+            output,
+            exit_code,
+            denied,
+            ..
+        } = &item.kind
+        {
+            let failed = *denied
+                || matches!(exit_code, Some(code) if *code != 0)
+                || (item.status == session::Status::Failed && exit_code.is_none());
+            if !failed {
+                if item.status == session::Status::Done {
+                    ok_commands += 1;
+                }
+                continue;
+            }
+            match kodo_agent::TurnFailureKind::classify(*exit_code, output, *denied) {
+                Some(kodo_agent::TurnFailureKind::CommandNotFound)
+                | Some(kodo_agent::TurnFailureKind::PermissionDenied)
+                | Some(kodo_agent::TurnFailureKind::Timeout) => blocked_commands += 1,
+                _ => failed_commands += 1,
+            }
+        }
+    }
+
+    let delivery = if !delivery.is_empty() {
+        match delivery {
+            "partial" => "partial",
+            "blocked" => "blocked",
+            "failed" => "failed",
+            _ => "ready",
+        }
+    } else if turn.error.is_some() {
+        "failed"
+    } else if turn
+        .items
+        .iter()
+        .any(|item| matches!(item.kind, session::ItemKind::AgentMessage { .. }))
+    {
+        "ready"
+    } else if wrote_files {
+        "partial"
+    } else {
+        "failed"
+    };
+    let verification = if !verification.is_empty() {
+        match verification {
+            "running" => "running",
+            "passed" => "passed",
+            "failed" => "failed",
+            "blocked" => "blocked",
+            _ => "not_run",
+        }
+    } else if blocked_commands > 0 {
+        "blocked"
+    } else if failed_commands > 0 {
+        "failed"
+    } else if ok_commands > 0 {
+        "passed"
+    } else {
+        "not_run"
+    };
+
+    TurnStatusView {
+        lifecycle,
+        delivery,
+        verification,
+        outcome: outcome_for(lifecycle, delivery, verification, wrote_files),
+    }
 }
 
 /// One step, flattened so the GUI can switch on `kind` and read the rest
@@ -97,6 +257,10 @@ pub struct ItemView {
 pub enum ItemDetail {
     Reasoning {
         summary: String,
+        /// Public phase code. Empty for legacy rows.
+        phase: String,
+        /// Internal scheduling diagnostics (Debug surfaces only).
+        diagnostics: Option<String>,
     },
     Search {
         query: String,
@@ -112,6 +276,13 @@ pub enum ItemDetail {
         output: String,
         #[serde(rename = "exitCode")]
         exit_code: Option<i32>,
+        denied: bool,
+        /// Structured failure taxonomy code — classified here, not in the UI.
+        #[serde(rename = "failureClass")]
+        failure_class: Option<&'static str>,
+        /// Missing binary for `command_not_found`, when one was named.
+        #[serde(rename = "failureTool")]
+        failure_tool: Option<String>,
     },
     ModelCall {
         model: String,
@@ -126,6 +297,10 @@ pub enum ItemDetail {
     AgentMessage {
         text: String,
         checks: Vec<String>,
+        /// ready | partial | blocked | failed
+        delivery: String,
+        /// not_run | running | passed | failed | blocked
+        verification: String,
     },
 }
 
@@ -166,7 +341,15 @@ pub struct UndoConflictView {
 impl From<session::Item> for ItemView {
     fn from(item: session::Item) -> Self {
         let detail = match item.kind {
-            session::ItemKind::Reasoning { summary } => ItemDetail::Reasoning { summary },
+            session::ItemKind::Reasoning {
+                summary,
+                phase,
+                diagnostics,
+            } => ItemDetail::Reasoning {
+                summary,
+                phase,
+                diagnostics,
+            },
             session::ItemKind::Search { query, detail } => ItemDetail::Search { query, detail },
             session::ItemKind::FileRead { path, detail } => ItemDetail::FileRead { path, detail },
             session::ItemKind::CommandExecution {
@@ -174,12 +357,27 @@ impl From<session::Item> for ItemView {
                 cwd,
                 output,
                 exit_code,
-            } => ItemDetail::CommandExecution {
-                command,
-                cwd,
-                output,
-                exit_code,
-            },
+                denied,
+            } => {
+                let failed = denied || exit_code.map(|code| code != 0).unwrap_or(false);
+                let kind = if failed {
+                    kodo_agent::TurnFailureKind::classify(exit_code, &output, denied)
+                } else {
+                    None
+                };
+                let failure_tool = kind
+                    .filter(|k| *k == kodo_agent::TurnFailureKind::CommandNotFound)
+                    .and_then(|_| kodo_agent::TurnFailureKind::missing_tool(&output));
+                ItemDetail::CommandExecution {
+                    command,
+                    cwd,
+                    output,
+                    exit_code,
+                    denied,
+                    failure_class: kind.map(|k| k.code()),
+                    failure_tool,
+                }
+            }
             session::ItemKind::ModelCall {
                 model,
                 input_tokens,
@@ -199,9 +397,17 @@ impl From<session::Item> for ItemView {
                     })
                     .collect(),
             },
-            session::ItemKind::AgentMessage { text, checks } => {
-                ItemDetail::AgentMessage { text, checks }
-            }
+            session::ItemKind::AgentMessage {
+                text,
+                checks,
+                delivery,
+                verification,
+            } => ItemDetail::AgentMessage {
+                text,
+                checks,
+                delivery,
+                verification,
+            },
         };
 
         ItemView {
@@ -229,14 +435,18 @@ impl From<session::Session> for SessionView {
             turns: session
                 .turns
                 .into_iter()
-                .map(|turn| TurnView {
-                    ask: turn.ask,
-                    context: turn.context,
-                    items: turn.items.into_iter().map(Into::into).collect(),
-                    done: turn.done,
-                    stopped: turn.stopped,
-                    interrupted: turn.interrupted,
-                    error: turn.error,
+                .map(|turn| {
+                    let status = turn_status(&turn);
+                    TurnView {
+                        ask: turn.ask,
+                        context: turn.context,
+                        items: turn.items.into_iter().map(Into::into).collect(),
+                        done: turn.done,
+                        stopped: turn.stopped,
+                        interrupted: turn.interrupted,
+                        error: turn.error,
+                        status,
+                    }
                 })
                 .collect(),
         }
@@ -397,6 +607,7 @@ mod tests {
             cwd: "/p".to_owned(),
             output: "ok".to_owned(),
             exit_code: Some(0),
+            denied: false,
         }));
 
         // The envelope and the payload sit side by side, so the GUI switches on
@@ -415,9 +626,7 @@ mod tests {
 
     #[test]
     fn a_running_item_has_no_duration() {
-        let mut running = item(ItemKind::Reasoning {
-            summary: "先看目录".to_owned(),
-        });
+        let mut running = item(ItemKind::reasoning("先看目录".to_owned()));
         running.status = Status::Running;
         running.duration_ms = None;
         let value = to_json(running);
@@ -431,12 +640,7 @@ mod tests {
     #[test]
     fn every_kind_uses_the_tag_the_gui_switches_on() {
         let cases = vec![
-            (
-                ItemKind::Reasoning {
-                    summary: String::new(),
-                },
-                "reasoning",
-            ),
+            (ItemKind::reasoning(String::new()), "reasoning"),
             (
                 ItemKind::Search {
                     query: String::new(),
@@ -457,6 +661,7 @@ mod tests {
                     cwd: String::new(),
                     output: String::new(),
                     exit_code: None,
+                    denied: false,
                 },
                 "commandExecution",
             ),
@@ -475,10 +680,7 @@ mod tests {
                 "fileChange",
             ),
             (
-                ItemKind::AgentMessage {
-                    text: String::new(),
-                    checks: Vec::new(),
-                },
+                ItemKind::agent_message(String::new(), Vec::new()),
                 "agentMessage",
             ),
         ];
@@ -492,9 +694,7 @@ mod tests {
     fn a_run_event_carries_its_lifecycle_tag() {
         let event = RunEvent::ItemStarted {
             session: "abc".to_owned(),
-            item: ItemView::from(item(ItemKind::Reasoning {
-                summary: "s".to_owned(),
-            })),
+            item: ItemView::from(item(ItemKind::reasoning("s".to_owned()))),
         };
         let value = serde_json::to_value(event).expect("an event should serialize");
 
@@ -534,9 +734,7 @@ mod tests {
             turns: vec![kodo_core::session::Turn {
                 ask: "帮我看一下".to_owned(),
                 context: vec!["src/lib.rs".to_owned()],
-                items: vec![item(ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                })],
+                items: vec![item(ItemKind::reasoning("s".to_owned()))],
                 done: true,
                 stopped: false,
                 interrupted: false,
@@ -551,5 +749,145 @@ mod tests {
         assert_eq!(value["turns"][0]["context"], json!(["src/lib.rs"]));
         assert_eq!(value["turns"][0]["done"], json!(true));
         assert_eq!(value["turns"][0]["items"][0]["kind"], json!("reasoning"));
+    }
+
+    #[test]
+    fn a_failed_command_carries_a_structured_failure_class() {
+        let value = to_json(item(ItemKind::CommandExecution {
+            command: "cargo build".to_owned(),
+            cwd: "/p".to_owned(),
+            output: "/bin/sh: cargo: command not found".to_owned(),
+            exit_code: Some(127),
+            denied: false,
+        }));
+        assert_eq!(value["failureClass"], json!("command_not_found"));
+        assert_eq!(value["failureTool"], json!("cargo"));
+        assert_eq!(value["denied"], json!(false));
+
+        let denied = to_json(item(ItemKind::CommandExecution {
+            command: "rm -rf /".to_owned(),
+            cwd: "/p".to_owned(),
+            output: String::new(),
+            exit_code: None,
+            denied: true,
+        }));
+        assert_eq!(denied["failureClass"], json!("denied"));
+        assert_eq!(denied["denied"], json!(true));
+    }
+
+    #[test]
+    fn reasoning_carries_phase_and_hidden_diagnostics() {
+        let value = to_json(item(ItemKind::Reasoning {
+            summary: "Planning the work".to_owned(),
+            phase: "analyze".to_owned(),
+            diagnostics: Some("rounds 1/6 · tools 2/32".to_owned()),
+        }));
+        assert_eq!(value["summary"], json!("Planning the work"));
+        assert_eq!(value["phase"], json!("analyze"));
+        assert_eq!(value["diagnostics"], json!("rounds 1/6 · tools 2/32"));
+    }
+
+    fn turn_with(items: Vec<Item>, done: bool) -> kodo_core::session::Turn {
+        kodo_core::session::Turn {
+            ask: "q".to_owned(),
+            context: Vec::new(),
+            items,
+            done,
+            stopped: false,
+            interrupted: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn an_answer_with_passed_verification_is_completed() {
+        let turn = turn_with(
+            vec![
+                item(ItemKind::agent_message("done".to_owned(), Vec::new())),
+                item(ItemKind::AgentMessage {
+                    text: "done".to_owned(),
+                    checks: Vec::new(),
+                    delivery: "ready".to_owned(),
+                    verification: "passed".to_owned(),
+                }),
+            ],
+            true,
+        );
+        // First message is the legacy-shaped one; last answer wins.
+        let status = turn_status(&turn);
+        assert_eq!(status.lifecycle, "completed");
+        assert_eq!(status.delivery, "ready");
+        assert_eq!(status.verification, "passed");
+        assert_eq!(status.outcome, "completed");
+    }
+
+    #[test]
+    fn an_answer_with_failed_verification_is_partially_completed() {
+        let turn = turn_with(
+            vec![item(ItemKind::AgentMessage {
+                text: "done".to_owned(),
+                checks: Vec::new(),
+                delivery: "ready".to_owned(),
+                verification: "failed".to_owned(),
+            })],
+            true,
+        );
+        let status = turn_status(&turn);
+        assert_eq!(status.outcome, "partially_completed");
+    }
+
+    #[test]
+    fn environment_blockade_is_never_plain_failure() {
+        let turn = turn_with(
+            vec![item(ItemKind::AgentMessage {
+                text: "无法验证".to_owned(),
+                checks: Vec::new(),
+                delivery: "blocked".to_owned(),
+                verification: "blocked".to_owned(),
+            })],
+            true,
+        );
+        let status = turn_status(&turn);
+        assert_eq!(status.outcome, "blocked_by_environment");
+    }
+
+    #[test]
+    fn a_stopped_turn_reports_stopped_not_failed() {
+        let mut turn = turn_with(vec![item(ItemKind::reasoning("s"))], false);
+        turn.stopped = true;
+        let status = turn_status(&turn);
+        assert_eq!(status.lifecycle, "stopped");
+        assert_eq!(status.outcome, "stopped");
+    }
+
+    #[test]
+    fn a_qanda_without_checks_still_reads_completed() {
+        let turn = turn_with(
+            vec![item(ItemKind::agent_message("答案", Vec::new()))],
+            true,
+        );
+        let status = turn_status(&turn);
+        assert_eq!(status.verification, "not_run");
+        assert_eq!(status.outcome, "completed");
+    }
+
+    #[test]
+    fn missing_tool_failures_become_blocked_verification() {
+        let turn = turn_with(
+            vec![
+                item(ItemKind::CommandExecution {
+                    command: "cargo build".to_owned(),
+                    cwd: "/p".to_owned(),
+                    output: "/bin/sh: cargo: command not found".to_owned(),
+                    exit_code: Some(127),
+                    denied: false,
+                }),
+                item(ItemKind::agent_message("done".to_owned(), Vec::new())),
+            ],
+            true,
+        );
+        let status = turn_status(&turn);
+        assert_eq!(status.verification, "blocked");
+        assert_eq!(status.outcome, "blocked_by_environment");
     }
 }

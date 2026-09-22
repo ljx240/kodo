@@ -11,11 +11,12 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { loadSession, type SessionDto } from "../api";
-import { formatDuration, formatTokens } from "../conversation/trace";
+import { formatDuration, formatTokens, mergeChanges, totals } from "../conversation/trace";
 import { type DemoState, type DemoState as Demo } from "../data/demoState";
 import type { ChangedFile } from "../data/types";
 import { ReplyMeta } from "../inspector/TraceInspector";
 import { FileRow } from "../inspector/Section";
+import { T, toolAlias } from "../i18n";
 
 const TABS = ["Timeline", "Logs", "Artifacts"] as const;
 type Tab = (typeof TABS)[number];
@@ -38,7 +39,7 @@ function TypePill({ type }: { type: TimelineRow["type"] }) {
   return (
     <span className={`type-pill type-pill--${type.toLowerCase()}`}>
       <Icon size={13} strokeWidth={1.9} />
-      <span>{type}</span>
+      <span>{toolAlias(type)}</span>
     </span>
   );
 }
@@ -70,7 +71,7 @@ function liveTimeline(session: SessionDto): {
         time: new Date(item.at * 1000).toLocaleTimeString(),
         duration: formatDuration(item.duration),
         type: "Finalize",
-        title: "Finalize answer",
+        title: T.step.finalize,
         note: item.text.slice(0, 80),
       });
       return;
@@ -82,19 +83,19 @@ function liveTimeline(session: SessionDto): {
     };
     switch (item.kind) {
       case "reasoning":
-        rows.push({ ...base, type: "Thinking", title: "Thinking", note: item.summary });
+        rows.push({ ...base, type: "Thinking", title: T.step.thinking, note: item.summary });
         break;
       case "search":
-        rows.push({ ...base, type: "Search", title: "Search codebase", note: item.detail, chip: item.query });
+        rows.push({ ...base, type: "Search", title: T.step.search, note: item.detail, chip: item.query });
         break;
       case "fileRead":
-        rows.push({ ...base, type: "Read", title: "Read file", note: item.detail, chip: item.path });
+        rows.push({ ...base, type: "Read", title: T.step.read, note: item.detail, chip: item.path });
         break;
       case "commandExecution":
         rows.push({
           ...base,
           type: "Run",
-          title: "Run command",
+          title: T.step.run,
           note: item.output.slice(0, 80) || "命令输出",
           chip: item.command,
           ok: item.exitCode === 0,
@@ -104,24 +105,27 @@ function liveTimeline(session: SessionDto): {
         rows.push({
           ...base,
           type: "Model",
-          title: "Model call",
-          note: "调用模型",
+          title: T.step.model,
+          note: T.step.model,
           chips: [item.model, `${formatTokens(item.inputTokens)} → ${formatTokens(item.outputTokens)}`],
         });
         break;
-      case "fileChange":
-        item.changes.forEach((change) => files.push(change));
+      case "fileChange": {
+        const merged = mergeChanges(item.changes);
+        const stepTotals = totals(merged);
+        files.push(...merged);
         rows.push({
           ...base,
           type: "Edit",
-          title: "Edit files",
-          note: `${item.changes.length} 个文件`,
+          title: T.step.edit,
+          note: `${stepTotals.files} 个文件`,
           delta: {
-            added: item.changes.reduce((n, c) => n + c.added, 0),
-            removed: item.changes.reduce((n, c) => n + c.removed, 0),
+            added: stepTotals.added,
+            removed: stepTotals.removed,
           },
         });
         break;
+      }
     }
   });
 
@@ -129,7 +133,7 @@ function liveTimeline(session: SessionDto): {
     rows,
     final,
     checks,
-    files,
+    files: mergeChanges(files),
     done: turn.done,
     stopped: turn.stopped,
     interrupted:
@@ -228,14 +232,12 @@ export function TracePage({
   }
 
   const statusLabel = demoMode
-    ? "Completed"
+    ? T.lifecycle.completed
     : data.stopped
-      ? "Stopped"
+      ? T.lifecycle.stopped
       : data.done
-        ? "Completed"
-        : data.interrupted
-          ? "Interrupted"
-          : "Interrupted";
+        ? T.lifecycle.completed
+        : T.lifecycle.interrupted;
   const logs = data.rows.map((row) => {
     const detail = row.chip ?? row.chips?.join(" ") ?? "";
     return `${row.time}  ${String(row.duration).padStart(4)}  ${row.type.padEnd(9)} ${row.title}${detail ? ` ${detail}` : ""}`;

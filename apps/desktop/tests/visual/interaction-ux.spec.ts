@@ -336,6 +336,9 @@ test("edit step expands to the unified diff from turn_changes", async ({ page })
   await page.locator(".tree-project-main").click();
   await page.locator(".tree-conversation").click();
 
+  // A completed edit step hides its paths and diffs until the row is opened.
+  await expect(page.locator('[data-testid="trace-file-list"]')).toHaveCount(0);
+  await page.locator(".trace-label").click();
   await expect(page.locator('[data-testid="trace-file-list"]')).toBeVisible();
   await expect(page.locator('[data-testid="trace-diff-src/app.ts"]')).toContainText("+new");
 });

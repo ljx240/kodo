@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { coreInfo, gitBranch, setting, setSetting } from "./api";
+import { coreInfo, gitBranch, pickFolder, setting, setSetting } from "./api";
 import { loadDemoState, type DemoState } from "./data/demoState";
 import { DEFAULT_MODEL, MODEL_SETTING, MODELS } from "./data/models";
 import {
@@ -35,9 +35,7 @@ export function App() {
     route.demo && demoState ? demoState.conversation.id : null,
   );
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() =>
-    route.demo && demoState
-      ? demoState.project.id
-      : window.localStorage.getItem(LAST_PROJECT_KEY),
+    route.demo && demoState ? demoState.project.id : null,
   );
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("summary");
   const [coreVersion, setCoreVersion] = useState<string | null>(null);
@@ -122,7 +120,7 @@ export function App() {
     project.conversations.some((item) => item.id === activeConversationId),
   );
   const activeProject =
-    owner ?? workspace.projects.find((project) => project.id === activeProjectId) ?? workspace.projects[0] ?? null;
+    owner ?? (activeProjectId ? workspace.projects.find((project) => project.id === activeProjectId) : null);
 
   const traceBootstrapped = useRef(false);
   useEffect(() => {
@@ -194,25 +192,19 @@ export function App() {
     });
   };
 
-  const newChat = async (projectPath?: string) => {
-    const path = projectPath ?? activeProject?.path;
-    if (!path) return;
+  const newChat = (projectPath?: string) => {
+    const path = projectPath ?? null;
     setActiveConversationId(null);
     setActiveProjectId(path);
-    window.localStorage.setItem(LAST_PROJECT_KEY, path);
+    if (path) window.localStorage.setItem(LAST_PROJECT_KEY, path);
+    else window.localStorage.removeItem(LAST_PROJECT_KEY);
   };
 
-  const selectProject = (id: string) => {
-    const project = workspace.projects.find((item) => item.id === id);
-    if (!project) return;
-    setActiveProjectId(id);
-    window.localStorage.setItem(LAST_PROJECT_KEY, id);
-    const latest = project.conversations[0];
-    if (latest) {
-      setActiveConversationId(latest.id);
-      return;
-    }
-    setActiveConversationId(null);
+  const addProjectForTask = async () => {
+    const path = await pickFolder();
+    if (!path) return;
+    await workspace.add(path);
+    newChat(path);
   };
 
   const setInspectorOpen = (open: boolean) =>
@@ -253,6 +245,7 @@ export function App() {
         onSelectConversation={setActiveConversationId}
         onNewTask={() => void newChat()}
         onOpenSettings={() => setSettingsOpen(true)}
+        onToggleSidebar={() => setSidebarVisible((value) => !value)}
         onStartConversation={(path) => void newChat(path)}
         onRenameConversation={async (id, title) => {
           await workspace.retitle(id, title);
@@ -265,19 +258,18 @@ export function App() {
       />
 
       <div className="content">
-        {route.name === "conversation" && (
+        {/* Conversation always has a TopBar. Other routes only need one while
+            the sidebar is collapsed, so the expand control + nav icons never
+            disappear after navigating away from the conversation. */}
+        {(route.name === "conversation" || !sidebarVisible) && (
           <TopBar
-            projects={workspace.projects}
-            activeProjectId={activeProject?.id ?? null}
-            onSelectProject={selectProject}
-            projectName={projectName}
-            branch={branch}
-            provider={activeProvider}
-            onNewChat={(path) => void newChat(path)}
             inspectorOpen={route.inspectorOpen}
             onToggleInspector={() => setInspectorOpen(!route.inspectorOpen)}
             sidebarVisible={sidebarVisible}
             onToggleSidebar={() => setSidebarVisible((value) => !value)}
+            onNewTask={() => void newChat()}
+            onOpenSettings={() => setSettingsOpen(true)}
+            route={route.name}
           />
         )}
 
@@ -301,8 +293,12 @@ export function App() {
               }}
               onConversationCommitted={() => workspace.refresh()}
               onOpenSettings={() => setSettingsOpen(true)}
+              projects={workspace.projects}
+              onSelectProject={(id) => newChat(id ?? undefined)}
+              onAddProject={addProjectForTask}
               projectName={projectName}
               projectPath={activeProject?.path ?? ""}
+              branch={branch}
               demo={demoState}
               onRetitle={async (id, title) => {
                 await workspace.retitle(id, title);

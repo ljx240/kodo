@@ -147,7 +147,8 @@ p {
   display: none;
 }
 
-/* Holds the macOS traffic lights on the desktop build; empty otherwise. */
+/* Holds the macOS traffic lights on the desktop build; the collapse control
+   sits at the top-right of the left menu, clear of the traffic lights. */
 .sidebar-strip {
   height: var(--kodo-topbar-height);
   flex: none;
@@ -155,6 +156,10 @@ p {
   align-items: center;
   justify-content: flex-end;
   padding: 0 8px;
+}
+
+.sidebar-strip .icon-btn {
+  margin-left: auto;
 }
 
 .brand {
@@ -534,6 +539,12 @@ p {
   border-bottom: 1px solid var(--kodo-border);
 }
 
+/* Collapsed sidebar exposes the top bar under the traffic lights; leave room
+   so the expand control does not sit under the window buttons. */
+.app--sidebar-hidden .topbar {
+  padding-left: 78px;
+}
+
 .topbar--plain {
   padding: 0 16px;
 }
@@ -549,6 +560,14 @@ p {
   align-items: center;
   gap: 8px;
   margin-left: auto;
+}
+
+/* Icon strip that replaces a collapsed sidebar: sits immediately right of the
+   PanelLeft resize/toggle control so destinations never fully disappear. */
+.topbar-nav-icons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 /* The reference keeps a wide gap before the window-level overflow menu. */
@@ -925,6 +944,55 @@ p {
 
 .status-pill--empty .status-mark {
   background: var(--kodo-border-strong);
+}
+
+/* Three-axis outcomes: partially completed and env-blocked read as caution,
+   never as plain failure — the answer may still be usable. */
+.status-pill--partially_completed,
+.status-pill--blocked_by_environment {
+  background: color-mix(in srgb, var(--kodo-warning) 12%, var(--kodo-canvas));
+  color: var(--kodo-warning-text);
+}
+
+.status-pill--partially_completed .status-mark,
+.status-pill--blocked_by_environment .status-mark {
+  background: var(--kodo-warning);
+}
+
+.status-pill--queued,
+.status-pill--awaiting_approval {
+  background: var(--kodo-hover);
+  color: var(--kodo-text-secondary);
+}
+
+.status-pill--queued .status-mark,
+.status-pill--awaiting_approval .status-mark {
+  background: var(--kodo-border-strong);
+}
+
+.status-pill--verify-not_run {
+  background: var(--kodo-hover);
+  color: var(--kodo-text-secondary);
+}
+
+.status-pill--verify-running {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+.status-pill--verify-passed {
+  background: var(--kodo-success-bg);
+  color: var(--kodo-success-text);
+}
+
+.status-pill--verify-failed {
+  background: var(--kodo-error-bg);
+  color: var(--kodo-error);
+}
+
+.status-pill--verify-blocked {
+  background: color-mix(in srgb, var(--kodo-warning) 12%, var(--kodo-canvas));
+  color: var(--kodo-warning-text);
 }
 
 .archived-pill {

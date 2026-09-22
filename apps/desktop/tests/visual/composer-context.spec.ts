@@ -276,7 +276,10 @@ test("provider unavailable shows Settings recovery, not a dead control", async (
   await expect(warning).toBeVisible();
   await expect(warning).toContainText("尚未配置 AI Provider");
   await warning.locator("button").click();
-  await expect(page).toHaveURL(/\/settings$/);
+  // Settings opens as an overlay — the same contract as the sidebar entry,
+  // which must not navigate away from the conversation either.
+  await expect(page.locator(".settings-modal")).toBeVisible();
+  await expect(page).not.toHaveURL(/\/settings$/);
 });
 
 test("approval response failure surfaces recovery", async ({ page }) => {

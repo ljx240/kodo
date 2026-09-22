@@ -1,10 +1,11 @@
-import { BarChart3, Check, Folder, History, Minus, Sparkles, Square, Terminal, Undo2, X } from "lucide-react";
+import { BarChart3, Check, Folder, History, Minus, RefreshCw, Sparkles, Square, Terminal, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { turnChanges, undoTurn, type TurnChangeDto } from "../api";
 import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
 import { changesFromReply, commandsFromTurn, llmFromTurn, toolsFromTurn } from "../data/liveContext";
-import { formatDuration, type ReplyStatus } from "../conversation/trace";
+import { formatDuration, type OutcomeStatus, type Reply, type RunStatus } from "../conversation/trace";
+import { T } from "../i18n";
 import { FileRow, MetaRow, Section, ToolRow } from "./Section";
 
 export type InspectorData = {
@@ -22,34 +23,65 @@ function EmptyBody({ note }: { note: string }) {
   );
 }
 
-function StatusPill({ status }: { status: ReplyStatus }) {
-  const labels: Record<ReplyStatus, string> = {
-    empty: "—",
-    working: "Working",
-    completed: "Completed",
-    stopped: "Stopped",
-    interrupted: "Interrupted",
-    failed: "Failed",
-  };
+/**
+ * The single high-level status. The word carries the state — color is only a
+ * reinforcement, never the signal itself.
+ */
+function StatusPill({ outcome }: { outcome: OutcomeStatus }) {
   const mark =
-    status === "completed" ? (
+    outcome === "completed" ? (
       <Check size={9} strokeWidth={4} />
-    ) : status === "working" ? (
+    ) : outcome === "working" || outcome === "queued" || outcome === "awaiting_approval" ? (
       "…"
-    ) : status === "stopped" ? (
+    ) : outcome === "stopped" ? (
       <Square size={8} strokeWidth={2.5} />
-    ) : status === "interrupted" ? (
+    ) : outcome === "interrupted" ? (
       <Minus size={10} strokeWidth={3} />
-    ) : status === "failed" ? (
+    ) : outcome === "failed" || outcome === "blocked_by_environment" || outcome === "partially_completed" ? (
       <X size={9} strokeWidth={3} />
     ) : null;
 
   return (
-    <span className={`status-pill status-pill--${status}`}>
+    <span className={`status-pill status-pill--${outcome}`} data-testid="ins-status-pill">
       <span className="status-mark">{mark}</span>
-      <span>{labels[status]}</span>
+      <span>{T.outcome[outcome]}</span>
     </span>
   );
+}
+
+/** Answer / verification words for the summary rows. */
+function axisText(status: RunStatus): { answer: string; verify: string } {
+  return {
+    answer: T.delivery[status.delivery],
+    verify: T.verification[status.verification],
+  };
+}
+
+function filesText(reply: Reply | null): string {
+  const files = reply?.files ?? 0;
+  if (files > 0) return T.inspector.filesModified(files);
+  return T.inspector.filesNone;
+}
+
+function verifyText(reply: Reply | null): string {
+  if (!reply) return T.inspector.verifyWaiting;
+  const { verify, status } = reply;
+  if (status.verification === "running") return T.verification.running;
+  if (verify.blocked > 0) return T.inspector.verifyBlocked(verify.blocked);
+  if (verify.failed > 0) return T.inspector.verifyFailed(verify.failed);
+  if (verify.passed > 0) return T.inspector.verifyPassed(verify.passed);
+  return T.inspector.verifyNotRun;
+}
+
+function stepsText(reply: Reply | null, running: boolean): string {
+  const steps = reply?.steps.length ?? 0;
+  if (steps > 0) return T.reply.stepsCount(steps);
+  return running ? T.inspector.stepsPending : T.reply.stepsCount(0);
+}
+
+function tokensText(reply: Reply | null): string {
+  if (!reply || reply.tokensPending) return T.reply.statsPending;
+  return reply.tokens ?? T.tokens.pending;
 }
 
 /** Real per-file diffs + safe undo for the open session's Kodo changes. */
@@ -89,26 +121,26 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
     undoTurn(projectPath, sessionId)
       .then((report) => {
         if (!report) {
-          setMessage("撤销失败：未得到撤销报告");
+          setMessage(T.files.undoConflict);
           return;
         }
         const parts: string[] = [];
         if (report.restored.length) {
-          parts.push(`已撤销 ${report.restored.length} 个 Kodo 修改`);
+          parts.push(T.files.undoDone);
         }
         if (report.conflicts.length) {
           const details = report.conflicts
             .map((c) => `${c.path}（${c.reason}）`)
             .join("、");
-          parts.push(`撤销冲突 ${report.conflicts.length} 个：${details} — 已保留您的修改`);
+          parts.push(`${T.files.conflictCount(report.conflicts.length)}：${details} — ${T.files.undoSafe}`);
         }
         if (!parts.length) {
-          parts.push("没有可撤销的 Kodo 修改");
+          parts.push(T.files.undoDone);
         }
         setMessage(parts.join(" · "));
         reload();
       })
-      .catch((error: unknown) => setMessage(`撤销失败：${String(error)}`))
+      .catch(() => setMessage(T.files.undoConflict))
       .finally(() => setUndoing(false));
   };
 
@@ -117,10 +149,10 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
     return (
       <div className="ins-body">
         <p className="ins-note" data-testid="diff-error" role="alert">
-          加载 diff 失败：{loadError}
+          {T.reply.reason(loadError)}
         </p>
         <button type="button" className="btn btn--sm" data-testid="diff-retry" onClick={reload}>
-          重试
+          {T.action.regenerate}
         </button>
       </div>
     );
@@ -129,7 +161,7 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
     return (
       <div className="ins-body">
         <p className="ins-note" data-testid="diff-loading">
-          加载本轮 diff…
+          {T.reply.statsPending}
         </p>
       </div>
     );
@@ -138,7 +170,7 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
     return (
       <div className="ins-body">
         <p className="ins-note" data-testid="diff-empty">
-          本轮没有 Kodo 文件修改。
+          {T.inspector.filesNone}
         </p>
       </div>
     );
@@ -156,18 +188,18 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
               onClick={() => setOpen((cur) => (cur === change.path ? null : change.path))}
             >
               {change.path}
-              {change.userPreexisting ? " · (pre-existing user change)" : ""}
-              {change.conflict ? " · (undo conflict)" : ""}
-              {!change.conflict && !change.userPreexisting ? " · (Kodo change)" : ""}
+              {change.userPreexisting ? ` · ${T.files.preExisting}` : ""}
+              {change.conflict ? ` · ${T.files.conflicts}` : ""}
+              {!change.conflict && !change.userPreexisting ? ` · ${T.files.kodoEdits}` : ""}
             </button>
             {change.conflict && (
               <p className="ins-note" data-testid={`conflict-${change.path}`}>
-                Undo conflict — working tree diverged from Kodo&apos;s after-hash;您的后续修改会被保留
+                {T.files.undoConflict}
               </p>
             )}
             {open === change.path && (
               <pre className="terminal-block diff-block" data-testid={`diff-body-${change.path}`}>
-                {change.diff || "(no diff)"}
+                {change.diff || T.tokens.pending}
               </pre>
             )}
           </div>
@@ -184,86 +216,174 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
           className="btn btn--sm"
           data-testid="undo-kodo"
           disabled={undoing}
-          title={undoing ? "正在撤销…" : "撤销本轮 Kodo 修改（不会覆盖您的后续编辑）"}
+          title={undoing ? T.action.undoing : T.files.undoSafe}
           onClick={undo}
         >
           <Undo2 size={13} strokeWidth={1.8} />
-          <span>{undoing ? "撤销中…" : "撤销 Kodo 修改"}</span>
+          <span>{undoing ? T.action.undoing : T.inspector.undoSafe}</span>
         </button>
       </div>
     </>
   );
 }
 
-export function ThisResponse({ demo, demoState, live }: InspectorData) {
+/**
+ * Summary first: 当前结果 / 回答 / 文件 / 验证, then the recovery actions.
+ * While a run is live the rows say 统计中… / 尚未产生文件修改 / 等待步骤完成 —
+ * never a bare 0.
+ */
+export function SummarySection({
+  demo,
+  demoState,
+  live,
+  onShowAllFiles,
+}: InspectorData & { onShowAllFiles?: () => void }) {
+  const [showFailures, setShowFailures] = useState(false);
   const fixture = demo ? demoState?.conversation : undefined;
+
   if (!demo && live) {
     const reply = live.reply;
     if (!live.turn && !live.running) {
       return (
-        <Section icon={<History size={14} strokeWidth={1.7} />} title="This response">
-          <EmptyBody note="尚未开始响应，发送消息后会在这里显示执行摘要。" />
+        <Section icon={<History size={14} strokeWidth={1.7} />} title={T.inspector.thisResponse}>
+          <EmptyBody note={T.inspector.notStarted} />
         </Section>
       );
     }
-    const steps = reply?.steps.length ?? 0;
-    const status = reply?.status ?? (live.running ? "working" : "empty");
+    const status: RunStatus = reply?.status ?? {
+      lifecycle: live.running ? "working" : "interrupted",
+      delivery: live.running ? "partial" : "failed",
+      verification: "running",
+      outcome: live.running ? "working" : "interrupted",
+    };
+    const axes = axisText(status);
+    const failures = reply?.failureGroups ?? [];
     return (
       <Section
         icon={<History size={14} strokeWidth={1.7} />}
-        title="This response"
-        meta={<span className="ins-time">{live.running ? "进行中" : ""}</span>}
+        title={T.inspector.thisResponse}
+        meta={<span className="ins-time">{live.running ? T.reply.inProgress : ""}</span>}
       >
         <div className="ins-body">
-          <MetaRow label="Status">
-            <StatusPill status={status} />
+          <MetaRow label={T.inspector.currentResult}>
+            <StatusPill outcome={status.outcome} />
           </MetaRow>
-          <MetaRow label="Conversation">{live.title}</MetaRow>
-          <MetaRow label="Total steps">{steps}</MetaRow>
+          <MetaRow label={T.inspector.answerState}>{axes.answer}</MetaRow>
+          <MetaRow label={T.inspector.filesState}>{filesText(reply)}</MetaRow>
+          <MetaRow label={T.inspector.verificationState}>{verifyText(reply)}</MetaRow>
+          <MetaRow label={T.inspector.conversation}>{live.title}</MetaRow>
+          <MetaRow label={T.inspector.totalSteps}>{stepsText(reply, live.running)}</MetaRow>
+          <MetaRow label={T.inspector.totalTokens}>{tokensText(reply)}</MetaRow>
         </div>
+        <div className="ins-body ins-actions" data-testid="ins-summary-actions">
+          {failures.length > 0 && (
+            <button
+              type="button"
+              className="btn btn--sm"
+              data-testid="ins-view-failures"
+              aria-expanded={showFailures}
+              onClick={() => setShowFailures((value) => !value)}
+            >
+              {T.action.viewFailures}
+            </button>
+          )}
+          {onShowAllFiles && (reply?.files ?? 0) > 0 && (
+            <button
+              type="button"
+              className="btn btn--sm"
+              data-testid="ins-review-files"
+              onClick={onShowAllFiles}
+            >
+              {T.action.review}
+            </button>
+          )}
+          {live.onUndo && !live.running && (
+            <button
+              type="button"
+              className="btn btn--sm"
+              data-testid="ins-undo"
+              disabled={live.undoing}
+              title={live.undoing ? T.action.undoing : T.files.undoSafe}
+              onClick={live.onUndo}
+            >
+              <Undo2 size={13} strokeWidth={1.8} />
+              <span>{live.undoing ? T.action.undoing : T.action.undo}</span>
+            </button>
+          )}
+          {live.onRetry && !live.running && (
+            <button
+              type="button"
+              className="btn btn--sm"
+              data-testid="ins-regenerate"
+              onClick={live.onRetry}
+            >
+              <RefreshCw size={13} strokeWidth={1.8} />
+              <span>{T.action.regenerate}</span>
+            </button>
+          )}
+        </div>
+        {showFailures && failures.length > 0 && (
+          <div className="ins-body" data-testid="ins-failures">
+            {failures.map((group) => (
+              <div key={`${group.cls}-${group.tool ?? "n"}`} className="failure-group">
+                <p className="failure-label">{group.label}</p>
+                <p className="failure-reason">{T.reply.reason(group.reason)}</p>
+                <p className="failure-advice">{T.reply.advice(group.recovery)}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </Section>
     );
   }
   if (!demo && !live) {
     return (
-      <Section icon={<History size={14} strokeWidth={1.7} />} title="This response">
-        <EmptyBody note="尚未打开会话，或当前会话还没有回复。" />
+      <Section icon={<History size={14} strokeWidth={1.7} />} title={T.inspector.thisResponse}>
+        <EmptyBody note={T.inspector.noSession} />
       </Section>
     );
   }
   if (!fixture) {
     return (
-      <Section icon={<History size={14} strokeWidth={1.7} />} title="This response">
-        <EmptyBody note="演示数据未加载。" />
+      <Section icon={<History size={14} strokeWidth={1.7} />} title={T.inspector.thisResponse}>
+        <EmptyBody note={T.inspector.notStarted} />
       </Section>
     );
   }
   return (
     <Section
       icon={<History size={14} strokeWidth={1.7} />}
-      title="This response"
+      title={T.inspector.thisResponse}
       meta={<span className="ins-time">{fixture.assistant.time}</span>}
     >
       <div className="ins-body">
-        <MetaRow label="Status">
-          <span className="status-pill">
-            <span className="status-mark">
-              <Check size={9} strokeWidth={4} />
-            </span>
-            <span>Completed</span>
-          </span>
+        <MetaRow label={T.inspector.currentResult}>
+          <StatusPill outcome="completed" />
         </MetaRow>
-        <MetaRow label="Duration">{fixture.assistant.duration}</MetaRow>
-        <MetaRow label="Total steps">{fixture.assistant.trace.length}</MetaRow>
-        <MetaRow label="Input tokens">14.5k</MetaRow>
-        <MetaRow label="Output tokens">2.1k</MetaRow>
-        <MetaRow label="Model">Claude 3.5 Sonnet</MetaRow>
+        <MetaRow label={T.inspector.answerState}>{T.delivery.ready}</MetaRow>
+        <MetaRow label={T.inspector.filesState}>
+          {T.inspector.filesModified(demoState?.summary.files_changed ?? 0)}
+        </MetaRow>
+        <MetaRow label={T.inspector.verificationState}>
+          {T.inspector.verifyPassed(fixture.assistant.checks.length)}
+        </MetaRow>
+        <MetaRow label={T.inspector.totalSteps}>{T.reply.stepsCount(fixture.assistant.trace.length)}</MetaRow>
+        <MetaRow label={T.inspector.duration}>{fixture.assistant.duration}</MetaRow>
+        <MetaRow label={T.inspector.inputTokens}>{demoState?.summary.llm_calls[0]?.input_tokens ?? "—"}</MetaRow>
+        <MetaRow label={T.inspector.outputTokens}>{demoState?.summary.llm_calls[0]?.output_tokens ?? "—"}</MetaRow>
+        <MetaRow label={T.inspector.model}>{demoState?.summary.llm_calls[0]?.model ?? "—"}</MetaRow>
       </div>
     </Section>
   );
 }
 
-export function ChangedFilesSection({ demo, demoState, live, limit, onShowAll }: InspectorData & {
+export function ChangedFilesSection({
+  demo,
+  demoState,
+  live,
+  limit,
+  onShowAll,
+}: InspectorData & {
   limit?: number;
   /** Opens the Files tab — demo overview "Show all" must navigate, not no-op. */
   onShowAll?: () => void;
@@ -279,13 +399,13 @@ export function ChangedFilesSection({ demo, demoState, live, limit, onShowAll }:
   const shown = limit && demo ? files.slice(0, limit) : files;
 
   return (
-    <Section icon={<BarChart3 size={14} strokeWidth={1.7} />} title="Changed files" count={total}>
+    <Section icon={<BarChart3 size={14} strokeWidth={1.7} />} title={T.inspector.changedFiles} count={total}>
       {!demo && live?.conversationId && live.projectPath ? (
         <LiveDiffPanel sessionId={live.conversationId} projectPath={live.projectPath} />
       ) : (
         <div className="ins-body">
           {!demo && files.length === 0 ? (
-            <p className="ins-note">本轮没有记录到文件变更。</p>
+            <p className="ins-note">{T.inspector.filesNone}</p>
           ) : (
             shown.map((file) => <FileRow key={file.path} file={file} />)
           )}
@@ -298,7 +418,7 @@ export function ChangedFilesSection({ demo, demoState, live, limit, onShowAll }:
           data-testid="show-all-files"
           onClick={onShowAll}
         >
-          Show all {total} files →
+          {T.action.showAll} {total} →
         </button>
       )}
     </Section>
@@ -309,10 +429,10 @@ export function ToolsSection({ demo, demoState, live }: InspectorData) {
   const tools = !demo ? toolsFromTurn(live?.turn ?? null) : demoState?.summary.tools_used ?? {};
   const entries = Object.entries(tools);
   return (
-    <Section icon={<Terminal size={14} strokeWidth={1.7} />} title="Tools used" count={entries.length}>
+    <Section icon={<Terminal size={14} strokeWidth={1.7} />} title={T.inspector.toolsUsed} count={entries.length}>
       <div className="ins-body">
         {entries.length === 0 ? (
-          <p className="ins-note">暂无工具调用。</p>
+          <p className="ins-note">{T.inspector.stepsPending}</p>
         ) : (
           entries.map(([name, count]) => <ToolRow key={name} name={name} count={count} />)
         )}
@@ -324,10 +444,10 @@ export function ToolsSection({ demo, demoState, live }: InspectorData) {
 export function LlmSection({ demo, demoState, live, detailed = false }: InspectorData & { detailed?: boolean }) {
   const calls = !demo ? llmFromTurn(live?.turn ?? null) : demoState?.summary.llm_calls ?? [];
   return (
-    <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title="LLM calls" count={calls.length}>
+    <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title={T.inspector.llmCalls} count={calls.length}>
       <div className="ins-body">
         {calls.length === 0 ? (
-          <p className="ins-note">暂无模型调用记录。</p>
+          <p className="ins-note">{T.reply.statsPending}</p>
         ) : (
           calls.map((call) => (
             <div key={`${call.model}-${call.input_tokens}`} className="llm-call">
@@ -337,9 +457,9 @@ export function LlmSection({ demo, demoState, live, detailed = false }: Inspecto
                 {detailed && <span className="llm-time">{call.duration}</span>}
                 {!detailed && <span className="llm-duration">{call.duration}</span>}
               </div>
-              <MetaRow label="Input tokens">{call.input_tokens}</MetaRow>
-              <MetaRow label="Output tokens">{call.output_tokens}</MetaRow>
-              {detailed && <MetaRow label="Duration">{call.duration}</MetaRow>}
+              <MetaRow label={T.inspector.inputTokens}>{call.input_tokens}</MetaRow>
+              <MetaRow label={T.inspector.outputTokens}>{call.output_tokens}</MetaRow>
+              {detailed && <MetaRow label={T.inspector.duration}>{call.duration}</MetaRow>}
             </div>
           ))
         )}
@@ -352,7 +472,7 @@ export function CurrentProjectSection({ demo, demoState, live }: InspectorData) 
   const name = !demo ? live?.projectName || "未选择项目" : demoState?.project.name ?? "未选择项目";
   const path = !demo ? live?.projectPath || "—" : demoState?.project.path ?? "—";
   return (
-    <Section icon={<Folder size={14} strokeWidth={1.7} />} title="Current project">
+    <Section icon={<Folder size={14} strokeWidth={1.7} />} title={T.inspector.currentProject}>
       <div className="ins-body">
         <div className="project-name">{name}</div>
         <div className="project-path">{path}</div>
@@ -368,15 +488,18 @@ export function TerminalSection({ demo, demoState, live }: InspectorData) {
         .filter((step) => step.output)
         .map((step) => ({ command: step.chip || step.label, output: step.output || "" }));
   return (
-    <Section icon={<Terminal size={14} strokeWidth={1.7} />} title="Terminal output" count={runs.length}>
+    <Section icon={<Terminal size={14} strokeWidth={1.7} />} title={T.inspector.terminalOutput} count={runs.length}>
       <div className="ins-body">
         {runs.length === 0 ? (
-          <p className="ins-note">暂无命令输出。</p>
+          <p className="ins-note">{T.inspector.stepsPending}</p>
         ) : (
           runs.map((run) => (
-            <pre key={run.command} className="terminal-block">
-              {run.output || "(无输出)"}
-            </pre>
+            <div key={run.command} className="terminal-run">
+              <div className="terminal-cmd">
+                <code className="code-chip">{run.command}</code>
+              </div>
+              <pre className="terminal-block">{run.output || T.tokens.pending}</pre>
+            </div>
           ))
         )}
       </div>
@@ -389,7 +512,7 @@ export function ResponseOverview(props: InspectorData & { onShowAllFiles?: () =>
   const emptyLive = !data.demo && !data.live?.turn && !data.live?.running;
   return (
     <>
-      <ThisResponse {...data} />
+      <SummarySection {...data} onShowAllFiles={onShowAllFiles} />
       {!emptyLive && <ChangedFilesSection {...data} limit={5} onShowAll={onShowAllFiles} />}
       {!emptyLive && <ToolsSection {...data} />}
       {!emptyLive && <LlmSection {...data} />}

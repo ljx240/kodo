@@ -113,6 +113,12 @@ pub enum ItemKind {
     /// here, so no renderer can show what must stay hidden.
     Reasoning {
         summary: String,
+        /// High-level public phase code (`prepare`/`analyze`/`execute`/
+        /// `verify`/`summarize`). Structured so the UI never parses the summary.
+        phase: String,
+        /// Internal scheduling/budget diagnostics. Debug surfaces only — the
+        /// default UI shows `phase`, never this.
+        diagnostics: Option<String>,
     },
     Search {
         query: String,
@@ -127,6 +133,8 @@ pub enum ItemKind {
         cwd: String,
         output: String,
         exit_code: Option<i32>,
+        /// The user refused to run this command. Distinct from a non-zero exit.
+        denied: bool,
     },
     ModelCall {
         model: String,
@@ -139,7 +147,32 @@ pub enum ItemKind {
     AgentMessage {
         text: String,
         checks: Vec<String>,
+        /// What the answer delivered: `ready`/`partial`/`blocked`/`failed`.
+        delivery: String,
+        /// Whether acceptance ran and how: `not_run`/`running`/`passed`/`failed`/`blocked`.
+        verification: String,
     },
+}
+
+impl ItemKind {
+    /// Reasoning with no phase/diagnostics — the shape legacy logs decode to.
+    pub fn reasoning(summary: impl Into<String>) -> Self {
+        ItemKind::Reasoning {
+            summary: summary.into(),
+            phase: String::new(),
+            diagnostics: None,
+        }
+    }
+
+    /// Answer without a structured outcome — legacy shape.
+    pub fn agent_message(text: impl Into<String>, checks: Vec<String>) -> Self {
+        ItemKind::AgentMessage {
+            text: text.into(),
+            checks,
+            delivery: String::new(),
+            verification: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -584,7 +617,15 @@ fn encode_item(item: &Item) -> Vec<String> {
     ];
 
     match &item.kind {
-        ItemKind::Reasoning { summary } => fields.push(summary.clone()),
+        ItemKind::Reasoning {
+            summary,
+            phase,
+            diagnostics,
+        } => {
+            fields.push(summary.clone());
+            fields.push(phase.clone());
+            fields.push(diagnostics.clone().unwrap_or_default());
+        }
         ItemKind::Search { query, detail } => {
             fields.push(query.clone());
             fields.push(detail.clone());
@@ -598,11 +639,17 @@ fn encode_item(item: &Item) -> Vec<String> {
             cwd,
             output,
             exit_code,
+            denied,
         } => {
             fields.push(command.clone());
             fields.push(cwd.clone());
             fields.push(output.clone());
             fields.push(exit_code.map(|code| code.to_string()).unwrap_or_default());
+            fields.push(if *denied {
+                "1".to_owned()
+            } else {
+                "0".to_owned()
+            });
         }
         ItemKind::ModelCall {
             model,
@@ -620,10 +667,17 @@ fn encode_item(item: &Item) -> Vec<String> {
                 fields.push(change.removed.to_string());
             }
         }
-        ItemKind::AgentMessage { text, checks } => {
+        ItemKind::AgentMessage {
+            text,
+            checks,
+            delivery,
+            verification,
+        } => {
             fields.push(text.clone());
             // Newlines are escaped by the codec, so one field can hold the list.
             fields.push(checks.join("\n"));
+            fields.push(delivery.clone());
+            fields.push(verification.clone());
         }
     }
 
@@ -639,8 +693,15 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
     let duration_ms = duration.parse().ok();
 
     let kind = match (kind.as_str(), payload) {
-        ("reasoning", [summary]) => ItemKind::Reasoning {
+        ("reasoning", [summary]) => ItemKind::reasoning(summary.clone()),
+        ("reasoning", [summary, phase, diagnostics]) => ItemKind::Reasoning {
             summary: summary.clone(),
+            phase: phase.clone(),
+            diagnostics: if diagnostics.is_empty() {
+                None
+            } else {
+                Some(diagnostics.clone())
+            },
         },
         ("search", [query, detail]) => ItemKind::Search {
             query: query.clone(),
@@ -655,7 +716,17 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
             cwd: cwd.clone(),
             output: output.clone(),
             exit_code: exit_code.parse().ok(),
+            denied: false,
         },
+        ("commandExecution", [command, cwd, output, exit_code, denied]) => {
+            ItemKind::CommandExecution {
+                command: command.clone(),
+                cwd: cwd.clone(),
+                output: output.clone(),
+                exit_code: exit_code.parse().ok(),
+                denied: denied == "1",
+            }
+        }
         ("modelCall", [model, input, output]) => ItemKind::ModelCall {
             model: model.clone(),
             input_tokens: input.parse().ok()?,
@@ -673,13 +744,23 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
                 })
                 .collect(),
         },
-        ("agentMessage", [text, checks]) => ItemKind::AgentMessage {
+        ("agentMessage", [text, checks]) => ItemKind::agent_message(
+            text.clone(),
+            if checks.is_empty() {
+                Vec::new()
+            } else {
+                checks.split('\n').map(str::to_owned).collect()
+            },
+        ),
+        ("agentMessage", [text, checks, delivery, verification]) => ItemKind::AgentMessage {
             text: text.clone(),
             checks: if checks.is_empty() {
                 Vec::new()
             } else {
                 checks.split('\n').map(str::to_owned).collect()
             },
+            delivery: delivery.clone(),
+            verification: verification.clone(),
         },
         _ => return None,
     };
@@ -842,12 +923,7 @@ mod tests {
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
-        let mut running = item(
-            1,
-            ItemKind::Reasoning {
-                summary: "先看看目录结构".to_owned(),
-            },
-        );
+        let mut running = item(1, ItemKind::reasoning("先看看目录结构".to_owned()));
         running.status = Status::Running;
         running.duration_ms = None;
         record_item(&dir, &id, &running, Phase::Started).expect("started");
@@ -861,12 +937,7 @@ mod tests {
         );
 
         // The completion carries the duration the start could not know.
-        let finished = item(
-            1,
-            ItemKind::Reasoning {
-                summary: "先看看目录结构".to_owned(),
-            },
-        );
+        let finished = item(1, ItemKind::reasoning("先看看目录结构".to_owned()));
         record_item(&dir, &id, &finished, Phase::Completed).expect("completed");
         let after_done = load(&dir, &id).expect("load");
         assert_eq!(
@@ -889,12 +960,7 @@ mod tests {
         record_item(
             &dir,
             &id,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("s".to_owned())),
             Phase::Started,
         )
         .expect("started");
@@ -916,12 +982,7 @@ mod tests {
         record_item(
             &dir,
             &id,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "phase note".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("phase note".to_owned())),
             Phase::Started,
         )
         .expect("started");
@@ -937,9 +998,7 @@ mod tests {
         assert_eq!(session.turns[0].items[0].status, Status::Running);
         assert_eq!(
             session.turns[0].items[0].kind,
-            ItemKind::Reasoning {
-                summary: "phase note".to_owned()
-            },
+            ItemKind::reasoning("phase note".to_owned()),
             "item payload (last phase) is preserved"
         );
 
@@ -961,12 +1020,7 @@ mod tests {
         record_item(
             &dir,
             &id2,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("s".to_owned())),
             Phase::Started,
         )
         .expect("started");
@@ -991,6 +1045,7 @@ mod tests {
                 cwd: "/p".to_owned(),
                 output: "error[E0308]".to_owned(),
                 exit_code: Some(101),
+                denied: false,
             },
         );
         record_item(&dir, &id, &step, Phase::Completed).expect("completed");
@@ -1017,9 +1072,7 @@ mod tests {
         record_ask(&dir, &id, 10, "go").expect("ask");
 
         let kinds = vec![
-            ItemKind::Reasoning {
-                summary: "看目录\n再决定".to_owned(),
-            },
+            ItemKind::reasoning("看目录\n再决定".to_owned()),
             ItemKind::Search {
                 query: "unknown table".to_owned(),
                 detail: "12 处匹配".to_owned(),
@@ -1033,6 +1086,7 @@ mod tests {
                 cwd: "/p".to_owned(),
                 output: "warning: unused\n\tfinished".to_owned(),
                 exit_code: Some(0),
+                denied: false,
             },
             ItemKind::ModelCall {
                 model: "claude-sonnet-5".to_owned(),
@@ -1053,10 +1107,10 @@ mod tests {
                     },
                 ],
             },
-            ItemKind::AgentMessage {
-                text: "已修复。".to_owned(),
-                checks: vec!["cargo test 通过".to_owned(), "无新增告警".to_owned()],
-            },
+            ItemKind::agent_message(
+                "已修复。".to_owned(),
+                vec!["cargo test 通过".to_owned(), "无新增告警".to_owned()],
+            ),
         ];
 
         let mut expected = Vec::new();
@@ -1077,13 +1131,7 @@ mod tests {
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
-        let step = item(
-            1,
-            ItemKind::AgentMessage {
-                text: "done".to_owned(),
-                checks: Vec::new(),
-            },
-        );
+        let step = item(1, ItemKind::agent_message("done".to_owned(), Vec::new()));
         record_item(&dir, &id, &step, Phase::Completed).expect("record");
 
         assert_eq!(load(&dir, &id).expect("load").turns[0].items[0], step);
@@ -1173,24 +1221,14 @@ mod tests {
         let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
-        let good = item(
-            1,
-            ItemKind::Reasoning {
-                summary: "kept".to_owned(),
-            },
-        );
+        let good = item(1, ItemKind::reasoning("kept".to_owned()));
         record_item(&dir, &id, &good, Phase::Completed).expect("record");
         line::append(&dir.join(format!("{id}.log")), "item.completed\tnonsense").expect("junk");
         line::append(&dir.join(format!("{id}.log")), "a verb nobody knows\tx").expect("junk");
         record_item(
             &dir,
             &id,
-            &item(
-                2,
-                ItemKind::Reasoning {
-                    summary: "also kept".to_owned(),
-                },
-            ),
+            &item(2, ItemKind::reasoning("also kept".to_owned())),
             Phase::Completed,
         )
         .expect("record");
@@ -1213,12 +1251,7 @@ mod tests {
         record_item(
             &dir,
             &id,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("s".to_owned())),
             Phase::Completed,
         )
         .expect("record");
@@ -1274,12 +1307,7 @@ mod tests {
         record_item(
             &dir,
             &id,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("s".to_owned())),
             Phase::Started,
         )
         .expect("started");
@@ -1295,13 +1323,7 @@ mod tests {
         assert_eq!(turn.items[0].status, Status::Running, "item envelope kept");
         assert_eq!(
             turn.items[0].kind,
-            item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                }
-            )
-            .kind,
+            item(1, ItemKind::reasoning("s".to_owned())).kind,
             "last phase payload preserved for undo/diff"
         );
 
@@ -1349,5 +1371,160 @@ mod tests {
         assert_eq!(base36(0), "0");
         assert_eq!(base36(35), "z");
         assert_eq!(base36(36), "10");
+    }
+
+    #[test]
+    fn reasoning_round_trips_phase_and_diagnostics() {
+        let tmp = TempDir::new("sess-reasoning-phase");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "Planning the work".to_owned(),
+                    phase: "analyze".to_owned(),
+                    diagnostics: Some("rounds 1/6 · tools 2/32".to_owned()),
+                },
+            ),
+            Phase::Completed,
+        )
+        .expect("record");
+        let session = load(&dir, &id).expect("load");
+        match &session.turns[0].items[0].kind {
+            ItemKind::Reasoning {
+                summary,
+                phase,
+                diagnostics,
+            } => {
+                assert_eq!(summary, "Planning the work");
+                assert_eq!(phase, "analyze");
+                assert_eq!(diagnostics.as_deref(), Some("rounds 1/6 · tools 2/32"));
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_denied_flag_round_trips() {
+        let tmp = TempDir::new("sess-denied");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::CommandExecution {
+                    command: "rm -rf /".to_owned(),
+                    cwd: "/p".to_owned(),
+                    output: String::new(),
+                    exit_code: None,
+                    denied: true,
+                },
+            ),
+            Phase::Completed,
+        )
+        .expect("record");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::CommandExecution {
+                    command: "rm -rf /".to_owned(),
+                    cwd: "/p".to_owned(),
+                    output: String::new(),
+                    exit_code: None,
+                    denied: true,
+                },
+            ),
+            Phase::Failed,
+        )
+        .expect("mark failed");
+        let session = load(&dir, &id).expect("load");
+        match &session.turns[0].items[0].kind {
+            ItemKind::CommandExecution {
+                denied, exit_code, ..
+            } => {
+                assert!(*denied);
+                assert_eq!(*exit_code, None);
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_message_round_trips_structured_outcome() {
+        let tmp = TempDir::new("sess-outcome");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::AgentMessage {
+                    text: "已修复。".to_owned(),
+                    checks: vec!["cargo test 通过".to_owned()],
+                    delivery: "ready".to_owned(),
+                    verification: "passed".to_owned(),
+                },
+            ),
+            Phase::Completed,
+        )
+        .expect("record");
+        let session = load(&dir, &id).expect("load");
+        match &session.turns[0].items[0].kind {
+            ItemKind::AgentMessage {
+                delivery,
+                verification,
+                ..
+            } => {
+                assert_eq!(delivery, "ready");
+                assert_eq!(verification, "passed");
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_lines_without_outcome_fields_still_decode() {
+        // Old logs: reasoning with one payload field, agentMessage with two,
+        // commandExecution with four. They must keep loading as empty-outcome
+        // legacy shapes rather than be dropped as damaged.
+        let tmp = TempDir::new("sess-legacy");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let path = dir.join(format!("{id}.log"));
+        line::append(&path, "ask\t10\tgo").expect("ask");
+        line::append(&path, "item.completed\t1\t10\t5\treasoning\told summary").expect("r");
+        line::append(
+            &path,
+            "item.completed\t2\t10\t\tcommandExecution\tmake\t/p\tboom\t2",
+        )
+        .expect("c");
+        line::append(&path, "item.completed\t3\t10\t\tagentMessage\tdone\tcheck1").expect("a");
+        line::append(&path, "turn.complete\t20").expect("done");
+        let session = load(&dir, &id).expect("load");
+        let items = &session.turns[0].items;
+        assert_eq!(items.len(), 3);
+        assert!(
+            matches!(&items[0].kind, ItemKind::Reasoning { phase, diagnostics, .. }
+            if phase.is_empty() && diagnostics.is_none())
+        );
+        assert!(
+            matches!(&items[1].kind, ItemKind::CommandExecution { denied, exit_code, .. }
+            if !*denied && *exit_code == Some(2))
+        );
+        assert!(
+            matches!(&items[2].kind, ItemKind::AgentMessage { delivery, verification, .. }
+            if delivery.is_empty() && verification.is_empty())
+        );
     }
 }

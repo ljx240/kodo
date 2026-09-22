@@ -193,11 +193,12 @@ fn list_archived() -> Result<Vec<ArchivedItemView>, String> {
                     }
                     kodo_core::session::ItemKind::FileChange { changes } => {
                         for change in changes {
+                            // One path once; line deltas sum across steps/turns.
                             if seen_paths.insert(change.path.clone()) {
                                 files_changed += 1;
-                                added += change.added;
-                                removed += change.removed;
                             }
+                            added += change.added;
+                            removed += change.removed;
                         }
                     }
                     kodo_core::session::ItemKind::AgentMessage { text, .. }

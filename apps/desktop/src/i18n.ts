@@ -1,0 +1,254 @@
+/**
+ * Central zh-CN copy. Components never hardcode user-facing strings; every
+ * label lives here so the wording stays consistent across trace, reply,
+ * inspector and buttons. Commands, model names and paths stay as recorded.
+ */
+
+export const T = {
+  step: {
+    thinking: "思考",
+    search: "搜索代码",
+    read: "读取文件",
+    run: "运行命令",
+    model: "调用模型",
+    edit: "修改文件",
+    finalize: "整理回答",
+  },
+  phase: {
+    prepare: "准备项目上下文",
+    analyze: "分析任务",
+    execute: "执行修改",
+    verify: "运行验证",
+    summarize: "整理回答",
+    unknown: "执行任务",
+  },
+  lifecycle: {
+    queued: "排队中",
+    working: "执行中",
+    awaiting_approval: "等待批准",
+    completed: "已完成",
+    stopped: "已停止",
+    interrupted: "已中断",
+    failed: "失败",
+    empty: "待回答",
+  },
+  outcome: {
+    working: "执行中",
+    queued: "排队中",
+    awaiting_approval: "等待批准",
+    partially_completed: "部分完成",
+    blocked_by_environment: "环境阻塞",
+    completed: "已完成",
+    failed: "失败",
+    stopped: "已停止",
+    interrupted: "已中断",
+  },
+  delivery: {
+    ready: "已生成",
+    partial: "部分生成",
+    blocked: "已阻塞",
+    failed: "未生成",
+  },
+  verification: {
+    not_run: "未验证",
+    running: "验证中",
+    passed: "已通过",
+    failed: "未通过",
+    blocked: "已阻塞",
+  },
+  failure: {
+    command_not_found: {
+      reason: "找不到命令",
+      recovery: "安装缺失的工具后重试",
+      blocked: "工具不可用",
+    },
+    permission_denied: {
+      reason: "权限不足",
+      recovery: "调整文件或命令权限后重试",
+      blocked: "权限不足",
+    },
+    non_zero_exit: {
+      reason: "命令返回非零退出码",
+      recovery: "查看失败命令的输出并修复后重试",
+      blocked: "命令失败",
+    },
+    timeout: {
+      reason: "命令执行超时",
+      recovery: "缩短命令耗时或调整超时后重试",
+      blocked: "执行超时",
+    },
+    denied: {
+      reason: "已拒绝执行该命令",
+      recovery: "如需继续，请允许执行后重试",
+      blocked: "已拒绝",
+    },
+    provider_error: {
+      reason: "模型调用失败",
+      recovery: "检查 Provider 配置后重新生成",
+      blocked: "模型失败",
+    },
+    workspace_conflict: {
+      reason: "工作区存在冲突",
+      recovery: "解决冲突后重试；撤销不会覆盖您的后续编辑",
+      blocked: "工作区冲突",
+    },
+    unknown: {
+      reason: "命令执行失败",
+      recovery: "查看失败命令的输出后重试",
+      blocked: "执行失败",
+    },
+  },
+  action: {
+    review: "查看修改",
+    undo: "撤销修改",
+    undoing: "撤销中…",
+    regenerate: "重新生成",
+    retryEnvironment: "修复环境后重试",
+    viewFailures: "查看失败",
+    viewFailedCommands: "查看失败命令",
+    ignoreVerification: "忽略验证并完成回答",
+    viewLogs: "查看详细日志",
+    viewOutput: "查看输出",
+    hideOutput: "收起输出",
+    showAll: "查看全部",
+    collapse: "收起",
+    expand: "展开",
+    expandAnswer: "展开完整回答",
+    collapseAnswer: "收起回答",
+    showFullCode: "显示完整代码",
+    close: "关闭",
+    copy: "复制回复",
+    copied: "已复制",
+  },
+  reply: {
+    draft: "回答草稿",
+    working: "正在处理您的请求",
+    conclusion: "结论",
+    doneThisTurn: "本次完成",
+    verificationCard: "验证结果",
+    nextSteps: "下一步",
+    toc: "本页目录",
+    stopped: "这次运行已停止。",
+    interrupted: "这次运行中断了，最后一步没有完成。",
+    waitingApproval: "等待你的批准后继续执行",
+    inProgress: "进行中",
+    statsPending: "统计中…",
+    unknownDuration: "—",
+    stepsCount: (n: number) => `${n} 个步骤`,
+    subSteps: (n: number) => `${n} 个子步骤`,
+    reason: (text: string) => `原因：${text}`,
+    advice: (text: string) => `建议：${text}`,
+    answerState: (delivery: string) => `回答：${delivery}`,
+    verifyState: (verification: string) => `验证：${verification}`,
+    verificationIgnored: "已忽略验证结果，回答按现状使用。",
+    exitCode: (code: number) => `exit ${code}`,
+    showCode: "显示完整代码",
+    hideCode: "收起代码",
+  },
+  verify: {
+    passed: "通过",
+    failed: "失败",
+    blocked: "阻塞",
+    notRun: "未运行",
+    summary: (passed: number, failed: number, blocked: number) =>
+      `通过 ${passed} · 失败 ${failed} · 阻塞 ${blocked}`,
+    mergedBlocked: (count: number, tool: string) =>
+      tool
+        ? `${count} 个验证步骤因缺少 ${tool} 而阻塞`
+        : `${count} 个验证步骤因环境不可用而阻塞`,
+    mergedFailed: (count: number, reason: string) =>
+      `${count} 个步骤因${reason}而失败`,
+  },
+  files: {
+    title: (n: number) => `修改了 ${n} 个文件`,
+    kodoEdits: "本轮 Kodo 修改",
+    preExisting: "用户原有修改",
+    conflicts: "撤销冲突",
+    net: "工作区最终净变化",
+    cumulativeNote: "+/− 为本轮补丁累计增删，非工作区净 diff",
+    preExistingCount: (n: number) => `${n} 个用户原有`,
+    conflictCount: (n: number) => `${n} 个冲突`,
+    edits: (n: number) => `${n} 次编辑`,
+    undoSafe: "撤销本轮 Kodo 修改（不会覆盖您的后续编辑）",
+    undoConflict: "撤销失败：工作区与 Kodo 记录不一致，将不会覆盖您的后续编辑。",
+    undoDone: "已撤销本轮 Kodo 修改。",
+    viewDiff: "查看 diff",
+  },
+  inspector: {
+    panel: "Inspector",
+    terminal: "终端",
+    summary: "概览",
+    files: "文件",
+    tools: "工具",
+    llm: "模型",
+    help: "帮助",
+    currentResult: "当前结果",
+    answerState: "回答",
+    filesState: "文件",
+    verificationState: "验证",
+    filesNone: "尚未产生文件修改",
+    verifyWaiting: "等待步骤完成",
+    stepsPending: "等待步骤完成",
+    filesModified: (n: number) => `已修改 ${n} 个`,
+    verifyBlocked: (n: number) => `阻塞 ${n} 项`,
+    verifyFailed: (n: number) => `失败 ${n} 项`,
+    verifyPassed: (n: number) => `通过 ${n} 项`,
+    verifyNotRun: "未验证",
+    thisResponse: "本轮",
+    totalSteps: "步骤",
+    totalTokens: "Tokens",
+    toolsUsed: "使用工具",
+    changedFiles: "修改文件",
+    terminalOutput: "命令输出",
+    llmCalls: "模型调用",
+    currentProject: "当前项目",
+    debugDetails: "运行详情",
+    notStarted: "尚未开始响应，发送消息后会在这里显示执行摘要。",
+    noSession: "尚未打开会话，或当前会话还没有回复。",
+    conversation: "会话",
+    duration: "耗时",
+    inputTokens: "输入 tokens",
+    outputTokens: "输出 tokens",
+    model: "模型",
+    workspace: "项目路径",
+    kodoChange: "Kodo 修改",
+    undoSafe: "撤销修改",
+  },
+  tokens: {
+    pending: "—",
+    counting: "统计中…",
+  },
+} as const;
+
+export type FailureClassKey = keyof typeof T.failure;
+
+export function failureCopy(cls: string | null | undefined) {
+  const key = (cls ?? "unknown") as FailureClassKey;
+  return T.failure[key] ?? T.failure.unknown;
+}
+
+/**
+ * Fixture and legacy code name tools in English; the UI shows the zh label.
+ * Commands, model names and paths stay as recorded — this maps tool names only.
+ */
+const TOOL_ALIAS: Record<string, string> = {
+  Thinking: T.step.thinking,
+  Search: T.step.search,
+  "Search codebase": T.step.search,
+  Read: T.step.read,
+  "Read file": T.step.read,
+  Run: T.step.run,
+  "Run command": T.step.run,
+  Model: T.step.model,
+  "Call model": T.step.model,
+  Edit: T.step.edit,
+  "Edit file": T.step.edit,
+  "Edit files": T.step.edit,
+  Finalize: T.step.finalize,
+  Output: "命令输出",
+};
+
+/** English tool name → zh label; unknown names pass through unchanged. */
+export function toolAlias(name: string): string {
+  return TOOL_ALIAS[name] ?? name;
+}

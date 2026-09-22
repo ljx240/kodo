@@ -1,5 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
+const localBrowser = process.env.KODO_PLAYWRIGHT_EXECUTABLE_PATH;
+
 /** Reference viewport from docs/design/UI_ACCEPTANCE.md. */
 const VIEWPORT = { width: 1586, height: 992 };
 
@@ -22,6 +24,7 @@ export default defineConfig({
     deviceScaleFactor: 1,
     reducedMotion: "reduce",
     colorScheme: "light",
+    ...(localBrowser ? { launchOptions: { executablePath: localBrowser } } : {}),
   },
   expect: {
     toHaveScreenshot: {
