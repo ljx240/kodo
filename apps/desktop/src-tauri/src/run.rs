@@ -89,7 +89,11 @@ impl Approvals {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    pub fn wait_point(&self, session: &str, step: u32) -> (ApprovalTicket, Receiver<ApprovalChoice>) {
+    pub fn wait_point(
+        &self,
+        session: &str,
+        step: u32,
+    ) -> (ApprovalTicket, Receiver<ApprovalChoice>) {
         let (tx, rx) = mpsc::channel();
         self.waits().insert((session.to_owned(), step), tx);
         (
