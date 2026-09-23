@@ -2469,6 +2469,13 @@ pub fn run(
         if wrote_files {
             checks.push("已写入项目内文件".to_owned());
         }
+        // Keep the verification state visible in the answer text itself:
+        // consumers that only read the final message (evals, benchmarks)
+        // must never have to infer it from side channels.
+        if !answer.is_empty() && !answer.ends_with('\n') {
+            answer.push('\n');
+        }
+        answer.push_str(&format!("**Verification status:** {}\n", status.label()));
         simple_step(
             Step::AgentMessage {
                 text: answer,
