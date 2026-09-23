@@ -387,12 +387,13 @@ p {
   padding: 0 8px 0 12px;
   border-radius: var(--kodo-radius);
   font-size: var(--kodo-font-sm);
-  color: var(--kodo-text-secondary);
+  color: var(--kodo-text);
   text-align: left;
 }
 
 .tree-conversation svg {
   flex: none;
+  color: var(--kodo-text-secondary);
 }
 
 .tree-conversation-title {
@@ -406,7 +407,7 @@ p {
 .tree-conversation-time {
   flex: none;
   font-size: var(--kodo-font-sm);
-  color: var(--kodo-text-secondary);
+  color: var(--kodo-text-muted);
 }
 
 .tree-conversation:hover {
@@ -414,15 +415,16 @@ p {
 }
 
 /* The reference marks the open conversation with a plain rounded pill; it
-   draws no accent rule down the row's edge. */
+   draws no accent rule down the row's edge and keeps the title in primary
+   text (only the row tint changes). */
 .tree-conversation--active {
   background: var(--kodo-selected);
-  color: var(--kodo-accent);
+  color: var(--kodo-text);
   font-weight: 500;
 }
 
 .tree-conversation--active svg {
-  color: var(--kodo-accent);
+  color: var(--kodo-text-secondary);
 }
 
 /* Conversation row + trailing ⋯. The button is the primary target; the menu
@@ -596,6 +598,25 @@ p {
 
 .crumb-current {
   color: var(--kodo-text);
+}
+
+/* Compact context chips in the conversation top bar (LAYOUT §3). */
+.topbar-crumbs {
+  margin-left: 4px;
+  min-width: 0;
+}
+
+.topbar-crumbs span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-chip {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  color: var(--kodo-text-secondary);
 }
 
 /* ---------------------------------------------------------- page header -- */

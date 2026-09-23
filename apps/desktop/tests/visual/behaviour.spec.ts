@@ -374,7 +374,7 @@ test("choosing a project in a new task does not open an existing conversation", 
     },
   });
   await page.goto("/");
-  await page.getByRole("link", { name: "New Task" }).click();
+  await page.getByRole("link", { name: "新建任务" }).click();
   await page.locator('[data-testid="composer-project-picker"]').click();
   await page.getByRole("menuitem", { name: "beta" }).click();
   await expect(page.locator(".conv-title")).toHaveText("新对话");
@@ -491,17 +491,17 @@ test("the Trace page's three tabs swap the pane, none of them onto nothing", asy
   await expect(page.locator(".timeline")).toBeVisible();
   await expect(page.locator(".artifact-list")).toHaveCount(0);
 
-  await page.locator(".page-tab", { hasText: "Logs" }).click();
+  await page.locator(".page-tab", { hasText: "日志" }).click();
   await expect(page.locator(".timeline")).toHaveCount(0);
   await expect(page.locator(".page-inner > .terminal-block")).toContainText("10:24:32");
-  await expect(page.locator(".page-tab--active")).toHaveText("Logs");
+  await expect(page.locator(".page-tab--active")).toHaveText("日志");
 
-  await page.locator(".page-tab", { hasText: "Artifacts" }).click();
+  await page.locator(".page-tab", { hasText: "产物" }).click();
   await expect(page.locator(".page-inner > .terminal-block")).toHaveCount(0);
   await expect(page.locator(".artifact-list .file-row")).toHaveCount(7);
-  await expect(page.locator(".page-tab--active")).toHaveText("Artifacts");
+  await expect(page.locator(".page-tab--active")).toHaveText("产物");
 
-  await page.locator(".page-tab", { hasText: "Timeline" }).click();
+  await page.locator(".page-tab", { hasText: "时间线" }).click();
   await expect(page.locator(".timeline")).toBeVisible();
 });
 
@@ -537,16 +537,16 @@ test("each Settings category swaps the detail pane", async ({ page }) => {
 
   const categories = page.locator(".settings-nav-item");
   await expect(categories).toHaveText([
-    "General",
-    "Models",
+    "通用",
+    "模型",
     "AI Provider",
-    "Tools & Permissions",
-    "Projects",
-    "Archive & Storage",
-    "Appearance",
+    "工具与权限",
+    "项目",
+    "归档与存储",
+    "外观",
   ]);
 
-  for (const name of ["Models", "AI Provider", "Tools & Permissions", "Projects", "Archive & Storage", "Appearance", "General"]) {
+  for (const name of ["模型", "AI Provider", "工具与权限", "项目", "归档与存储", "外观", "通用"]) {
     await page.locator(".settings-nav-item", { hasText: name }).click();
     await expect(page.locator(".settings-detail h2")).toHaveText(name);
     await expect(page.locator(".settings-detail").locator(".setting-row, .provider-row, .provider-editor, button").first()).toBeVisible();
@@ -599,7 +599,7 @@ test("settings toggles persist through the stubbed settings store", async ({ pag
   await expect(page.locator(".settings-modal")).toBeVisible();
   await expect(page).not.toHaveURL(/\/settings$/);
 
-  await page.locator(".settings-nav-item", { hasText: "Projects" }).click();
+  await page.locator(".settings-nav-item", { hasText: "项目" }).click();
   const toggle = page.locator(".settings-detail .toggle").first();
   await expect(toggle).toHaveAttribute("aria-checked", "false");
   await toggle.click();
@@ -625,14 +625,14 @@ test("every visible functional setting maps to a runtime consumer", async ({ pag
 
   // Appearance → DOM consumers
   await page.locator(".sidebar-foot .nav-item").click();
-  await page.locator(".settings-nav-item", { hasText: "Appearance" }).click();
-  await expect(page.locator('.settings-detail select[aria-label="Theme"]')).toHaveValue("system");
+  await page.locator(".settings-nav-item", { hasText: "外观" }).click();
+  await expect(page.locator('.settings-detail select[aria-label="主题"]')).toHaveValue("system");
   await expect(page.locator(".app")).toHaveAttribute("data-density", "comfortable");
   await expect(page.locator(".app")).toHaveAttribute("data-line-numbers", "false");
   await expect(page.locator(".app")).toHaveClass(/app--system-font/);
 
   // Models → fallback / thinking / max tokens keys
-  await page.locator(".settings-nav-item", { hasText: "Models" }).click();
+  await page.locator(".settings-nav-item", { hasText: "模型" }).click();
   await expect(page.locator(".settings-detail select").first()).toHaveValue("fail");
   await expect(page.locator('.settings-detail input[role="switch"], .settings-detail .toggle').first()).toHaveAttribute(
     "aria-checked",
@@ -641,11 +641,11 @@ test("every visible functional setting maps to a runtime consumer", async ({ pag
   await expect(page.locator(".settings-detail input.input").first()).toHaveValue("2048");
 
   // Projects → auto git branch (App skips gitBranch when false)
-  await page.locator(".settings-nav-item", { hasText: "Projects" }).click();
+  await page.locator(".settings-nav-item", { hasText: "项目" }).click();
   await expect(page.locator(".settings-detail .toggle").first()).toHaveAttribute("aria-checked", "false");
 
   // Storage → auto-save / trace persistence path documented as append-only
-  await page.locator(".settings-nav-item", { hasText: "Archive" }).click();
+  await page.locator(".settings-nav-item", { hasText: "归档与存储" }).click();
   await expect(page.locator(".settings-detail")).toContainText("settings.log");
 });
 

@@ -165,7 +165,7 @@ test("+ project file panel searches and pins a context chip", async ({ page }) =
   await stubShell(page, liveCore({ files: ["src/app.ts", "src/util.ts", "README.md"] }));
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator('.composer button[aria-label="添加内容"]').click();
   await page.locator('[data-testid="project-files-item"]').click();
   await expect(page.locator('[data-testid="context-file-list"]')).toBeVisible();
   await page.locator('.composer-files-search input').fill("app");

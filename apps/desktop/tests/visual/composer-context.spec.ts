@@ -3,7 +3,7 @@ import { emit, project, sessionRef, stubShell } from "./shell";
 
 /** Open the + menu and trigger "添加照片和文件" (OS / stubbed filesystem picker). */
 async function attachFiles(page: import("@playwright/test").Page) {
-  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator('.composer button[aria-label="添加内容"]').click();
   await page.locator(".composer-plus-menu").getByRole("menuitem", { name: "添加照片和文件" }).click();
 }
 
@@ -29,14 +29,14 @@ test("no decorative Mic button remains in the composer", async ({ page }) => {
   await stubShell(page, liveCore());
   await openLiveConversation(page);
   await expect(page.locator('.composer button[aria-label="Voice input"]')).toHaveCount(0);
-  await expect(page.locator('.composer button[aria-label="Composer menu"]')).toHaveCount(1);
+  await expect(page.locator('.composer button[aria-label="添加内容"]')).toHaveCount(1);
 });
 
 test("+ opens a menu, not an inline file list", async ({ page }) => {
   await stubShell(page, liveCore({ files: ["src/app.ts"] }));
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator('.composer button[aria-label="添加内容"]').click();
   await expect(page.locator('[data-testid="context-file-list"]')).toHaveCount(0);
   await expect(page.locator(".composer-plus-menu")).toBeVisible();
   await expect(page.locator(".composer-plus-menu").getByRole("menuitem", { name: "添加照片和文件" })).toBeVisible();
@@ -59,7 +59,7 @@ test("+ child panels stay joined to the action menu", async ({ page }) => {
   await stubShell(page, liveCore({ files: ["src/app.ts"] }));
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator('.composer button[aria-label="添加内容"]').click();
   await page.locator(".composer-plus-menu").getByRole("menuitem", { name: "项目文件" }).click();
   await expect(page.locator(".composer-files-panel")).toBeVisible();
 
@@ -84,17 +84,17 @@ test("+ lists builtin skills as a removable chip and serializes it on send", asy
   await stubShell(page, liveCore());
   await openLiveConversation(page);
 
-  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator('.composer button[aria-label="添加内容"]').click();
   await page.locator(".composer-plus-menu", { hasText: "技能" }).getByRole("menuitem", { name: "技能" }).click();
   await page.locator('[data-skill-id="bug-fix"]').click();
 
   await expect(page.locator(".composer-input")).toHaveValue("");
   await expect(page.locator('.composer-skill[data-skill-id="bug-fix"]')).toContainText("bug-fix");
-  await expect(page.locator('[aria-label="Remove skill bug-fix"]')).toBeVisible();
-  await page.locator('[aria-label="Remove skill bug-fix"]').click();
+  await expect(page.locator('[aria-label="移除技能 bug-fix"]')).toBeVisible();
+  await page.locator('[aria-label="移除技能 bug-fix"]').click();
   await expect(page.locator(".composer-skill")).toHaveCount(0);
 
-  await page.locator('.composer button[aria-label="Composer menu"]').click();
+  await page.locator('.composer button[aria-label="添加内容"]').click();
   await page.locator(".composer-plus-menu", { hasText: "技能" }).getByRole("menuitem", { name: "技能" }).click();
   await page.locator('[data-skill-id="bug-fix"]').click();
 
@@ -136,7 +136,7 @@ test("remove a context chip", async ({ page }) => {
 
   await attachFiles(page);
   await expect(page.locator("[data-context-path]")).toHaveCount(2);
-  await page.locator('[aria-label="Remove context src/app.ts"]').click();
+  await page.locator('[aria-label="移除上下文 src/app.ts"]').click();
   await expect(page.locator('[data-context-path="src/app.ts"]')).toHaveCount(0);
   await expect(page.locator('[data-context-path="README.md"]')).toBeVisible();
 });
@@ -244,7 +244,7 @@ test("failed rename shows retry", async ({ page }) => {
   await stubShell(page, liveCore({ failRename: true }));
   await openLiveConversation(page);
 
-  await page.locator('[aria-label="Rename conversation"]').click();
+  await page.locator('[aria-label="重命名会话"]').click();
   const input = page.locator(".conv-title-input");
   await input.fill("新标题");
   await input.press("Enter");
@@ -260,8 +260,8 @@ test("failed archive shows retry", async ({ page }) => {
   await stubShell(page, liveCore({ failArchive: true }));
   await openLiveConversation(page);
 
-  await page.locator('[aria-label="Conversation actions"]').click();
-  await page.locator(".menu-item", { hasText: "Archive conversation" }).click();
+  await page.locator('[aria-label="会话操作"]').click();
+  await page.locator(".menu-item", { hasText: "归档会话" }).click();
 
   const banner = page.locator('[data-testid="action-error"]');
   await expect(banner).toContainText("归档失败");

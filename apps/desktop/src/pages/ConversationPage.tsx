@@ -39,6 +39,8 @@ type Props = {
   conversationId: string | null;
   provider: ProviderConfig | null;
   providers: ProviderConfig[];
+  /** Default-model value shared with Settings and the top-bar chip (§5b). */
+  defaultModel?: string;
   onSelectProvider: (index: number) => void;
   onSelectProviderModel: (providerIndex: number, modelId: string, displayName: string) => void;
   onViewFiles: () => void;
@@ -133,6 +135,7 @@ export function ConversationPage({
   conversationId,
   provider,
   providers,
+  defaultModel,
   onSelectProvider,
   onSelectProviderModel,
   onViewFiles,
@@ -572,6 +575,7 @@ export function ConversationPage({
     <Composer
       provider={provider}
       providers={providers}
+      defaultModel={defaultModel}
       onSelectProvider={onSelectProvider}
       onSelectProviderModel={onSelectProviderModel}
       projects={projects}
@@ -630,7 +634,7 @@ export function ConversationPage({
               <button
                 type="button"
                 className="icon-btn icon-btn--sm"
-                aria-label="Rename conversation"
+                aria-label={T.conv.rename}
                 onClick={() => {
                   setDraftTitle(heading);
                   setRenaming(true);
@@ -644,7 +648,7 @@ export function ConversationPage({
               <Menu
                 align="right"
                 trigger={({ toggle }) => (
-                  <button type="button" className="icon-btn" aria-label="Conversation actions" onClick={toggle}>
+                  <button type="button" className="icon-btn" aria-label={T.conv.actions} onClick={toggle}>
                     <MoreVertical size={16} strokeWidth={1.8} />
                   </button>
                 )}
@@ -653,7 +657,7 @@ export function ConversationPage({
                   <>
                     <MenuItem
                       icon={<Pencil size={14} strokeWidth={1.8} />}
-                      label="Rename conversation"
+                      label={T.conv.rename}
                       onSelect={() => {
                         close();
                         setDraftTitle(heading);
@@ -662,7 +666,7 @@ export function ConversationPage({
                     />
                     <MenuItem
                       icon={<Archive size={14} strokeWidth={1.8} />}
-                      label="Archive conversation"
+                      label="归档会话"
                       danger
                       onSelect={() => {
                         close();
@@ -671,7 +675,7 @@ export function ConversationPage({
                     />
                     <MenuItem
                       icon={<Folder size={14} strokeWidth={1.8} />}
-                      label="Open response trace"
+                      label="查看响应轨迹"
                       onSelect={() => {
                         close();
                         onOpenTrace();

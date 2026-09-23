@@ -35,7 +35,8 @@ import {
   templateById,
 } from "../data/providers";
 import type { Project } from "../data/types";
-import { type Permission, PERMISSIONS, PERMISSION_SETTING, DEFAULT_PERMISSION } from "../data/models";
+import { type Permission, PERMISSIONS, PERMISSION_SETTING, DEFAULT_PERMISSION, DEFAULT_MODEL } from "../data/models";
+import { T } from "../i18n";
 import { Menu, MenuItem } from "../shell/Menu";
 import { navigate } from "../routes";
 
@@ -47,6 +48,8 @@ type Props = {
   provider: ProviderConfig | null;
   /** All configured providers. */
   providers: ProviderConfig[];
+  /** Settings' Default model — shown when no provider is active (§5b). */
+  defaultModel?: string;
   /** Registered projects available to a new conversation. */
   projects: Project[];
   /** Select the project context for a new conversation. */
@@ -89,6 +92,10 @@ const PERM_ICONS: Record<Permission, typeof Shield> = {
   full: Shield,
 };
 
+/**
+ * Semantic color only on the icon — the trigger label stays neutral so the
+ * composer's left cluster reads as quiet chrome (DESIGN §4).
+ */
 const PERM_CONFIG: Record<Permission, { label: string; color: string }> = {
   ask: { label: "请求批准", color: "var(--kodo-accent)" },
   auto: { label: "自动批准安全操作", color: "var(--kodo-success-text)" },
@@ -111,6 +118,7 @@ export const BUILTIN_SKILLS: { id: string; label: string }[] = [
 export function Composer({
   provider,
   providers,
+  defaultModel,
   projects,
   onSelectProject,
   onAddProject,
@@ -382,7 +390,11 @@ export function Composer({
 
   const permConfig = PERM_CONFIG[permission];
   const PermIcon = PERM_ICONS[permission];
-  const modelLabel = provider ? providerModelLabel(provider) || provider.model || "选择模型" : "选择模型";
+  // No provider yet — show the default model rather than a placeholder so the
+  // composer chip and Settings' Default model agree (UI_ACCEPTANCE §5b).
+  const modelLabel = provider
+    ? providerModelLabel(provider) || provider.model || T.composer.selectModel
+    : defaultModel || DEFAULT_MODEL;
   const providerName = provider?.name ?? "";
 
   return (
@@ -406,7 +418,7 @@ export function Composer({
                 <button
                   type="button"
                   className="chip-remove"
-                  aria-label={`Remove skill ${skillId}`}
+                  aria-label={T.composer.removeSkill(skillId)}
                   onClick={() => setSelectedSkills((current) => current.filter((id) => id !== skillId))}
                 >
                   <X size={12} strokeWidth={2} />
@@ -434,11 +446,11 @@ export function Composer({
               <button
                 type="button"
                 className="icon-btn"
-                aria-label="Composer menu"
+                aria-label={T.composer.menu}
                 aria-expanded={plusOpen}
                 aria-haspopup="menu"
                 aria-controls={plusOpen ? "composer-plus-menu" : undefined}
-                title="添加照片和文件、项目文件、技能或打开模型设置"
+                title={T.composer.menuHint}
                 onClick={() => {
                   if (plusOpen) closePlus();
                   else {
@@ -538,7 +550,7 @@ export function Composer({
                     )}
 
                     {plusPanel === "skills" && (
-                      <div className="menu composer-plus-panel" role="listbox" aria-label="Skills">
+                      <div className="menu composer-plus-panel" role="listbox" aria-label={T.composer.skills}>
                         {BUILTIN_SKILLS.map((skill) => (
                           <button
                             key={skill.id}
@@ -579,9 +591,8 @@ export function Composer({
                   className="composer-perm-trigger"
                   aria-expanded={open}
                   onClick={toggle}
-                  style={{ color: permConfig.color }}
                 >
-                  <PermIcon size={14} strokeWidth={2} />
+                  <PermIcon size={14} strokeWidth={2} style={{ color: permConfig.color }} />
                   <span>{permConfig.label}</span>
                   <ChevronDown size={12} strokeWidth={2} />
                 </button>
@@ -611,7 +622,7 @@ export function Composer({
             ref={input}
             className="composer-input"
             rows={1}
-            placeholder="描述任务，输入 / 调用技能"
+            placeholder={T.composer.inputPlaceholder}
             value={draft}
             data-testid="composer-input"
             onChange={(event) => setDraft(event.target.value)}
@@ -747,14 +758,14 @@ export function Composer({
             </div>
 
             {running ? (
-              <button type="button" className="composer-send composer-send--stop" aria-label="Stop" onClick={onStop}>
+              <button type="button" className="composer-send composer-send--stop" aria-label={T.composer.stop} onClick={onStop}>
                 <Square size={13} strokeWidth={2.4} />
               </button>
             ) : (
               <button
                 type="button"
                 className="composer-send"
-                aria-label="Send"
+                aria-label={T.composer.send}
                 data-testid="composer-send"
                 disabled={!ready || draft.trim() === ""}
                 title={
@@ -802,7 +813,7 @@ export function Composer({
                 <button
                   type="button"
                   className="chip-remove"
-                  aria-label={`Remove context ${path}`}
+                  aria-label={T.composer.removeContext(path)}
                   onClick={() => onRemoveContext(path)}
                 >
                   <X size={12} strokeWidth={2} />

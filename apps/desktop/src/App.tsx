@@ -6,6 +6,7 @@ import {
   type ProviderConfig,
   loadProviders,
   loadActiveIndex,
+  providerModelLabel,
   saveActiveIndex,
   saveProviders,
 } from "./data/providers";
@@ -270,6 +271,16 @@ export function App() {
             onNewTask={() => void newChat()}
             onOpenSettings={() => setSettingsOpen(true)}
             route={route.name}
+            crumbProject={projectName}
+            crumbTitle={
+              demoState?.conversation.title ??
+              workspace.projects
+                .flatMap((p) => p.conversations)
+                .find((c) => c.id === activeConversationId)?.title ??
+              null
+            }
+            branch={branch}
+            modelLabel={providerModelLabel(activeProvider) || activeProvider?.model || model}
           />
         )}
 
@@ -279,6 +290,7 @@ export function App() {
               conversationId={activeConversationId}
               provider={activeProvider}
               providers={providers}
+              defaultModel={model}
               onSelectProvider={selectProvider}
               onSelectProviderModel={selectProviderModel}
               onViewFiles={openFiles}

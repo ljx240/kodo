@@ -40,16 +40,16 @@ When collapsed:
 
 The sidebar is one navigation surface only.
 
-Structure:
+Structure (labels as rendered, zh-CN from `apps/desktop/src/i18n.ts`):
 
 ```text
 Kodo
-Search
+Get code done.
 
-Conversations
-Archive
+新建任务          ← action, never active
+技能
 
-Projects                          +
+项目                          +
 ├─ project A
 │  ├─ conversation A1
 │  ├─ conversation A2
@@ -57,8 +57,14 @@ Projects                          +
 ├─ project B
 └─ project C
 
-Settings
+设置
 ```
+
+> Structure update: the old `Conversations`/`Archive` nav rows are gone. One
+> tree carries projects and their conversations (a second conversation list was
+> banned by the core layout rule anyway); `新建任务` is an action, not a
+> destination; `技能` is a real destination that deserves one row; `归档` is a
+> storage-management screen reached via 设置 → 归档与存储 → 查看归档.
 
 There is **no account row**. Kodo has no login, so the sidebar does not name a
 user and does not offer a sign-out.

@@ -54,12 +54,12 @@ test("900px: sidebar toggles; inspector opens as overlay without squeezing main"
   // Collapsed via the control at the top of the left menu (kept in DOM for aria-controls).
   await expect(page.locator(".sidebar")).toBeVisible();
   await expect(page.locator(".topbar-nav-icons")).toHaveCount(0);
-  await expect(page.locator(".topbar button[aria-label='Toggle sidebar']")).toHaveCount(0);
-  await page.locator('.sidebar button[aria-label="Toggle sidebar"]').click();
+  await expect(page.locator(".topbar button[aria-label='切换侧边栏']")).toHaveCount(0);
+  await page.locator('.sidebar button[aria-label="切换侧边栏"]').click();
   await expect(page.locator(".sidebar")).toBeHidden();
   // Scope to the top-bar control: the sidebar's own toggle stays in the DOM
   // (hidden) so its aria-controls target remains valid.
-  await expect(page.locator('.topbar button[aria-label="Toggle sidebar"]')).toHaveAttribute(
+  await expect(page.locator('.topbar button[aria-label="切换侧边栏"]')).toHaveAttribute(
     "aria-expanded",
     "false",
   );
@@ -67,14 +67,14 @@ test("900px: sidebar toggles; inspector opens as overlay without squeezing main"
   await expect(page.locator(".topbar-nav-icons")).toBeVisible();
   const strip = await page.evaluate(() => {
     const toggle = document
-      .querySelector('.topbar button[aria-label="Toggle sidebar"]')
+      .querySelector('.topbar button[aria-label="切换侧边栏"]')
       ?.getBoundingClientRect();
     const strip = document.querySelector(".topbar-nav-icons")?.getBoundingClientRect();
     return { toggleRight: toggle?.right ?? 0, stripLeft: strip?.left ?? 0 };
   });
   expect(strip.toggleRight).toBeGreaterThan(0);
   expect(strip.stripLeft).toBeGreaterThanOrEqual(strip.toggleRight);
-  await page.locator('.topbar button[aria-label="Toggle sidebar"]').click();
+  await page.locator('.topbar button[aria-label="切换侧边栏"]').click();
   await expect(page.locator(".sidebar")).toBeVisible();
   await expect(page.locator(".topbar-nav-icons")).toHaveCount(0);
 
@@ -97,7 +97,7 @@ test("Menu keyboard: Escape, arrows, Home/End, focus return", async ({ page }) =
   await page.waitForLoadState("networkidle");
 
   // Projects + menu (sidebar).
-  const trigger = page.locator('.section-head button[aria-label="New project"]');
+  const trigger = page.locator('.section-head button[aria-label="新建项目"]');
   await trigger.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator('.menu[role="menu"]')).toBeVisible();

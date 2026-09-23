@@ -21,13 +21,18 @@ import {
 import { useState } from "react";
 import { pickFolder } from "../api";
 import type { WorkspaceState } from "../data/workspace";
+import { T } from "../i18n";
 import { hrefTo, navigate, type RouteName } from "../routes";
 import { Menu, MenuItem } from "./Menu";
 
-/** The two destinations that sit above the project tree. */
-const NAV: { name: RouteName; label: string; Icon: typeof Archive }[] = [
-  { name: "conversation", label: "New Task", Icon: MessageCircle },
-  { name: "skills", label: "Skills", Icon: Sparkles },
+/**
+ * The two entries above the project tree. New Task is an action (it starts a
+ * conversation), so it never shows the selected-destination treatment; Skills
+ * is a destination and does.
+ */
+const NAV: { name: RouteName; label: string; Icon: typeof Archive; action?: boolean }[] = [
+  { name: "conversation", label: T.nav.newTask, Icon: MessageCircle, action: true },
+  { name: "skills", label: T.nav.skills, Icon: Sparkles },
 ];
 
 type Props = {
@@ -105,10 +110,10 @@ export function Sidebar({
     if (name) await attempt(() => rename(path, name));
   };
 
-  const navItem = (name: RouteName, label: string, Icon: typeof Archive) => (
+  const navItem = (name: RouteName, label: string, Icon: typeof Archive, action?: boolean) => (
     <a
       key={name}
-      className={`nav-item${route === name ? " nav-item--active" : ""}`}
+      className={`nav-item${!action && route === name ? " nav-item--active" : ""}`}
       href={hrefTo(name, inspectorOpen)}
       onClick={(event) => {
         event.preventDefault();
@@ -130,7 +135,7 @@ export function Sidebar({
         <button
           type="button"
           className="icon-btn"
-          aria-label="Toggle sidebar"
+          aria-label={T.nav.toggleSidebar}
           aria-expanded
           aria-controls="kodo-sidebar"
           onClick={onToggleSidebar}
@@ -147,17 +152,17 @@ export function Sidebar({
         </span>
       </div>
 
-      <nav className="nav">{NAV.map(({ name, label, Icon }) => navItem(name, label, Icon))}</nav>
+      <nav className="nav">{NAV.map(({ name, label, Icon, action }) => navItem(name, label, Icon, action))}</nav>
 
       <div className="projects">
         <div className="section-head">
-          <span>Projects</span>
+          <span>{T.nav.projects}</span>
           <Menu
             trigger={({ open, toggle }) => (
               <button
                 type="button"
                 className="icon-btn"
-                aria-label="New project"
+                aria-label={T.nav.newProject}
                 aria-expanded={open}
                 onClick={toggle}
               >
@@ -429,7 +434,7 @@ export function Sidebar({
       <div className="sidebar-foot">
         <button type="button" className="nav-item sidebar-settings" onClick={onOpenSettings}>
           <Settings size={16} strokeWidth={1.8} />
-          <span>Settings</span>
+          <span>{T.nav.settings}</span>
         </button>
       </div>
     </aside>
