@@ -57,6 +57,7 @@ Recommended internal-only demo routes:
 /ui-demo/conversation?inspector=closed
 /ui-demo/trace
 /ui-demo/archive
+/ui-demo/skills
 /ui-demo/settings
 ```
 
@@ -85,6 +86,14 @@ Concretely:
   items and the outcome, but not the time it was asked, so a reply in a live
   conversation renders no `.msg-time`. This is a known gap, not an oversight: it
   is visible in the UI as a missing time on live messages only.
+
+Fixture rows name tools in English (`Search codebase`, `Read file`,
+`Model call #2`, `Finalize answer`) and that text is frozen data — the fixture
+must never be edited to translate it. The UI maps tool names to zh labels at
+render time via `toolAlias()` in `apps/desktop/src/i18n.ts`, keeping the step
+index (`Model call #2` → `调用模型 #2`) and leaving commands, model names and
+paths exactly as recorded. Reason: the fixture is a recording; the display
+language is a presentation decision.
 
 The Playwright suite runs in a plain browser with no core, so it stubs `invoke`
 (`apps/desktop/tests/visual/shell.ts`) and drives the live routes with

@@ -34,12 +34,21 @@
   font-size: var(--kodo-font-sm);
 }
 
+/* User turns sit on the right; Kodo replies stay on the left. The head,
+   context chips, and bubble move as one column so the right edge lines up. */
 .msg-user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   margin-bottom: 14px;
 }
 
+.msg-user .msg-head,
+.msg-user .msg-contexts {
+  justify-content: flex-end;
+}
+
 .msg-bubble {
-  margin-left: 34px;
   max-width: 85%;
   padding: 10px 14px;
   border-radius: var(--kodo-radius);
@@ -93,6 +102,7 @@
 
 .trace-row {
   display: flex;
+  flex-direction: column;
 }
 
 /* The row's own hit area. It wraps the gutter chevron and the step content so
@@ -105,6 +115,11 @@
   display: flex;
   align-items: center;
   min-height: 36px;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
   border-radius: var(--kodo-radius);
   cursor: pointer;
 }
@@ -224,15 +239,15 @@
   min-width: 0;
   width: 100%;
   max-width: none;
-  max-height: 72px;
-  overflow: hidden;
+  max-height: 200px;
+  overflow: auto;
   margin: 4px 0;
   padding: 5px 10px;
   border-radius: var(--kodo-radius);
   background: var(--kodo-hover);
   color: var(--kodo-text-secondary);
   font-family: var(--kodo-font-mono);
-  font-size: 9px;
+  font-size: var(--kodo-font-xs);
   line-height: 16px;
   white-space: pre-wrap;
 }
@@ -258,6 +273,357 @@
 
 .final {
   margin-left: 46px;
+}
+
+/* Phase groups: one high-level stage per block. The header is a native button
+   — the whole line collapses the group. */
+.trace-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.trace-phase {
+  min-width: 0;
+}
+
+.trace-phase-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 2px 6px;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  border-radius: var(--kodo-radius);
+  cursor: pointer;
+}
+
+.trace-phase-head:hover {
+  background: var(--kodo-hover);
+}
+
+.trace-phase-head:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 2px;
+}
+
+.trace-phase-head svg {
+  flex: none;
+  color: var(--kodo-text-muted);
+  transition: transform 120ms ease;
+}
+
+.trace-phase-label {
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+}
+
+.trace-phase-meta {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.trace-phase .trace {
+  margin: 2px 0 0 10px;
+}
+
+/* Failure wording rides the row line in words — never color alone. */
+.trace-fail-reason {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--kodo-error);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trace-affordance {
+  flex: none;
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+}
+
+.trace-thinking-list {
+  margin: 0;
+  padding: 0 0 0 4px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.trace-thinking-item {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.45;
+}
+
+/* 1. 结论 */
+.answer-conclusion {
+  margin-bottom: 14px;
+}
+
+.answer-section-head {
+  margin: 0 0 6px;
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+}
+
+.answer-conclusion-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.answer-axes {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+}
+
+/* 2. 本次完成 */
+.answer-body {
+  margin-bottom: 14px;
+}
+
+.answer-expand {
+  margin-top: 4px;
+}
+
+/* 3. 验证结果 card */
+.verify-card {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-surface);
+}
+
+.verify-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.verify-card-head .answer-section-head {
+  margin: 0;
+}
+
+.verify-summary {
+  margin: 0 0 8px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.failure-group {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--kodo-border);
+}
+
+.failure-label {
+  margin: 0 0 2px;
+  font-size: var(--kodo-font-md);
+  font-weight: 500;
+}
+
+.failure-reason,
+.failure-advice {
+  margin: 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+}
+
+.failure-reason {
+  color: var(--kodo-error);
+}
+
+.failure-toggle {
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  cursor: pointer;
+}
+
+.failure-toggle:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 2px;
+}
+
+.failure-commands {
+  max-height: 120px;
+  overflow: auto;
+}
+
+.failure-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.reply-note {
+  margin: 8px 0 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+/* 5. 下一步 */
+.answer-next {
+  margin: 14px 0 4px;
+}
+
+.answer-next-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Streaming text is labeled a draft until the final answer replaces it. */
+.draft-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  margin-bottom: 6px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--kodo-hover);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  font-weight: 500;
+}
+
+.stream-preview {
+  position: relative;
+}
+
+/* Changed-files card: four sections, one audience each. */
+.changed-group {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--kodo-border);
+}
+
+.changed-group-head {
+  margin: 0 0 4px;
+  font-size: var(--kodo-font-xs);
+  font-weight: 600;
+  color: var(--kodo-text-secondary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.changed-file-edits {
+  flex: none;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+}
+
+.changed-fold {
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  cursor: pointer;
+}
+
+.changed-fold:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 2px;
+}
+
+.changed-note {
+  margin: 2px 0 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+}
+
+/* Long answers read as a summary first; many headings get a small TOC. */
+.md-toc {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  font-size: var(--kodo-font-sm);
+}
+
+.md-toc-title {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  font-weight: 600;
+}
+
+.md-toc-list {
+  margin: 0;
+  padding-left: 1.25em;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.md-toc-list a {
+  color: var(--kodo-text);
+  text-decoration: none;
+}
+
+.md-toc-list a:hover {
+  color: var(--kodo-accent);
+  text-decoration: underline;
+}
+
+.md-toc-list a:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 2px;
+}
+
+.md-code-wrap {
+  position: relative;
+  margin: 0 0 8px;
+}
+
+.md-code-wrap .md-code {
+  margin: 0;
+}
+
+.md-code-toggle {
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  cursor: pointer;
+}
+
+.md-code-toggle:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 2px;
 }
 
 .final-text {
@@ -306,34 +672,134 @@
   background: var(--kodo-hover);
 }
 
+/* End-of-answer card: header row + one path per line (unique after merge). */
 .changed-summary {
+  display: flex;
+  flex-direction: column;
+  margin-top: 14px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-popover);
+  background: var(--kodo-canvas);
+  overflow: hidden;
+}
+
+.changed-summary-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 30px;
-  padding: 0 12px;
-  margin-top: 10px;
-  border: 1px solid var(--kodo-border);
-  border-radius: var(--kodo-radius);
+  padding: 10px 12px;
 }
 
-.changed-summary > svg {
+.changed-summary-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--kodo-surface);
   color: var(--kodo-text-secondary);
 }
 
-.changed-count {
-  font-size: var(--kodo-font-md);
+.changed-summary-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 
-.changed-summary .btn {
-  margin-left: auto;
+.changed-summary-title {
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+  color: var(--kodo-text);
+}
+
+.changed-summary-delta {
+  font-size: var(--kodo-font-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.changed-summary-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--kodo-radius-sm);
+  background: transparent;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.changed-summary-action:hover:not(:disabled) {
+  background: var(--kodo-hover);
+  color: var(--kodo-text);
+}
+
+.changed-summary-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.changed-pre,
+.changed-conflict {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+}
+
+.changed-conflict {
+  color: var(--kodo-warning-text);
+}
+
+.changed-file-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--kodo-border);
+}
+
+.changed-file-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 34px;
+  padding: 6px 14px;
+}
+
+.changed-file-row + .changed-file-row {
+  border-top: 1px solid var(--kodo-border-subtle);
+}
+
+.changed-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text);
+}
+
+.changed-file-delta {
+  flex: none;
+  font-size: var(--kodo-font-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* ------------------------------------------------------------- composer -- */
 
 .composer {
   flex: none;
-  padding: 10px 20px 18px;
+  padding: 4px 20px 8px;
   min-width: 0;
 }
 
@@ -360,10 +826,49 @@
     0 4px 14px rgb(23 32 51 / 5%);
 }
 
-/* ── Row 1: textarea ─────────────────────────────────────────────────────── */
+/* ── The single row: attach/permission · draft · model/send ──────────────── */
 
 .composer-row {
-  padding: 12px 14px 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 8px 10px;
+  min-width: 0;
+}
+
+/* A new task chooses its project directly below the dialog. The row disappears
+   as soon as the first turn is created. */
+.composer-project-context {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 14px 0;
+}
+
+.composer-project-picker {
+  width: 180px;
+  min-width: 160px;
+  max-width: min(320px, 70%);
+  overflow: hidden;
+  color: var(--kodo-text);
+  cursor: pointer;
+}
+
+.composer-project-picker span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-project-picker:hover,
+.composer-project-picker[aria-expanded="true"] {
+  background: var(--kodo-hover);
+}
+
+.composer-branch {
+  flex: none;
 }
 
 .composer-skills {
@@ -399,7 +904,9 @@
    up to `MAX_HEIGHT` in Composer.tsx and scrolls past that, which is what the
    `resize: none` and the scrollbar-free default would otherwise fight. */
 .composer-input {
+  flex: 1;
   width: 100%;
+  min-width: 120px;
   min-height: 24px;
   max-height: 160px;
   border: 0;
@@ -424,24 +931,13 @@
   color: var(--kodo-text-secondary);
 }
 
-/* ── Row 2: controls bar ─────────────────────────────────────────────────── */
-
-.composer-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 5px 8px 8px;
-  min-height: 36px;
-  min-width: 0;
-  gap: 4px;
-}
-
 .composer-left,
 .composer-right {
   display: flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
+  flex: none;
 }
 
 /* ── Permission trigger (dropdown style) ─────────────────────────────────── */
@@ -708,11 +1204,11 @@
 
 @media (max-width: 1199px) {
   .composer {
-    padding: 8px 12px 12px;
+    padding: 6px 12px 10px;
     min-width: 0;
   }
 
-  .composer-controls {
+  .composer-row {
     flex-wrap: wrap;
     gap: 6px;
   }

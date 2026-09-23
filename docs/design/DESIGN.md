@@ -237,3 +237,24 @@ Prefer:
 - progressive disclosure over permanently visible detail.
 
 Kodo should look calm even when it contains a lot of information.
+
+## 10. Copy policy
+
+All user-facing chrome copy is zh-CN and lives in one place:
+`apps/desktop/src/i18n.ts`. Components never hardcode a user-facing string;
+they read `T.*`. Reason: wording drifts per page when labels live next to the
+markup, and the answer-experience work made status/trace vocabulary shared
+across four surfaces (reply, trace, inspector, buttons).
+
+Recorded English exceptions — keep as-is:
+
+- brand: `Kodo`, `Get code done.`;
+- product nouns that are names, not sentences: `Inspector`, `AI Provider`;
+- model names, commands, file paths, file names, code chips;
+- fixture data recorded in English (see `DEMO_DATA.md`).
+
+Fixture and legacy tool names arrive in English (`Search codebase`,
+`Model call #2`, `Finalize answer`). The UI maps them to zh labels through
+`toolAlias()` in `i18n.ts` — tool names only. Step indexes fixtures record are
+kept (`Model call #2` → `调用模型 #2`), and commands, models and paths inside a
+row stay exactly as recorded.

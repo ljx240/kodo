@@ -80,10 +80,10 @@ pub use skill::{
 pub use state::{AgentState as TurnState, Budget as TurnBudget, FailReason as TurnFailReason};
 pub use tools::{dangerous_reason, CommandOutcome, CommandRisk};
 pub use verify::{
-    classify_verify_failure, FailureClass as TurnFailureClass, FinalStatus as TurnFinalStatus,
-    PlannedVerifyCommand, RepairDecision as TurnRepairDecision,
-    VerificationEvidence as TurnVerificationEvidence, VerificationPlan as TurnVerificationPlan,
-    VerificationRunner as TurnVerifier, VerifyTier,
+    classify_verify_failure, CommandFailureKind as TurnFailureKind,
+    FailureClass as TurnFailureClass, FinalStatus as TurnFinalStatus, PlannedVerifyCommand,
+    RepairDecision as TurnRepairDecision, VerificationEvidence as TurnVerificationEvidence,
+    VerificationPlan as TurnVerificationPlan, VerificationRunner as TurnVerifier, VerifyTier,
 };
 
 /// Permission mode for tool execution. Default is Ask — Secure by Default.
@@ -143,7 +143,12 @@ pub enum StepKind {
 #[derive(Debug, Clone)]
 pub enum Step {
     Reasoning {
+        /// Short user-safe summary. Never budget/scheduling internals.
         summary: String,
+        /// High-level public phase code: prepare/analyze/execute/verify/summarize.
+        phase: &'static str,
+        /// Internal diagnostics for Debug surfaces; hidden from the default UI.
+        diagnostics: Option<String>,
     },
     Search {
         query: String,
@@ -170,6 +175,10 @@ pub enum Step {
     AgentMessage {
         text: String,
         checks: Vec<String>,
+        /// `ready`/`partial`/`blocked`/`failed` — what the answer delivered.
+        delivery: String,
+        /// `not_run`/`running`/`passed`/`failed`/`blocked` — how acceptance went.
+        verification: String,
     },
 }
 
@@ -241,6 +250,7 @@ pub enum SinkEvent {
     },
     /// Structured progress phase for the UI (never chain-of-thought).
     Progress {
+        /// High-level phase code (prepare/analyze/execute/verify/summarize).
         phase: String,
         detail: String,
     },
@@ -1471,6 +1481,8 @@ pub fn run(
                 Step::AgentMessage {
                     text: answer,
                     checks: Vec::new(),
+                    delivery: "ready".to_owned(),
+                    verification: "not_run".to_owned(),
                 },
                 alive,
                 emit,
@@ -1505,7 +1517,9 @@ pub fn run(
 
     if !simple_step(
         Step::Reasoning {
-            summary: machine.progress_summary(),
+            summary: "Understanding the request".to_owned(),
+            phase: "prepare",
+            diagnostics: Some(machine.progress_summary()),
         },
         alive,
         emit,
@@ -1517,12 +1531,17 @@ pub fn run(
     // Plan (skill-shaped or heuristic; model JSON may refine later).
     machine.handle(AgentEvent::PlanReady);
     let _ = emit(SinkEvent::Progress {
-        phase: "Planning".into(),
+        phase: "prepare".into(),
         detail: machine.plan().progress_summary("locked"),
     });
     if !simple_step(
         Step::Reasoning {
-            summary: format!("Plan · {}", machine.plan().progress_summary("locked")),
+            summary: "Planning the work".to_owned(),
+            phase: "prepare",
+            diagnostics: Some(format!(
+                "Plan · {}",
+                machine.plan().progress_summary("locked")
+            )),
         },
         alive,
         emit,
@@ -1715,7 +1734,7 @@ pub fn run(
     // Context gathered → Execute (or stay ready for model).
     machine.handle(AgentEvent::ContextGathered);
     let _ = emit(SinkEvent::Progress {
-        phase: "Searching repository".into(),
+        phase: "analyze".into(),
         detail: format!("{} context spans · repo map ready", pre_observations.len()),
     });
     machine.handle(AgentEvent::ToolsFinished {
@@ -1723,7 +1742,9 @@ pub fn run(
     });
     if !simple_step(
         Step::Reasoning {
-            summary: machine.progress_summary(),
+            summary: "Gathering project context".to_owned(),
+            phase: "analyze",
+            diagnostics: Some(machine.progress_summary()),
         },
         alive,
         emit,
@@ -1804,7 +1825,7 @@ pub fn run(
 
             if machine.state() == &AgentState::Verify {
                 let _ = emit(SinkEvent::Progress {
-                    phase: "Final verification".into(),
+                    phase: "verify".into(),
                     detail: format!(
                         "repair attempt {repair_attempts}/{}",
                         machine.budget().max_repairs
@@ -1886,6 +1907,21 @@ pub fn run(
                 }
 
                 // Targeted first: stop after first product failure for repair.
+                if !simple_step(
+                    Step::Reasoning {
+                        summary: "Running verification".to_owned(),
+                        phase: "verify",
+                        diagnostics: Some(format!(
+                            "verify plan: {} command(s)",
+                            plan.commands.len()
+                        )),
+                    },
+                    alive,
+                    emit,
+                ) {
+                    machine.handle(AgentEvent::Cancel);
+                    break;
+                }
                 let evidence_list = verifier.run_plan(project, &plan, alive, true);
                 if !alive() {
                     machine.handle(AgentEvent::Cancel);
@@ -1899,20 +1935,23 @@ pub fn run(
                     && !machine.budget().any_exhausted();
                 let decision = RepairDecision::from_evidence(&evidence_list, &plan, budget_ok);
 
-                // Surface failed command step for the UI/trace.
-                if let Some(fail) = evidence_list.iter().find(|e| !e.ok) {
-                    notes.push(format!(
-                        "验证失败 [{}] ({})：{}",
-                        fail.command,
-                        fail.failure_class.map(|c| c.label()).unwrap_or("unknown"),
-                        fail.output_summary
-                    ));
+                // Every planned check lands in the trace — successes stay
+                // collapsed; failures carry their root cause for merging.
+                for ev in &evidence_list {
+                    if !ev.ok {
+                        notes.push(format!(
+                            "验证失败 [{}] ({})：{}",
+                            ev.command,
+                            ev.failure_class.map(|c| c.label()).unwrap_or("unknown"),
+                            ev.output_summary
+                        ));
+                    }
                     let _ = simple_step(
                         Step::Command {
-                            command: fail.command.clone(),
+                            command: ev.command.clone(),
                             cwd: project.to_string_lossy().into_owned(),
-                            output: fail.output_summary.clone(),
-                            exit_code: fail.exit_code,
+                            output: ev.output_summary.clone(),
+                            exit_code: ev.exit_code,
                         },
                         alive,
                         emit,
@@ -2004,16 +2043,18 @@ pub fn run(
                     repair_started = Some(Instant::now());
                 }
                 let _ = emit(SinkEvent::Progress {
-                    phase: "Repairing".into(),
+                    phase: "execute".into(),
                     detail: format!("attempt {repair_attempts}/{}", machine.budget().max_repairs),
                 });
                 if !simple_step(
                     Step::Reasoning {
-                        summary: format!(
+                        summary: format!("Repair attempt {repair_attempts}"),
+                        phase: "execute",
+                        diagnostics: Some(format!(
                             "{} · repair attempt {repair_attempts}/{}",
                             machine.progress_summary(),
                             machine.budget().max_repairs
-                        ),
+                        )),
                     },
                     alive,
                     emit,
@@ -2174,13 +2215,17 @@ pub fn run(
                     machine.handle(AgentEvent::ModelRequestedTools { count: calls.len() });
                     if !simple_step(
                         Step::Reasoning {
-                            summary: machine.plan().progress_payload(
-                                machine.state().name(),
-                                calls
-                                    .first()
-                                    .map(|c| c.id().to_string())
-                                    .as_deref()
-                                    .or(Some("—")),
+                            summary: "Running tools".to_owned(),
+                            phase: "execute",
+                            diagnostics: Some(
+                                machine.plan().progress_payload(
+                                    machine.state().name(),
+                                    calls
+                                        .first()
+                                        .map(|c| c.id().to_string())
+                                        .as_deref()
+                                        .or(Some("—")),
+                                ),
                             ),
                         },
                         alive,
@@ -2237,9 +2282,13 @@ pub fn run(
                     }
                     if !simple_step(
                         Step::Reasoning {
-                            summary: machine
-                                .plan()
-                                .progress_payload(machine.state().name(), Some(&active_tool)),
+                            summary: "Reviewing tool results".to_owned(),
+                            phase: "execute",
+                            diagnostics: Some(
+                                machine
+                                    .plan()
+                                    .progress_payload(machine.state().name(), Some(&active_tool)),
+                            ),
                         },
                         alive,
                         emit,
@@ -2396,6 +2445,19 @@ pub fn run(
             }
         };
 
+        // Structured axes — the UI reads these instead of parsing answer text.
+        // An answer that landed but could not be fully verified is never
+        // "failed delivery": it is partial/ready with failed verification.
+        let (delivery, verification) = match status {
+            FinalStatus::Verified => ("ready", "passed"),
+            FinalStatus::PartiallyVerified => ("partial", "failed"),
+            FinalStatus::VerificationFailed => ("ready", "failed"),
+            FinalStatus::NotVerified => ("ready", "not_run"),
+            FinalStatus::Cancelled => ("partial", "not_run"),
+            FinalStatus::Blocked => ("blocked", "blocked"),
+            FinalStatus::ProviderError => ("failed", "not_run"),
+        };
+
         if verified {
             checks.push("验收条件验证通过（criterion-scoped）".to_owned());
         } else if partial_verify {
@@ -2407,13 +2469,19 @@ pub fn run(
         if wrote_files {
             checks.push("已写入项目内文件".to_owned());
         }
-        checks.push(format!("status: {}", status.label()));
-        checks.push(format!("state: {}", machine.state().name()));
-        answer = format!("**Verification status:** {}\n\n{}", status.label(), answer);
+        // Keep the verification state visible in the answer text itself:
+        // consumers that only read the final message (evals, benchmarks)
+        // must never have to infer it from side channels.
+        if !answer.is_empty() && !answer.ends_with('\n') {
+            answer.push('\n');
+        }
+        answer.push_str(&format!("**Verification status:** {}\n", status.label()));
         simple_step(
             Step::AgentMessage {
                 text: answer,
                 checks,
+                delivery: delivery.to_owned(),
+                verification: verification.to_owned(),
             },
             alive,
             emit,

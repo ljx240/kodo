@@ -147,7 +147,8 @@ p {
   display: none;
 }
 
-/* Holds the macOS traffic lights on the desktop build; empty otherwise. */
+/* Holds the macOS traffic lights on the desktop build; the collapse control
+   sits at the top-right of the left menu, clear of the traffic lights. */
 .sidebar-strip {
   height: var(--kodo-topbar-height);
   flex: none;
@@ -155,6 +156,10 @@ p {
   align-items: center;
   justify-content: flex-end;
   padding: 0 8px;
+}
+
+.sidebar-strip .icon-btn {
+  margin-left: auto;
 }
 
 .brand {
@@ -284,7 +289,7 @@ p {
   display: flex;
   align-items: center;
   width: 100%;
-  height: 34px;
+  height: 30px;
   padding: 0 4px 0 13px;
   border-radius: var(--kodo-radius);
   font-size: var(--kodo-font-md);
@@ -336,7 +341,7 @@ p {
   display: flex;
   align-items: center;
   gap: 11px;
-  height: 34px;
+  height: 30px;
   padding: 0 4px 0 13px;
 }
 
@@ -378,16 +383,17 @@ p {
   align-items: center;
   gap: 11px;
   width: 100%;
-  height: 33px;
+  height: 28px;
   padding: 0 8px 0 12px;
   border-radius: var(--kodo-radius);
   font-size: var(--kodo-font-sm);
-  color: var(--kodo-text-secondary);
+  color: var(--kodo-text);
   text-align: left;
 }
 
 .tree-conversation svg {
   flex: none;
+  color: var(--kodo-text-secondary);
 }
 
 .tree-conversation-title {
@@ -401,7 +407,7 @@ p {
 .tree-conversation-time {
   flex: none;
   font-size: var(--kodo-font-sm);
-  color: var(--kodo-text-secondary);
+  color: var(--kodo-text-muted);
 }
 
 .tree-conversation:hover {
@@ -409,15 +415,16 @@ p {
 }
 
 /* The reference marks the open conversation with a plain rounded pill; it
-   draws no accent rule down the row's edge. */
+   draws no accent rule down the row's edge and keeps the title in primary
+   text (only the row tint changes). */
 .tree-conversation--active {
   background: var(--kodo-selected);
-  color: var(--kodo-accent);
+  color: var(--kodo-text);
   font-weight: 500;
 }
 
 .tree-conversation--active svg {
-  color: var(--kodo-accent);
+  color: var(--kodo-text-secondary);
 }
 
 /* Conversation row + trailing ⋯. The button is the primary target; the menu
@@ -534,6 +541,12 @@ p {
   border-bottom: 1px solid var(--kodo-border);
 }
 
+/* Collapsed sidebar exposes the top bar under the traffic lights; leave room
+   so the expand control does not sit under the window buttons. */
+.app--sidebar-hidden .topbar {
+  padding-left: 78px;
+}
+
 .topbar--plain {
   padding: 0 16px;
 }
@@ -549,6 +562,14 @@ p {
   align-items: center;
   gap: 8px;
   margin-left: auto;
+}
+
+/* Icon strip that replaces a collapsed sidebar: sits immediately right of the
+   PanelLeft resize/toggle control so destinations never fully disappear. */
+.topbar-nav-icons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 /* The reference keeps a wide gap before the window-level overflow menu. */
@@ -577,6 +598,25 @@ p {
 
 .crumb-current {
   color: var(--kodo-text);
+}
+
+/* Compact context chips in the conversation top bar (LAYOUT §3). */
+.topbar-crumbs {
+  margin-left: 4px;
+  min-width: 0;
+}
+
+.topbar-crumbs span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-chip {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  color: var(--kodo-text-secondary);
 }
 
 /* ---------------------------------------------------------- page header -- */
@@ -925,6 +965,55 @@ p {
 
 .status-pill--empty .status-mark {
   background: var(--kodo-border-strong);
+}
+
+/* Three-axis outcomes: partially completed and env-blocked read as caution,
+   never as plain failure — the answer may still be usable. */
+.status-pill--partially_completed,
+.status-pill--blocked_by_environment {
+  background: color-mix(in srgb, var(--kodo-warning) 12%, var(--kodo-canvas));
+  color: var(--kodo-warning-text);
+}
+
+.status-pill--partially_completed .status-mark,
+.status-pill--blocked_by_environment .status-mark {
+  background: var(--kodo-warning);
+}
+
+.status-pill--queued,
+.status-pill--awaiting_approval {
+  background: var(--kodo-hover);
+  color: var(--kodo-text-secondary);
+}
+
+.status-pill--queued .status-mark,
+.status-pill--awaiting_approval .status-mark {
+  background: var(--kodo-border-strong);
+}
+
+.status-pill--verify-not_run {
+  background: var(--kodo-hover);
+  color: var(--kodo-text-secondary);
+}
+
+.status-pill--verify-running {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+.status-pill--verify-passed {
+  background: var(--kodo-success-bg);
+  color: var(--kodo-success-text);
+}
+
+.status-pill--verify-failed {
+  background: var(--kodo-error-bg);
+  color: var(--kodo-error);
+}
+
+.status-pill--verify-blocked {
+  background: color-mix(in srgb, var(--kodo-warning) 12%, var(--kodo-canvas));
+  color: var(--kodo-warning-text);
 }
 
 .archived-pill {

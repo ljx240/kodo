@@ -89,9 +89,19 @@ Conversation screen must satisfy all:
 
 ## 5a. Sidebar checks
 
+> Updated when the sidebar IA changed: `Conversations`/`Archive` nav rows were
+> replaced by an explicit `新建任务` action plus a `技能` destination above the
+> tree, and `Archive` became a Settings destination. Reason: conversations are
+> reached through the project tree (one tree, no second conversation list), a
+> new task is an action rather than a destination, and archiving is a
+> management concern that belongs with storage. Labels are zh-CN via
+> `apps/desktop/src/i18n.ts` (see `DESIGN.md` §10).
+
 - [ ] no account row, avatar or sign-out anywhere in the sidebar;
-- [ ] `Conversations` and `Archive` are the only top-level nav rows;
-- [ ] `Settings` sits at the foot, below the scrollable tree;
+- [ ] `新建任务` and `技能` are the only nav rows above the tree, in that order;
+- [ ] `新建任务` is an action and never renders as the active destination;
+- [ ] `Settings` (`设置`) sits at the foot, below the scrollable tree;
+- [ ] `Archive` (`归档`) is reached via Settings → 归档与存储 → 查看归档, never as a permanent nav row;
 - [ ] `+` beside `Projects` offers "add existing folder" and "new project";
 - [ ] a project row's `⋯` offers rename, reveal in Finder, remove from list;
 - [ ] renaming a project does not rename the directory;
@@ -102,12 +112,19 @@ Conversation screen must satisfy all:
 
 ## 5b. Settings checks
 
-- [ ] left column lists all six categories;
+> Updated when `AI Provider` became its own category (it was folded into
+> Models before): model/provider configuration is a first-class concern, so the
+> list is seven categories, not six. The model-chip check was aspirational
+> before the chip existed; it is now wired (conversation top bar + composer
+> both show `providerModelLabel(activeProvider)` and fall back to the Default
+> model control's value).
+
+- [ ] left column lists all seven categories (通用, 模型, AI Provider, 工具与权限, 项目, 归档与存储, 外观);
 - [ ] selecting a category swaps the right-hand pane;
 - [ ] no category opens onto an empty pane;
 - [ ] the selected category is visibly marked;
 - [ ] the page head (title, subtitle, search) is unchanged;
-- [ ] the `Default model` control and the top bar's model chip show the same value;
+- [ ] the `Default model` control, the top bar's model chip and the composer's model chip show the same value;
 - [ ] no row controls a setting that no longer exists.
 
 ---

@@ -87,12 +87,17 @@ Rules:
 A single `nav-item` pinned below the scrollable tree:
 
 ```text
-⚙ Settings
+⚙ 设置
 ```
 
 There is **no `AccountRow`**. Kodo does not log in, so the sidebar names no user,
-shows no avatar and offers no sign-out. `Conversations` and `Archive` stay at the
-top of the sidebar and are never mixed with `Settings` in the same list.
+shows no avatar and offers no sign-out. `Settings` is never mixed into the
+project tree, and the tree is the only conversation list.
+
+> Copy update: the old line said `Conversations`/`Archive` stay at the top.
+> They no longer exist as nav rows — above the tree sit the `新建任务` action and
+> the `技能` destination (see `LAYOUT.md` §2), and `归档` opens from Settings →
+> 归档与存储. Reason recorded there.
 
 ---
 

@@ -3,7 +3,10 @@ import {
   ArrowUp,
   ChevronDown,
   FileText,
+  Folder,
   FolderSearch,
+  FolderPlus,
+  GitBranch,
   Paperclip,
   Plus,
   Puzzle,
@@ -31,7 +34,9 @@ import {
   providerModelId,
   templateById,
 } from "../data/providers";
-import { type Permission, PERMISSIONS, PERMISSION_SETTING, DEFAULT_PERMISSION } from "../data/models";
+import type { Project } from "../data/types";
+import { type Permission, PERMISSIONS, PERMISSION_SETTING, DEFAULT_PERMISSION, DEFAULT_MODEL } from "../data/models";
+import { T } from "../i18n";
 import { Menu, MenuItem } from "../shell/Menu";
 import { navigate } from "../routes";
 
@@ -43,11 +48,25 @@ type Props = {
   provider: ProviderConfig | null;
   /** All configured providers. */
   providers: ProviderConfig[];
+  /** Settings' Default model — shown when no provider is active (§5b). */
+  defaultModel?: string;
+  /** Registered projects available to a new conversation. */
+  projects: Project[];
+  /** Select the project context for a new conversation. */
+  onSelectProject: (id: string | null) => void;
+  /** Open the existing project registration flow for a new conversation. */
+  onAddProject: () => void;
+  /** Current project display name. */
+  projectName: string;
+  /** Current project's git branch, when available. */
+  branch: string | null;
+  /** Project and branch context is only shown before the first turn. */
+  showProjectContext: boolean;
   /** Switch to a different provider. */
   onSelectProvider: (index: number) => void;
   /** Switch model inside a provider without leaving the composer. */
   onSelectProviderModel: (providerIndex: number, modelId: string, displayName: string) => void;
-  /** False when there is nowhere to send to — a demo route, or no session. */
+  /** False on demo routes; live sends validate the selected project in the page. */
   ready: boolean;
   running: boolean;
   /** Project root for Add context; empty disables the picker. */
@@ -73,6 +92,10 @@ const PERM_ICONS: Record<Permission, typeof Shield> = {
   full: Shield,
 };
 
+/**
+ * Semantic color only on the icon — the trigger label stays neutral so the
+ * composer's left cluster reads as quiet chrome (DESIGN §4).
+ */
 const PERM_CONFIG: Record<Permission, { label: string; color: string }> = {
   ask: { label: "请求批准", color: "var(--kodo-accent)" },
   auto: { label: "自动批准安全操作", color: "var(--kodo-success-text)" },
@@ -95,6 +118,13 @@ export const BUILTIN_SKILLS: { id: string; label: string }[] = [
 export function Composer({
   provider,
   providers,
+  defaultModel,
+  projects,
+  onSelectProject,
+  onAddProject,
+  projectName,
+  branch,
+  showProjectContext,
   onSelectProvider,
   onSelectProviderModel,
   ready,
@@ -360,7 +390,11 @@ export function Composer({
 
   const permConfig = PERM_CONFIG[permission];
   const PermIcon = PERM_ICONS[permission];
-  const modelLabel = provider ? providerModelLabel(provider) || provider.model || "选择模型" : "选择模型";
+  // No provider yet — show the default model rather than a placeholder so the
+  // composer chip and Settings' Default model agree (UI_ACCEPTANCE §5b).
+  const modelLabel = provider
+    ? providerModelLabel(provider) || provider.model || T.composer.selectModel
+    : defaultModel || DEFAULT_MODEL;
   const providerName = provider?.name ?? "";
 
   return (
@@ -384,7 +418,7 @@ export function Composer({
                 <button
                   type="button"
                   className="chip-remove"
-                  aria-label={`Remove skill ${skillId}`}
+                  aria-label={T.composer.removeSkill(skillId)}
                   onClick={() => setSelectedSkills((current) => current.filter((id) => id !== skillId))}
                 >
                   <X size={12} strokeWidth={2} />
@@ -394,80 +428,10 @@ export function Composer({
           </div>
         )}
 
-        {/* Row 1: textarea */}
+        {/* One row: attach/permission, draft, model/send — a single ~60px bar
+            (LAYOUT §3's 54–60px collapsed height), not two stacked rows. */}
         <div className="composer-row">
-          <textarea
-            ref={input}
-            className="composer-input"
-            rows={1}
-            placeholder="描述任务，输入 / 调用技能"
-            value={draft}
-            data-testid="composer-input"
-            onChange={(event) => setDraft(event.target.value)}
-            onPaste={(event) => void onComposerPaste(event)}
-            onKeyDown={(event) => {
-              if (slashOpen && (event.key === "Enter" || event.key === "Tab")) {
-                event.preventDefault();
-                applySkillFromSlash(slashMatches[0].id);
-                return;
-              }
-              if (slashOpen && event.key === "Escape") {
-                event.preventDefault();
-                setDraft("");
-                return;
-              }
-              // Enter sends, Shift+Enter breaks the line.
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                send();
-              }
-            }}
-          />
-        </div>
-
-        {/* Slash skill suggestions — progressive disclosure, not a second sidebar. */}
-        {slashOpen && (
-          <div className="composer-slash" role="listbox" aria-label="技能" data-testid="composer-slash">
-            {slashMatches.map((skill) => (
-              <button
-                key={skill.id}
-                type="button"
-                role="option"
-                className="menu-item"
-                data-slash-id={skill.id}
-                onClick={() => applySkillFromSlash(skill.id)}
-              >
-                <Puzzle size={14} strokeWidth={1.8} />
-                <span>{skill.label}</span>
-                <span className="menu-item-hint">/{skill.id}</span>
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Pinned context chips — paths only, never file bodies. */}
-        {contexts.length > 0 && (
-          <div className="composer-contexts" data-testid="composer-contexts">
-            {contexts.map((path) => (
-              <span key={path} className="chip chip--context" data-context-path={path}>
-                <FileText size={13} strokeWidth={1.8} className="chip-icon" />
-                <span className="chip-label">{path}</span>
-                <button
-                  type="button"
-                  className="chip-remove"
-                  aria-label={`Remove context ${path}`}
-                  onClick={() => onRemoveContext(path)}
-                >
-                  <X size={12} strokeWidth={2} />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Row 2: controls */}
-        <div className="composer-controls">
-          {/* Left side */}
+          {/* Left: attachment menu + permission */}
           <div className="composer-left">
             <div
               className="menu-anchor composer-plus"
@@ -482,11 +446,11 @@ export function Composer({
               <button
                 type="button"
                 className="icon-btn"
-                aria-label="Composer menu"
+                aria-label={T.composer.menu}
                 aria-expanded={plusOpen}
                 aria-haspopup="menu"
                 aria-controls={plusOpen ? "composer-plus-menu" : undefined}
-                title="添加照片和文件、项目文件、技能或打开模型设置"
+                title={T.composer.menuHint}
                 onClick={() => {
                   if (plusOpen) closePlus();
                   else {
@@ -586,7 +550,7 @@ export function Composer({
                     )}
 
                     {plusPanel === "skills" && (
-                      <div className="menu composer-plus-panel" role="listbox" aria-label="Skills">
+                      <div className="menu composer-plus-panel" role="listbox" aria-label={T.composer.skills}>
                         {BUILTIN_SKILLS.map((skill) => (
                           <button
                             key={skill.id}
@@ -627,9 +591,8 @@ export function Composer({
                   className="composer-perm-trigger"
                   aria-expanded={open}
                   onClick={toggle}
-                  style={{ color: permConfig.color }}
                 >
-                  <PermIcon size={14} strokeWidth={2} />
+                  <PermIcon size={14} strokeWidth={2} style={{ color: permConfig.color }} />
                   <span>{permConfig.label}</span>
                   <ChevronDown size={12} strokeWidth={2} />
                 </button>
@@ -655,7 +618,35 @@ export function Composer({
             </Menu>
           </div>
 
-          {/* Right side */}
+          <textarea
+            ref={input}
+            className="composer-input"
+            rows={1}
+            placeholder={T.composer.inputPlaceholder}
+            value={draft}
+            data-testid="composer-input"
+            onChange={(event) => setDraft(event.target.value)}
+            onPaste={(event) => void onComposerPaste(event)}
+            onKeyDown={(event) => {
+              if (slashOpen && (event.key === "Enter" || event.key === "Tab")) {
+                event.preventDefault();
+                applySkillFromSlash(slashMatches[0].id);
+                return;
+              }
+              if (slashOpen && event.key === "Escape") {
+                event.preventDefault();
+                setDraft("");
+                return;
+              }
+              // Enter sends, Shift+Enter breaks the line.
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                send();
+              }
+            }}
+          />
+
+          {/* Right: model picker + send */}
           <div className="composer-right">
             {/* Model / provider picker — provider groups, models within each. */}
             <div className="menu-anchor composer-model-anchor">
@@ -767,14 +758,14 @@ export function Composer({
             </div>
 
             {running ? (
-              <button type="button" className="composer-send composer-send--stop" aria-label="Stop" onClick={onStop}>
+              <button type="button" className="composer-send composer-send--stop" aria-label={T.composer.stop} onClick={onStop}>
                 <Square size={13} strokeWidth={2.4} />
               </button>
             ) : (
               <button
                 type="button"
                 className="composer-send"
-                aria-label="Send"
+                aria-label={T.composer.send}
                 data-testid="composer-send"
                 disabled={!ready || draft.trim() === ""}
                 title={
@@ -792,7 +783,113 @@ export function Composer({
           </div>
         </div>
 
+        {/* Slash skill suggestions — progressive disclosure, not a second sidebar. */}
+        {slashOpen && (
+          <div className="composer-slash" role="listbox" aria-label="技能" data-testid="composer-slash">
+            {slashMatches.map((skill) => (
+              <button
+                key={skill.id}
+                type="button"
+                role="option"
+                className="menu-item"
+                data-slash-id={skill.id}
+                onClick={() => applySkillFromSlash(skill.id)}
+              >
+                <Puzzle size={14} strokeWidth={1.8} />
+                <span>{skill.label}</span>
+                <span className="menu-item-hint">/{skill.id}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Pinned context chips — paths only, never file bodies. */}
+        {contexts.length > 0 && (
+          <div className="composer-contexts" data-testid="composer-contexts">
+            {contexts.map((path) => (
+              <span key={path} className="chip chip--context" data-context-path={path}>
+                <FileText size={13} strokeWidth={1.8} className="chip-icon" />
+                <span className="chip-label">{path}</span>
+                <button
+                  type="button"
+                  className="chip-remove"
+                  aria-label={T.composer.removeContext(path)}
+                  onClick={() => onRemoveContext(path)}
+                >
+                  <X size={12} strokeWidth={2} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
       </div>
+
+      {showProjectContext && (
+        <div className="composer-project-context" data-testid="composer-project-context">
+          <Menu
+            trigger={({ open, toggle }) => (
+              <button
+                type="button"
+                className="chip composer-project-picker"
+                data-testid="composer-project-picker"
+                aria-label="选择项目"
+                aria-expanded={open}
+                onClick={toggle}
+              >
+                <Folder size={14} strokeWidth={1.7} />
+                <span data-testid="composer-project-name">{projectName || "未选择项目"}</span>
+                <ChevronDown size={13} strokeWidth={1.9} />
+              </button>
+            )}
+          >
+            {(close) =>
+              <>
+                {projects.length > 0 ? (
+                  projects.map((project) => (
+                    <MenuItem
+                      key={project.id}
+                      icon={<Folder size={14} strokeWidth={1.8} />}
+                      label={project.name}
+                      onSelect={() => {
+                        close();
+                        onSelectProject(project.id);
+                      }}
+                    />
+                  ))
+                ) : (
+                  <div className="menu-item menu-item--static">暂无可用项目</div>
+                )}
+
+                <div className="menu-separator" />
+                <MenuItem
+                  icon={<FolderPlus size={14} strokeWidth={1.8} />}
+                  label="添加新项目"
+                  onSelect={() => {
+                    close();
+                    onAddProject();
+                  }}
+                />
+                {projectPath && (
+                  <MenuItem
+                    icon={<X size={14} strokeWidth={1.9} />}
+                    label="移除当前项目"
+                    onSelect={() => {
+                      close();
+                      onSelectProject(null);
+                    }}
+                  />
+                )}
+              </>
+            }
+          </Menu>
+
+          <span className="chip chip--static composer-branch" data-testid="composer-branch">
+            <GitBranch size={14} strokeWidth={1.7} />
+            <span>{branch ?? "无分支"}</span>
+          </span>
+        </div>
+      )}
 
       {(queueCount > 0 || running) && (
         <div className="composer-status" data-testid="composer-status">

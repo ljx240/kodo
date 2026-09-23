@@ -272,7 +272,10 @@ fn run_scenario(
                 true
             }
             SinkEvent::Finished { step, .. } => {
-                if let Step::AgentMessage { text, checks: c } = &step {
+                if let Step::AgentMessage {
+                    text, checks: c, ..
+                } = &step
+                {
                     answer = text.clone();
                     checks = c.clone();
                 }
@@ -311,7 +314,7 @@ struct ScenarioOpts {
 
 fn preview(step: &Step) -> String {
     match step {
-        Step::Reasoning { summary } => format!("reasoning:{summary}"),
+        Step::Reasoning { summary, .. } => format!("reasoning:{summary}"),
         Step::Search { query, .. } => format!("search:{query}"),
         Step::FileRead { path, .. } => format!("read:{path}"),
         Step::Command { command, .. } => format!("command:{command}"),

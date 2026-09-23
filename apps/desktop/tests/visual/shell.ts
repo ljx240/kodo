@@ -20,6 +20,8 @@ export type Core = {
   files?: string[];
   /** Paths returned by the OS file dialog (`pick_files`) for 添加照片和文件. */
   pickFiles?: string[];
+  /** Path returned by the OS folder dialog for adding a project. */
+  pickFolder?: string | null;
   /** Absolute external files the stub treats as readable. */
   externalFiles?: string[];
   /** When true, `send_message` always rejects (failed-send recovery UX). */
@@ -78,6 +80,18 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             return (config.sessions as Record<string, unknown> | undefined)?.[String(args?.id ?? "")] ?? session;
           case "git_branch":
             return config.branch ?? null;
+          case "pick_folder":
+            return config.pickFolder ?? null;
+          case "add_project": {
+            const path = String(args?.path ?? "");
+            const current = workspace as { projects?: Array<{ path: string; name: string }> };
+            if (path && Array.isArray(current.projects) && !current.projects.some((item) => item.path === path)) {
+              const segments = path.split("/").filter(Boolean);
+              const name = segments[segments.length - 1] ?? path;
+              workspace = { ...(workspace as Record<string, unknown>), projects: [...current.projects, { path, name }] };
+            }
+            return workspace;
+          }
           case "list_archived":
             return config.archived ?? [];
           case "load_providers":

@@ -33,6 +33,8 @@ export type TraceStep = {
    */
   chip?: string;
   duration: string;
+  /** Raw milliseconds when known; 0 means "so fast it is hidden". */
+  durationMs?: number | null;
   status: StepStatus;
   output?: string;
   model?: string;
@@ -44,6 +46,18 @@ export type TraceStep = {
   exitCode?: number | null;
   /** Paths touched by a file-change step. */
   files?: string[];
+  /** Public phase code (prepare/analyze/execute/verify/summarize). */
+  phase?: string;
+  /** Structured failure taxonomy code from the backend. */
+  failureClass?: string | null;
+  /** Missing binary when failureClass is command_not_found. */
+  failureTool?: string | null;
+  /** The user refused this command. */
+  denied?: boolean;
+  /** Internal scheduling diagnostics — Debug surfaces only. */
+  diagnostics?: string | null;
+  /** Stable id for expand/collapse + aria wiring. */
+  stepId?: number;
 };
 
 export type ChangedFile = {

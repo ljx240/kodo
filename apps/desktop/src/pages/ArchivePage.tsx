@@ -2,6 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Archive, ArrowDownUp, MessageCircle, Search } from "lucide-react";
 import { isDesktop, listArchived, type ArchivedItemDto } from "../api";
 import type { DemoState } from "../data/demoState";
+import { T } from "../i18n";
+
+const F = T.page.archive;
 
 type Row = {
   id: string;
@@ -11,7 +14,6 @@ type Row = {
   model: string;
   added: number;
   removed: number;
-  filesChanged: number;
   projectName: string;
   live: boolean;
 };
@@ -21,6 +23,20 @@ function formatWhen(at: number): string {
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleString();
 }
+
+/**
+ * Sort/filter key for a row's archived time. Demo fixtures freeze display
+ * strings ("Today 10:25", "Apr 28, 2024") — "Today" counts as now so the
+ * relative ranges behave; dated strings parse normally.
+ */
+function whenKey(archivedAt: string): number {
+  if (archivedAt.startsWith("Today")) return Date.now();
+  const parsed = Date.parse(archivedAt);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+type TimeRange = "all" | "7d" | "30d" | "older";
+type SortKey = "archived" | "title" | "model";
 
 export function ArchivePage({
   demo,
@@ -45,6 +61,8 @@ export function ArchivePage({
   }) => void;
 }) {
   const live = !demo && isDesktop();
+  // Demo rows carry no project of their own — the fixture's workspace project
+  // is the one the reference shows for these conversations (DEMO_DATA.md).
   const demoRows = useMemo<Row[]>(
     () =>
       (demoState?.archivedConversations ?? []).map((item) => ({
@@ -55,8 +73,7 @@ export function ArchivePage({
         model: item.model,
         added: item.added,
         removed: item.removed,
-        filesChanged: item.added + item.removed > 0 ? 7 : 0,
-        projectName: "—",
+        projectName: demoState?.project.name ?? "—",
         live: false,
       })),
     [demoState],
@@ -64,6 +81,10 @@ export function ArchivePage({
   const [rows, setRows] = useState<Row[]>(demoRows);
   const [total, setTotal] = useState(demoState?.archiveFooter.total ?? 0);
   const [query, setQuery] = useState("");
+  const [projectFilter, setProjectFilter] = useState("all");
+  const [timeRange, setTimeRange] = useState<TimeRange>("all");
+  const [modelFilter, setModelFilter] = useState("all");
+  const [sortBy, setSortBy] = useState<SortKey>("archived");
   const [reverse, setReverse] = useState(false);
 
   useEffect(() => {
@@ -73,19 +94,40 @@ export function ArchivePage({
     }
   }, [demo, demoRows, demoState]);
 
+  const projectOptions = useMemo(() => [...new Set(rows.map((r) => r.projectName))], [rows]);
+  const modelOptions = useMemo(() => [...new Set(rows.map((r) => r.model))], [rows]);
+
   const visibleRows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let list = q
-      ? rows.filter(
-          (row) =>
-            row.title.toLowerCase().includes(q) ||
-            row.summary.toLowerCase().includes(q) ||
-            row.projectName.toLowerCase().includes(q),
-        )
-      : rows;
-    if (reverse) list = [...list].reverse();
+    const now = Date.now();
+    const day = 86_400_000;
+    let list = rows.filter((row) => {
+      if (
+        q &&
+        !row.title.toLowerCase().includes(q) &&
+        !row.summary.toLowerCase().includes(q) &&
+        !row.projectName.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+      if (projectFilter !== "all" && row.projectName !== projectFilter) return false;
+      if (modelFilter !== "all" && row.model !== modelFilter) return false;
+      if (timeRange !== "all") {
+        const age = now - whenKey(row.archivedAt);
+        if (timeRange === "7d" && age > 7 * day) return false;
+        if (timeRange === "30d" && age > 30 * day) return false;
+        if (timeRange === "older" && age <= 30 * day) return false;
+      }
+      return true;
+    });
+    list = [...list].sort((a, b) => {
+      if (sortBy === "title") return a.title.localeCompare(b.title, "zh-Hans-CN");
+      if (sortBy === "model") return a.model.localeCompare(b.model);
+      return whenKey(a.archivedAt) - whenKey(b.archivedAt);
+    });
+    if (reverse) list.reverse();
     return list;
-  }, [rows, query, reverse]);
+  }, [rows, query, projectFilter, timeRange, modelFilter, sortBy, reverse]);
 
   useEffect(() => {
     if (!live) return;
@@ -105,7 +147,6 @@ export function ArchivePage({
         model: item.model || "—",
         added: item.added,
         removed: item.removed,
-        filesChanged: item.filesChanged,
         projectName: item.projectName,
         live: true,
       }));
@@ -117,6 +158,9 @@ export function ArchivePage({
     };
   }, [live, reloadToken]);
 
+  const f = T.page.archive.filters;
+  const archivedArrow = sortBy === "archived" ? (reverse ? " ↑" : " ↓") : "";
+
   return (
     <main className="main">
       <header className="page-head">
@@ -124,11 +168,11 @@ export function ArchivePage({
           <Archive size={18} strokeWidth={1.7} />
         </span>
         <div className="page-head-text">
-          <h1>Archive</h1>
-          <p>Manage your archived conversations across projects</p>
+          <h1>{F.title}</h1>
+          <p>{F.subtitle}</p>
         </div>
         <span className="spacer" />
-        <span className="page-meta">{total} archived conversations</span>
+        <span className="page-meta">{F.count(total)}</span>
       </header>
 
       <div className="scroll">
@@ -136,19 +180,75 @@ export function ArchivePage({
           <div className="search-field">
             <Search size={15} strokeWidth={1.7} />
             <input
-              placeholder="搜索归档的对话..."
+              placeholder={F.searchPlaceholder}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              aria-label="搜索归档的对话"
+              aria-label={F.searchPlaceholder}
             />
           </div>
 
+          {/* One compact toolbar: Project / Time range / Model / Sort by (§5c). */}
           <div className="filters">
+            <label className="field">
+              <span className="field-label">{f.project}</span>
+              <select
+                className="select"
+                value={projectFilter}
+                onChange={(event) => setProjectFilter(event.target.value)}
+              >
+                <option value="all">{f.all}</option>
+                {projectOptions.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span className="field-label">{f.timeRange}</span>
+              <select
+                className="select"
+                value={timeRange}
+                onChange={(event) => setTimeRange(event.target.value as TimeRange)}
+              >
+                <option value="all">{f.allTime}</option>
+                <option value="7d">{f.last7}</option>
+                <option value="30d">{f.last30}</option>
+                <option value="older">{f.older}</option>
+              </select>
+            </label>
+            <label className="field">
+              <span className="field-label">{f.model}</span>
+              <select
+                className="select"
+                value={modelFilter}
+                onChange={(event) => setModelFilter(event.target.value)}
+              >
+                <option value="all">{f.all}</option>
+                {modelOptions.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span className="field-label">{f.sortBy}</span>
+              <select
+                className="select"
+                value={sortBy}
+                onChange={(event) => setSortBy(event.target.value as SortKey)}
+              >
+                <option value="archived">{f.sortArchivedAt}</option>
+                <option value="title">{f.sortTitle}</option>
+                <option value="model">{f.sortModel}</option>
+              </select>
+            </label>
             <button
               type="button"
               className="icon-btn icon-btn--boxed"
-              aria-label="Reverse sort order"
-              title="反转排序"
+              aria-label={f.reverse}
+              title={f.reverse}
               onClick={() => setReverse((value) => !value)}
             >
               <ArrowDownUp size={15} strokeWidth={1.7} />
@@ -156,19 +256,17 @@ export function ArchivePage({
           </div>
 
           {visibleRows.length === 0 ? (
-            <p className="empty-note">
-              {live ? (query ? "没有匹配的归档对话。" : "还没有归档的对话。") : "（演示数据）"}
-            </p>
+            <p className="empty-note">{live ? (query ? F.emptyFiltered : F.emptyNone) : F.demoNote}</p>
           ) : (
             <table className="archive-table">
               <thead>
                 <tr>
-                  <th>Conversation</th>
-                  <th>Summary</th>
-                  <th>Archived at ↓</th>
-                  <th>Model</th>
-                  <th>Files changed</th>
-                  <th>Status</th>
+                  <th>{F.columns.conversation}</th>
+                  <th>{F.columns.summary}</th>
+                  <th>{F.columns.archivedAt}{archivedArrow}</th>
+                  <th>{F.columns.model}</th>
+                  <th>{F.columns.files}</th>
+                  <th>{F.columns.status}</th>
                 </tr>
               </thead>
               <tbody>
@@ -190,7 +288,7 @@ export function ArchivePage({
                     <td>
                       <span className="arc-title">
                         <MessageCircle size={14} strokeWidth={1.8} />
-                        {item.title}
+                        <span className="arc-title-text">{item.title}</span>
                       </span>
                     </td>
                     <td className="arc-summary">{item.summary}</td>
@@ -199,18 +297,17 @@ export function ArchivePage({
                       <span className="model-pill">{item.model}</span>
                     </td>
                     <td>
-                      {item.filesChanged > 0 ? (
+                      {item.added + item.removed > 0 ? (
                         <>
                           <span className="delta-add">+{item.added}</span>{" "}
                           <span className="delta-del">-{item.removed}</span>
-                          <span className="setting-hint"> · {item.filesChanged} files</span>
                         </>
                       ) : (
-                        <span className="setting-hint">{item.filesChanged} files</span>
+                        <span className="setting-hint">—</span>
                       )}
                     </td>
                     <td>
-                      <span className="archived-pill">Archived</span>
+                      <span className="archived-pill">{F.statusArchived}</span>
                     </td>
                   </tr>
                 ))}
@@ -220,10 +317,10 @@ export function ArchivePage({
 
           <footer className="table-foot">
             <span>
-              {visibleRows.length === 0 ? 0 : 1}–{visibleRows.length} of {total} conversations
+              {F.footer(visibleRows.length === 0 ? 0 : 1, visibleRows.length, total)}
             </span>
             <span className="spacer" />
-            <span className="setting-hint">Restore 在 Inspector 中操作</span>
+            <span className="setting-hint">{F.restoreHint}</span>
           </footer>
         </div>
       </div>

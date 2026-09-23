@@ -1,6 +1,6 @@
 import type { ItemDto, TurnDto } from "../api";
-import type { Reply } from "../conversation/trace";
-import { toReply } from "../conversation/trace";
+import { T } from "../i18n";
+import { formatDuration, formatTokens, toReply, type Reply } from "../conversation/trace";
 
 /** Live conversation facts the Inspector paints on non-demo routes. */
 export type LiveSnapshot = {
@@ -11,6 +11,11 @@ export type LiveSnapshot = {
   turn: TurnDto | null;
   reply: Reply | null;
   running: boolean;
+  /** Undo this turn's Kodo edits (Inspector summary action). */
+  onUndo?: (() => void) | null;
+  undoing?: boolean;
+  /** Re-run after fixing the environment / regenerate. */
+  onRetry?: (() => void) | null;
 };
 
 export function snapshotFromTurn(
@@ -20,6 +25,7 @@ export function snapshotFromTurn(
   projectPath: string,
   turn: TurnDto | null,
   running: boolean,
+  actions?: { onUndo?: (() => void) | null; undoing?: boolean; onRetry?: (() => void) | null },
 ): LiveSnapshot {
   return {
     conversationId,
@@ -29,18 +35,22 @@ export function snapshotFromTurn(
     turn,
     reply: turn ? toReply(turn, running) : null,
     running,
+    onUndo: actions?.onUndo ?? null,
+    undoing: actions?.undoing ?? false,
+    onRetry: actions?.onRetry ?? null,
   };
 }
 
+/** Tool counts keyed by the zh labels the UI shows. */
 export function toolsFromTurn(turn: TurnDto | null): Record<string, number> {
   if (!turn) return {};
   const counts: Record<string, number> = {};
   for (const item of turn.items as ItemDto[]) {
-    if (item.kind === "commandExecution") counts.Run = (counts.Run ?? 0) + 1;
-    if (item.kind === "search") counts.Search = (counts.Search ?? 0) + 1;
-    if (item.kind === "fileRead") counts.Read = (counts.Read ?? 0) + 1;
-    if (item.kind === "modelCall") counts.Model = (counts.Model ?? 0) + 1;
-    if (item.kind === "fileChange") counts.Edit = (counts.Edit ?? 0) + 1;
+    if (item.kind === "commandExecution") counts[T.step.run] = (counts[T.step.run] ?? 0) + 1;
+    if (item.kind === "search") counts[T.step.search] = (counts[T.step.search] ?? 0) + 1;
+    if (item.kind === "fileRead") counts[T.step.read] = (counts[T.step.read] ?? 0) + 1;
+    if (item.kind === "modelCall") counts[T.step.model] = (counts[T.step.model] ?? 0) + 1;
+    if (item.kind === "fileChange") counts[T.step.edit] = (counts[T.step.edit] ?? 0) + 1;
   }
   return counts;
 }
@@ -53,9 +63,9 @@ export function llmFromTurn(turn: TurnDto | null) {
       if (item.kind !== "modelCall") throw new Error("unreachable");
       return {
         model: item.model,
-        input_tokens: String(item.inputTokens),
-        output_tokens: String(item.outputTokens),
-        duration: item.duration != null ? `${item.duration}ms` : "—",
+        input_tokens: formatTokens(item.inputTokens, item.status),
+        output_tokens: formatTokens(item.outputTokens, item.status),
+        duration: item.status === "running" ? T.reply.inProgress : formatDuration(item.duration),
       };
     });
 }

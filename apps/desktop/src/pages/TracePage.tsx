@@ -11,14 +11,19 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { loadSession, type SessionDto } from "../api";
-import { formatDuration, formatTokens } from "../conversation/trace";
+import { formatDuration, formatTokens, mergeChanges, totals } from "../conversation/trace";
 import { type DemoState, type DemoState as Demo } from "../data/demoState";
 import type { ChangedFile } from "../data/types";
 import { ReplyMeta } from "../inspector/TraceInspector";
 import { FileRow } from "../inspector/Section";
+import { T, toolAlias } from "../i18n";
 
-const TABS = ["Timeline", "Logs", "Artifacts"] as const;
-type Tab = (typeof TABS)[number];
+const TABS = [
+  { id: "timeline", label: T.page.traceTabs.timeline },
+  { id: "logs", label: T.page.traceTabs.logs },
+  { id: "artifacts", label: T.page.traceTabs.artifacts },
+] as const;
+type Tab = (typeof TABS)[number]["id"];
 
 type TimelineRow = Demo["timeline"][number];
 
@@ -38,7 +43,7 @@ function TypePill({ type }: { type: TimelineRow["type"] }) {
   return (
     <span className={`type-pill type-pill--${type.toLowerCase()}`}>
       <Icon size={13} strokeWidth={1.9} />
-      <span>{type}</span>
+      <span>{toolAlias(type)}</span>
     </span>
   );
 }
@@ -70,7 +75,7 @@ function liveTimeline(session: SessionDto): {
         time: new Date(item.at * 1000).toLocaleTimeString(),
         duration: formatDuration(item.duration),
         type: "Finalize",
-        title: "Finalize answer",
+        title: T.step.finalize,
         note: item.text.slice(0, 80),
       });
       return;
@@ -82,19 +87,19 @@ function liveTimeline(session: SessionDto): {
     };
     switch (item.kind) {
       case "reasoning":
-        rows.push({ ...base, type: "Thinking", title: "Thinking", note: item.summary });
+        rows.push({ ...base, type: "Thinking", title: T.step.thinking, note: item.summary });
         break;
       case "search":
-        rows.push({ ...base, type: "Search", title: "Search codebase", note: item.detail, chip: item.query });
+        rows.push({ ...base, type: "Search", title: T.step.search, note: item.detail, chip: item.query });
         break;
       case "fileRead":
-        rows.push({ ...base, type: "Read", title: "Read file", note: item.detail, chip: item.path });
+        rows.push({ ...base, type: "Read", title: T.step.read, note: item.detail, chip: item.path });
         break;
       case "commandExecution":
         rows.push({
           ...base,
           type: "Run",
-          title: "Run command",
+          title: T.step.run,
           note: item.output.slice(0, 80) || "命令输出",
           chip: item.command,
           ok: item.exitCode === 0,
@@ -104,24 +109,27 @@ function liveTimeline(session: SessionDto): {
         rows.push({
           ...base,
           type: "Model",
-          title: "Model call",
-          note: "调用模型",
+          title: T.step.model,
+          note: T.step.model,
           chips: [item.model, `${formatTokens(item.inputTokens)} → ${formatTokens(item.outputTokens)}`],
         });
         break;
-      case "fileChange":
-        item.changes.forEach((change) => files.push(change));
+      case "fileChange": {
+        const merged = mergeChanges(item.changes);
+        const stepTotals = totals(merged);
+        files.push(...merged);
         rows.push({
           ...base,
           type: "Edit",
-          title: "Edit files",
-          note: `${item.changes.length} 个文件`,
+          title: T.step.edit,
+          note: `${stepTotals.files} 个文件`,
           delta: {
-            added: item.changes.reduce((n, c) => n + c.added, 0),
-            removed: item.changes.reduce((n, c) => n + c.removed, 0),
+            added: stepTotals.added,
+            removed: stepTotals.removed,
           },
         });
         break;
+      }
     }
   });
 
@@ -129,7 +137,7 @@ function liveTimeline(session: SessionDto): {
     rows,
     final,
     checks,
-    files,
+    files: mergeChanges(files),
     done: turn.done,
     stopped: turn.stopped,
     interrupted:
@@ -151,7 +159,7 @@ export function TracePage({
   live?: SessionDto | null;
 }) {
   const demoMode = Boolean(demo);
-  const [tab, setTab] = useState<Tab>("Timeline");
+  const [tab, setTab] = useState<Tab>("timeline");
   const [session, setSession] = useState<SessionDto | null>(live ?? null);
 
   useEffect(() => {
@@ -180,7 +188,7 @@ export function TracePage({
     return (
       <main className="main">
         <div className="scroll">
-          <p className="empty-note">先在侧边栏选择一个会话，再查看 Response Trace。</p>
+          <p className="empty-note">{T.page.selectConversation}</p>
         </div>
       </main>
     );
@@ -190,7 +198,7 @@ export function TracePage({
     return (
       <main className="main">
         <div className="scroll">
-          <p className="empty-note">正在加载会话轨迹…</p>
+          <p className="empty-note">{T.page.loadingTrace}</p>
         </div>
       </main>
     );
@@ -221,24 +229,24 @@ export function TracePage({
     return (
       <main className="main">
         <div className="scroll">
-          <p className="empty-note">当前会话没有可展示的执行记录。</p>
+          <p className="empty-note">{T.page.emptyTrace}</p>
         </div>
       </main>
     );
   }
 
   const statusLabel = demoMode
-    ? "Completed"
+    ? T.lifecycle.completed
     : data.stopped
-      ? "Stopped"
+      ? T.lifecycle.stopped
       : data.done
-        ? "Completed"
-        : data.interrupted
-          ? "Interrupted"
-          : "Interrupted";
+        ? T.lifecycle.completed
+        : T.lifecycle.interrupted;
   const logs = data.rows.map((row) => {
     const detail = row.chip ?? row.chips?.join(" ") ?? "";
-    return `${row.time}  ${String(row.duration).padStart(4)}  ${row.type.padEnd(9)} ${row.title}${detail ? ` ${detail}` : ""}`;
+    // Fixture rows name tools in English; logs show the same zh labels as the UI.
+    const title = toolAlias(row.title);
+    return `${row.time}  ${String(row.duration).padStart(4)}  ${row.type.padEnd(9)} ${title}${detail ? ` ${detail}` : ""}`;
   });
 
   return (
@@ -250,7 +258,7 @@ export function TracePage({
           <span className="crumb-sep">/</span>
           <span>{data.crumbTitle}</span>
           <span className="crumb-sep">/</span>
-          <span className="crumb-current">Response Trace</span>
+          <span className="crumb-current">{T.page.responseTrace}</span>
         </nav>
         <span className="spacer" />
       </header>
@@ -262,7 +270,7 @@ export function TracePage({
               <span className="reply-mark">
                 <Sparkles size={14} strokeWidth={1.9} />
               </span>
-              <h1 className="reply-card-title">Assistant Reply</h1>
+              <h1 className="reply-card-title">{T.page.assistantReply}</h1>
               <span className="status-pill">
                 <span className="status-mark">
                   <Check size={9} strokeWidth={4} />
@@ -290,8 +298,8 @@ export function TracePage({
                 }
               />
               <div className="reply-summary">
-                <h4>Final response summary</h4>
-                <p>{data.final || "（无最终回复）"}</p>
+                <h4>{T.page.finalSummary}</h4>
+                <p>{data.final || T.page.noFinalReply}</p>
                 {data.checks.length > 0 && (
                   <ul className="trace-checks">
                     {data.checks.map((check) => (
@@ -303,42 +311,42 @@ export function TracePage({
             </div>
           </section>
 
-          <nav className="page-tabs" role="tablist" aria-label="Trace views">
-            {TABS.map((name) => (
+          <nav className="page-tabs" role="tablist" aria-label={T.page.traceViews}>
+            {TABS.map(({ id, label }) => (
               <button
-                key={name}
+                key={id}
                 type="button"
                 role="tab"
-                className={`page-tab${name === tab ? " page-tab--active" : ""}`}
-                aria-selected={name === tab}
-                onClick={() => setTab(name)}
+                className={`page-tab${id === tab ? " page-tab--active" : ""}`}
+                aria-selected={id === tab}
+                onClick={() => setTab(id)}
               >
-                {name}
+                {label}
               </button>
             ))}
           </nav>
 
-          {tab === "Logs" && <pre className="terminal-block terminal-block--tall">{logs.join("\n") || "（暂无日志）"}</pre>}
+          {tab === "logs" && <pre className="terminal-block terminal-block--tall">{logs.join("\n") || T.page.noLogs}</pre>}
 
-          {tab === "Artifacts" && (
+          {tab === "artifacts" && (
             <div className="artifact-list">
               {data.files.length === 0 ? (
-                <p className="empty-note">本轮没有文件变更。</p>
+                <p className="empty-note">{T.page.noFileChanges}</p>
               ) : (
                 data.files.map((file) => <FileRow key={file.path} file={file} />)
               )}
             </div>
           )}
 
-          {tab === "Timeline" && (
+          {tab === "timeline" && (
             <table className="timeline">
               <thead>
                 <tr>
-                  <th className="col-n">#</th>
-                  <th className="col-time">Time</th>
-                  <th className="col-duration">Duration</th>
-                  <th className="col-type">Type</th>
-                  <th>Details</th>
+                  <th className="col-n">{T.page.timelineColumns.n}</th>
+                  <th className="col-time">{T.page.timelineColumns.time}</th>
+                  <th className="col-duration">{T.page.timelineColumns.duration}</th>
+                  <th className="col-type">{T.page.timelineColumns.type}</th>
+                  <th>{T.page.timelineColumns.details}</th>
                 </tr>
               </thead>
               <tbody>
@@ -352,7 +360,7 @@ export function TracePage({
                     </td>
                     <td>
                       <div className="tl-title">
-                        <span>{row.title}</span>
+                        <span>{toolAlias(row.title)}</span>
                         {row.chip && <code className="code-chip">{row.chip}</code>}
                         {row.chips?.map((chip) => (
                           <code key={chip} className="code-chip">

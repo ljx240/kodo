@@ -40,10 +40,41 @@ export type WorkspaceDto = {
 
 export type StepStatusDto = "running" | "done" | "failed";
 
+/** Three orthogonal axes. Backend-computed; the UI maps codes to copy. */
+export type LifecycleStatus =
+  | "queued"
+  | "working"
+  | "awaiting_approval"
+  | "completed"
+  | "stopped"
+  | "interrupted"
+  | "failed";
+export type DeliveryStatus = "ready" | "partial" | "blocked" | "failed";
+export type VerificationStatus = "not_run" | "running" | "passed" | "failed" | "blocked";
+export type OutcomeStatus =
+  | "working"
+  | "queued"
+  | "awaiting_approval"
+  | "partially_completed"
+  | "blocked_by_environment"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "interrupted";
+
+export type TurnStatusDto = {
+  lifecycle: LifecycleStatus;
+  delivery: DeliveryStatus;
+  verification: VerificationStatus;
+  outcome: OutcomeStatus;
+};
+
 export type ChangeDto = {
   path: string;
   added: number;
   removed: number;
+  /** Times this turn edited the path (merged steps count once per edit). */
+  edits?: number;
 };
 
 export type ItemDto = {
@@ -52,7 +83,14 @@ export type ItemDto = {
   status: StepStatusDto;
   duration: number | null;
 } & (
-  | { kind: "reasoning"; summary: string }
+  | {
+      kind: "reasoning";
+      summary: string;
+      /** Public phase code; empty/absent on legacy rows. */
+      phase?: string;
+      /** Internal scheduling diagnostics — Debug surfaces only. */
+      diagnostics?: string | null;
+    }
   | { kind: "search"; query: string; detail: string }
   | { kind: "fileRead"; path: string; detail: string }
   | {
@@ -61,10 +99,22 @@ export type ItemDto = {
       cwd: string;
       output: string;
       exitCode: number | null;
+      denied?: boolean;
+      /** Structured failure taxonomy code from the backend. */
+      failureClass?: string | null;
+      /** Missing binary when failureClass is command_not_found. */
+      failureTool?: string | null;
     }
   | { kind: "modelCall"; model: string; inputTokens: number; outputTokens: number }
   | { kind: "fileChange"; changes: ChangeDto[] }
-  | { kind: "agentMessage"; text: string; checks: string[] }
+  | {
+      kind: "agentMessage";
+      text: string;
+      checks: string[];
+      /** Structured outcome axes written by the agent. */
+      delivery?: string;
+      verification?: string;
+    }
 );
 
 export type ItemKindDto = ItemDto["kind"];
@@ -79,6 +129,8 @@ export type TurnDto = {
   /** Recovery stamped a killed run as interrupted (never Completed). */
   interrupted?: boolean;
   error: string | null;
+  /** Backend-computed status axes (absent on live/demo turns — derived). */
+  status?: TurnStatusDto;
 };
 
 export type SessionDto = {

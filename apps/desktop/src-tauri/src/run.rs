@@ -165,10 +165,16 @@ fn step_failed(step: &Step, denied: bool) -> bool {
     denied || matches!(step, Step::Command { exit_code: Some(code), .. } if *code != 0)
 }
 
-fn to_item_kind(step: &Step) -> ItemKind {
+fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
     match step {
-        Step::Reasoning { summary } => ItemKind::Reasoning {
+        Step::Reasoning {
+            summary,
+            phase,
+            diagnostics,
+        } => ItemKind::Reasoning {
             summary: summary.clone(),
+            phase: (*phase).to_owned(),
+            diagnostics: diagnostics.clone(),
         },
         Step::Search { query, detail } => ItemKind::Search {
             query: query.clone(),
@@ -188,6 +194,7 @@ fn to_item_kind(step: &Step) -> ItemKind {
             cwd: cwd.clone(),
             output: output.clone(),
             exit_code: *exit_code,
+            denied,
         },
         Step::ModelCall {
             model,
@@ -214,9 +221,16 @@ fn to_item_kind(step: &Step) -> ItemKind {
                 )
                 .collect(),
         },
-        Step::AgentMessage { text, checks } => ItemKind::AgentMessage {
+        Step::AgentMessage {
+            text,
+            checks,
+            delivery,
+            verification,
+        } => ItemKind::AgentMessage {
             text: text.clone(),
             checks: checks.clone(),
+            delivery: delivery.clone(),
+            verification: verification.clone(),
         },
     }
 }
@@ -415,7 +429,7 @@ pub fn start(
                         at,
                         status: Status::Running,
                         duration_ms: None,
-                        kind: to_item_kind(&step.running()),
+                        kind: to_item_kind(&step.running(), false),
                     };
                     if session::record_item(&record_dir, &record_id, &running_item, Phase::Started)
                         .is_err()
@@ -447,8 +461,15 @@ pub fn start(
                             at,
                             status: Status::Failed,
                             duration_ms: Some(duration_ms),
-                            kind: to_item_kind(&step),
+                            kind: to_item_kind(&step, denied),
                         };
+                        // The failed envelope only stamps status. Write the
+                        // payload first so exit code and output survive reload.
+                        if session::record_item(&record_dir, &record_id, &failed, Phase::Completed)
+                            .is_err()
+                        {
+                            return false;
+                        }
                         if session::record_item(&record_dir, &record_id, &failed, Phase::Failed)
                             .is_err()
                         {
@@ -469,7 +490,7 @@ pub fn start(
                         at,
                         status: Status::Done,
                         duration_ms: Some(duration_ms),
-                        kind: to_item_kind(&step),
+                        kind: to_item_kind(&step, false),
                     };
                     if session::record_item(
                         &record_dir,
@@ -566,7 +587,9 @@ mod tests {
         assert!(step_failed(&command, true));
         assert!(!step_failed(
             &Step::Reasoning {
-                summary: "ok".into()
+                summary: "ok".into(),
+                phase: "execute",
+                diagnostics: None,
             },
             false
         ));
