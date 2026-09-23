@@ -1941,6 +1941,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kodo-cli"
+version = "0.0.1"
+dependencies = [
+ "kodo-agent",
+ "kodo-core",
+ "kodo-shell",
+ "libc",
+]
+
+[[package]]
 name = "kodo-core"
 version = "0.0.1"
 
@@ -1950,6 +1960,7 @@ version = "0.0.1"
 dependencies = [
  "kodo-agent",
  "kodo-core",
+ "kodo-shell",
  "serde",
  "serde_json",
  "tauri",
@@ -1963,6 +1974,16 @@ name = "kodo-evals"
 version = "0.0.1"
 dependencies = [
  "kodo-agent",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kodo-shell"
+version = "0.0.1"
+dependencies = [
+ "kodo-agent",
+ "kodo-core",
  "serde",
  "serde_json",
 ]

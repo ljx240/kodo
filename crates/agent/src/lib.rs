@@ -179,6 +179,9 @@ pub enum Step {
         delivery: String,
         /// `not_run`/`running`/`passed`/`failed`/`blocked` — how acceptance went.
         verification: String,
+        /// Conversational answer (你是谁/你好) — the UI renders the text alone,
+        /// without the conclusion card or next-step chrome (2026-09-23).
+        plain: bool,
     },
 }
 
@@ -1483,6 +1486,7 @@ pub fn run(
                     checks: Vec::new(),
                     delivery: "ready".to_owned(),
                     verification: "not_run".to_owned(),
+                    plain: true,
                 },
                 alive,
                 emit,
@@ -2482,6 +2486,7 @@ pub fn run(
                 checks,
                 delivery: delivery.to_owned(),
                 verification: verification.to_owned(),
+                plain: false,
             },
             alive,
             emit,

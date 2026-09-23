@@ -6,7 +6,6 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
-use kodo_agent::Provider as AgentProvider;
 use kodo_core::{session, settings, workspace};
 
 use run::{ApprovalChoice, Approvals, Runs, StartArgs};
@@ -374,77 +373,9 @@ fn send_message(
         .map_err(|error| error.to_string())?;
     let found = session::load(&dir, &id).map_err(|error| error.to_string())?;
 
-    let settings_path = settings::settings_path();
-    let read_setting = |key: &str| {
-        settings_path
-            .as_ref()
-            .and_then(|path| settings::read(path, key))
-    };
-
-    let permission = run::permission_from_settings(read_setting("permission"));
-
-    let provider = load_providers().ok().and_then(|list| {
-        let active = read_setting("active-provider")
-            .and_then(|raw| raw.parse::<usize>().ok())
-            .unwrap_or(0);
-        let chosen = list
-            .get(active)
-            .cloned()
-            .or_else(|| list.iter().find(|p| p.has_key).cloned());
-        let creds = settings::credentials_path()?;
-        let build = |p: &ProviderView| -> Option<AgentProvider> {
-            let api_key = settings::read_credential(&creds, &p.id).unwrap_or_default();
-            if api_key.is_empty() {
-                return None;
-            }
-            Some(AgentProvider::new(
-                p.template.clone(),
-                api_key,
-                p.endpoint.clone(),
-                p.model_id
-                    .clone()
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or_else(|| p.model.clone()),
-            ))
-        };
-        let primary = chosen.as_ref().and_then(build);
-        let mut primary = primary?;
-        // Populate the failover chain when the user asked to try the next best
-        // model (fallback-behavior != fail). Auth/invalid-model never failover.
-        if read_setting("fallback-behavior").as_deref() != Some("fail") {
-            for p in &list {
-                if Some(&p.id) == chosen.as_ref().map(|c| &c.id) {
-                    continue;
-                }
-                if let Some(fb) = build(p) {
-                    primary.fallbacks.push(fb);
-                }
-            }
-        }
-        // Default model is a runtime consumer: override the primary model so the
-        // Settings control is what the next call actually sends.
-        if let Some(model) = read_setting("default-model") {
-            let model = model.trim().to_owned();
-            if !model.is_empty() {
-                let mut next = AgentProvider::new(
-                    primary.template.clone(),
-                    primary.api_key.clone(),
-                    primary.endpoint.clone(),
-                    model,
-                );
-                next.fallbacks = std::mem::take(&mut primary.fallbacks);
-                primary = next;
-            }
-        }
-        Some(primary)
-    });
-
-    let max_output_tokens = read_setting("max-output-tokens")
-        .and_then(|raw| raw.parse::<u32>().ok())
-        .unwrap_or(4096);
-    let extended_thinking = read_setting("extended-thinking").as_deref() == Some("true");
-    // fallback-behavior=fail means no silent offline answers when a key exists.
-    let fallback_to_local = read_setting("fallback-behavior").as_deref() != Some("fail");
+    // Provider, permission and generation knobs come from the shared shell
+    // config — the same settings.log/credentials.log the CLI reads.
+    let config = kodo_shell::ShellConfig::load(kodo_shell::Overrides::default());
 
     run::start(
         &app,
@@ -456,11 +387,11 @@ fn send_message(
             project: found.project,
             message: text,
             context: context_paths,
-            provider,
-            permission,
-            fallback_to_local,
-            max_output_tokens,
-            extended_thinking,
+            provider: config.provider,
+            permission: config.permission,
+            fallback_to_local: config.fallback_to_local,
+            max_output_tokens: config.max_output_tokens,
+            extended_thinking: config.extended_thinking,
         },
     )?;
 

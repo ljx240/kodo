@@ -151,6 +151,8 @@ pub enum ItemKind {
         delivery: String,
         /// Whether acceptance ran and how: `not_run`/`running`/`passed`/`failed`/`blocked`.
         verification: String,
+        /// Conversational answer — the UI renders the text alone, no report chrome.
+        plain: bool,
     },
 }
 
@@ -171,6 +173,7 @@ impl ItemKind {
             checks,
             delivery: String::new(),
             verification: String::new(),
+            plain: false,
         }
     }
 }
@@ -672,12 +675,18 @@ fn encode_item(item: &Item) -> Vec<String> {
             checks,
             delivery,
             verification,
+            plain,
         } => {
             fields.push(text.clone());
             // Newlines are escaped by the codec, so one field can hold the list.
             fields.push(checks.join("\n"));
             fields.push(delivery.clone());
             fields.push(verification.clone());
+            fields.push(if *plain {
+                "1".to_owned()
+            } else {
+                "0".to_owned()
+            });
         }
     }
 
@@ -761,6 +770,18 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
             },
             delivery: delivery.clone(),
             verification: verification.clone(),
+            plain: false,
+        },
+        ("agentMessage", [text, checks, delivery, verification, plain]) => ItemKind::AgentMessage {
+            text: text.clone(),
+            checks: if checks.is_empty() {
+                Vec::new()
+            } else {
+                checks.split('\n').map(str::to_owned).collect()
+            },
+            delivery: delivery.clone(),
+            verification: verification.clone(),
+            plain: plain == "1",
         },
         _ => return None,
     };
@@ -1474,6 +1495,7 @@ mod tests {
                     checks: vec!["cargo test 通过".to_owned()],
                     delivery: "ready".to_owned(),
                     verification: "passed".to_owned(),
+                    plain: true,
                 },
             ),
             Phase::Completed,
@@ -1484,10 +1506,12 @@ mod tests {
             ItemKind::AgentMessage {
                 delivery,
                 verification,
+                plain,
                 ..
             } => {
                 assert_eq!(delivery, "ready");
                 assert_eq!(verification, "passed");
+                assert!(*plain);
             }
             other => panic!("unexpected kind: {other:?}"),
         }
@@ -1523,8 +1547,8 @@ mod tests {
             if !*denied && *exit_code == Some(2))
         );
         assert!(
-            matches!(&items[2].kind, ItemKind::AgentMessage { delivery, verification, .. }
-            if delivery.is_empty() && verification.is_empty())
+            matches!(&items[2].kind, ItemKind::AgentMessage { delivery, verification, plain, .. }
+            if delivery.is_empty() && verification.is_empty() && !*plain)
         );
     }
 }

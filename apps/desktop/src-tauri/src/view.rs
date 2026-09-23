@@ -301,6 +301,8 @@ pub enum ItemDetail {
         delivery: String,
         /// not_run | running | passed | failed | blocked
         verification: String,
+        /// Conversational answer — the UI renders the text alone.
+        plain: bool,
     },
 }
 
@@ -402,11 +404,13 @@ impl From<session::Item> for ItemView {
                 checks,
                 delivery,
                 verification,
+                plain,
             } => ItemDetail::AgentMessage {
                 text,
                 checks,
                 delivery,
                 verification,
+                plain,
             },
         };
 
@@ -809,6 +813,7 @@ mod tests {
                     checks: Vec::new(),
                     delivery: "ready".to_owned(),
                     verification: "passed".to_owned(),
+                    plain: false,
                 }),
             ],
             true,
@@ -829,6 +834,7 @@ mod tests {
                 checks: Vec::new(),
                 delivery: "ready".to_owned(),
                 verification: "failed".to_owned(),
+                plain: false,
             })],
             true,
         );
@@ -844,6 +850,7 @@ mod tests {
                 checks: Vec::new(),
                 delivery: "blocked".to_owned(),
                 verification: "blocked".to_owned(),
+                plain: false,
             })],
             true,
         );

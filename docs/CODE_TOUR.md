@@ -11,6 +11,8 @@
 |---|---|---|
 | `kodo-core` | `crates/core` | 项目/会话/设置的 append-only 日志 |
 | `kodo-agent` | `crates/agent` | Agent 工具循环、LLM 调用、写文件与验证 |
+| `kodo-shell` | `crates/shell` | 桌面端与 CLI 共享的壳层（回合日志、共享配置、审批指纹） |
+| `kodo-cli` | `crates/cli` | 终端入口 `kodo`：REPL + 一次性问答，复用桌面端设置与会话 |
 | Tauri shell | `apps/desktop/src-tauri` | Tauri 命令、run 线程、审批（approval） |
 | `evals` | `evals` | 评测 |
 | GUI | `apps/desktop/src` | React + Vite 前端（不参与 Rust 编译） |
