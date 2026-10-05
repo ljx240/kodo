@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 
-use kodo_agent::{Permission, Provider, RunRequest, SinkEvent, Step, StepKind};
+use kodo_agent::{AgentMode, Permission, Provider, RunRequest, SinkEvent, Step, StepKind};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -220,15 +220,20 @@ fn run_scenario(
     );
 
     let request = RunRequest {
-        project: project.to_path_buf(),
+        project: Some(project.to_path_buf()),
         message: message.to_owned(),
         pinned_context: Vec::new(),
         provider: Some(provider),
         permission,
+        mode: AgentMode::Code,
         fallback_to_local: true,
         max_output_tokens: 1024,
         extended_thinking: false,
         session_id: None,
+        user_skills_dir: None,
+        mcp_servers: Vec::new(),
+        agent_instructions: None,
+        personas: vec![],
     };
 
     let cancel_after = Arc::new(AtomicUsize::new(
@@ -324,6 +329,16 @@ fn preview(step: &Step) -> String {
             format!("write:{}", paths.join(","))
         }
         Step::AgentMessage { .. } => "message".to_owned(),
+        // The transparency events still roll through `preview()` so the
+        // benchmark can tell them apart from a generic "other" — they
+        // round-trip in the session log but they don't affect pass/fail
+        // for these scenarios.
+        Step::Thinking { content, .. } => format!("thinking:{}", content.chars().take(40).collect::<String>()),
+        Step::Compaction { .. } => "compaction".to_owned(),
+        Step::Failover { from_model, to_model, .. } => format!("failover:{from_model}->{to_model}"),
+        Step::PlanStep { step_id, .. } => format!("plan:{step_id}"),
+        Step::Permission { kind, .. } => format!("permission:{kind}"),
+        Step::ContextBudget { percent, .. } => format!("budget:{percent}%"),
     }
 }
 
@@ -354,8 +369,11 @@ fn benchmark_01_read_only_question() {
 
     let (passed, detail, outcome) = match cap {
         Ok(c) => {
+            // 2026-09-29: a read-only question is the conversational channel —
+            // it ships as plain Q&A (ready + not_run), so the task-run
+            // "Verification status" footer must NOT be appended.
             let ok = !c.cancelled
-                && c.answer.contains("Verification status")
+                && !c.answer.contains("Verification status")
                 && c.file_changes.is_empty();
             (
                 ok,
@@ -834,4 +852,243 @@ fn benchmark_09_symlink_escape_attempt() {
         passed,
         "symlink/relative escape must not reach outside the project: {detail}"
     );
+}
+
+// --- Built-in persona injection skeleton (2026-10-04, mirrors the new
+// `crates/agent/src/agents.rs::builtin_agents()` registry). One synthetic
+// scenario that drives the run loop with the FIRST built-in persona's
+// `instructions` and asserts (a) the run produced at least one `SinkEvent`,
+// (b) no `StepKind::FileChange` was emitted (the reviewer persona must not
+// mutate project files in a code-review flow). Guards the resolve → block
+// pipeline added alongside the 12 built-ins. ---
+
+#[test]
+fn builtin_persona_instructions_reach_the_run_loop_without_triggering_edits() {
+    let persona = kodo_agent::agents::builtin_agents()
+        .into_iter()
+        .find(|spec| spec.name == "reviewer")
+        .expect("reviewer builtin must exist");
+    assert!(!persona.instructions.is_empty());
+
+    let harness = Harness::new("builtin-persona-skeleton");
+    let project = harness.project("alpha");
+    let script_path = harness.root.join(".bench-script-builtin-persona.jsonl");
+    // Script: a single fake reply that emits a textual answer. The reviewer
+    // persona is read-only by construction — no Edit tool calls here.
+    let script = json!([
+        {"role": "assistant", "content": [{"type": "text", "text": "已审阅。无重大风险。"}]}
+    ]);
+    fs::write(&script_path, script.to_string()).expect("script write");
+
+    let provider = Provider::new(
+        "fake",
+        "fake-key",
+        script_path.to_string_lossy(),
+        "fake-model",
+    );
+
+    let request = RunRequest {
+        project: Some(project.clone()),
+        message: "请评审这个最小项目".to_owned(),
+        pinned_context: Vec::new(),
+        provider: Some(provider),
+        permission: Permission::Auto,
+        mode: AgentMode::Code,
+        fallback_to_local: true,
+        max_output_tokens: 1024,
+        extended_thinking: false,
+        session_id: None,
+        user_skills_dir: None,
+        mcp_servers: Vec::new(),
+        agent_instructions: Some(persona.instructions.clone()),
+        personas: vec![],
+    };
+
+    let captured: Arc<Mutex<Vec<SinkEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = Arc::clone(&captured);
+    let mut emit = move |event: SinkEvent| -> bool {
+        cap.lock().expect("lock").push(event);
+        true
+    };
+    let approve = |_kind: StepKind, _label: &str| true;
+
+    kodo_agent::run(&request, &alive_true, &approve, &mut emit)
+        .expect("run with builtin persona");
+
+    let events: Vec<SinkEvent> = captured.lock().expect("lock").drain(..).collect();
+    assert!(!events.is_empty(), "run must emit at least one SinkEvent");
+    // No FileChange should have been requested — the reviewer persona is
+    // read-only and the fake provider didn't produce any tool calls.
+    let touched_files: usize = events
+        .iter()
+        .filter(|event| match event {
+                SinkEvent::Started { step } | SinkEvent::Finished { step, .. } => {
+                    matches!(step, Step::FileChange { .. })
+                }
+                _ => false,
+            })
+            .count();
+    assert!(
+        touched_files == 0,
+        "reviewer persona must not trigger edits: {touched_files}"
+    );
+}
+
+/// Always-alive closure for tests that don't drive cancellation.
+fn alive_true() -> bool {
+    true
+}
+
+#[test]
+fn persona_chain_with_template_vars_and_examples_runs_clean() {
+    // Script: a single fake reply that emits a textual answer. The chain
+    // is read-only by construction — no Edit tool calls.
+    let harness = Harness::new("persona-chain");
+    let project = harness.project("alpha");
+    let script_path = harness.root.join(".bench-script-persona-chain.jsonl");
+    let script = json!([
+        {"role": "assistant", "content": [{"type": "text", "text": "已审阅。"}]}
+    ]);
+    fs::write(&script_path, script.to_string()).expect("script write");
+
+    let provider = Provider::new(
+        "fake",
+        "fake-key",
+        script_path.to_string_lossy(),
+        "fake-model",
+    );
+
+    let personas = vec![
+        kodo_agent::PersonaBlock {
+            name: "reviewer".to_owned(),
+            instructions: "Review `{{project_path}}` on branch `{{branch}}`.".to_owned(),
+            defaults: kodo_agent::agents::PersonaDefaults {
+                provider: None,
+                model: None,
+                permission: None,
+                skills: Vec::new(),
+            },
+            variables: vec!["project_path".to_owned(), "branch".to_owned()],
+            examples: vec![kodo_agent::agents::PersonaExample {
+                input: "评审这段".to_owned(),
+                output: "风险 1：...".to_owned(),
+            }],
+        },
+        kodo_agent::PersonaBlock {
+            name: "refactorer".to_owned(),
+            instructions: "Then suggest cleanups.".to_owned(),
+            defaults: kodo_agent::agents::PersonaDefaults {
+                provider: None,
+                model: Some("fake-model-2".to_owned()),
+                permission: None,
+                skills: Vec::new(),
+            },
+            variables: Vec::new(),
+            examples: Vec::new(),
+        },
+    ];
+
+    let request = RunRequest {
+        project: Some(project.clone()),
+        message: "请评审这个最小项目".to_owned(),
+        pinned_context: Vec::new(),
+        provider: Some(provider),
+        permission: Permission::Auto,
+        mode: AgentMode::Code,
+        fallback_to_local: true,
+        max_output_tokens: 1024,
+        extended_thinking: false,
+        session_id: None,
+        user_skills_dir: None,
+        mcp_servers: Vec::new(),
+        agent_instructions: None,
+        personas,
+    };
+
+    let captured: Arc<Mutex<Vec<SinkEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = Arc::clone(&captured);
+    let mut emit = move |event: SinkEvent| -> bool {
+        cap.lock().expect("lock").push(event);
+        true
+    };
+    let approve = |_kind: StepKind, _label: &str| true;
+
+    kodo_agent::run(&request, &alive_true, &approve, &mut emit)
+        .expect("run with persona chain");
+
+    let events: Vec<SinkEvent> = captured.lock().expect("lock").drain(..).collect();
+    assert!(!events.is_empty(), "chain run must emit at least one SinkEvent");
+    let touched_files: usize = events
+        .iter()
+        .filter(|event| match event {
+            SinkEvent::Started { step } | SinkEvent::Finished { step, .. } => {
+                matches!(step, Step::FileChange { .. })
+            }
+            _ => false,
+        })
+        .count();
+    assert!(
+        touched_files == 0,
+        "persona chain must not trigger edits: {touched_files}"
+    );
+}
+
+#[test]
+fn persona_defaults_override_provider_model_in_chain() {
+    let harness = Harness::new("persona-defaults");
+    let project = harness.project("alpha");
+    let script_path = harness.root.join(".bench-script-persona-defaults.jsonl");
+    let script = json!([
+        {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}
+    ]);
+    fs::write(&script_path, script.to_string()).expect("script write");
+
+    let provider = Provider::new(
+        "fake",
+        "fake-key",
+        script_path.to_string_lossy(),
+        "fake-model",
+    );
+
+    let personas = vec![kodo_agent::PersonaBlock {
+        name: "reviewer".to_owned(),
+        instructions: "Use the alt model.".to_owned(),
+        defaults: kodo_agent::agents::PersonaDefaults {
+            provider: None,
+            model: Some("fake-model-2".to_owned()),
+            permission: None,
+            skills: Vec::new(),
+        },
+        variables: Vec::new(),
+        examples: Vec::new(),
+    }];
+
+    let request = RunRequest {
+        project: Some(project.clone()),
+        message: "go".to_owned(),
+        pinned_context: Vec::new(),
+        provider: Some(provider),
+        permission: Permission::Auto,
+        mode: AgentMode::Code,
+        fallback_to_local: true,
+        max_output_tokens: 1024,
+        extended_thinking: false,
+        session_id: None,
+        user_skills_dir: None,
+        mcp_servers: Vec::new(),
+        agent_instructions: None,
+        personas,
+    };
+
+    let captured: Arc<Mutex<Vec<SinkEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = Arc::clone(&captured);
+    let mut emit = move |event: SinkEvent| -> bool {
+        cap.lock().expect("lock").push(event);
+        true
+    };
+    let approve = |_kind: StepKind, _label: &str| true;
+
+    kodo_agent::run(&request, &alive_true, &approve, &mut emit)
+        .expect("run with persona defaults");
+    assert!(!captured.lock().expect("lock").is_empty());
 }

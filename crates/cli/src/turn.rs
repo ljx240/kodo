@@ -56,12 +56,31 @@ pub struct TurnContext {
     pub project: PathBuf,
     pub session_dir: PathBuf,
     pub session_id: Option<String>,
+    /// The open session's mode tag. Sessions are stamped at creation and keep
+    /// the tag forever; new sessions take it from the shared `agent-mode` setting.
+    pub session_mode: Option<session::Mode>,
     /// Live permission for this process — starts from settings/`--permission`;
     /// `[a]` at a prompt and `/permission` change it for subsequent turns.
     pub permission: Permission,
     pub config: ShellConfig,
     pub renderer: Renderer<Stdout, Stderr>,
     pub approver: Approver,
+}
+
+/// The agent's mode mapped onto the core's per-session tag.
+fn core_mode(mode: kodo_agent::AgentMode) -> session::Mode {
+    match mode {
+        kodo_agent::AgentMode::Work => session::Mode::Work,
+        kodo_agent::AgentMode::Code => session::Mode::Code,
+    }
+}
+
+/// The reverse map, for feeding a session's tag into a run.
+fn agent_mode(mode: session::Mode) -> kodo_agent::AgentMode {
+    match mode {
+        session::Mode::Work => kodo_agent::AgentMode::Work,
+        session::Mode::Code => kodo_agent::AgentMode::Code,
+    }
 }
 
 impl TurnContext {
@@ -72,6 +91,7 @@ impl TurnContext {
             project,
             session_dir,
             session_id: None,
+            session_mode: None,
             permission,
             config,
             renderer: Renderer::stdio(),
@@ -94,19 +114,22 @@ impl TurnContext {
             ));
         }
         self.session_id = Some(id.to_owned());
+        self.session_mode = Some(session.mode);
         Ok(())
     }
 
-    /// Resumes the newest non-archived session for this project, if any.
-    /// `session::list` is already newest-first.
+    /// Resumes the newest non-archived session for this project in the current
+    /// mode, if any. `session::list` is already newest-first. A Work run never
+    /// resumes a Code session — the two are separate worlds.
     pub fn continue_last(&mut self) -> Result<Option<String>, String> {
+        let want = core_mode(self.config.mode);
         let sessions = session::list(&self.session_dir).map_err(|error| error.to_string())?;
-        let found = sessions
-            .into_iter()
-            .find(|item| !item.archived && same_project(&item.project, &self.project))
-            .map(|item| item.id);
-        self.session_id = found.clone();
-        Ok(found)
+        let found = sessions.into_iter().find(|item| {
+            !item.archived && item.mode == want && same_project(&item.project, &self.project)
+        });
+        self.session_id = found.as_ref().map(|item| item.id.clone());
+        self.session_mode = found.map(|item| item.mode);
+        Ok(self.session_id.clone())
     }
 
     /// Lazily opens the session on the first message, so the GUI's session
@@ -116,9 +139,17 @@ impl TurnContext {
             return Ok(id.clone());
         }
         let title = session_title(message);
-        let id = session::open(&self.session_dir, &self.project, &title, session::now())
-            .map_err(|error| format!("创建会话失败：{error}"))?;
+        let mode = core_mode(self.config.mode);
+        let id = session::open(
+            &self.session_dir,
+            &self.project,
+            &title,
+            session::now(),
+            mode,
+        )
+        .map_err(|error| format!("创建会话失败：{error}"))?;
         self.session_id = Some(id.clone());
+        self.session_mode = Some(mode);
         Ok(id)
     }
 
@@ -139,15 +170,27 @@ impl TurnContext {
         .map_err(|error| format!("写入会话失败：{error}"))?;
 
         let request = RunRequest {
-            project: self.project.clone(),
+            project: Some(self.project.clone()),
             message: message.to_owned(),
             pinned_context: Vec::new(),
             provider: self.config.provider.clone(),
             permission: self.permission,
+            // The session's immutable tag wins over the global setting.
+            mode: self
+                .session_mode
+                .map(agent_mode)
+                .unwrap_or(self.config.mode),
             fallback_to_local: self.config.fallback_to_local,
             max_output_tokens: self.config.max_output_tokens,
             extended_thinking: self.config.extended_thinking,
             session_id: Some(session_id.clone()),
+            // User skills live beside the shared settings state; None only
+            // when HOME is unset (no skills, builtins still work).
+            user_skills_dir: kodo_core::settings::state_dir().map(|d| d.join("skills")),
+            mcp_servers: self.config.mcp_servers.clone(),
+            // CLI v1 has no agent selector — personas are desktop-only.
+            agent_instructions: None,
+            personas: vec![],
         };
 
         let mut logger = TurnLogger::new(self.session_dir.clone(), session_id);
@@ -211,9 +254,11 @@ mod tests {
         let config = ShellConfig {
             provider: None,
             permission: Permission::Ask,
+            mode: kodo_agent::AgentMode::Code,
             fallback_to_local: true,
             max_output_tokens: 4096,
             extended_thinking: false,
+            mcp_servers: Vec::new(),
         };
         TurnContext::new(project, session_dir, config)
     }
@@ -256,10 +301,14 @@ mod tests {
         fs::create_dir_all(&proj_a).expect("proj-a");
         fs::create_dir_all(&proj_b).expect("proj-b");
 
-        let id_old = session::open(&sessions, &proj_a, "old", 100).expect("old");
-        let id_new = session::open(&sessions, &proj_a, "new", 200).expect("new");
-        let id_other = session::open(&sessions, &proj_b, "other", 300).expect("other");
-        let id_arch = session::open(&sessions, &proj_a, "arch", 400).expect("arch");
+        let id_old =
+            session::open(&sessions, &proj_a, "old", 100, session::Mode::Code).expect("old");
+        let id_new =
+            session::open(&sessions, &proj_a, "new", 200, session::Mode::Code).expect("new");
+        let id_other =
+            session::open(&sessions, &proj_b, "other", 300, session::Mode::Code).expect("other");
+        let id_arch =
+            session::open(&sessions, &proj_a, "arch", 400, session::Mode::Code).expect("arch");
         session::archive(&sessions, &id_arch).expect("archive");
 
         let mut ctx = temp_ctx(proj_a.clone(), sessions.clone());

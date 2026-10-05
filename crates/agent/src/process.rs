@@ -399,7 +399,7 @@ fn truncate_chars_in_place(text: &mut String, byte_cap: usize) {
     text.truncate(end);
 }
 
-fn apply_env(cmd: &mut Command, policy: &EnvPolicy) {
+pub fn apply_env(cmd: &mut Command, policy: &EnvPolicy) {
     match policy {
         EnvPolicy::Inherit => {}
         EnvPolicy::Scrubbed { vars } => {
@@ -407,6 +407,24 @@ fn apply_env(cmd: &mut Command, policy: &EnvPolicy) {
             for (k, v) in vars {
                 cmd.env(k, v);
             }
+        }
+    }
+}
+
+/// Place the child in its own process group (Unix), so [`kill_process_tree`]
+/// reaches grandchildren. No-op on Windows. Shared by every long-lived or
+/// one-shot child Kodo starts — shell commands and MCP stdio servers alike.
+pub fn isolate_process_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
     }
 }
@@ -422,18 +440,7 @@ fn shell_command(command: &str) -> Command {
         c.arg("-c").arg(command);
         c
     };
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    isolate_process_group(&mut cmd);
     cmd
 }
 

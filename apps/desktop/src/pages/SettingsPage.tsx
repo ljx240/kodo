@@ -3,12 +3,12 @@ import {
   Box,
   Cloud,
   Database,
-  FileText,
   Folder,
-  GitBranch,
   Palette,
   Pencil,
+  Plug,
   Plus,
+  RotateCw,
   Search,
   Settings,
   SlidersHorizontal,
@@ -17,13 +17,17 @@ import {
   Wrench,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { listProviderModels } from "../api";
 import { DEFAULT_PERMISSION, MODELS } from "../data/models";
 import { PERMISSIONS, PERMISSION_SETTING } from "../data/models";
 import { T } from "../i18n";
+import { Field, Switch } from "../shell/controls";
 import {
   PROVIDER_TEMPLATES,
+  type ModelOption,
   type ProviderConfig,
   templateById,
+  dedupeModels,
   loadProviders,
   saveProviders,
   uid,
@@ -33,52 +37,12 @@ import {
 } from "../data/providers";
 import { useSetting, useSettingBool } from "../data/useSetting";
 
+/** The shared switch markup: `Toggle` binds it to a settings key; `Field` and
+ *  `Switch` live in `shell/controls` because the MCP page's editor uses the
+ *  same settings-row geometry. */
 function Toggle({ settingKey, fallback = true }: { settingKey: string; fallback?: boolean }) {
   const [on, setOn] = useSettingBool(settingKey, fallback);
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      className={`toggle${on ? " toggle--on" : ""}`}
-      onClick={() => setOn(!on)}
-    >
-      <span className="toggle-knob" />
-    </button>
-  );
-}
-
-function Field({
-  icon,
-  label,
-  hint,
-  hintBelow,
-  wide,
-  block,
-  children,
-}: {
-  icon?: ReactNode;
-  label: string;
-  hint?: string;
-  hintBelow?: boolean;
-  wide?: boolean;
-  block?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div className={`setting-row${block ? " setting-row--stacked" : ""}`}>
-      {icon && <span className="setting-icon">{icon}</span>}
-      <div className="setting-text">
-        <span className="setting-label">{label}</span>
-        {hint && !hintBelow && !block && <span className="setting-hint">{hint}</span>}
-      </div>
-      <div className={`setting-control${wide ? " setting-control--wide" : ""}`}>
-        {children}
-        {hint && hintBelow && <span className="setting-hint">{hint}</span>}
-      </div>
-      {hint && block && <span className="setting-hint">{hint}</span>}
-    </div>
-  );
+  return <Switch checked={on} onChange={() => setOn(!on)} />;
 }
 
 function SwitchRow({ label, hint, trailing, settingKey }: { label: string; hint: string; trailing?: boolean; settingKey: string }) {
@@ -217,7 +181,7 @@ export function SettingsPage({ model, onSelectModel, onProvidersSaved, onOpenArc
           <kbd>⌘F</kbd>
         </div>
         {modal && onClose && (
-          <button type="button" className="icon-btn" aria-label="关闭设置" onClick={onClose}>
+          <button type="button" className="icon-btn" aria-label={T.page.settings.rows.closeAria} onClick={onClose}>
             ×
           </button>
         )}
@@ -274,6 +238,12 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [edit, setEdit] = useState<ProviderEditMode>(null);
+  /** Row-level connectivity verdict — which row it belongs to, and the text. */
+  const [probe, setProbe] = useState<{
+    id: string;
+    status: "loading" | "ok" | "fail";
+    text: string;
+  } | null>(null);
 
   useEffect(() => {
     void loadProviders().then((list) => {
@@ -288,6 +258,30 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
     const fresh = await loadProviders();
     setProviders(fresh);
     onSaved?.(fresh);
+  };
+
+  // The editor's own `GET /models` probe, fired straight from the row — a
+  // credentials check that never opens the editor. Masked keys resolve to the
+  // stored secret Rust-side (same as the editor's refresh).
+  const runTest = (p: ProviderConfig) => {
+    const hasUsableKey = Boolean(p.hasKey || (p.apiKey && !p.apiKey.includes("•")));
+    if (!hasUsableKey) {
+      setProbe({ id: p.id, status: "fail", text: T.page.settings.provider.noKey });
+      return;
+    }
+    if (p.template === "custom" && !(p.endpoint ?? "").trim()) {
+      setProbe({ id: p.id, status: "fail", text: T.page.settings.provider.endpointNeeded });
+      return;
+    }
+    const id = p.id;
+    setProbe({ id, status: "loading", text: "" });
+    listProviderModels(p.template, p.endpoint ?? "", p.apiKey ?? "", p.id)
+      .then((list) => {
+        setProbe({ id, status: "ok", text: T.page.settings.provider.testOk(list.length) });
+      })
+      .catch((error: unknown) => {
+        setProbe({ id, status: "fail", text: T.page.settings.provider.testFail(String(error)) });
+      });
   };
 
   if (!loaded) return null;
@@ -316,7 +310,7 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
     <>
       {providers.length === 0 && (
         <p className="settings-hint" style={{ marginBottom: 12 }}>
-          还没有添加任何 AI 服务商。点击下方按钮添加第一个。
+          {T.page.settings.provider.emptyList}
         </p>
       )}
 
@@ -329,6 +323,15 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
               <span className="code-chip">{t.name}</span>
               {p.model && <span className="provider-row-model">{providerModelLabel(p) || p.model}</span>}
               <span className="provider-row-model">{maskApiKey(p.apiKey, p.hasKey)}</span>
+              {probe?.id === p.id && probe.status !== "loading" && (
+                <span
+                  className="provider-row-model"
+                  data-testid="provider-test-result"
+                  data-status={probe.status}
+                >
+                  {probe.text}
+                </span>
+              )}
             </div>
             <div className="provider-row-actions">
               <button type="button" className="icon-btn icon-btn--sm" aria-label={T.page.settings.rows.edit} onClick={() => setEdit({ mode: "edit", index })}>
@@ -341,6 +344,17 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
                 onClick={() => void update(providers.filter((_, i) => i !== index))}
               >
                 <Trash2 size={14} strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn icon-btn--sm"
+                aria-label={T.page.settings.provider.test}
+                title={T.page.settings.provider.test}
+                data-testid="provider-test"
+                disabled={probe?.id === p.id && probe.status === "loading"}
+                onClick={() => runTest(p)}
+              >
+                <Plug size={14} strokeWidth={1.8} />
               </button>
             </div>
           </div>
@@ -370,20 +384,130 @@ function ProviderEditor({
   const [endpoint, setEndpoint] = useState(initial?.endpoint ?? "");
   const [modelId, setModelId] = useState(initial?.modelId || initial?.model || "");
   const [displayName, setDisplayName] = useState(initial?.displayName || "");
+  const [models, setModels] = useState<ModelOption[]>(
+    () => initial?.models ?? [...templateById(initial?.template ?? PROVIDER_TEMPLATES[0].id).models],
+  );
+  const [fetched, setFetched] = useState<ModelOption[]>([]);
+  const [fetchState, setFetchState] = useState<"idle" | "loading" | "error">("idle");
+  const [fetchError, setFetchError] = useState("");
+  const [pending, setPending] = useState("");
+  const fetchSeq = useRef(0);
 
   const tmpl = templateById(templateId);
+  // Raw typed key (no mask) or an already-stored secret can fetch; a fresh
+  // provider without a key never leaves the editor for a network call.
+  const hasUsableKey = Boolean(
+    (apiKey && !apiKey.includes("•")) || initial?.hasKey,
+  );
+  const canFetch = hasUsableKey && (templateId !== "custom" || endpoint.trim() !== "");
+
+  const runFetch = (seq: number) => {
+    setFetchState("loading");
+    listProviderModels(templateId, endpoint, apiKey, initial?.id)
+      .then((list) => {
+        if (seq !== fetchSeq.current) return;
+        const mapped: ModelOption[] = list.map((m) => ({
+          display_name: m.displayName,
+          model_id: m.modelId,
+        }));
+        setFetched(mapped);
+        // Replace the list with the live one; the selected model always stays
+        // so the pointer can never dangle after a refresh.
+        setModels((prev) => {
+          const selected = prev.find(
+            (m) => m.model_id.toLowerCase() === modelId.toLowerCase(),
+          );
+          return dedupeModels([...mapped, ...(selected ? [selected] : [])]);
+        });
+        setFetchState("idle");
+        setFetchError("");
+      })
+      .catch((error: unknown) => {
+        if (seq !== fetchSeq.current) return;
+        setFetchState("error");
+        setFetchError(T.page.settings.provider.fetchFailed(String(error)));
+      });
+  };
+
+  // Auto-fetch: debounced on editor inputs, dropped when the key/endpoint is
+  // not ready, and late responses are ignored after a template switch.
+  useEffect(() => {
+    if (!canFetch) return;
+    const seq = ++fetchSeq.current;
+    const timer = window.setTimeout(() => runFetch(seq), 400);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templateId, endpoint, apiKey, initial?.hasKey]);
+
+  const refresh = () => {
+    if (!hasUsableKey) {
+      setFetchState("error");
+      setFetchError(T.page.settings.provider.noKey);
+      return;
+    }
+    if (templateId === "custom" && !endpoint.trim()) {
+      setFetchState("error");
+      setFetchError(T.page.settings.provider.endpointNeeded);
+      return;
+    }
+    const seq = ++fetchSeq.current;
+    runFetch(seq);
+  };
+
+  const selectModel = (option: ModelOption) => {
+    setModelId(option.model_id);
+    setDisplayName(option.display_name);
+  };
+
+  const removeModel = (option: ModelOption) => {
+    setModels((prev) => {
+      const next = prev.filter((m) => m.model_id !== option.model_id);
+      if (option.model_id.toLowerCase() === modelId.toLowerCase()) {
+        const successor = next[0];
+        setModelId(successor?.model_id ?? "");
+        setDisplayName(successor?.display_name ?? "");
+      }
+      return next;
+    });
+  };
+
+  const addModel = (option: ModelOption) => {
+    const id = option.model_id.trim();
+    if (!id) return;
+    const entry: ModelOption = {
+      display_name: option.display_name.trim() || id,
+      model_id: id,
+    };
+    setModels((prev) => dedupeModels([...prev, entry]));
+    selectModel(entry);
+  };
+
+  const available = dedupeModels([...tmpl.models, ...fetched]).filter(
+    (m) => !models.some((have) => have.model_id.toLowerCase() === m.model_id.toLowerCase()),
+  );
+
+  const onTemplateChange = (nextId: string) => {
+    setTemplateId(nextId);
+    const nextTmpl = templateById(nextId);
+    const selected = models.find((m) => m.model_id.toLowerCase() === modelId.toLowerCase());
+    setModels(dedupeModels([...nextTmpl.models, ...(selected ? [selected] : [])]));
+    setFetched([]);
+    setFetchState("idle");
+    setFetchError("");
+  };
 
   const save = () => {
-    const selected = tmpl.models.find((m) => m.model_id === modelId);
+    const selected = models.find((m) => m.model_id.toLowerCase() === modelId.toLowerCase());
     const migrated = migrateProviderConfig({
       id: initial?.id ?? uid(),
       name: name || tmpl.name,
       template: templateId,
       apiKey,
       endpoint,
-      model: modelId || tmpl.models[0]?.model_id || "",
-      modelId: modelId || tmpl.models[0]?.model_id || "",
-      displayName: displayName || selected?.display_name || tmpl.models[0]?.display_name || "",
+      model: modelId || models[0]?.model_id || "",
+      modelId: modelId || models[0]?.model_id || "",
+      displayName: displayName || selected?.display_name || models[0]?.display_name || "",
+      models,
     });
     onSave(migrated);
   };
@@ -391,7 +515,7 @@ function ProviderEditor({
   return (
     <div className="provider-editor">
       <Field label={T.page.settings.rows.template} hintBelow wide>
-        <select className="select" value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
+        <select className="select" value={templateId} onChange={(e) => onTemplateChange(e.target.value)}>
           {PROVIDER_TEMPLATES.map((t) => (
             <option key={t.id} value={t.id}>
               {t.name}
@@ -404,11 +528,7 @@ function ProviderEditor({
       </Field>
       <Field
         label={T.page.settings.rows.apiKey}
-        hint={
-          initial?.hasKey
-            ? "已保存密钥（界面只显示掩码）。留空或保持掩码表示不修改；输入新值则覆盖。"
-            : "密钥仅写入 credentials.log，不会进入 settings.log，也不会回传明文。"
-        }
+        hint={initial?.hasKey ? T.page.settings.provider.keyHintSaved : T.page.settings.provider.keyHintNew}
         hintBelow
         wide
       >
@@ -425,42 +545,98 @@ function ProviderEditor({
           <input className="input" placeholder="https://api.example.com/v1" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
         </Field>
       )}
-      <Field
-        label={T.page.settings.rows.model}
-        hint={tmpl.models.length > 0 ? "界面显示名称；后端发送 model_id" : "请直接填写 API model id，例如 gpt-4o"}
-        hintBelow
-        wide
-      >
-        {tmpl.models.length > 0 ? (
-          <select
-            className="select"
-            value={modelId || tmpl.models[0].model_id}
-            onChange={(e) => {
-              const next = e.target.value;
-              setModelId(next);
-              const opt = tmpl.models.find((m) => m.model_id === next);
-              if (opt) setDisplayName(opt.display_name);
-            }}
-          >
-            {tmpl.models.map((m) => (
-              <option key={m.model_id} value={m.model_id}>
-                {m.display_name} — {m.model_id}
-              </option>
+      {/* Stacked like the storage rows: a fetched list needs the full pane
+          width, not the 215px control column. */}
+      <Field label={T.page.settings.rows.model} block>
+        <div className="model-editor">
+          <div className="model-chips">
+            {models.map((m) => (
+              <span
+                key={m.model_id}
+                className={`model-chip${m.model_id.toLowerCase() === modelId.toLowerCase() ? " model-chip--active" : ""}`}
+              >
+                <button type="button" className="model-chip-label" onClick={() => selectModel(m)}>
+                  {/* Fetched lists usually repeat the id as the name — render one span. */}
+                  {m.display_name.toLowerCase() === m.model_id.toLowerCase() ? (
+                    <span className="model-chip-id">{m.model_id}</span>
+                  ) : (
+                    <>
+                      <span>{m.display_name}</span>
+                      <span className="model-chip-id">{m.model_id}</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="model-chip-remove"
+                  aria-label={T.page.settings.provider.remove(m.display_name)}
+                  onClick={() => removeModel(m)}
+                >
+                  ×
+                </button>
+              </span>
             ))}
-          </select>
-        ) : (
-          <input
-            className="input"
-            placeholder="model-id"
-            value={modelId}
-            onChange={(e) => {
-              setModelId(e.target.value);
-              setDisplayName(e.target.value);
-            }}
-          />
-        )}
+          </div>
+          <div className="model-toolbar">
+            {/* Only render the picker when something is actually addable —
+                an empty select is a dead control. */}
+            {available.length > 0 && (
+              <select className="select" value="" onChange={(e) => {
+                const id = e.target.value;
+                if (!id) return;
+                const option = available.find((m) => m.model_id === id);
+                if (option) addModel(option);
+              }}>
+                <option value="">{T.page.settings.provider.chooseFromList}</option>
+                {available.map((m) => (
+                  <option key={m.model_id} value={m.model_id}>
+                    {m.display_name} — {m.model_id}
+                  </option>
+                ))}
+              </select>
+            )}
+            <input
+              className="input"
+              placeholder={T.page.settings.provider.addPlaceholder}
+              value={pending}
+              onChange={(e) => setPending(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                addModel({ display_name: pending, model_id: pending });
+                setPending("");
+              }}
+            />
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                addModel({ display_name: pending, model_id: pending });
+                setPending("");
+              }}
+            >
+              {T.page.settings.provider.add}
+            </button>
+            <button type="button" className="icon-btn" aria-label={T.page.settings.provider.refresh} onClick={refresh}>
+              <RotateCw size={14} strokeWidth={1.8} />
+            </button>
+          </div>
+          <p
+            className={`model-status${fetchState === "error" ? " model-status--error" : ""}`}
+            role={fetchState === "error" ? "alert" : undefined}
+          >
+            {fetchState === "loading"
+              ? T.page.settings.provider.loading
+              : fetchState === "error"
+                ? fetchError
+                : models.length > 0
+                  ? T.page.settings.provider.modelHintCatalog
+                  : T.page.settings.provider.modelHintFree}
+          </p>
+        </div>
       </Field>
-      <div className="provider-row-actions" style={{ marginTop: 8 }}>
+      {/* No extra margin: the editor's column gap already spaces this row. */}
+      <div className="provider-row-actions">
         <button type="button" className="btn" onClick={onCancel}>
           {T.page.settings.rows.cancel}
         </button>
@@ -480,7 +656,7 @@ function ToolsBody() {
       <Field
         icon={<SquareTerminal size={20} strokeWidth={1.6} />}
         label={T.page.settings.rows.permissionMode}
-        hint="Shell、文件与 git 步骤共用此策略（写入 permission，由 run driver 读取）"
+        hint={T.page.settings.rows.permissionHint}
         hintBelow
         wide
       >
@@ -497,34 +673,6 @@ function ToolsBody() {
           ))}
         </select>
       </Field>
-      <Field icon={<FileText size={20} strokeWidth={1.6} />} label={T.page.settings.rows.fileWrite} hint="由 Permission mode 统一约束（同一 runtime key）" hintBelow wide>
-        <select
-          className="select"
-          value={permission}
-          onChange={(e) => setPermission(e.target.value)}
-          aria-label={T.page.settings.rows.fileWrite}
-        >
-          {PERMISSIONS.map((item) => (
-            <option key={item.value} value={item.value}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field icon={<GitBranch size={20} strokeWidth={1.6} />} label={T.page.settings.rows.gitAccess} hint="由 Permission mode 统一约束（同一 runtime key）" hintBelow wide>
-        <select
-          className="select"
-          value={permission}
-          onChange={(e) => setPermission(e.target.value)}
-          aria-label={T.page.settings.rows.gitAccess}
-        >
-          {PERMISSIONS.map((item) => (
-            <option key={item.value} value={item.value}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-      </Field>
     </>
   );
 }
@@ -534,12 +682,14 @@ function StorageBody({ onOpenArchive }: { onOpenArchive?: () => void }) {
     <>
       <Field
         label={T.page.settings.rows.localState}
-        hint="项目、会话与设置写入 settings.log（append-only）；API Key 在 credentials.log"
+        hint={T.page.settings.rows.localStateHint}
         hintBelow
         block
       >
         <p className="settings-hint">
-          macOS 目录：<code>~/Library/Application Support/Kodo</code>。不使用 SQLite；自动归档天数与导出将在后续版本接入。
+          {T.page.settings.rows.storageDirLabel}
+          <code>~/Library/Application Support/Kodo</code>
+          {T.page.settings.rows.storageNoteTail}
         </p>
       </Field>
       {onOpenArchive && (
@@ -559,7 +709,7 @@ function AppearanceBody() {
     <>
       <Field
         label={T.page.settings.rows.theme}
-        hint="写入 settings.log 并应用到 <html data-theme>；System 跟随系统深色偏好"
+        hint={T.page.settings.rows.themeHint}
         hintBelow
         wide
       >
@@ -568,35 +718,89 @@ function AppearanceBody() {
           <option value="system">{T.page.settings.options.system}</option>
         </select>
       </Field>
-      <Field label={T.page.settings.rows.density} hint="应用到 app 的 data-density" hintBelow wide>
+      <Field label={T.page.settings.rows.density} hint={T.page.settings.rows.densityHint} hintBelow wide>
         <select className="select" value={density} onChange={(e) => setDensity(e.target.value)}>
           <option value="compact">{T.page.settings.options.compact}</option>
           <option value="comfortable">{T.page.settings.options.comfortable}</option>
         </select>
       </Field>
-      <SwitchRow label={T.page.settings.rows.lineNumbers} hint="应用到 data-line-numbers 属性" trailing settingKey="show-line-numbers" />
-      <SwitchRow label={T.page.settings.rows.systemFont} hint="应用 app--system-font 类" trailing settingKey="use-system-font" />
+      <SwitchRow label={T.page.settings.rows.lineNumbers} hint={T.page.settings.rows.lineNumbersHint} trailing settingKey="show-line-numbers" />
+      <SwitchRow label={T.page.settings.rows.systemFont} hint={T.page.settings.rows.systemFontHint} trailing settingKey="use-system-font" />
     </>
+  );
+}
+
+/** Default-model control fed by the configured providers' model lists so the
+ *  control and the composer chip always name a model the backend can send.
+ *  With no providers yet (fresh install / demo route) it keeps the built-in
+ *  defaults — the control still writes `default-model`, a live runtime key. */
+function DefaultModelSelect({
+  model,
+  onSelectModel,
+}: {
+  model: string;
+  onSelectModel: (m: string) => void;
+}) {
+  const [providers, setProviders] = useState<ProviderConfig[]>([]);
+
+  useEffect(() => {
+    void loadProviders().then(setProviders);
+  }, []);
+
+  const known =
+    providers.length === 0
+      ? MODELS.some((name) => name.toLowerCase() === model.toLowerCase())
+      : providers.some((p) =>
+          p.models?.some(
+            (m) =>
+              m.model_id.toLowerCase() === model.toLowerCase() ||
+              m.display_name.toLowerCase() === model.toLowerCase(),
+          ),
+        );
+
+  return (
+    <select
+      className="select"
+      value={model}
+      aria-label={T.page.settings.rows.defaultModel}
+      onChange={(event) => onSelectModel(event.target.value)}
+    >
+      {providers.length === 0
+        ? MODELS.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))
+        : providers.map((p) => (
+            <optgroup key={p.id} label={p.name}>
+              {(p.models ?? []).map((m) => (
+                <option key={m.model_id} value={m.model_id}>
+                  {m.display_name} — {m.model_id}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+      {!known && model && <option value={model}>{model}</option>}
+    </select>
   );
 }
 
 function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m: string) => void }) {
   return (
     <>
-      <Field label={T.page.settings.rows.fallback} hint="所选模型不可用时" hintBelow wide>
+      <Field label={T.page.settings.rows.fallback} hint={T.page.settings.rows.fallbackHint} hintBelow wide>
         <FallbackSelect />
       </Field>
-      <Field label={T.page.settings.rows.defaultModel} hint="用于新会话" hintBelow wide>
-        <select className="select" value={model} onChange={(event) => onSelectModel(event.target.value)}>
-          {MODELS.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
+      <Field label={T.page.settings.rows.defaultModel} hint={T.page.settings.models.defaultModelHint} hintBelow wide>
+        <DefaultModelSelect model={model} onSelectModel={onSelectModel} />
       </Field>
-      <SwitchRow label={T.page.settings.rows.extendedThinking} hint="允许模型逐步思考" trailing settingKey="extended-thinking" />
-      <Field label={T.page.settings.rows.maxOutputTokens} hint="新会话的默认值" hintBelow wide>
+      <SwitchRow
+        label={T.page.settings.rows.extendedThinking}
+        hint={T.page.settings.rows.extendedThinkingHint}
+        trailing
+        settingKey="extended-thinking"
+      />
+      <Field label={T.page.settings.rows.maxOutputTokens} hint={T.page.settings.rows.maxTokensHint} hintBelow wide>
         <MaxTokens />
       </Field>
     </>
@@ -621,16 +825,10 @@ function MaxTokens() {
 function GeneralBody({ model, onSelectModel }: { model: string; onSelectModel: (m: string) => void }) {
   return (
     <>
-      <Field label={T.page.settings.rows.defaultModel} hint="用于新会话" hintBelow wide>
-        <select className="select" value={model} onChange={(event) => onSelectModel(event.target.value)}>
-          {MODELS.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
+      <Field label={T.page.settings.rows.defaultModel} hint={T.page.settings.models.defaultModelHint} hintBelow wide>
+        <DefaultModelSelect model={model} onSelectModel={onSelectModel} />
       </Field>
-      <Field label={T.page.settings.rows.fallback} hint="所选模型不可用时" hintBelow wide>
+      <Field label={T.page.settings.rows.fallback} hint={T.page.settings.rows.fallbackHint} hintBelow wide>
         <FallbackSelect />
       </Field>
     </>
@@ -655,7 +853,7 @@ function body(
       return (
         <SwitchRow
           label={T.page.settings.rows.autoGitBranch}
-          hint="在上下文中包含当前分支"
+          hint={T.page.settings.rows.projectsHint}
           trailing
           settingKey="auto-detect-git-branch"
         />

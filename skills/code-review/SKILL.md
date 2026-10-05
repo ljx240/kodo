@@ -1,5 +1,8 @@
 # Skill: code-review
 
+## description
+Review changes read-only and report findings backed by tool evidence.
+
 ## applicable_task_types
 - code-review
 
@@ -9,6 +12,10 @@ review-only
 ## allowed_tools
 - search
 - read_file
+- list_files
+- find_symbol
+- find_references
+- read_range
 - run_command
 
 ## verification_policy

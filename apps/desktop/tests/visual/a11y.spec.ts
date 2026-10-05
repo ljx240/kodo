@@ -178,7 +178,9 @@ test("reduced-motion disables transitions", async ({ page }) => {
     return { transition: style.transitionDuration, animation: style.animationDuration };
   });
   if (durations) {
-    // 0.01ms rule from prefers-reduced-motion; Chrome may report it as 1e-05s.
+    // Reduced motion collapses transitions to 0s (not the usual 0.01ms trick):
+    // mermaid measures node sizes synchronously, and any non-zero duration
+    // makes those reads return pre-transition values, breaking the layout.
     expect(durations.transition.split(",")[0].trim()).toMatch(
       /^0(\.0+)?s$|^0\.01ms$|^1e-0?5s$/,
     );
@@ -195,17 +197,28 @@ test("decorative muted is not used as informational body color on key text", asy
       return el ? getComputedStyle(el).color : null;
     };
     return {
-      time: pick(".msg-time"),
       duration: pick(".trace-duration"),
       empty: pick(".empty-note"),
-      brandTag: pick(".brand-tagline"),
+      brandCaret: pick(".brand-caret"),
     };
   });
 
   // Readable secondary #667085 → rgb(102, 112, 133); muted is #98a2b3.
   const readable = "rgb(102, 112, 133)";
-  if (colors.time) expect(colors.time).toBe(readable);
   if (colors.duration) expect(colors.duration).toBe(readable);
   if (colors.empty) expect(colors.empty).toBe(readable);
-  if (colors.brandTag) expect(colors.brandTag).toBe(readable);
+  if (colors.brandCaret) expect(colors.brandCaret).toBe(readable);
+});
+
+test("⌘K palette is an accessible dialog with a focusable input", async ({ page }) => {
+  await page.goto("/ui-demo/conversation");
+  await page.waitForLoadState("networkidle");
+
+  await page.keyboard.press("ControlOrMeta+k");
+  const dialog = page.locator('[role="dialog"][aria-modal="true"][aria-label="快速切换"]');
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('[data-testid="palette-input"]')).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
 });

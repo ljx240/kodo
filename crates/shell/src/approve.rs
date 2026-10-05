@@ -39,6 +39,17 @@ pub fn step_kind_label(kind: StepKind) -> &'static str {
         StepKind::ModelCall => "call model",
         StepKind::FileChange => "edit files",
         StepKind::AgentMessage => "draft answer",
+        StepKind::ExternalTool => "call external tool",
+        StepKind::WebSearch => "search the web",
+        // Transparency-side kinds never gate approval: they default to allow.
+        // The strings here exist only so the StepKind remains exhaustive at
+        // every callsite; the approval UI never sees these labels.
+        StepKind::Thinking => "model reasoning",
+        StepKind::Compaction => "compact history",
+        StepKind::Failover => "switch model",
+        StepKind::PlanStep => "plan step",
+        StepKind::Permission => "permission event",
+        StepKind::ContextBudget => "context budget",
     }
 }
 
@@ -55,6 +66,10 @@ mod tests {
         assert_eq!(
             approval_fingerprint(StepKind::FileChange, "src/main.rs"),
             "edit files::src/main.rs"
+        );
+        assert_eq!(
+            approval_fingerprint(StepKind::WebSearch, "tauri webview"),
+            "search the web::tauri webview"
         );
     }
 

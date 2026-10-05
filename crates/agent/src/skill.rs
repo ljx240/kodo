@@ -2,9 +2,10 @@
 //! Planner, Verifier, and tool gate — not a Markdown blob in the prompt.
 //!
 //! Skill files live at `skills/<name>/SKILL.md` and use section headers the
-//! parser understands (`## applicable_task_types`, `## workflow`, …). The six
+//! parser understands (`## applicable_task_types`, `## workflow`, …). The eight
 //! built-in skills are embedded via `include_str!` so the registry is
-//! available with zero filesystem I/O.
+//! available with zero filesystem I/O. User skills load from a caller-supplied
+//! directory ([`load_user_skills`]) — this crate never resolves paths itself.
 
 use std::path::Path;
 
@@ -29,6 +30,8 @@ pub enum ContextStrategy {
     ReviewOnly,
     /// Docs: lightweight docs-oriented context, no deep code packing.
     DocsFocused,
+    /// Work mode: general deliverables; light context, no repo-map depth.
+    WorkFocused,
 }
 
 impl ContextStrategy {
@@ -40,6 +43,7 @@ impl ContextStrategy {
             Self::MinimalChange => "minimal-change",
             Self::ReviewOnly => "review-only",
             Self::DocsFocused => "docs-focused",
+            Self::WorkFocused => "work-focused",
         }
     }
 
@@ -51,6 +55,7 @@ impl ContextStrategy {
             "minimal-change" => Some(Self::MinimalChange),
             "review-only" => Some(Self::ReviewOnly),
             "docs-focused" => Some(Self::DocsFocused),
+            "work-focused" => Some(Self::WorkFocused),
             _ => None,
         }
     }
@@ -60,6 +65,11 @@ impl ContextStrategy {
         match self {
             // Docs updates need a light touch: fewer, shorter spans.
             Self::DocsFocused => ContextBudget {
+                max_spans: 4,
+                ..ContextBudget::default()
+            },
+            // Work deliverables rarely need deep repo packing.
+            Self::WorkFocused => ContextBudget {
                 max_spans: 4,
                 ..ContextBudget::default()
             },
@@ -120,6 +130,9 @@ pub struct WorkflowStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillSpec {
     pub name: String,
+    /// One-line summary (`## description`). Parse falls back to the first
+    /// completion criterion; saving requires the explicit section.
+    pub description: String,
     pub applicable_task_types: Vec<TaskType>,
     pub context_strategy: ContextStrategy,
     pub allowed_tools: Vec<ToolName>,
@@ -138,6 +151,14 @@ impl SkillSpec {
     }
 
     pub fn allows_label(&self, label: &str) -> bool {
+        // External (MCP) tools (`mcp__*` wire names) pass the skill gate
+        // unconditionally: `allowed_tools` narrows **builtin** tools only —
+        // a skill never blocks a server tool the project configured. They are
+        // not free of oversight: every external call still goes through
+        // `Permission::needs_approval` (a skill can narrow, never widen).
+        if label.starts_with("mcp__") {
+            return true;
+        }
         ToolName::parse(label)
             .map(|t| self.allows(t))
             .unwrap_or(false)
@@ -160,8 +181,10 @@ impl SkillSpec {
         ))
     }
 
-    /// Registry visible to the model: only skill-allowed tools are advertised
-    /// (and therefore parseable) for this turn.
+    /// Registry visible to the model: only skill-allowed **builtin** tools are
+    /// advertised (and therefore parseable) for this turn. External (MCP)
+    /// tools pass through untouched — the allowlist never narrows them (see
+    /// `allows_label`).
     pub fn filter_registry(&self, registry: ToolRegistry) -> ToolRegistry {
         registry.filtered(|name| self.allows_label(name))
     }
@@ -189,7 +212,7 @@ impl SkillSpec {
 // Parser — section-based Markdown, no extra dependencies.
 // ---------------------------------------------------------------------------
 
-fn section_body<'a>(lines: &[&'a str], header: &str) -> Vec<&'a str> {
+pub(crate) fn section_body<'a>(lines: &[&'a str], header: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut inside = false;
     for line in lines {
@@ -215,12 +238,20 @@ fn bullets(body: &[&str]) -> Vec<String> {
         .collect()
 }
 
-fn single_line(body: &[&str]) -> String {
+pub(crate) fn single_line(body: &[&str]) -> String {
     body.iter()
         .map(|l| l.trim())
         .find(|l| !l.is_empty())
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Truncate on a char boundary (skill text is user-supplied UTF-8).
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    s.chars().take(max).collect()
 }
 
 fn parse_workflow(body: &[&str]) -> Result<Vec<WorkflowStep>, String> {
@@ -291,6 +322,18 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
         return Err(format!("skill `{name}` has no completion_criteria"));
     }
 
+    // Backward-tolerant: older skill files carry no `## description` — fall
+    // back to the first completion criterion so the field is never empty.
+    let description_raw = single_line(&section_body(&lines, "description"));
+    let description = if description_raw.is_empty() {
+        completion_criteria
+            .first()
+            .map(|c| truncate_chars(c.trim(), 120))
+            .unwrap_or_default()
+    } else {
+        description_raw
+    };
+
     let guidance = section_body(&lines, "guidance")
         .iter()
         .map(|l| l.trim())
@@ -300,6 +343,7 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
 
     Ok(SkillSpec {
         name,
+        description,
         applicable_task_types: task_types,
         context_strategy,
         allowed_tools,
@@ -320,26 +364,60 @@ pub struct SkillRegistry {
     skills: Vec<SkillSpec>,
 }
 
+/// Embedded built-in skill sources, keyed by name, in registry order.
+/// `select()` is first-match, so `workflow` (also applicable to `work` tasks)
+/// must stay **after** `work` — otherwise every Work task would silently
+/// switch skills. Guarded by the `workflow_registration_keeps_work_selectable`
+/// test.
+pub(crate) const BUILTIN_SOURCES: [(&str, &str); 8] = [
+    ("bug-fix", include_str!("../../../skills/bug-fix/SKILL.md")),
+    ("feature", include_str!("../../../skills/feature/SKILL.md")),
+    ("test", include_str!("../../../skills/test/SKILL.md")),
+    (
+        "refactor",
+        include_str!("../../../skills/refactor/SKILL.md"),
+    ),
+    (
+        "code-review",
+        include_str!("../../../skills/code-review/SKILL.md"),
+    ),
+    ("docs", include_str!("../../../skills/docs/SKILL.md")),
+    ("work", include_str!("../../../skills/work/SKILL.md")),
+    (
+        "workflow",
+        include_str!("../../../skills/workflow/SKILL.md"),
+    ),
+];
+
+/// Embedded Markdown for a built-in skill — the read-only preview source.
+pub fn builtin_markdown(name: &str) -> Option<&'static str> {
+    BUILTIN_SOURCES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, src)| *src)
+}
+
 impl SkillRegistry {
-    /// The six built-in skills, embedded at compile time.
+    /// The eight built-in skills, embedded at compile time.
     pub fn builtin() -> Self {
-        const SOURCES: [&str; 6] = [
-            include_str!("../../../skills/bug-fix/SKILL.md"),
-            include_str!("../../../skills/feature/SKILL.md"),
-            include_str!("../../../skills/test/SKILL.md"),
-            include_str!("../../../skills/refactor/SKILL.md"),
-            include_str!("../../../skills/code-review/SKILL.md"),
-            include_str!("../../../skills/docs/SKILL.md"),
-        ];
-        let skills = SOURCES
+        let skills = BUILTIN_SOURCES
             .iter()
-            .map(|src| parse_skill(src).expect("built-in SKILL.md must parse"))
+            .map(|(_, src)| parse_skill(src).expect("built-in SKILL.md must parse"))
             .collect();
         Self { skills }
     }
 
     pub fn from_skills(skills: Vec<SkillSpec>) -> Self {
         Self { skills }
+    }
+
+    /// Builtins first, extra skills appended (project then user in
+    /// `build_skill_registry`): `select()`'s first-match fallback always lands
+    /// on a builtin; `get(name)` (the chip path) reaches extras too and is
+    /// first-match, so earlier extras shadow later ones on a name collision.
+    pub fn with_user(mut self, user: Vec<SkillSpec>) -> Self {
+        self.skills.extend(user);
+        self
     }
 
     /// Pick the skill whose `applicable_task_types` contains `task_type`.
@@ -356,6 +434,116 @@ impl SkillRegistry {
     pub fn skills(&self) -> &[SkillSpec] {
         &self.skills
     }
+}
+
+// ---------------------------------------------------------------------------
+// User skill store — flat `<dir>/<name>.md`. The directory is always supplied
+// by the caller (`RunRequest.user_skills_dir` / the Tauri `skills_dir()`):
+// this crate has no core dependency and must stay hermetic in tests.
+// ---------------------------------------------------------------------------
+
+/// Chip ids and file stems: `[A-Za-z0-9_-]{1,64}`.
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn is_builtin_name(name: &str) -> bool {
+    BUILTIN_SOURCES.iter().any(|(n, _)| *n == name)
+}
+
+/// Load every usable `*.md` in `dir`. Missing dir → empty. Files are skipped
+/// when they fail [`parse_skill`], the stem or the `# Skill:` title violates
+/// the name rules, the name collides with a builtin, or a name already loaded
+/// (first wins). Entries are sorted by file name so loading is deterministic.
+pub fn load_user_skills(dir: &Path) -> Vec<SkillSpec> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "md"))
+        .collect();
+    paths.sort();
+    let mut out: Vec<SkillSpec> = Vec::new();
+    for path in paths {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !valid_skill_name(stem) {
+            continue;
+        }
+        let Ok(markdown) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(spec) = parse_skill(&markdown) else {
+            continue;
+        };
+        // Layout invariant: file name = chip id = spec.name (save enforces it;
+        // tolerate no drift on load so chip lookup can't miss).
+        if spec.name != stem || is_builtin_name(&spec.name) {
+            continue;
+        }
+        if out.iter().any(|s| s.name == spec.name) {
+            continue;
+        }
+        out.push(spec);
+    }
+    out
+}
+
+/// Validate and write one user skill to `dir/<name>.md`. The `# Skill:` title
+/// must equal `name` so the chip id, the file name and the parsed name agree.
+/// Errors are zh-CN for direct display in the UI.
+pub fn save_user_skill(dir: &Path, name: &str, markdown: &str) -> Result<SkillSpec, String> {
+    if !valid_skill_name(name) {
+        return Err(format!(
+            "技能名无效 `{name}`：仅限字母、数字、- 和 _，最多 64 字符"
+        ));
+    }
+    if is_builtin_name(name) {
+        return Err(format!("`{name}` 是内置技能名，请换一个名称"));
+    }
+    let spec = parse_skill(markdown)?;
+    if spec.name != name {
+        return Err(format!(
+            "技能标题 `# Skill: {}` 与名称 `{name}` 不一致",
+            spec.name
+        ));
+    }
+    // Save is strict where parse is tolerant: new user skills must carry an
+    // explicit `## description` (the editor template includes it).
+    if single_line(&section_body(
+        &markdown.lines().collect::<Vec<_>>(),
+        "description",
+    ))
+    .is_empty()
+    {
+        return Err("技能缺少 `## description` 一行描述".to_owned());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{name}.md")), markdown).map_err(|e| e.to_string())?;
+    Ok(spec)
+}
+
+/// Remove `dir/<name>.md`. Builtins and invalid names are rejected; a missing
+/// file is `技能不存在` (the UI already removed the row — not fatal).
+pub fn delete_user_skill(dir: &Path, name: &str) -> Result<(), String> {
+    if !valid_skill_name(name) {
+        return Err(format!("技能名无效 `{name}`"));
+    }
+    if is_builtin_name(name) {
+        return Err(format!("内置技能 `{name}` 不可删除"));
+    }
+    let path = dir.join(format!("{name}.md"));
+    if !path.exists() {
+        return Err("技能不存在".to_owned());
+    }
+    std::fs::remove_file(path).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -375,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_registry_covers_all_six_task_types() {
+    fn builtin_registry_covers_all_task_types() {
         let reg = registry();
         for kind in TaskType::ALL {
             let skill = reg
@@ -383,7 +571,46 @@ mod tests {
                 .unwrap_or_else(|| panic!("no skill for {kind}"));
             assert!(skill.applicable_task_types.contains(&kind));
         }
-        assert_eq!(reg.skills().len(), 6);
+        assert_eq!(reg.skills().len(), 8);
+    }
+
+    #[test]
+    fn workflow_registration_keeps_work_selectable() {
+        // `select()` is first-match and both work + workflow declare the Work
+        // task type: workflow must be registered after work or every plain
+        // Work task would silently switch skills.
+        let reg = registry();
+        assert_eq!(reg.select(TaskType::Work).unwrap().name, "work");
+        assert!(reg.get("workflow").is_some());
+        assert!(builtin_markdown("workflow").is_some_and(|s| s.contains("# Skill: workflow")));
+        assert!(builtin_markdown("nope").is_none());
+    }
+
+    #[test]
+    fn workflow_allowlist_is_exactly_the_work_row_of_the_mode_matrix() {
+        // Same invariant as the work skill: the workflow skill must not be
+        // load-bearing for work-mode tool availability (DESIGN.md §11).
+        let skill = registry()
+            .get("workflow")
+            .expect("workflow builtin")
+            .clone();
+        let skill_names: std::collections::BTreeSet<&str> =
+            skill.allowed_tools.iter().map(|t| t.label()).collect();
+        let matrix = ToolRegistry::for_mode(crate::AgentMode::Work, true);
+        let matrix_names: std::collections::BTreeSet<&str> =
+            matrix.definitions().iter().map(|d| d.name).collect();
+        assert_eq!(skill_names, matrix_names);
+        assert_eq!(skill.verification_policy, VerificationPolicy::None);
+    }
+
+    #[test]
+    fn workflow_plan_is_deliverable_bar_without_verify() {
+        use crate::plan::TaskPlan;
+        let reg = registry();
+        let skill = reg.get("workflow").expect("workflow builtin");
+        let plan = TaskPlan::from_skill(skill, "批量整理这批文件");
+        assert!(plan.deliverable_bar, "work-family skill carries the bar");
+        assert!(!plan.requires_verify, "verification_policy none");
     }
 
     #[test]
@@ -391,6 +618,7 @@ mod tests {
         let reg = registry();
         for skill in reg.skills() {
             assert!(!skill.name.is_empty());
+            assert!(!skill.description.is_empty());
             assert!(!skill.allowed_tools.is_empty());
             assert!(!skill.workflow.is_empty());
             assert!(!skill.completion_criteria.is_empty());
@@ -474,6 +702,84 @@ mod tests {
     }
 
     #[test]
+    fn work_skill_allows_files_but_never_symbol_tools_or_verify() {
+        let skill = skill_of(TaskType::Work);
+        for tool in [
+            ToolName::WriteFile,
+            ToolName::CreateFile,
+            ToolName::ApplyPatch,
+            ToolName::ReplaceRange,
+            ToolName::DeleteFile,
+            ToolName::RunCommand,
+            ToolName::Search,
+            ToolName::ReadFile,
+        ] {
+            assert!(skill.allows(tool), "work must allow {}", tool.label());
+        }
+        for tool in [
+            ToolName::FindSymbol,
+            ToolName::FindReferences,
+            ToolName::ReadRange,
+        ] {
+            assert!(!skill.allows(tool), "work must not allow {}", tool.label());
+        }
+        assert_eq!(skill.verification_policy, VerificationPolicy::None);
+        let reg = skill.filter_registry(ToolRegistry::standard());
+        assert!(reg.find("write_file").is_some());
+        assert!(reg.find("find_symbol").is_none());
+        assert!(reg.find("find_references").is_none());
+    }
+
+    #[test]
+    fn work_allowlist_is_exactly_the_work_row_of_the_mode_matrix() {
+        // The work skill must not be load-bearing for the matrix (DESIGN.md
+        // §11): if these drift, work-mode tool availability would depend on
+        // skill contents instead of the explicit ToolRegistry::for_mode row.
+        let skill = skill_of(TaskType::Work);
+        let skill_names: std::collections::BTreeSet<&str> =
+            skill.allowed_tools.iter().map(|t| t.label()).collect();
+        let matrix = ToolRegistry::for_mode(crate::AgentMode::Work, true);
+        let matrix_names: std::collections::BTreeSet<&str> =
+            matrix.definitions().iter().map(|d| d.name).collect();
+        assert_eq!(skill_names, matrix_names);
+    }
+
+    #[test]
+    fn code_skills_advertise_symbol_tools() {
+        // The system prompt tells the coding agent to navigate with
+        // find_symbol / find_references / read_range — the code skills'
+        // allowlists must actually keep them in the advertised registry.
+        for kind in [
+            TaskType::BugFix,
+            TaskType::Feature,
+            TaskType::Test,
+            TaskType::Refactor,
+            TaskType::CodeReview,
+            TaskType::Docs,
+        ] {
+            let skill = skill_of(kind);
+            for tool in [
+                ToolName::FindSymbol,
+                ToolName::FindReferences,
+                ToolName::ReadRange,
+                ToolName::ListFiles,
+            ] {
+                assert!(
+                    skill.allows(tool),
+                    "{kind} must allow {} for code navigation",
+                    tool.label()
+                );
+            }
+            let reg = skill.filter_registry(ToolRegistry::standard());
+            assert!(
+                reg.find("find_symbol").is_some(),
+                "{kind} keeps find_symbol"
+            );
+            assert!(reg.find("read_range").is_some(), "{kind} keeps read_range");
+        }
+    }
+
+    #[test]
     fn gate_rejects_disallowed_tool_with_permission_denied_code() {
         let skill = skill_of(TaskType::CodeReview);
         let denied = skill
@@ -488,6 +794,32 @@ mod tests {
         assert!(skill
             .gate(ToolCallId::new("g2"), "read_file", "src/lib.rs")
             .is_none());
+    }
+
+    #[test]
+    fn gate_always_passes_external_mcp_labels() {
+        // `mcp__*` is outside the builtin allowlist by design: external tools
+        // are never narrowed by a skill — Permission still governs them.
+        let skill = skill_of(TaskType::CodeReview);
+        assert!(!skill.allowed_tools.is_empty(), "fixture must have an allowlist");
+        assert!(skill.allows_label("mcp__fake__echo"));
+        assert!(skill
+            .gate(ToolCallId::new("m1"), "mcp__fake__echo", "{}")
+            .is_none());
+        // Unknown non-external labels still fall through to rejection.
+        assert!(!skill.allows_label("drop_database"));
+        // filter_registry keeps externals while narrowing builtins.
+        let reg = skill.filter_registry(
+            crate::protocol::ToolRegistry::standard().with_externals(vec![
+                crate::protocol::ExternalToolDef {
+                    name: "mcp__fake__echo".to_owned(),
+                    description: "echo".to_owned(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                },
+            ]),
+        );
+        assert_eq!(reg.external_definitions().len(), 1);
+        assert!(reg.find_external("mcp__fake__echo").is_some());
     }
 
     #[test]
@@ -580,5 +912,157 @@ mod tests {
         let docs = skill_of(TaskType::Docs);
         let bug = skill_of(TaskType::BugFix);
         assert!(docs.context_strategy.budget().max_spans < bug.context_strategy.budget().max_spans);
+    }
+
+    // -----------------------------------------------------------------------
+    // User skill store
+    // -----------------------------------------------------------------------
+
+    /// Fresh temp dir per test (name-scoped so parallel tests never collide).
+    fn temp_store(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("kodo_user_skills_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    const USER_MD: &str = "# Skill: my-notes\n\
+        ## description\nSummarize materials into short notes.\n\
+        ## applicable_task_types\n- work\n\
+        ## context_strategy\nwork-focused\n\
+        ## allowed_tools\n- read_file\n\
+        ## verification_policy\nnone\n\
+        ## workflow\n- s1 | read | Read the input\n\
+        ## completion_criteria\n- The notes are complete\n\
+        ## guidance\nKeep it short.\n";
+
+    /// Same skill without `## description` (the pre-description on-disk shape).
+    const USER_MD_NO_DESC: &str = "# Skill: my-notes\n\
+        ## applicable_task_types\n- work\n\
+        ## context_strategy\nwork-focused\n\
+        ## allowed_tools\n- read_file\n\
+        ## verification_policy\nnone\n\
+        ## workflow\n- s1 | read | Read the input\n\
+        ## completion_criteria\n- The notes are complete\n\
+        ## guidance\nKeep it short.\n";
+
+    #[test]
+    fn description_falls_back_to_first_criterion() {
+        let spec = parse_skill(USER_MD_NO_DESC).expect("legacy shape still parses");
+        assert_eq!(spec.description, "The notes are complete");
+        let spec = parse_skill(USER_MD).expect("explicit description");
+        assert_eq!(spec.description, "Summarize materials into short notes.");
+        // Long criterion truncates to 120 chars.
+        let mut long_criterion = String::from("- ");
+        long_criterion.push_str(&"x".repeat(200));
+        let long = USER_MD_NO_DESC.replace("- The notes are complete", &long_criterion);
+        let spec = parse_skill(&long).expect("long criterion");
+        assert_eq!(spec.description.chars().count(), 120);
+    }
+
+    #[test]
+    fn save_user_skill_requires_explicit_description() {
+        let dir = temp_store("desc");
+        let err = save_user_skill(&dir, "my-notes", USER_MD_NO_DESC)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("description"), "got: {err}");
+        // Legacy file on disk still loads (parse is tolerant).
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join("my-notes.md"), USER_MD_NO_DESC).expect("write");
+        let loaded = load_user_skills(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].description, "The notes are complete");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_user_skill_round_trips_and_enforces_invariants() {
+        let dir = temp_store("roundtrip");
+        let spec = save_user_skill(&dir, "my-notes", USER_MD).expect("save");
+        assert_eq!(spec.name, "my-notes");
+        assert!(dir.join("my-notes.md").exists());
+        let loaded = load_user_skills(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "my-notes");
+
+        // Bad charset / builtin collision / title mismatch are refused.
+        assert!(save_user_skill(&dir, "bad name!", USER_MD).is_err());
+        assert!(save_user_skill(&dir, "work", USER_MD)
+            .unwrap_err()
+            .contains("内置"));
+        let wrong_title = USER_MD.replace("my-notes", "other-name");
+        assert!(save_user_skill(&dir, "my-notes", &wrong_title)
+            .unwrap_err()
+            .contains("不一致"));
+        assert!(save_user_skill(&dir, "nope", "not a skill").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_user_skills_skips_unusable_files() {
+        let dir = temp_store("skip");
+        std::fs::create_dir_all(&dir).expect("dir");
+        // File name = chip id = `# Skill:` title (the save() invariant).
+        std::fs::write(dir.join("my-notes.md"), USER_MD).expect("good");
+        std::fs::write(dir.join("broken.md"), "no title").expect("broken");
+        // Stem ≠ title: chip id would miss on lookup — skipped.
+        std::fs::write(dir.join("other-name.md"), USER_MD).expect("mismatch");
+        // Builtin collision (stem AND title = builtin name): must never
+        // shadow an embedded skill.
+        std::fs::write(dir.join("work.md"), USER_MD.replace("my-notes", "work")).expect("builtin");
+        // Bad stem charset.
+        std::fs::write(dir.join("bad name.md"), USER_MD).expect("bad stem");
+        // Non-markdown files ignored.
+        std::fs::write(dir.join("readme.txt"), USER_MD).expect("txt");
+
+        let loaded = load_user_skills(&dir);
+        assert_eq!(loaded.len(), 1, "only my-notes.md loads: {:?}", loaded);
+        assert_eq!(loaded[0].name, "my-notes");
+
+        assert!(load_user_skills(&dir.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_user_skill_removes_only_user_files() {
+        let dir = temp_store("delete");
+        save_user_skill(&dir, "my-notes", USER_MD).expect("save");
+        assert!(delete_user_skill(&dir, "my-notes").is_ok());
+        assert!(!dir.join("my-notes.md").exists());
+        assert!(delete_user_skill(&dir, "my-notes")
+            .unwrap_err()
+            .contains("不存在"));
+        assert!(delete_user_skill(&dir, "work")
+            .unwrap_err()
+            .contains("内置"));
+        assert!(delete_user_skill(&dir, "bad name").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_user_appends_after_builtins_without_hijacking_select() {
+        let user = parse_skill(USER_MD).expect("user spec");
+        let reg = SkillRegistry::builtin().with_user(vec![user]);
+        assert_eq!(reg.skills().len(), 9);
+        // select() first-match still lands on builtins…
+        assert_eq!(reg.select(TaskType::Work).unwrap().name, "work");
+        // …while get() reaches the user skill (the chip path).
+        assert!(reg.get("my-notes").is_some());
+        assert!(SkillRegistry::builtin().get("my-notes").is_none());
+    }
+
+    #[test]
+    fn earlier_extras_shadow_later_ones_on_name_collision() {
+        // build_skill_registry appends project before user: the project copy
+        // wins `get()` (chip path) deterministically.
+        let project = parse_skill(
+            &USER_MD.replace("Summarize materials into short notes.", "Project copy."),
+        )
+        .expect("project spec");
+        let user = parse_skill(USER_MD).expect("user spec");
+        let reg = SkillRegistry::builtin().with_user(vec![project]).with_user(vec![user]);
+        let hit = reg.get("my-notes").expect("collision resolves");
+        assert_eq!(hit.description, "Project copy.");
     }
 }

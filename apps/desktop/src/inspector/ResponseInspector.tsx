@@ -4,6 +4,7 @@ import { turnChanges, undoTurn, type TurnChangeDto } from "../api";
 import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
 import { changesFromReply, commandsFromTurn, llmFromTurn, toolsFromTurn } from "../data/liveContext";
+import { DiffRows } from "../conversation/diff";
 import { formatDuration, type OutcomeStatus, type Reply, type RunStatus } from "../conversation/trace";
 import { T } from "../i18n";
 import { FileRow, MetaRow, Section, ToolRow } from "./Section";
@@ -120,22 +121,22 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
     setUndoing(true);
     undoTurn(projectPath, sessionId)
       .then((report) => {
-        if (!report) {
-          setMessage(T.files.undoConflict);
-          return;
-        }
+        // An empty (or missing) report is "nothing to undo" — never claim
+        // "已撤销" when no file was restored.
+        const restored = report?.restored ?? [];
+        const conflicts = report?.conflicts ?? [];
         const parts: string[] = [];
-        if (report.restored.length) {
+        if (restored.length) {
           parts.push(T.files.undoDone);
         }
-        if (report.conflicts.length) {
-          const details = report.conflicts
+        if (conflicts.length) {
+          const details = conflicts
             .map((c) => `${c.path}（${c.reason}）`)
             .join("、");
-          parts.push(`${T.files.conflictCount(report.conflicts.length)}：${details} — ${T.files.undoSafe}`);
+          parts.push(`${T.files.conflictCount(conflicts.length)}：${details} — ${T.files.undoSafe}`);
         }
         if (!parts.length) {
-          parts.push(T.files.undoDone);
+          parts.push(T.files.undoNothing);
         }
         setMessage(parts.join(" · "));
         reload();
@@ -197,11 +198,18 @@ function LiveDiffPanel({ sessionId, projectPath }: { sessionId: string; projectP
                 {T.files.undoConflict}
               </p>
             )}
-            {open === change.path && (
-              <pre className="terminal-block diff-block" data-testid={`diff-body-${change.path}`}>
-                {change.diff || T.tokens.pending}
-              </pre>
-            )}
+            {open === change.path &&
+              (change.diff ? (
+                <DiffRows
+                  diff={change.diff}
+                  className="terminal-block diff-block"
+                  testid={`diff-body-${change.path}`}
+                />
+              ) : (
+                <pre className="terminal-block diff-block" data-testid={`diff-body-${change.path}`}>
+                  {T.tokens.pending}
+                </pre>
+              ))}
           </div>
         ))}
         {message && (
@@ -239,7 +247,8 @@ export function SummarySection({
   onShowAllFiles,
 }: InspectorData & { onShowAllFiles?: () => void }) {
   const [showFailures, setShowFailures] = useState(false);
-  const fixture = demo ? demoState?.conversation : undefined;
+  // Demo Inspector sections keep describing turn 1's recording.
+  const fixture = demo ? demoState?.conversation.turns[0] : undefined;
 
   if (!demo && live) {
     const reply = live.reply;
@@ -484,7 +493,7 @@ export function CurrentProjectSection({ demo, demoState, live }: InspectorData) 
 export function TerminalSection({ demo, demoState, live }: InspectorData) {
   const runs = !demo
     ? commandsFromTurn(live?.turn ?? null)
-    : (demoState?.conversation.assistant.trace ?? [])
+    : (demoState?.conversation.turns[0].assistant.trace ?? [])
         .filter((step) => step.output)
         .map((step) => ({ command: step.chip || step.label, output: step.output || "" }));
   return (

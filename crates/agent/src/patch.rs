@@ -161,7 +161,7 @@ pub fn apply_patch(project: &Path, args: &ApplyPatchArgs) -> Result<PatchOutcome
             let (added, removed) = line_diff_counts(&old_content, &new_content);
             write_checked(&full, &new_content)?;
             Ok(PatchOutcome {
-                path: args.path.clone(),
+                path: args.path.trim().to_owned(),
                 added,
                 removed,
                 summary: format!("patched {} (+{added} -{removed})", args.path),
@@ -249,7 +249,7 @@ pub fn replace_range(project: &Path, args: &ReplaceRangeArgs) -> Result<PatchOut
     let (added, removed) = line_diff_counts(&old_content, &new_content);
     write_checked(&full, &new_content)?;
     Ok(PatchOutcome {
-        path: args.path.clone(),
+        path: args.path.trim().to_owned(),
         added,
         removed,
         summary: format!(
@@ -280,7 +280,7 @@ pub fn create_file(project: &Path, path: &str, content: &str) -> Result<PatchOut
     fs::write(&full, content).map_err(|e| ToolError::execution(e.to_string()))?;
     let added = content.lines().count() as u32;
     Ok(PatchOutcome {
-        path: path.to_owned(),
+        path: path.trim().to_owned(),
         added,
         removed: 0,
         summary: format!("created {path} (+{added})"),
@@ -304,7 +304,7 @@ pub fn delete_file(project: &Path, path: &str) -> Result<PatchOutcome, ToolError
     let removed = old.lines().count() as u32;
     fs::remove_file(&full).map_err(|e| ToolError::execution(e.to_string()))?;
     Ok(PatchOutcome {
-        path: path.to_owned(),
+        path: path.trim().to_owned(),
         added: 0,
         removed,
         summary: format!("deleted {path} (-{removed})"),

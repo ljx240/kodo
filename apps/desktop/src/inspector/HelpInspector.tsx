@@ -1,5 +1,6 @@
-import { Database, FolderOpen, Info, SquareArrowOutUpRight, Zap } from "lucide-react";
+import { Database, FolderOpen, Info, Keyboard, SquareArrowOutUpRight, Zap } from "lucide-react";
 import type { ReactNode } from "react";
+import { T } from "../i18n";
 
 /** Static help card — no chevron: a disclosure glyph with no toggle would be a dead affordance. */
 function HelpCard({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
@@ -18,13 +19,13 @@ function HelpCard({ icon, title, children }: { icon: ReactNode; title: string; c
 export function HelpOverview() {
   return (
     <>
-      <HelpCard icon={<Info size={14} strokeWidth={1.7} />} title="About archive">
+      <HelpCard icon={<Info size={14} strokeWidth={1.7} />} title={T.inspector.helpAbout}>
         <p className="ins-note">
           归档会话会从侧边栏隐藏，但日志文件仍完整保留。可在 Archive 页通过 Inspector 恢复。
         </p>
       </HelpCard>
 
-      <HelpCard icon={<Database size={14} strokeWidth={1.7} />} title="Where your data is stored">
+      <HelpCard icon={<Database size={14} strokeWidth={1.7} />} title={T.inspector.helpStorage}>
         <p className="ins-note">
           项目列表、会话与设置使用本机 append-only 日志（macOS：
           <code>~/Library/Application Support/Kodo</code>）。API Key 单独存放在 credentials.log（权限 0600），
@@ -32,24 +33,28 @@ export function HelpOverview() {
         </p>
       </HelpCard>
 
-      <HelpCard icon={<Zap size={14} strokeWidth={1.7} />} title="Quick actions">
+      <HelpCard icon={<Zap size={14} strokeWidth={1.7} />} title={T.inspector.helpActions}>
         <div className="quick-action">
           <FolderOpen size={15} strokeWidth={1.7} />
           <span>
-            <span className="quick-title">Local data directory</span>
+            <span className="quick-title">{T.inspector.helpDataDir}</span>
             <span className="quick-sub">~/Library/Application Support/Kodo</span>
           </span>
         </div>
         <div className="quick-action">
           <SquareArrowOutUpRight size={15} strokeWidth={1.7} />
           <span>
-            <span className="quick-title">Open documentation</span>
-            <span className="quick-sub">See README in the repository</span>
+            <span className="quick-title">{T.inspector.helpDocs}</span>
+            <span className="quick-sub">{T.inspector.helpDocsSub}</span>
           </span>
         </div>
       </HelpCard>
 
-      <HelpCard icon={<Info size={14} strokeWidth={1.7} />} title="Need more help?">
+      <HelpCard icon={<Keyboard size={14} strokeWidth={1.7} />} title={T.inspector.helpShortcuts}>
+        <p className="ins-note">{T.inspector.helpShortcutsBody}</p>
+      </HelpCard>
+
+      <HelpCard icon={<Info size={14} strokeWidth={1.7} />} title={T.inspector.helpMore}>
         <p className="ins-note">查看仓库 README 与 docs/design/，默认权限为「请求批准」。</p>
       </HelpCard>
     </>

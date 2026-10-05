@@ -1,5 +1,8 @@
 # Skill: bug-fix
 
+## description
+Reproduce a failure, find the root cause, apply a minimal fix, and verify with regression tests.
+
 ## applicable_task_types
 - bug-fix
 
@@ -9,6 +12,10 @@ repro-first
 ## allowed_tools
 - search
 - read_file
+- list_files
+- find_symbol
+- find_references
+- read_range
 - run_command
 - write_file
 - apply_patch

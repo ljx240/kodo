@@ -145,19 +145,25 @@ export function MenuItem({
   label,
   hint,
   danger,
+  selected,
+  testId,
   onSelect,
 }: {
   icon: ReactNode;
   label: string;
   hint?: string;
   danger?: boolean;
+  /** The current choice in a selection menu — tinted row, check carried by icon. */
+  selected?: boolean;
+  testId?: string;
   onSelect: () => void;
 }) {
   return (
     <button
       type="button"
       role="menuitem"
-      className={`menu-item${danger ? " menu-item--danger" : ""}`}
+      className={`menu-item${danger ? " menu-item--danger" : ""}${selected ? " menu-item--selected" : ""}`}
+      data-testid={testId}
       onClick={onSelect}
     >
       {icon}

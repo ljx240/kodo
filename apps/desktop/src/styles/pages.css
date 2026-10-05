@@ -406,6 +406,486 @@
 
 .settings-modal-panel .page-head { height: 64px; }
 
+/* ----------------------------------------------------------- file viewer -- */
+/* Codex-style browser: tree left, 完整文件 / 变更 right. Panel body only —
+   it fills the Inspector's .ins-content--flush (no modal shell since 2026-10). */
+
+.fv {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--kodo-canvas);
+}
+
+/* Compact (narrow window or narrow panel): the tree folds behind a drawer
+   toggle in the header; opening it overlays the content column. */
+.fv--compact .fv-tree {
+  display: none;
+}
+
+.fv--compact.fv--tree-open .fv-tree {
+  display: block;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 5;
+  width: 260px;
+  box-shadow: 6px 0 18px rgb(0 0 0 / 14%);
+}
+
+.fv-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 0 12px 0 18px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.fv-title {
+  flex: none;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+}
+
+.fv-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+}
+
+.fv-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.fv-tree {
+  flex: none;
+  width: 240px;
+  overflow-y: auto;
+  padding: 10px 0 14px;
+  border-right: 1px solid var(--kodo-border);
+  background: var(--kodo-sidebar);
+}
+
+.fv-tree-head {
+  margin: 0;
+  padding: 4px 14px 8px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  font-weight: 600;
+}
+
+.fv-filter-bar {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px 8px;
+}
+
+.fv-filter {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-sm);
+}
+
+.fv-filter::placeholder { color: var(--kodo-text-muted); }
+
+.fv-only-changed {
+  flex: none;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.fv-only-changed:hover { background: var(--kodo-hover); }
+
+.fv-only-changed--on {
+  border-color: transparent;
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+.fv-tree-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fv-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  padding-right: 10px;
+  border: 0;
+  background: none;
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.fv-tree-row:hover { background: var(--kodo-hover); }
+
+.fv-tree-file--active {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+.fv-tree-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fv-tree-delta {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--kodo-font-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fv-caret {
+  flex: none;
+  color: var(--kodo-text-muted);
+  transition: transform 120ms ease;
+}
+
+.fv-caret--open { transform: rotate(90deg); }
+
+.fv-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fv-tabs {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.fv-tab {
+  padding: 6px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  cursor: pointer;
+}
+
+.fv-tab--active {
+  border-bottom-color: var(--kodo-accent);
+  color: var(--kodo-text);
+}
+
+.fv-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--kodo-canvas);
+}
+
+.fv-note {
+  margin: 0;
+  padding: 18px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.fv-note--error { color: var(--kodo-error); }
+
+.fv-code {
+  margin: 0;
+  padding: 10px 0;
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.55;
+}
+
+.viewer-line {
+  display: flex;
+  gap: 12px;
+  padding: 0 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.viewer-line.is-add {
+  background: var(--kodo-success-bg-soft);
+  color: var(--kodo-success-text);
+}
+
+.viewer-line.is-del {
+  background: var(--kodo-error-bg);
+  color: var(--kodo-error);
+}
+
+.viewer-ln {
+  flex: none;
+  width: 36px;
+  color: var(--kodo-text-muted);
+  text-align: right;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.viewer-text { min-width: 0; }
+
+.viewer-line-inner {
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.viewer-line--wide {
+  padding: 0;
+}
+
+/* --------------------------------------------------------- diff extras -- */
+
+.fv-diff-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.fv-diff-stats {
+  font-size: var(--kodo-font-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fv-mode {
+  display: flex;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  overflow: hidden;
+}
+
+.fv-mode-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  background: var(--kodo-canvas);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  cursor: pointer;
+}
+
+.fv-mode-btn + .fv-mode-btn { border-left: 1px solid var(--kodo-border); }
+
+.fv-mode-btn--active {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+.fv-fold {
+  display: block;
+  width: 100%;
+  padding: 3px 14px;
+  border: 0;
+  border-top: 1px solid var(--kodo-border-subtle);
+  border-bottom: 1px solid var(--kodo-border-subtle);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.fv-fold:hover {
+  background: var(--kodo-hover);
+  color: var(--kodo-accent);
+}
+
+.viewer-line.is-hunk {
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+}
+
+.viewer-line--split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  padding: 0;
+  white-space: normal;
+}
+
+.viewer-half {
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+  padding: 0 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.viewer-half + .viewer-half { border-left: 1px solid var(--kodo-border); }
+
+/* ------------------------------------------------------------ preview -- */
+
+.fv-preview {
+  padding: 16px 20px;
+}
+
+.fv-preview--html {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  padding-bottom: 0;
+}
+
+.fv-preview-note {
+  margin: 0;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-xs);
+}
+
+.fv-preview-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+}
+
+/* ------------------------------------------------------ kind preview -- */
+
+.fv-tree-icon {
+  flex: none;
+  color: var(--kodo-text-muted);
+}
+
+.fv-tree-file--active .fv-tree-icon { color: var(--kodo-accent); }
+
+.fv-preview--image {
+  display: flex;
+  width: 100%;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.fv-preview-img {
+  max-width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+}
+
+.fv-kind-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.fv-kind-figure { line-height: 0; }
+
+.fv-kind-badge {
+  padding: 2px 7px;
+  border-radius: 4px;
+  color: #ffffff;
+  font-size: var(--kodo-font-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.fv-kind-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+}
+
+.fv-kind-size {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------- csv grid -- */
+
+.fv-csv-wrap {
+  height: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  overflow: auto;
+}
+
+.fv-csv {
+  border-collapse: collapse;
+  font-size: var(--kodo-font-sm);
+}
+
+.fv-csv th,
+.fv-csv td {
+  padding: 4px 10px;
+  border: 1px solid var(--kodo-border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.fv-csv th {
+  background: var(--kodo-surface);
+  color: var(--kodo-text);
+  font-weight: 600;
+}
+
+.fv-csv td { color: var(--kodo-text); }
+
 .skills-card {
   width: min(760px, 100%);
   margin: 24px auto;
@@ -428,6 +908,317 @@
 .skill-row:last-child { border-bottom: 0; }
 .skill-row-label { color: var(--kodo-text); font-size: var(--kodo-font-md); }
 .skill-row code { margin-left: auto; color: var(--kodo-text-secondary); }
+
+/* Builtin rows are buttons now — pixel-neutral reset over the row look so
+   the list geometry stays identical to the div it replaces. */
+button.skill-row {
+  width: 100%;
+  appearance: none;
+  text-align: left;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--kodo-border);
+  cursor: pointer;
+}
+
+button.skill-row:hover { background: var(--kodo-hover); }
+
+/* --------------------------------------------------------- user skills -- */
+
+.skills-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--kodo-border);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+}
+
+.user-skill-row {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.user-skill-row:last-child { border-bottom: 0; }
+
+.user-skill-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 0 16px;
+  appearance: none;
+  text-align: left;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  color: var(--kodo-text-secondary);
+  cursor: pointer;
+}
+
+.user-skill-open:hover { background: var(--kodo-hover); }
+
+.skill-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 10px;
+}
+
+.skill-row-actions .icon-btn--armed {
+  width: auto;
+  padding: 0 8px;
+}
+
+.skill-row-confirm {
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+}
+
+.skills-empty {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+/* ------------------------------------------------------------- agents -- */
+/* Compact persona rows (插件 · 智能体 tab): same geometry as user skill
+   rows, own class family so the `.skill-row` count tests stay exact. */
+
+.agent-row {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.agent-row:last-child { border-bottom: 0; }
+
+.agent-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 0 16px;
+  appearance: none;
+  text-align: left;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  color: var(--kodo-text-secondary);
+  cursor: pointer;
+}
+
+.agent-open:hover { background: var(--kodo-hover); }
+.agent-row-name { flex: none; color: var(--kodo-text); font-size: var(--kodo-font-md); }
+.agent-row-desc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Instructions textarea: same skin as the skill editor, shorter floor — the
+   persona body is prose, not a SKILL.md. */
+.agent-editor-instructions { min-height: 180px; }
+
+/* Builtin persona badge — sits at the end of an `.agent-open` row. The
+   agent name and description still claim the leading real estate; the
+   badge is a small muted pill so the row geometry stays identical to a
+   user-defined persona row (the `.agent-row` count tests count rows, not
+   inner shape). */
+.agent-row-badge {
+  flex: none;
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-pill, 999px);
+  background: var(--kodo-canvas-2, var(--kodo-canvas));
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs, var(--kodo-font-sm));
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------ skill detail -- */
+/* settings-modal house style: panel is flex column (header / body / foot). */
+
+.skill-detail-panel {
+  width: min(640px, 100%);
+  height: min(720px, 100%);
+  display: flex;
+  flex-direction: column;
+}
+
+.skill-detail-source {
+  padding: 1px 7px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+}
+
+.skill-detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.skill-detail-body--edit { gap: 12px; }
+
+.skill-detail-detail {
+  margin: 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  line-height: 1.6;
+}
+
+.skill-detail-section h3 {
+  margin: 0 0 6px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+}
+
+.skill-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.skill-detail-tags code {
+  padding: 2px 7px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+}
+
+.skill-detail-steps {
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+}
+
+.skill-detail-steps li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+}
+
+.skill-detail-steps li code {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+}
+
+.skill-detail-kind {
+  flex: none;
+  min-width: 3em;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.skill-detail-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  line-height: 1.55;
+}
+
+.skill-detail-md {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-sidebar);
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.skill-editor-name {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+}
+
+.skill-editor {
+  flex: 1;
+  min-height: 300px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.skill-editor-error {
+  margin: 0;
+  color: var(--kodo-error);
+  font-size: var(--kodo-font-sm);
+}
+
+.skill-detail-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--kodo-border);
+}
+
+.btn--danger-armed {
+  border-color: var(--kodo-error);
+  color: var(--kodo-error);
+}
 
 /* A category column and the detail beside it. The column is fixed so switching
    categories never moves the text the user is reading. */
@@ -573,7 +1364,9 @@
   gap: 0;
 }
 
-.setting-row--stacked .setting-text {
+/* Direct child only: a stacked row's own label hugs its text. Nested rows
+   (an inline editor inside a stacked field) keep the growing label column. */
+.setting-row--stacked > .setting-text {
   flex: none;
 }
 
@@ -677,4 +1470,261 @@
   color: var(--kodo-text-secondary);
   font-size: 10px;
   line-height: 1.4;
+}
+
+/* ---------------------------------------------------------------------------
+   Trace artifacts (Phase E — transparency UI)
+
+   Three new tabs reuse the existing `.page-tabs` chrome and add three layouts:
+   a side-by-side `.llm-io-grid` for the LLM I/O viewer, a stacked
+   `.thinking-list` for the thinking aggregation, and a flat list of
+   `.artifact-row` buttons for spans. The modal is the same chrome as the
+   settings modal — a centered card on a dimmed backdrop.
+   --------------------------------------------------------------------------- */
+
+.llm-io {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.llm-io-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--kodo-line);
+  border-radius: 6px;
+  background: var(--kodo-surface-1);
+}
+
+.llm-io-bar-meta {
+  flex: 1 1 auto;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text);
+}
+
+.llm-io-bar-meta .muted {
+  color: var(--kodo-text-secondary);
+  font-size: 11px;
+}
+
+.llm-io-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 1100px) {
+  .llm-io-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.llm-io-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.llm-io-col h4 {
+  margin: 0;
+  font-size: var(--kodo-font-md);
+}
+
+.llm-io-block {
+  border: 1px solid var(--kodo-line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--kodo-surface-1);
+}
+
+.llm-io-block > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--kodo-font-sm);
+}
+
+.llm-io-block > summary::-webkit-details-marker {
+  display: none;
+}
+
+.llm-io-block > summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 12px;
+  color: var(--kodo-text-secondary);
+  transition: transform 0.12s ease;
+}
+
+.llm-io-block[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.llm-io-pre {
+  margin: 8px 0 0;
+  padding: 8px;
+  border-radius: 4px;
+  background: var(--kodo-bg-elev);
+  color: var(--kodo-text);
+  font-family: var(--kodo-mono, "Menlo", "SF Mono", monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.llm-io-block > summary .mono,
+.llm-io-block > summary code {
+  margin-left: auto;
+}
+
+/* Thinking aggregation ------------------------------------------------ */
+
+.thinking-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.thinking-item {
+  border: 1px solid var(--kodo-line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--kodo-surface-1);
+}
+
+.thinking-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--kodo-font-sm);
+}
+
+.thinking-body {
+  margin: 6px 0 0;
+  font-size: var(--kodo-font-sm);
+  line-height: 1.55;
+  color: var(--kodo-text);
+}
+
+/* Spans list --------------------------------------------------------- */
+
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--kodo-line);
+  border-radius: 6px;
+  background: var(--kodo-surface-1);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--kodo-font-sm);
+  width: 100%;
+}
+
+.artifact-row:hover {
+  border-color: var(--kodo-accent);
+}
+
+.artifact-row .muted {
+  margin-left: auto;
+}
+
+/* Generic modal ------------------------------------------------------ */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 12, 20, 0.45);
+  display: grid;
+  place-items: center;
+  z-index: 200;
+}
+
+.modal {
+  width: min(720px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  background: var(--kodo-bg);
+  border: 1px solid var(--kodo-line);
+  border-radius: 8px;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+}
+
+.modal--wide {
+  width: min(960px, calc(100vw - 48px));
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--kodo-line);
+}
+
+.modal-title {
+  margin: 0;
+  font-size: var(--kodo-font-md);
+  flex: 1 1 auto;
+}
+
+.modal-body {
+  padding: 12px;
+}
+
+.modal-body--scroll {
+  overflow: auto;
+}
+
+.modal-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .modal-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
+.modal-cols h4 {
+  margin: 0 0 6px;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+}
+
+.file-span-pre {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--kodo-line);
+  border-radius: 6px;
+  background: var(--kodo-surface-1);
+  font-family: var(--kodo-mono, "Menlo", "SF Mono", monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.modal-foot {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--kodo-line);
+  font-size: 11px;
 }

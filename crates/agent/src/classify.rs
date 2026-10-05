@@ -12,6 +12,9 @@ pub enum TaskType {
     Refactor,
     CodeReview,
     Docs,
+    /// General work mode tag (docs/summaries/Q&A). Never produced by
+    /// [`classify`] — selected explicitly for Work mode runs.
+    Work,
 }
 
 impl TaskType {
@@ -24,6 +27,7 @@ impl TaskType {
             Self::Refactor => "refactor",
             Self::CodeReview => "code-review",
             Self::Docs => "docs",
+            Self::Work => "work",
         }
     }
 
@@ -35,17 +39,19 @@ impl TaskType {
             "refactor" => Some(Self::Refactor),
             "code-review" | "review" | "code_review" => Some(Self::CodeReview),
             "docs" | "documentation" => Some(Self::Docs),
+            "work" => Some(Self::Work),
             _ => None,
         }
     }
 
-    pub const ALL: [TaskType; 6] = [
+    pub const ALL: [TaskType; 7] = [
         Self::BugFix,
         Self::Feature,
         Self::Test,
         Self::Refactor,
         Self::CodeReview,
         Self::Docs,
+        Self::Work,
     ];
 }
 

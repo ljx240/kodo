@@ -32,6 +32,11 @@ pub struct ProviderCapabilities {
     pub streaming: bool,
     pub reasoning: bool,
     pub token_usage: bool,
+    /// Approximate total context window in tokens (input + output ceiling).
+    /// Used only for budget UI / auto-compaction thresholds — never to gate
+    /// the actual call (the provider owns its real window). Conservative
+    /// defaults pick 32k so unknown providers don't claim room they don't have.
+    pub context_window_tokens: u32,
 }
 
 impl ProviderCapabilities {
@@ -42,6 +47,7 @@ impl ProviderCapabilities {
             streaming: false,
             reasoning: false,
             token_usage: false,
+            context_window_tokens: 32_000,
         }
     }
 
@@ -55,6 +61,7 @@ impl ProviderCapabilities {
             streaming: false,
             reasoning: false,
             token_usage: false,
+            context_window_tokens: 32_000,
         }
     }
 
@@ -65,6 +72,7 @@ impl ProviderCapabilities {
             streaming: true,
             reasoning: true,
             token_usage: true,
+            context_window_tokens: 200_000,
         }
     }
 
@@ -75,6 +83,7 @@ impl ProviderCapabilities {
             streaming: true,
             reasoning: false,
             token_usage: true,
+            context_window_tokens: 128_000,
         }
     }
 
@@ -85,6 +94,7 @@ impl ProviderCapabilities {
             streaming: true,
             reasoning: true,
             token_usage: true,
+            context_window_tokens: 128_000,
         }
     }
 }
@@ -95,6 +105,10 @@ pub struct ModelSpec {
     pub display_name: String,
     pub model_id: String,
     pub provider_type: String,
+    /// Optional user override of the context window for this model (tokens).
+    /// Used only for budget UI / compaction thresholds. `None` falls back to
+    /// the provider preset in `ProviderCapabilities::context_window_tokens`.
+    pub context_window_override: Option<u32>,
 }
 
 /// Catalog entry used **only** for config migration from legacy display labels.
@@ -171,6 +185,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
             display_name: String::new(),
             model_id: String::new(),
             provider_type: provider_type.to_owned(),
+            context_window_override: None,
         };
     }
     for entry in MODEL_CATALOG {
@@ -181,6 +196,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
                 display_name: entry.display_name.to_owned(),
                 model_id: entry.model_id.to_owned(),
                 provider_type: provider_type.to_owned(),
+                context_window_override: None,
             };
         }
     }
@@ -190,6 +206,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
             display_name: raw.to_owned(),
             model_id: raw.to_owned(),
             provider_type: provider_type.to_owned(),
+            context_window_override: None,
         };
     }
     // Unknown display label: keep it visible, but do not invent an API id.
@@ -198,6 +215,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
         display_name: raw.to_owned(),
         model_id: String::new(),
         provider_type: provider_type.to_owned(),
+        context_window_override: None,
     }
 }
 
@@ -382,6 +400,12 @@ impl Provider {
             // Custom / unknown endpoints: conservative until configured or probed.
             _ => ProviderCapabilities::conservative(),
         }
+    }
+
+    /// Effective context window for budget UI / compaction thresholds. Falls
+    /// back to provider preset when the resolved model has no override.
+    pub fn context_window(&self) -> u32 {
+        self.capabilities().context_window_tokens
     }
 
     /// Clear, typed error when the backend cannot send this model id.
@@ -582,6 +606,10 @@ pub enum ProviderEvent {
     TextDelta {
         text: String,
     },
+    /// The model streamed reasoning (`reasoning_content`) during this
+    /// message. Emitted once at completion; the thinking itself is not
+    /// forwarded as answer text.
+    ReasoningSeen,
     ToolCallStart {
         id: String,
         name: String,
@@ -962,7 +990,7 @@ fn stream_agent() -> ureq::Agent {
         .build()
 }
 
-fn is_read_timeout(err: &std::io::Error) -> bool {
+pub fn is_read_timeout(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
@@ -1366,7 +1394,12 @@ fn parse_openai_body(body: OpenAiResponse, model_id: &str) -> Result<ChatRespons
         .unwrap_or_default();
     let choice = body.choices.into_iter().next();
     let message = choice.as_ref().map(|c| &c.message);
-    let text = message.and_then(|m| m.content.clone()).unwrap_or_default();
+    // Inline ` <think>` blocks are thinking, not the reply — strip before
+    // the text becomes answer/protocol input.
+    let text = message
+        .and_then(|m| m.content.clone())
+        .map(|raw| crate::protocol::strip_think_blocks(&raw).0)
+        .unwrap_or_default();
     let native_tool_calls = message
         .and_then(|m| m.tool_calls.as_ref())
         .map(|calls| {
@@ -1527,6 +1560,13 @@ struct OpenAiStreamState {
     usage: (u32, u32),
     done: bool,
     finish_reason: String,
+    /// A reasoning model streamed `delta.reasoning_content`, or inlined
+    /// ` <think>…` blocks into `delta.content`. Thinking is never echoed as
+    /// answer text, but we must not confuse "all budget spent on reasoning,
+    /// empty content" with "provider not configured".
+    saw_reasoning: bool,
+    /// Filters inline ` <think>` blocks out of `delta.content` as they stream.
+    think: crate::protocol::ThinkStripper,
 }
 
 impl OpenAiStreamState {
@@ -1535,6 +1575,19 @@ impl OpenAiStreamState {
         model_id: &str,
         on_event: &mut impl FnMut(ProviderEvent) -> bool,
     ) -> Result<ChatResponse, ProviderError> {
+        let tail = self.think.finish();
+        if !tail.is_empty() {
+            self.text.push_str(&tail);
+            emit_or_cancel(
+                on_event,
+                ProviderEvent::TextDelta {
+                    text: tail,
+                },
+            )?;
+        }
+        if self.think.saw_think() {
+            self.saw_reasoning = true;
+        }
         let mut native = Vec::new();
         for (id, name, args, _) in std::mem::take(&mut self.tool_acc) {
             if name.is_empty() {
@@ -1554,6 +1607,9 @@ impl OpenAiStreamState {
                 ProviderEvent::ToolCallComplete { call: call.clone() },
             )?;
             native.push(call);
+        }
+        if self.saw_reasoning {
+            emit_or_cancel(on_event, ProviderEvent::ReasoningSeen)?;
         }
         if self.usage.0 > 0 || self.usage.1 > 0 {
             emit_or_cancel(
@@ -1616,13 +1672,30 @@ fn process_openai_sse_data(
         if !alive() {
             return Err(cancelled_err("cancelled while processing text delta"));
         }
-        state.text.push_str(delta);
-        emit_or_cancel(
-            on_event,
-            ProviderEvent::TextDelta {
-                text: delta.to_owned(),
-            },
-        )?;
+        // Inline ` <think>` blocks ride `content` on some reasoning models —
+        // filter them out mid-stream so raw thinking never reaches the answer.
+        let visible = state.think.push(delta);
+        if !visible.is_empty() {
+            state.text.push_str(&visible);
+            emit_or_cancel(
+                on_event,
+                ProviderEvent::TextDelta {
+                    text: visible,
+                },
+            )?;
+        }
+    }
+    // Reasoning deltas (DeepSeek/MiMo-style `reasoning_content`) are tracked
+    // but never streamed as answer text — thinking is not the reply. The flag
+    // lets the agent distinguish "reasoning ate the output budget" from a
+    // genuinely unanswered call.
+    if value
+        .pointer("/choices/0/delta/reasoning_content")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        state.saw_reasoning = true;
     }
     if let Some(calls) = value
         .pointer("/choices/0/delta/tool_calls")
@@ -1916,7 +1989,14 @@ fn parse_anthropic_body(
     let mut tool_index = 0usize;
     for block in body.content {
         match block.kind.as_str() {
-            "text" => text_parts.push(block.text.unwrap_or_default()),
+            "text" => {
+                let raw = block.text.unwrap_or_default();
+                // Inline ` <think>` blocks are thinking, not the reply.
+                let (visible, _saw) = crate::protocol::strip_think_blocks(&raw);
+                if !visible.is_empty() {
+                    text_parts.push(visible);
+                }
+            }
             "tool_use" => {
                 let id = block
                     .id
@@ -2051,6 +2131,8 @@ struct AnthropicStreamState {
     completed_tools: Vec<NativeToolCall>,
     stop_reason: String,
     message_stopped: bool,
+    /// Filters inline ` <think>` blocks out of `delta.text` as they stream.
+    think: crate::protocol::ThinkStripper,
 }
 
 impl AnthropicStreamState {
@@ -2059,12 +2141,25 @@ impl AnthropicStreamState {
         model_id: &str,
         on_event: &mut impl FnMut(ProviderEvent) -> bool,
     ) -> Result<ChatResponse, ProviderError> {
+        let tail = self.think.finish();
+        if !tail.is_empty() {
+            self.text.push_str(&tail);
+            emit_or_cancel(
+                on_event,
+                ProviderEvent::TextDelta {
+                    text: tail,
+                },
+            )?;
+        }
         if let Some(tool) = self.pending_tool.take() {
             emit_or_cancel(
                 on_event,
                 ProviderEvent::ToolCallComplete { call: tool.clone() },
             )?;
             self.completed_tools.push(tool);
+        }
+        if self.think.saw_think() {
+            emit_or_cancel(on_event, ProviderEvent::ReasoningSeen)?;
         }
         if self.usage.0 > 0 || self.usage.1 > 0 {
             emit_or_cancel(
@@ -2145,13 +2240,17 @@ fn process_anthropic_sse_data(
                 if !alive() {
                     return Err(cancelled_err("cancelled while processing text delta"));
                 }
-                state.text.push_str(delta);
-                emit_or_cancel(
-                    on_event,
-                    ProviderEvent::TextDelta {
-                        text: delta.to_owned(),
-                    },
-                )?;
+                // Same inline-thinking leak as the OpenAI path.
+                let visible = state.think.push(delta);
+                if !visible.is_empty() {
+                    state.text.push_str(&visible);
+                    emit_or_cancel(
+                        on_event,
+                        ProviderEvent::TextDelta {
+                            text: visible,
+                        },
+                    )?;
+                }
             }
             if let Some(partial) = value
                 .pointer("/delta/partial_json")
@@ -2407,8 +2506,127 @@ pub fn catalog_models(provider_type: &str) -> Vec<ModelSpec> {
             display_name: m.display_name.to_owned(),
             model_id: m.model_id.to_owned(),
             provider_type: m.provider_type.to_owned(),
+            context_window_override: None,
         })
         .collect()
+}
+
+/// Fetch the supported model list from a provider's `/models` endpoint.
+///
+/// Used by the desktop settings editor for auto-load + refresh. `endpoint`
+/// may be empty — vendor defaults apply (anthropic / openai / deepseek).
+/// Error strings are zh-CN because they are surfaced directly in the UI.
+pub fn fetch_models(
+    template: &str,
+    endpoint: &str,
+    api_key: &str,
+) -> Result<Vec<ModelSpec>, String> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err("未设置 API 密钥".to_owned());
+    }
+    let is_anthropic = template.eq_ignore_ascii_case("anthropic");
+    let url = models_url(template, endpoint);
+
+    let request = ureq::get(&url).timeout(Duration::from_secs(10));
+    let request = if is_anthropic {
+        request
+            .set("x-api-key", key)
+            .set("anthropic-version", "2023-06-01")
+    } else {
+        request.set("Authorization", &format!("Bearer {key}"))
+    };
+
+    let response = match request.call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, _)) => {
+            return Err(match code {
+                401 | 403 => "API 密钥无效或无权限".to_owned(),
+                404 => "接入地址不支持 /models".to_owned(),
+                other => format!("模型列表请求失败（HTTP {other}）"),
+            });
+        }
+        Err(_) => return Err("网络请求失败或超时".to_owned()),
+    };
+    let body = response
+        .into_string()
+        .map_err(|_| "模型列表响应无法解析".to_owned())?;
+    if is_anthropic {
+        parse_anthropic_models(&body, template)
+    } else {
+        parse_openai_models(&body, template)
+    }
+}
+
+/// Build the `GET /models` URL for a template + endpoint (pure, testable).
+fn models_url(template: &str, endpoint: &str) -> String {
+    let is_anthropic = template.eq_ignore_ascii_case("anthropic");
+    let base = if endpoint.trim().is_empty() {
+        if is_anthropic {
+            "https://api.anthropic.com".to_owned()
+        } else {
+            default_openai_base(template)
+        }
+    } else {
+        endpoint.trim().trim_end_matches('/').to_owned()
+    };
+    if is_anthropic {
+        format!("{base}/v1/models")
+    } else {
+        format!("{base}/models")
+    }
+}
+
+/// Parse an OpenAI-compatible `GET /models` body: `{"data":[{"id":"..."}]}`.
+fn parse_openai_models(body: &str, provider_type: &str) -> Result<Vec<ModelSpec>, String> {
+    let value: Value = serde_json::from_str(body).map_err(|_| "模型列表响应无法解析".to_owned())?;
+    let data = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "模型列表响应无法解析".to_owned())?;
+    let mut models = Vec::new();
+    for entry in data {
+        let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
+        if id.trim().is_empty() {
+            continue;
+        }
+        models.push(ModelSpec {
+            display_name: id.to_owned(),
+            model_id: id.to_owned(),
+            provider_type: provider_type.to_owned(),
+            context_window_override: None,
+        });
+    }
+    Ok(models)
+}
+
+/// Parse an Anthropic `GET /v1/models` body:
+/// `{"data":[{"id":"...","display_name":"..."}]}`.
+fn parse_anthropic_models(body: &str, provider_type: &str) -> Result<Vec<ModelSpec>, String> {
+    let value: Value = serde_json::from_str(body).map_err(|_| "模型列表响应无法解析".to_owned())?;
+    let data = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "模型列表响应无法解析".to_owned())?;
+    let mut models = Vec::new();
+    for entry in data {
+        let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
+        if id.trim().is_empty() {
+            continue;
+        }
+        let display = entry
+            .get("display_name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(id);
+        models.push(ModelSpec {
+            display_name: display.to_owned(),
+            model_id: id.to_owned(),
+            provider_type: provider_type.to_owned(),
+            context_window_override: None,
+        });
+    }
+    Ok(models)
 }
 
 // Silence unused struct warning for intermediate serialization helper.
@@ -2457,6 +2675,55 @@ mod tests {
         let err = p.validate_model().unwrap_err();
         assert_eq!(err.class, ProviderFailureClass::InvalidModel);
         assert!(err.message.contains("invalid model id"));
+    }
+
+    #[test]
+    fn parse_openai_models_body() {
+        let body = r#"{"object":"list","data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"},{"id":""}]}"#;
+        let models = parse_openai_models(body, "openai").unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].model_id, "gpt-4o");
+        assert_eq!(models[0].display_name, "gpt-4o");
+        assert_eq!(models[0].provider_type, "openai");
+        assert_eq!(models[1].model_id, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn parse_anthropic_models_body_prefers_display_name() {
+        let body = r#"{"data":[{"id":"claude-sonnet-4-5","display_name":"Claude Sonnet 4.5"},{"id":"claude-opus-4-1"}]}"#;
+        let models = parse_anthropic_models(body, "anthropic").unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].model_id, "claude-sonnet-4-5");
+        assert_eq!(models[0].display_name, "Claude Sonnet 4.5");
+        // missing display_name falls back to the id
+        assert_eq!(models[1].display_name, "claude-opus-4-1");
+    }
+
+    #[test]
+    fn parse_models_rejects_non_list_bodies() {
+        assert!(parse_openai_models(r#"{"error":"nope"}"#, "openai").is_err());
+        assert!(parse_anthropic_models("not json", "anthropic").is_err());
+    }
+
+    #[test]
+    fn models_url_defaults_and_trims() {
+        assert_eq!(
+            models_url("anthropic", ""),
+            "https://api.anthropic.com/v1/models"
+        );
+        assert_eq!(
+            models_url("anthropic", "https://proxy.test/"),
+            "https://proxy.test/v1/models"
+        );
+        assert_eq!(models_url("openai", ""), "https://api.openai.com/v1/models");
+        assert_eq!(
+            models_url("deepseek", ""),
+            "https://api.deepseek.com/v1/models"
+        );
+        assert_eq!(
+            models_url("custom", "https://ollama.test/v1/"),
+            "https://ollama.test/v1/models"
+        );
     }
 
     #[test]
@@ -3144,6 +3411,7 @@ mod tests {
                 streaming: false,
                 reasoning: false,
                 token_usage: true,
+                context_window_tokens: 32_000,
             }),
             // Force invalid network — we only assert capability path selection
             // via a local override that fails fast on empty key... use validate path.
@@ -3437,6 +3705,118 @@ mod tests {
         });
         assert!(result.is_ok());
         assert_eq!(collect_text(&events), "chunked");
+    }
+
+    #[test]
+    fn streaming_reasoning_content_is_tracked_but_never_answer_text() {
+        // MiMo/DeepSeek-style reasoning deltas ride `reasoning_content`.
+        // Thinking must not stream to the answer surface, but the run has to
+        // know it happened so an empty final text isn't blamed on config.
+        let chunk = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking hard\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"final answer\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut events = Vec::new();
+        let result =
+            drive_openai_sse_chunks(&[chunk.as_bytes()], "mimo-v2.6-flash", &|| true, &mut |ev| {
+                events.push(ev);
+                true
+            });
+        assert!(result.is_ok(), "{result:?}");
+        let response = result.unwrap();
+        assert_eq!(response.text, "final answer");
+        assert_eq!(collect_text(&events), "final answer");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::ReasoningSeen)),
+            "reasoning seen must be reported exactly once at completion"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, ProviderEvent::ReasoningSeen))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn streaming_reasoning_only_with_length_finish_marks_both_flags() {
+        // The 2026-09-30 incident shape: thinking ate the whole output
+        // budget, content never started, finish_reason=length, text empty.
+        let chunk = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"only thinking\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut events = Vec::new();
+        let result =
+            drive_openai_sse_chunks(&[chunk.as_bytes()], "mimo-v2.6-flash", &|| true, &mut |ev| {
+                events.push(ev);
+                true
+            });
+        assert!(result.is_ok(), "{result:?}");
+        let response = result.unwrap();
+        assert_eq!(response.text, "", "no content ever streamed");
+        assert_eq!(response.finish_reason, "length");
+        assert_eq!(collect_text(&events), "");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::ReasoningSeen))
+        );
+    }
+
+    #[test]
+    fn streaming_inline_think_blocks_never_reach_answer_text() {
+        // 2026-10-02 incident: the model inlined ` <think>…` into content
+        // and the raw block rendered as the reply. Thinking must be tracked
+        // (for empty-answer diagnostics) but never echoed.
+        let chunk = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\" <think>planning\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" more</think>\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"the real answer\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut events = Vec::new();
+        let result =
+            drive_openai_sse_chunks(&[chunk.as_bytes()], "mimo-v2.6-pro", &|| true, &mut |ev| {
+                events.push(ev);
+                true
+            });
+        let response = result.expect("stream ok");
+        assert_eq!(response.text, "the real answer");
+        assert_eq!(collect_text(&events), "the real answer");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::ReasoningSeen)),
+            "inline think blocks count as reasoning for diagnostics"
+        );
+    }
+
+    #[test]
+    fn streaming_think_tag_split_across_chunks_stays_hidden() {
+        // Worst case: the open tag itself is split across network chunks.
+        let parts: [&[u8]; 4] = [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"pre <th\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ink>inner text</th\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ink>post\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        ]
+        .map(|s| s.as_bytes());
+        let mut events = Vec::new();
+        let result = drive_openai_sse_chunks(&parts, "mimo-v2.6-pro", &|| true, &mut |ev| {
+            events.push(ev);
+            true
+        });
+        let response = result.expect("stream ok");
+        assert_eq!(response.text, "pre post");
+        assert_eq!(collect_text(&events), "pre post");
     }
 
     #[test]

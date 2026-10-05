@@ -7,6 +7,7 @@
 //! multi-word ones say so explicitly.
 
 use kodo_core::session;
+use kodo_core::traces;
 use kodo_core::workspace;
 
 /// A project on the sidebar's list.
@@ -33,6 +34,7 @@ pub struct SessionRefView {
     pub title: String,
     pub at: u64,
     pub archived: bool,
+    pub mode: String,
 }
 
 impl From<session::SessionRef> for SessionRefView {
@@ -43,6 +45,7 @@ impl From<session::SessionRef> for SessionRefView {
             title: reference.title,
             at: reference.at,
             archived: reference.archived,
+            mode: reference.mode.as_str().to_owned(),
         }
     }
 }
@@ -63,6 +66,7 @@ pub struct SessionView {
     pub title: String,
     pub at: u64,
     pub archived: bool,
+    pub mode: String,
     pub turns: Vec<TurnView>,
 }
 
@@ -290,9 +294,38 @@ pub enum ItemDetail {
         input_tokens: u32,
         #[serde(rename = "outputTokens")]
         output_tokens: u32,
+        /// `native` / `json_fallback` / `tag_fallback` / `fence_fallback` /
+        /// `text_only` / "" (unknown, legacy). Surfaced as a chip in the
+        /// transparency UI; empty string means "unknown".
+        protocol: String,
+        /// `stop` / `length` / `tool_calls` / `content_filter` / `cancelled` /
+        /// `error` / "" (unknown). Empty for legacy rows.
+        #[serde(rename = "finishReason")]
+        finish_reason: String,
+        /// Whether the response carried a private reasoning block.
+        #[serde(rename = "sawReasoning")]
+        saw_reasoning: bool,
+        /// Streaming wall time in ms.
+        #[serde(rename = "durationMs")]
+        duration_ms: u64,
+        /// Provider-reported end-to-end latency (excluding failover retries).
+        #[serde(rename = "providerLatencyMs")]
+        provider_latency_ms: u64,
+        /// `n` for the n-th retry of the same call (0 on first attempt).
+        #[serde(rename = "retryIndex")]
+        retry_index: u32,
+        /// Relative path under `traces/<session>/<turn>/` pointing at the
+        /// full request/response JSON. `None` when capture is disabled.
+        #[serde(rename = "llmIoRef")]
+        llm_io_ref: Option<String>,
     },
     FileChange {
         changes: Vec<ChangeView>,
+        /// Relative path under `traces/<session>/<turn>/spans/` for the
+        /// before/after capture of this write. `None` when snapshotting is
+        /// disabled or the file didn't actually exist before the tool ran.
+        #[serde(rename = "fileSpanRef")]
+        file_span_ref: Option<String>,
     },
     AgentMessage {
         text: String,
@@ -303,6 +336,90 @@ pub enum ItemDetail {
         verification: String,
         /// Conversational answer — the UI renders the text alone.
         plain: bool,
+    },
+    /// Model's private reasoning block. Carries the full `<think>` content
+    /// so the transparency UI can show what the model was thinking, separate
+    /// from its public `Reasoning` summary.
+    Thinking {
+        content: String,
+        /// Public phase that was active when this block was emitted.
+        phase: String,
+        /// `extraction_main` / `anthropic_reasoning` / `native`.
+        source: String,
+    },
+    /// History-compaction pass. `source_summary` is the text that fed into the
+    /// compaction — without it, the trace would only show the *event* of
+    /// compacting, never the content that got compressed away.
+    Compaction {
+        #[serde(rename = "dropped")]
+        dropped: usize,
+        #[serde(rename = "summarizedInto")]
+        summarized_into: usize,
+        /// 0..=100
+        #[serde(rename = "freedPct")]
+        freed_pct: u8,
+        #[serde(rename = "sourceSummary")]
+        source_summary: String,
+        #[serde(rename = "coveredMessages")]
+        covered_messages: usize,
+    },
+    /// A failover event. `errorClass` is the bucketed cause.
+    Failover {
+        #[serde(rename = "fromProvider")]
+        from_provider: String,
+        #[serde(rename = "fromModel")]
+        from_model: String,
+        #[serde(rename = "errorClass")]
+        error_class: String,
+        error: String,
+        #[serde(rename = "toProvider")]
+        to_provider: String,
+        #[serde(rename = "toModel")]
+        to_model: String,
+        #[serde(rename = "retryIndex")]
+        retry_index: u32,
+    },
+    /// A task-plan subtask status update.
+    PlanStep {
+        #[serde(rename = "stepId")]
+        step_id: String,
+        title: String,
+        /// `search` / `read` / `edit` / `verify` / `explore` / `external`.
+        /// Renamed away from `kind` because the variant-level `kind` tag
+        /// would shadow it. Wire format uses the underscored form.
+        #[serde(rename = "stepKind")]
+        step_kind: String,
+        status: String,
+        #[serde(rename = "triggeredBy")]
+        triggered_by: Vec<u32>,
+        evidence: Vec<String>,
+    },
+    /// An approval decision. Distinct from a denied `CommandExecution`
+    /// because that one records the *effect*; this records the *decision*.
+    Permission {
+        /// `command` / `write` / `external` / `websearch`. Same rename
+        /// reasoning as `PlanStep.step_kind`.
+        #[serde(rename = "permissionKind")]
+        permission_kind: String,
+        detail: String,
+        decision: String,
+        context: String,
+    },
+    /// Context window usage snapshot.
+    ContextBudget {
+        #[serde(rename = "used")]
+        used: u32,
+        #[serde(rename = "window")]
+        window: u32,
+        /// 0..=100
+        #[serde(rename = "percent")]
+        percent: u8,
+        #[serde(rename = "cumulativeChars")]
+        cumulative_chars: u64,
+        #[serde(rename = "compactedCount")]
+        compacted_count: u32,
+        #[serde(rename = "lastModel")]
+        last_model: String,
     },
 }
 
@@ -321,6 +438,7 @@ pub struct TurnChangeView {
     #[serde(rename = "userPreexisting")]
     pub user_preexisting: bool,
     /// Live undo state: "clean" | "already_baseline" | "diverged" | "missing".
+    #[serde(rename = "undoState")]
     pub undo_state: String,
     /// True when the recorded after-hash no longer matches the working tree.
     pub conflict: bool,
@@ -384,12 +502,26 @@ impl From<session::Item> for ItemView {
                 model,
                 input_tokens,
                 output_tokens,
+                protocol,
+                finish_reason,
+                saw_reasoning,
+                duration_ms,
+                provider_latency_ms,
+                retry_index,
+                llm_io_ref,
             } => ItemDetail::ModelCall {
                 model,
                 input_tokens,
                 output_tokens,
+                protocol,
+                finish_reason,
+                saw_reasoning,
+                duration_ms,
+                provider_latency_ms,
+                retry_index,
+                llm_io_ref,
             },
-            session::ItemKind::FileChange { changes } => ItemDetail::FileChange {
+            session::ItemKind::FileChange { changes, .. } => ItemDetail::FileChange {
                 changes: changes
                     .into_iter()
                     .map(|change| ChangeView {
@@ -398,6 +530,10 @@ impl From<session::Item> for ItemView {
                         removed: change.removed,
                     })
                     .collect(),
+                // The capture layer in the agent attaches the file-span ref
+                // to the chip once a snapshot has been persisted; for now
+                // legacy chips carry none, so we surface `None`.
+                file_span_ref: None,
             },
             session::ItemKind::AgentMessage {
                 text,
@@ -411,6 +547,86 @@ impl From<session::Item> for ItemView {
                 delivery,
                 verification,
                 plain,
+            },
+            session::ItemKind::Thinking {
+                content,
+                phase,
+                source,
+            } => ItemDetail::Thinking {
+                content,
+                phase,
+                source,
+            },
+            session::ItemKind::Compaction {
+                dropped,
+                summarized_into,
+                freed_pct,
+                source_summary,
+                covered_messages,
+            } => ItemDetail::Compaction {
+                dropped,
+                summarized_into,
+                freed_pct,
+                source_summary,
+                covered_messages,
+            },
+            session::ItemKind::Failover {
+                from_provider,
+                from_model,
+                error_class,
+                error,
+                to_provider,
+                to_model,
+                retry_index,
+            } => ItemDetail::Failover {
+                from_provider,
+                from_model,
+                error_class,
+                error,
+                to_provider,
+                to_model,
+                retry_index,
+            },
+            session::ItemKind::PlanStep {
+                step_id,
+                title,
+                kind,
+                status,
+                triggered_by,
+                evidence,
+            } => ItemDetail::PlanStep {
+                step_id,
+                title,
+                step_kind: kind,
+                status,
+                triggered_by,
+                evidence,
+            },
+            session::ItemKind::Permission {
+                kind,
+                detail,
+                decision,
+                context,
+            } => ItemDetail::Permission {
+                permission_kind: kind,
+                detail,
+                decision,
+                context,
+            },
+            session::ItemKind::ContextBudget {
+                used,
+                window,
+                percent,
+                cumulative_chars,
+                compacted_count,
+                last_model,
+            } => ItemDetail::ContextBudget {
+                used,
+                window,
+                percent,
+                cumulative_chars,
+                compacted_count,
+                last_model,
             },
         };
 
@@ -436,6 +652,7 @@ impl From<session::Session> for SessionView {
             title: session.title,
             at: session.at,
             archived: session.archived,
+            mode: session.mode.as_str().to_owned(),
             turns: session
                 .turns
                 .into_iter()
@@ -539,6 +756,37 @@ pub enum RunEvent {
         #[serde(rename = "toModel")]
         to_model: String,
     },
+    /// Live context-window telemetry after every successful model call.
+    /// UI uses this to render the Codex-style progress bar; consumers should
+    /// treat it as best-effort (the provider may not report usage).
+    ContextBudget {
+        session: String,
+        used: u32,
+        window: u32,
+        percent: u8,
+        #[serde(rename = "cumulativeChars")]
+        cumulative_chars: u64,
+        #[serde(rename = "compactedCount")]
+        compacted_count: u32,
+        #[serde(rename = "lastModel")]
+        last_model: String,
+    },
+    /// History-compaction pass finished — UI surfaces a short toast.
+    Compacted {
+        session: String,
+        dropped: usize,
+        #[serde(rename = "summarizedInto")]
+        summarized_into: usize,
+        #[serde(rename = "freedPct")]
+        freed_pct: u8,
+    },
+    /// Model-initiated question (Phase 0 second-pass). The frontend surfaces a
+    /// dialog; the answer is fed back as the next user message.
+    AskUser {
+        session: String,
+        question: String,
+        options: Vec<String>,
+    },
 }
 
 /// One archived conversation, as the Archive table needs it.
@@ -557,6 +805,144 @@ pub struct ArchivedItemView {
     pub files_changed: u32,
     pub added: u32,
     pub removed: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Trace artifacts (Phase D — transparency UI)
+//
+// The session log stores chips with `llm_io_ref` pointers; the body lives
+// under `~/Library/Application Support/Kodo/traces/<session>/<turn>/…`. These
+// DTOs and the matching commands in `main.rs` let the webview open those
+// captures without holding the whole log in memory.
+// ---------------------------------------------------------------------------
+
+/// One trace artifact (LLM I/O capture or file span), as the trace-page
+/// list pane needs it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRefView {
+    /// `"llm_io"` or `"file_span"`.
+    pub kind: &'static str,
+    pub seq: u32,
+    pub label: String,
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes: u64,
+    /// Seconds since the Unix epoch.
+    pub at: u64,
+}
+
+impl From<traces::ArtifactRef> for ArtifactRefView {
+    fn from(value: traces::ArtifactRef) -> Self {
+        Self {
+            kind: value.kind,
+            seq: value.seq,
+            label: value.label,
+            size_bytes: value.size_bytes,
+            at: value.at,
+        }
+    }
+}
+
+/// One full LLM I/O capture. `request.messages` is kept opaque so the
+/// renderer doesn't have to special-case each provider shape.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmIoView {
+    pub seq: u32,
+    pub model: String,
+    pub protocol: String,
+    pub retry_index: u32,
+    #[serde(rename = "providerLatencyMs")]
+    pub provider_latency_ms: u64,
+    #[serde(rename = "finishReason")]
+    pub finish_reason: String,
+    #[serde(rename = "inputTokens")]
+    pub input_tokens: u32,
+    #[serde(rename = "outputTokens")]
+    pub output_tokens: u32,
+    #[serde(rename = "sawReasoning")]
+    pub saw_reasoning: bool,
+    pub at: u64,
+    pub request: LlmIoRequestView,
+    pub response: LlmIoResponseView,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmIoRequestView {
+    pub system: String,
+    pub messages: serde_json::Value,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmIoResponseView {
+    pub text: String,
+    #[serde(rename = "reasoningContent")]
+    pub reasoning_content: String,
+    #[serde(rename = "nativeToolCalls")]
+    pub native_tool_calls: serde_json::Value,
+}
+
+impl From<traces::LlmIoCapture> for LlmIoView {
+    fn from(value: traces::LlmIoCapture) -> Self {
+        Self {
+            seq: value.seq,
+            model: value.model,
+            protocol: value.protocol,
+            retry_index: value.retry_index,
+            provider_latency_ms: value.provider_latency_ms,
+            finish_reason: value.finish_reason,
+            input_tokens: value.input_tokens,
+            output_tokens: value.output_tokens,
+            saw_reasoning: value.saw_reasoning,
+            at: value.at,
+            request: LlmIoRequestView {
+                system: value.request.system,
+                messages: value.request.messages,
+            },
+            response: LlmIoResponseView {
+                text: value.response.text,
+                reasoning_content: value.response.reasoning_content,
+                native_tool_calls: value.response.native_tool_calls,
+            },
+        }
+    }
+}
+
+/// One file-span snapshot (before/after content of one tool's write).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSpanView {
+    pub path: String,
+    #[serde(rename = "contentBefore")]
+    pub content_before: String,
+    /// `None` for create/delete of an empty/missing file.
+    #[serde(rename = "contentAfter")]
+    pub content_after: Option<String>,
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: String,
+    pub seq: u32,
+}
+
+impl From<traces::FileSpanCapture> for FileSpanView {
+    fn from(value: traces::FileSpanCapture) -> Self {
+        Self {
+            path: value.path,
+            content_before: value.content_before,
+            content_after: value.content_after,
+            tool_call_id: value.tool_call_id,
+            seq: value.seq,
+        }
+    }
+}
+
+/// One model inside a provider's configured model list.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOptionView {
+    pub model_id: String,
+    pub display_name: String,
 }
 
 /// A provider as the settings screen edits it. `api_key` is a mask when
@@ -578,10 +964,173 @@ pub struct ProviderView {
         skip_serializing_if = "Option::is_none"
     )]
     pub display_name: Option<String>,
+    /// Configured model list. `None` on legacy records (frontend seeds
+    /// template presets); always written back as an array on save so an
+    /// intentionally emptied list stays distinguishable from legacy.
+    #[serde(default)]
+    pub models: Option<Vec<ModelOptionView>>,
     /// True when a secret exists in credentials.log.
     #[serde(default)]
     #[serde(rename = "hasKey")]
     pub has_key: bool,
+}
+
+/// One workflow step as the skill preview lists it.
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillStepView {
+    pub id: String,
+    /// `read` | `edit` | `command` | `verify`.
+    pub kind: String,
+    pub title: String,
+}
+
+/// One skill as the Skills page previews it: builtins (embedded, read-only),
+/// project files (`.kodo/skills`) and user files share this shape so one
+/// renderer draws all three.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillView {
+    pub name: String,
+    /// `builtin` | `project` | `user`.
+    pub source: String,
+    /// One-line `## description` (falls back to the first criterion on load).
+    pub description: String,
+    /// Task type labels (`bug-fix`, `work`, …) — which space(s) it belongs to.
+    pub task_types: Vec<String>,
+    /// Context strategy label (`work-focused`, …).
+    pub strategy: String,
+    /// Verification policy label (`full` | `tests-only` | `none`).
+    pub policy: String,
+    pub workflow: Vec<SkillStepView>,
+    pub allowed_tools: Vec<String>,
+    pub completion_criteria: Vec<String>,
+    pub guidance: String,
+    /// Raw SKILL.md source — the preview pane's 原文 view and the editor base.
+    pub markdown: String,
+}
+
+fn skill_step_view(step: &kodo_agent::WorkflowStep) -> SkillStepView {
+    let kind = match step.kind {
+        kodo_agent::SubtaskKind::Read => "read",
+        kodo_agent::SubtaskKind::Edit => "edit",
+        kodo_agent::SubtaskKind::Command => "command",
+        kodo_agent::SubtaskKind::Verify => "verify",
+    };
+    SkillStepView {
+        id: step.id.clone(),
+        kind: kind.to_owned(),
+        title: step.title.clone(),
+    }
+}
+
+/// Map a parsed spec + its raw Markdown onto the wire shape.
+pub fn skill_view(spec: &kodo_agent::AgentSkillSpec, source: &str, markdown: String) -> SkillView {
+    SkillView {
+        name: spec.name.clone(),
+        source: source.to_owned(),
+        description: spec.description.clone(),
+        task_types: spec
+            .applicable_task_types
+            .iter()
+            .map(|t| t.label().to_owned())
+            .collect(),
+        strategy: spec.context_strategy.label().to_owned(),
+        policy: spec.verification_policy.label().to_owned(),
+        workflow: spec.workflow.iter().map(skill_step_view).collect(),
+        allowed_tools: spec
+            .allowed_tools
+            .iter()
+            .map(|t| t.label().to_owned())
+            .collect(),
+        completion_criteria: spec.completion_criteria.clone(),
+        guidance: spec.guidance.clone(),
+        markdown,
+    }
+}
+
+/// One persona as the 插件 · 智能体 tab lists it. `source` distinguishes
+/// the 12 read-only built-ins (`"builtin"`) from user markdown (`"user"`)
+/// and project markdown (`"project"`); the UI groups, badges, and gates
+/// edit/delete on it.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentView {
+    pub name: String,
+    /// `"builtin"` | `"user"` | `"project"` — drives the row badge,
+    /// edit/delete gating, and the Composer dropdown grouping
+    /// (see COMPONENTS.md §13d).
+    pub source: String,
+    /// One-line `## description` (the selector hint and the row subtitle).
+    pub description: String,
+    /// `## instructions` body — what gets appended to the system prompt.
+    pub instructions: String,
+    /// Raw agent markdown — the detail modal's editor base.
+    pub markdown: String,
+    /// Per-persona session defaults (§0.1 / B.1-B.3). Empty fields mean
+    /// "leave the composer's choice alone".
+    pub defaults: PersonaDefaultsView,
+    /// Declared template variables the `## instructions` may use
+    /// (e.g. `project_path`, `branch`). Unknown `{{name}}` placeholders
+    /// are preserved verbatim.
+    pub variables: Vec<String>,
+    /// Few-shot examples rendered after the persona block at run time.
+    pub examples: Vec<ExampleView>,
+}
+
+#[derive(serde::Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonaDefaultsView {
+    /// Provider id (`openai`, `anthropic`, …). When set, the run-time
+    /// check verifies it matches the active provider before applying
+    /// `model` — cross-provider overrides are ignored.
+    pub provider: Option<String>,
+    /// Model id (`gpt-4o`, `claude-sonnet-4-5`, …) the persona wants.
+    pub model: Option<String>,
+    /// Permission level (`"ask"` | `"auto"` | `"full"`).
+    pub permission: Option<String>,
+    /// Skill ids the persona wants pre-selected. User selections in the
+    /// composer are merged on top, never replaced.
+    pub skills: Vec<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ExampleView {
+    pub input: String,
+    pub output: String,
+}
+
+/// Map a parsed spec + its raw Markdown onto the wire shape. `source` is
+/// the caller's classification (`"builtin"` for the 12 embedded records,
+/// `"user"` for files on disk, `"project"` for `<project>/.kodo/agents/`).
+pub fn agent_view(
+    spec: &kodo_agent::agents::AgentSpec,
+    source: &str,
+    markdown: String,
+) -> AgentView {
+    AgentView {
+        name: spec.name.clone(),
+        source: source.to_owned(),
+        description: spec.description.clone(),
+        instructions: spec.instructions.clone(),
+        markdown,
+        defaults: PersonaDefaultsView {
+            provider: spec.defaults.provider.clone(),
+            model: spec.defaults.model.clone(),
+            permission: spec.defaults.permission.clone(),
+            skills: spec.defaults.skills.clone(),
+        },
+        variables: spec.variables.clone(),
+        examples: spec
+            .examples
+            .iter()
+            .map(|ex| ExampleView {
+                input: ex.input.clone(),
+                output: ex.output.clone(),
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -589,6 +1138,60 @@ mod tests {
     use super::*;
     use kodo_core::session::{Item, ItemKind, Status};
     use serde_json::json;
+
+    #[test]
+    fn skill_view_round_trips_the_wire_shape() {
+        let spec = kodo_agent::parse_skill(
+            "# Skill: my-notes\n\
+             ## applicable_task_types\n- work\n\
+             ## context_strategy\nwork-focused\n\
+             ## allowed_tools\n- read_file\n\
+             ## verification_policy\nnone\n\
+             ## workflow\n- s1 | read | Read the input\n\
+             ## completion_criteria\n- The notes are complete\n\
+             ## guidance\nKeep it short.\n",
+        )
+        .expect("parse");
+        let view = skill_view(&spec, "user", "# Skill: my-notes\n".to_owned());
+        let value = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(value["name"], "my-notes");
+        assert_eq!(value["source"], "user");
+        // No `## description` in the fixture: falls back to the first criterion.
+        assert_eq!(value["description"], "The notes are complete");
+        assert_eq!(value["taskTypes"], json!(["work"]));
+        assert_eq!(value["strategy"], "work-focused");
+        assert_eq!(value["policy"], "none");
+        assert_eq!(value["workflow"][0]["kind"], "read");
+        assert_eq!(value["workflow"][0]["id"], "s1");
+        assert_eq!(value["allowedTools"], json!(["read_file"]));
+        assert!(value["completionCriteria"].as_array().is_some());
+        assert_eq!(value["guidance"], "Keep it short.");
+        assert_eq!(value["markdown"], "# Skill: my-notes\n");
+    }
+
+    #[test]
+    fn provider_view_tolerates_legacy_records_without_models() {
+        let legacy = json!({
+            "id": "p1", "name": "OpenAI", "template": "openai",
+            "apiKey": "••••abcd", "endpoint": "", "model": "gpt-4o",
+            "modelId": "gpt-4o", "hasKey": true
+        });
+        let view: ProviderView = serde_json::from_value(legacy).unwrap();
+        assert!(view.models.is_none());
+        // save always writes an array back, even an intentionally empty one
+        let with_models = json!({
+            "id": "p2", "name": "Custom", "template": "custom",
+            "apiKey": "", "endpoint": "http://x", "model": "m",
+            "models": [{"modelId": "m", "displayName": "M"}], "hasKey": false
+        });
+        let view: ProviderView = serde_json::from_value(with_models).unwrap();
+        let models = view.models.as_ref().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "m");
+        assert_eq!(models[0].display_name, "M");
+        let round: serde_json::Value = serde_json::to_value(&view).unwrap();
+        assert!(round.get("models").is_some());
+    }
 
     fn item(kind: ItemKind) -> Item {
         Item {
@@ -674,6 +1277,13 @@ mod tests {
                     model: String::new(),
                     input_tokens: 0,
                     output_tokens: 0,
+                    protocol: String::new(),
+                    finish_reason: String::new(),
+                    saw_reasoning: false,
+                    duration_ms: 0,
+                    provider_latency_ms: 0,
+                    retry_index: 0,
+                    llm_io_ref: None,
                 },
                 "modelCall",
             ),
@@ -735,6 +1345,7 @@ mod tests {
             title: "t".to_owned(),
             at: 7,
             archived: false,
+            mode: kodo_core::session::Mode::Work,
             turns: vec![kodo_core::session::Turn {
                 ask: "帮我看一下".to_owned(),
                 context: vec!["src/lib.rs".to_owned()],
@@ -749,6 +1360,7 @@ mod tests {
 
         assert_eq!(value["id"], json!("abc"));
         assert_eq!(value["project"], json!("/p"));
+        assert_eq!(value["mode"], json!("work"));
         assert_eq!(value["turns"][0]["ask"], json!("帮我看一下"));
         assert_eq!(value["turns"][0]["context"], json!(["src/lib.rs"]));
         assert_eq!(value["turns"][0]["done"], json!(true));

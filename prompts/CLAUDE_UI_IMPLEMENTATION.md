@@ -1,6 +1,6 @@
 # Claude Code Goal — Implement Kodo GUI Faithfully
 
-Implement Kodo GUI V1 from the approved design references.
+Implement Kodo GUI V1 from the approved design docs.
 
 This is **not** a redesign task.
 
@@ -9,13 +9,6 @@ First read:
 - `CLAUDE.md`
 - all files under `docs/design/`
 - `skills/kodo-ui/SKILL.md`
-
-Then inspect:
-
-- `docs/design/references/01-conversation-main.png`
-- `docs/design/references/02-response-trace.png`
-- `docs/design/references/03-archive.png`
-- `docs/design/references/04-settings.png`
 
 ## Product model
 
@@ -54,7 +47,7 @@ Do not add unrelated functionality.
 
 ## Visual requirement
 
-The reference image is the visual source of truth.
+The design docs under `docs/design/` are the visual source of truth.
 
 Primary viewport:
 
@@ -83,13 +76,13 @@ Work page by page in this order:
 
 For each page:
 
-1. inspect reference;
+1. read the design rules for it;
 2. explain the major component structure;
 3. implement;
 4. run the app;
 5. load deterministic fixture;
 6. capture screenshot at 1586×992;
-7. compare to reference;
+7. check against `UI_ACCEPTANCE.md`;
 8. correct visual differences;
 9. repeat;
 10. only then continue.

@@ -114,6 +114,7 @@ const IGNORE_DIRS: &[&str] = &[
     ".cache",
     "vendor",
     "__pycache__",
+    ".pytest_cache",
     ".venv",
     "venv",
     ".idea",
@@ -125,6 +126,20 @@ const IGNORE_EXTS: &[&str] = &[
     "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "webm", "bin", "exe", "dll",
     "so", "dylib", "class", "jar", "wasm", "lock", "min.js", "min.css", "map",
 ];
+
+/// `IGNORE_EXTS` entries the file browser renders inline (image / PDF).
+/// The viewer reaches them through the tree; content tools guard themselves
+/// (grep prefilters to text, reads refuse binaries).
+const PREVIEWABLE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "ico", "avif", "heic", "pdf",
+];
+
+/// A path segment that must stay out of the file map: the fixed ignore list
+/// plus `.venv.<suffix>` backup copies of a dead virtualenv (the project's
+/// own .gitignore documents those as junk, and we do not read .gitignore).
+fn is_ignored_dir(name: &str) -> bool {
+    IGNORE_DIRS.contains(&name) || name.starts_with(".venv.")
+}
 
 /// How a span was chosen — stored for the model and for tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,13 +545,24 @@ impl ContextManager {
             return Err(format!("file not found: {path}"));
         }
         let meta = fs::metadata(&full).map_err(|e| e.to_string())?;
-        if is_binary_meta(&meta, &full) {
-            return Err(format!("binary file refused: {path}"));
-        }
-        let text = fs::read_to_string(&full).map_err(|e| format!("read failed: {e}"))?;
-        if text.bytes().take(READ_CHUNK).any(|b| b == 0) {
-            return Err(format!("binary file refused: {path}"));
-        }
+        // Spreadsheets inline as cell text so pinned xlsx/xls/ods attachments
+        // reach the model like any text file; extraction failure returns Err
+        // and the caller degrades to a path descriptor. The binary refusal
+        // below still guards every other non-text format.
+        let (text, extracted_truncated) = if crate::office::is_spreadsheet(path) {
+            let sheet = crate::office::read_spreadsheet(&full, self.budget.max_span_chars)
+                .map_err(|e| format!("spreadsheet read failed: {e}"))?;
+            (sheet.text, sheet.truncated)
+        } else {
+            if is_binary_meta(&meta, &full) {
+                return Err(format!("binary file refused: {path}"));
+            }
+            let text = fs::read_to_string(&full).map_err(|e| format!("read failed: {e}"))?;
+            if text.bytes().take(READ_CHUNK).any(|b| b == 0) {
+                return Err(format!("binary file refused: {path}"));
+            }
+            (text, false)
+        };
         let lines: Vec<&str> = text.lines().collect();
         let total = lines.len();
         if total == 0 {
@@ -547,7 +573,7 @@ impl ContextManager {
         let start = start_line.clamp(1, total);
         let end = end_line.clamp(start, total);
         let mut snippet = lines[start - 1..end].join("\n");
-        let mut truncated = false;
+        let mut truncated = extracted_truncated;
         if snippet.len() > self.budget.max_span_chars {
             snippet = truncate_chars(&snippet, self.budget.max_span_chars);
             truncated = true;
@@ -888,13 +914,9 @@ fn walk_collect(
             return Ok(true);
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') && name != "." {
-            // allow normal dotfiles? skip hidden dirs including .git
-            if IGNORE_DIRS.contains(&name.as_str()) || name == ".git" {
-                continue;
-            }
-        }
-        if IGNORE_DIRS.contains(&name.as_str()) {
+        // Skip ignored dirs (.git, node_modules, .venv backups, caches);
+        // other dotfiles and dot-directories stay listable.
+        if is_ignored_dir(&name) {
             continue;
         }
         let path = entry.path();
@@ -922,7 +944,7 @@ fn walk_collect(
 fn should_index_path(rel: &str) -> bool {
     let normalized = rel.replace('\\', "/");
     for seg in normalized.split('/') {
-        if IGNORE_DIRS.contains(&seg) {
+        if is_ignored_dir(seg) {
             return false;
         }
     }
@@ -931,6 +953,7 @@ fn should_index_path(rel: &str) -> bool {
         if IGNORE_EXTS
             .iter()
             .any(|x| *x == e || normalized.ends_with(x))
+            && !PREVIEWABLE_EXTS.contains(&e.as_str())
         {
             return false;
         }
@@ -1313,6 +1336,47 @@ mod tests {
     }
 
     #[test]
+    fn scan_keeps_previewable_files_and_drops_backups() {
+        let dir = std::env::temp_dir().join(format!(
+            "kodo-scan-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("docs")).unwrap();
+        fs::create_dir_all(dir.join("images")).unwrap();
+        fs::create_dir_all(dir.join(".venv.broken-backup/lib")).unwrap();
+        fs::create_dir_all(dir.join(".pytest_cache")).unwrap();
+        fs::write(dir.join("docs/guide.md"), "# hi").unwrap();
+        fs::write(dir.join("images/logo.png"), b"\x89PNG").unwrap();
+        fs::write(dir.join("archive.zip"), b"PK").unwrap();
+        fs::write(dir.join(".venv.broken-backup/lib/old.py"), "x = 1").unwrap();
+        fs::write(dir.join(".pytest_cache/lastfailed"), "{}").unwrap();
+
+        let mut m = manager(&dir);
+        m.scan(&|| true).expect("scan");
+        let paths: Vec<&str> = m.file_map().iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.contains(&"docs/guide.md"), "{paths:?}");
+        assert!(
+            paths.contains(&"images/logo.png"),
+            "previewable image must be listed: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains(".venv.broken-backup")),
+            "venv backup must be ignored: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains(".pytest_cache")),
+            "pytest cache must be ignored: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with("archive.zip")),
+            "archives stay out of the map: {paths:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn range_read_returns_exact_lines_and_flags_truncation() {
         let root = make_fixture();
         let mut m = manager(&root);
@@ -1378,6 +1442,24 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&external_dir);
+    }
+
+    #[test]
+    fn read_range_extracts_spreadsheet_cells() {
+        // xlsx is binary but not refused: read_range routes it through
+        // office::read_spreadsheet and returns a normal text span, so pinned
+        // spreadsheet attachments inline like any other file.
+        let root = make_fixture();
+        let mut m = manager(&root);
+        let xlsx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qa.xlsx");
+        let rel = xlsx.to_string_lossy().into_owned();
+        let span = m
+            .read_range(&rel, 1, 400, "pinned by user")
+            .expect("spreadsheet reads as a span");
+        assert!(span.snippet.contains("## sheet: 缴费基数"), "{}", span.snippet);
+        assert!(span.snippet.contains("养老保险\t4494"), "{}", span.snippet);
+        assert!(span.total_lines >= 4, "rows become lines");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

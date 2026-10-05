@@ -174,10 +174,24 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             model,
             input_tokens,
             output_tokens,
+            protocol,
+            finish_reason,
+            saw_reasoning,
+            duration_ms,
+            provider_latency_ms,
+            retry_index,
+            llm_io_ref,
         } => ItemKind::ModelCall {
             model: model.clone(),
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
+            protocol: protocol.clone(),
+            finish_reason: finish_reason.clone(),
+            saw_reasoning: *saw_reasoning,
+            duration_ms: *duration_ms,
+            provider_latency_ms: *provider_latency_ms,
+            retry_index: *retry_index,
+            llm_io_ref: llm_io_ref.clone(),
         },
         Step::FileChange { changes } => ItemKind::FileChange {
             changes: changes
@@ -207,6 +221,86 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             delivery: delivery.clone(),
             verification: verification.clone(),
             plain: *plain,
+        },
+        Step::Thinking {
+            content,
+            phase,
+            source,
+        } => ItemKind::Thinking {
+            content: content.clone(),
+            phase: phase.clone(),
+            source: source.clone(),
+        },
+        Step::Compaction {
+            dropped,
+            summarized_into,
+            freed_pct,
+            source_summary,
+            covered_messages,
+        } => ItemKind::Compaction {
+            dropped: *dropped,
+            summarized_into: *summarized_into,
+            freed_pct: *freed_pct,
+            source_summary: source_summary.clone(),
+            covered_messages: *covered_messages,
+        },
+        Step::Failover {
+            from_provider,
+            from_model,
+            error_class,
+            error,
+            to_provider,
+            to_model,
+            retry_index,
+        } => ItemKind::Failover {
+            from_provider: from_provider.clone(),
+            from_model: from_model.clone(),
+            error_class: error_class.clone(),
+            error: error.clone(),
+            to_provider: to_provider.clone(),
+            to_model: to_model.clone(),
+            retry_index: *retry_index,
+        },
+        Step::PlanStep {
+            step_id,
+            title,
+            kind,
+            status,
+            triggered_by,
+            evidence,
+        } => ItemKind::PlanStep {
+            step_id: step_id.clone(),
+            title: title.clone(),
+            kind: kind.clone(),
+            status: status.clone(),
+            triggered_by: triggered_by.clone(),
+            evidence: evidence.clone(),
+        },
+        Step::Permission {
+            kind,
+            detail,
+            decision,
+            context,
+        } => ItemKind::Permission {
+            kind: kind.clone(),
+            detail: detail.clone(),
+            decision: decision.clone(),
+            context: context.clone(),
+        },
+        Step::ContextBudget {
+            used,
+            window,
+            percent,
+            cumulative_chars,
+            compacted_count,
+            last_model,
+        } => ItemKind::ContextBudget {
+            used: *used,
+            window: *window,
+            percent: *percent,
+            cumulative_chars: *cumulative_chars,
+            compacted_count: *compacted_count,
+            last_model: last_model.clone(),
         },
     }
 }
@@ -244,7 +338,8 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("tempdir");
         let project = tmp.join("proj");
         std::fs::create_dir_all(&project).expect("proj");
-        let id = session::open(&dir, &project, "t", session::now()).expect("open");
+        let id =
+            session::open(&dir, &project, "t", session::now(), session::Mode::Code).expect("open");
         // Items attach to the turn an `ask` line opens — same order the shell writes.
         session::record_ask(&dir, &id, session::now(), "跑 ls").expect("ask");
 
@@ -357,7 +452,14 @@ mod tests {
                 &Step::ModelCall {
                     model: "m".into(),
                     input_tokens: 1,
-                    output_tokens: 2
+                    output_tokens: 2,
+                    protocol: "native".into(),
+                    finish_reason: "stop".into(),
+                    saw_reasoning: false,
+                    duration_ms: 0,
+                    provider_latency_ms: 0,
+                    retry_index: 0,
+                    llm_io_ref: None,
                 },
                 false
             )),

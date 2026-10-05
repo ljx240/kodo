@@ -7,6 +7,42 @@
   min-width: 0;
 }
 
+/* Width handle straddling the conversation ↔ inspector boundary (≥1200px;
+   narrow windows overlay and keep their own clamp, so no handle there). */
+.ins-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  z-index: 40;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.ins-resizer:hover,
+.ins-resizer:focus-visible {
+  background: var(--kodo-accent);
+}
+
+.ins-resizer:focus-visible {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: 1px;
+}
+
+/* While dragging: the whole shell follows the cursor and the panel width
+   snaps to it live (the 120ms width transition would lag behind the pointer). */
+.app--resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.app--resizing .ins-panel {
+  transition: none;
+}
+
 .ins-rail {
   width: var(--kodo-inspector-rail-width);
   flex: none;
@@ -48,6 +84,40 @@
   flex: none;
   display: flex;
   flex-direction: column;
+  /* Auto-widen/restore when 文件 opens/closes tracks this transition. */
+  transition: width 120ms ease;
+  /* Enter-only: the panel slides in when it opens (no exit timers). */
+  animation: ins-panel-enter 120ms ease;
+}
+
+/* Focus mode (LAYOUT §5): the conversation column is fixed at 300px, so the
+   Inspector's inline width must be capped to whatever fits the remaining
+   viewport — otherwise a drag past the threshold overflows the window at
+   narrower screens. The sidebar-hidden override fires when the tree is
+   collapsed (no sidebar column). */
+.app--focus-mode .ins-panel {
+  max-width: calc(
+    100vw - var(--kodo-sidebar-width) - var(--kodo-focus-mode-column) - 6px
+  );
+}
+.app--sidebar-hidden.app--focus-mode .ins-panel {
+  max-width: calc(100vw - var(--kodo-focus-mode-column) - 6px);
+}
+
+@keyframes ins-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+}
+
+/* 文件 and 浏览 widen the column so their content breathes (Codex-style);
+   leaving the panel drops the class and restores the base width. Narrow
+   windows keep the overlay clamp below and never widen. */
+@media (min-width: 1200px) {
+  .inspector--wide .ins-panel {
+    width: var(--kodo-inspector-file-width);
+  }
 }
 
 .ins-panel-head {
@@ -141,6 +211,110 @@
   flex-direction: column;
   gap: 12px;
   padding: 18px 14px 24px;
+  /* Remounts on every panel switch (keyed) and re-enters from 8px right. */
+  animation: ins-content-enter 120ms ease;
+}
+
+@keyframes ins-content-enter {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+}
+
+/* 文件 panel body owns its own padding/scroll — the tree needs full bleed. */
+.ins-content--flush {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+/* ── 浏览 panel: URL bar, embedded frame, refusal fallback ────────────────── */
+.browse {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.browse-bar {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.browse-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+}
+
+.browse-input:focus-visible {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: 1px;
+}
+
+.browse-go {
+  height: 30px;
+  padding: 0 12px;
+}
+
+.browse-error {
+  flex: none;
+  margin: 8px 12px 0;
+  color: var(--kodo-error);
+  font-size: var(--kodo-font-sm);
+}
+
+.browse-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  font-size: var(--kodo-font-sm);
+}
+
+.browse-banner span {
+  flex: 1;
+  min-width: 0;
+  color: var(--kodo-text-secondary);
+}
+
+.browse-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.browse-empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.browse-foot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px;
+  border-top: 1px solid var(--kodo-border);
 }
 
 .ins-section {
@@ -473,3 +647,7 @@
   font-size: 11px;
   margin: 4px 0 10px;
 }
+
+/* Shared diff rows — Inspector density (no viewer gutter padding). */
+.diff-block .viewer-line { padding: 0; }
+.diff-block .viewer-ln { width: 16px; }

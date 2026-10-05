@@ -1,49 +1,42 @@
-.conv-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 64px;
+/* The conversation page has no content header (the title lives in the top
+   bar since 2026-09-30): the turn list makes its own gap below the 44px bar. */
+.main--conversation > .conv-stage > .scroll > .page-inner {
+  padding-top: 16px;
 }
 
-.conv-head > svg {
-  color: var(--kodo-text-secondary);
-}
-
-.conv-title {
-  font-size: var(--kodo-font-title);
-  font-weight: 600;
-}
-
-/* The head row is sized by its text; the 36px avatar overflows it
-   symmetrically, which is what keeps the message blocks compact. */
-.msg-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 18px;
-  margin-bottom: 8px;
-}
-
-.msg-author {
-  font-size: var(--kodo-font-md);
-  font-weight: 600;
-}
-
-.msg-time {
-  color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-sm);
-}
-
-/* User turns sit on the right; Kodo replies stay on the left. The head,
-   context chips, and bubble move as one column so the right edge lines up. */
+/* User turns sit on the right; Kodo replies stay on the left — alignment and
+   the bubble background carry who spoke (no avatar/name header, 2026-09-30).
+   Context chips and the bubble move as one column so the right edge lines up. */
 .msg-user {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   margin-bottom: 14px;
 }
 
-.msg-user .msg-head,
+/* Copy / 编辑重发 cluster — hover-revealed at the turn's top right (user
+   turns only; reply actions live at the reply's bottom since 2026-09-30). */
+.msg-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+}
+
+.msg-actions .icon-btn {
+  background: var(--kodo-canvas);
+  border: 1px solid var(--kodo-border);
+}
+
+.msg-user:hover .msg-actions,
+.msg-actions:focus-within {
+  opacity: 1;
+}
+
 .msg-user .msg-contexts {
   justify-content: flex-end;
 }
@@ -65,10 +58,10 @@
 
 /* A run that stopped partway leaves a step started and never finished. Saying
    so is the point: the alternative is a reply that looks complete or one that
-   claims to still be working. */
+   claims to still be working. The words carry it — the tone stays quiet. */
 .reply-interrupted {
   margin: 0 0 8px 34px;
-  color: var(--kodo-warning-text);
+  color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
 }
 
@@ -88,6 +81,24 @@
   margin: 0 0 8px 34px;
   color: var(--kodo-text-muted, var(--kodo-text-secondary, #666));
   font-size: var(--kodo-font-sm, 12px);
+}
+
+/* The horizontal in-reply context bar was retired in favour of the
+   Codex-style circular ring at the bottom of the composer (single source
+   of truth). The compact-toast below remains as the in-place confirmation
+   of an actual compaction pass. */
+
+/* One-shot toast that confirms a context-compaction pass; auto-cleared. */
+.reply-compact-toast {
+  margin: 0 0 8px 34px;
+  color: var(--kodo-text-secondary, #666);
+  font-size: var(--kodo-font-sm, 12px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reply-context-bar-fill {
+    transition: none;
+  }
 }
 
 /* ---------------------------------------------------------------- trace -- */
@@ -134,8 +145,8 @@
   outline-offset: 2px;
 }
 
-/* The disclosure sits outside the step content, in the gutter left of the
-   status marks. The reference draws no rule between them. */
+/* The disclosure sits outside the step content, in the row's left gutter. The
+   reference draws no rule between them. */
 .trace-toggle {
   width: 22px;
   flex: none;
@@ -156,37 +167,18 @@
   flex-wrap: wrap;
 }
 
-.trace-mark {
-  width: 20px;
-  height: 20px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
+/* Interim stream prose between steps: a quiet text row, no chip, no icon. */
+.trace-row--note {
+  padding: 2px 0;
 }
 
-.trace-mark--done {
-  background: var(--kodo-success);
-  color: #fff;
-}
-
-.trace-mark--failed {
-  background: var(--kodo-error);
-}
-
-.trace-mark--running {
-  border: 2px solid var(--kodo-accent);
-  border-top-color: transparent;
-}
-
-.trace-mark--interrupted {
-  background: var(--kodo-warning);
-  color: #fff;
-}
-
-.trace-mark--stopped {
-  background: var(--kodo-warning-text);
-  color: #fff;
+.trace-note {
+  margin: 0;
+  padding: 0 0 0 32px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 /* The reference lets each step's content follow its own label rather than
@@ -331,6 +323,11 @@
 
 .trace-phase .trace {
   margin: 2px 0 0 10px;
+}
+
+/* Second level inside a same-type group: each step one indent deeper. */
+.trace .trace--nested {
+  margin: 2px 0 6px 18px;
 }
 
 /* Failure wording rides the row line in words — never color alone. */
@@ -496,24 +493,6 @@
   flex-wrap: wrap;
 }
 
-/* Streaming text is labeled a draft until the final answer replaces it. */
-.draft-badge {
-  display: inline-flex;
-  align-items: center;
-  height: 20px;
-  margin-bottom: 6px;
-  padding: 0 8px;
-  border-radius: 999px;
-  background: var(--kodo-hover);
-  color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-xs);
-  font-weight: 500;
-}
-
-.stream-preview {
-  position: relative;
-}
-
 /* Changed-files card: four sections, one audience each. */
 .changed-group {
   margin-top: 10px;
@@ -565,6 +544,7 @@
   margin: 0 0 12px;
   padding: 8px 10px;
   border: 1px solid var(--kodo-border);
+  border-left: 2px solid var(--kodo-accent);
   border-radius: var(--kodo-radius-sm);
   background: var(--kodo-surface);
   font-size: var(--kodo-font-sm);
@@ -584,6 +564,9 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Many headings cap here and scroll inside the box. */
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 .md-toc-list a {
@@ -594,6 +577,13 @@
 .md-toc-list a:hover {
   color: var(--kodo-accent);
   text-decoration: underline;
+}
+
+/* Scroll-follow: the heading in the reading band lights up. */
+.md-toc-list a.md-toc-active {
+  color: var(--kodo-accent);
+  background: var(--kodo-selected);
+  font-weight: 600;
 }
 
 .md-toc-list a:focus-visible {
@@ -608,6 +598,51 @@
 
 .md-code-wrap .md-code {
   margin: 0;
+  border-top: 0;
+  border-radius: 0 0 var(--kodo-radius-sm) var(--kodo-radius-sm);
+}
+
+/* Header strip: fence language left, copy right — compact IDE chrome. */
+.md-code-head {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--kodo-border);
+  border-bottom: 0;
+  border-radius: var(--kodo-radius-sm) var(--kodo-radius-sm) 0 0;
+  background: var(--kodo-surface);
+}
+
+.md-code-lang {
+  color: var(--kodo-text-secondary);
+  font-family: var(--kodo-font-mono);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.md-code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--kodo-text-secondary);
+  font: inherit;
+  font-size: var(--kodo-font-xs);
+  cursor: pointer;
+}
+
+.md-code-copy:hover {
+  background: var(--kodo-hover);
+  color: var(--kodo-text);
+}
+
+.md-code-copy:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: -1px;
 }
 
 .md-code-toggle {
@@ -788,6 +823,28 @@
   color: var(--kodo-text);
 }
 
+/* Rows are clickable (open the file viewer); the button keeps the row look. */
+button.changed-file-path {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.changed-file-path:hover:not(:disabled) {
+  color: var(--kodo-accent);
+  text-decoration: underline;
+}
+
+button.changed-file-path:disabled {
+  cursor: default;
+}
+
+.changed-undo-note {
+  color: var(--kodo-text-secondary);
+}
+
 .changed-file-delta {
   flex: none;
   font-size: var(--kodo-font-sm);
@@ -799,7 +856,16 @@
 
 .composer {
   flex: none;
-  padding: 4px 20px 8px;
+  /* Mirrors .page-inner: the input box spans the same centered column as the
+     reply text (900px box with 32px side padding → 836px content column at
+     the reference viewport), so both share one column edge (2026-09-30).
+     width:100% is required — auto margins turn off the flex stretch that
+     would otherwise give the row its full column width, so the box would
+     collapse to fit-content without it. */
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 4px 32px 8px;
   min-width: 0;
 }
 
@@ -826,14 +892,20 @@
     0 4px 14px rgb(23 32 51 / 5%);
 }
 
-/* ── The single row: attach/permission · draft · model/send ──────────────── */
+/* ── Draft above, controls sunk to the bottom edge ────────────────────────── */
+/* 2026-09-23: +, permission, model and send sit on the bottom of the input
+   box; the draft fills the width above them. Two visual lines inside one
+   wrap row keeps the DOM order (left · draft · right) stable for the menus. */
 
 .composer-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  align-content: space-between;
   gap: 6px;
   padding: 8px 8px 8px 10px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 /* A new task chooses its project directly below the dialog. The row disappears
@@ -904,7 +976,8 @@
    up to `MAX_HEIGHT` in Composer.tsx and scrolls past that, which is what the
    `resize: none` and the scrollbar-free default would otherwise fight. */
 .composer-input {
-  flex: 1;
+  order: -1;
+  flex: 1 1 100%;
   width: 100%;
   min-width: 120px;
   min-height: 24px;
@@ -935,9 +1008,15 @@
 .composer-right {
   display: flex;
   align-items: center;
-  gap: 4px;
+  /* The ring + model picker are two distinct affordances — give them room
+     so the ring doesn't visually merge with the picker chrome. */
+  gap: 8px;
   min-width: 0;
   flex: none;
+}
+
+.composer-right {
+  margin-left: auto;
 }
 
 /* ── Permission trigger (dropdown style) ─────────────────────────────────── */
@@ -961,6 +1040,78 @@
 .composer-perm-trigger:hover,
 .composer-perm-trigger[aria-expanded="true"] {
   background: var(--kodo-hover);
+}
+
+/* The agent selector mirrors the permission trigger's chrome — they sit
+   side by side in the left cluster (COMPONENTS §13). Long persona names
+   ellipsize instead of pushing the model picker around. */
+.composer-agent-trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--kodo-radius-sm);
+  background: none;
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 220px;
+  transition: background 0.1s;
+}
+
+.composer-agent-trigger:hover,
+.composer-agent-trigger[aria-expanded="true"] {
+  background: var(--kodo-hover);
+}
+
+.composer-agent-trigger span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Agent dropdown (composer, 2026-10-04): typeahead filter at the top
+   of the menu, then 分组标题 (内置 / 自定义) above their respective
+   MenuItem lists. The picker sits in `.composer-left`, narrow enough that
+   the dropdown needs a min-width so the typeahead doesn't cramp. */
+.composer-left > .menu-anchor:has(.composer-agent-trigger) .menu {
+  min-width: min(320px, calc(100vw - 40px));
+}
+
+.composer-agent-filter {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 6px 8px 8px;
+  padding: 6px 10px;
+  appearance: none;
+  font: inherit;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text);
+  background: var(--kodo-canvas);
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  outline: none;
+}
+
+.composer-agent-filter:focus {
+  border-color: var(--kodo-accent, var(--kodo-text));
+}
+
+.composer-agent-section {
+  padding: 6px 16px 4px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs, var(--kodo-font-sm));
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  border-top: 1px solid var(--kodo-border);
+  pointer-events: none;
+}
+
+.composer-agent-section:first-of-type {
+  border-top: 0;
 }
 
 /* ── Model / permission pickers open upward (composer sits at the bottom).
@@ -1096,6 +1247,89 @@
   color: var(--kodo-text-muted);
 }
 
+/* Codex-style circular context-window ring (sibling of the model picker). */
+.composer-context-ring {
+  /* The two stacked arcs inherit `currentColor`; per-tone CSS vars below
+     map `--kodo-context-ring-{muted,warn,danger}` onto the same palette
+     the in-reply bar used, so the color language stays consistent. */
+  --kodo-context-ring-muted: var(--kodo-text-muted, #888);
+  --kodo-context-ring-warn: var(--kodo-warning, #c79a26);
+  --kodo-context-ring-danger: var(--kodo-danger, #c0392b);
+  position: relative;
+  border-radius: 50%;
+  cursor: default;
+  outline: none;
+}
+
+.composer-context-ring:hover,
+.composer-context-ring:focus-visible {
+  /* Slight enlargement on hover/focus — the tooltip is the primary reveal,
+     this just telegraphs that the ring is hover-targetable. */
+  transform: scale(1.15);
+}
+
+.composer-context-ring-bg {
+  stroke: var(--kodo-hover);
+}
+
+.composer-context-ring-fg {
+  stroke: currentColor;
+  transition: stroke-dasharray 180ms ease, opacity 120ms ease;
+}
+
+.composer-context-ring:hover .composer-context-ring-fg,
+.composer-context-ring:focus-visible .composer-context-ring-fg {
+  opacity: 0.85;
+}
+
+/* Hover/focus popover — mirrors the `.turn-rail-preview` recipe (DESIGN §12):
+   `pointer-events: none`, `--kodo-canvas` on `--kodo-border`, popover
+   radius, find-bar shadow. Anchored above the ring so the chevron-menu
+   below it never fights for vertical space. */
+.composer-context-ring-tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  pointer-events: none;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 168px;
+  padding: 8px 10px;
+  border-radius: var(--kodo-radius-popover, 6px);
+  background: var(--kodo-canvas, #fff);
+  color: var(--kodo-text, #1f2330);
+  border: 1px solid var(--kodo-border, #d9dde3);
+  box-shadow: var(--kodo-shadow-find, 0 4px 14px rgba(0, 0, 0, 0.08));
+  font-size: var(--kodo-font-xs, 11px);
+  line-height: 1.45;
+  white-space: nowrap;
+  z-index: 50;
+  text-align: right;
+}
+
+.composer-context-ring-tooltip-line:first-child {
+  /* The header line ("背景信息窗口：") sits a touch heavier. */
+  font-weight: 500;
+  color: var(--kodo-text-secondary, #4a5160);
+}
+
+.composer-context-ring:hover .composer-context-ring-tooltip,
+.composer-context-ring:focus-visible .composer-context-ring-tooltip,
+.composer-context-ring-tooltip[data-open="true"] {
+  display: flex;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-context-ring,
+  .composer-context-ring-fg {
+    transition: none;
+  }
+  .composer-context-ring:hover {
+    transform: none;
+  }
+}
+
 /* ── Menu separator ───────────────────────────────────────────────────────── */
 
 .menu-separator {
@@ -1144,28 +1378,112 @@
   background: var(--kodo-text);
 }
 
-/* ── Pinned context chips (paths only) ───────────────────────────────────── */
+/* ── Attachment cards above the draft (Codex-style, 2026-09-23) ──────────── */
+/* Images render a thumbnail; PDF/Office/text show a gray card with a centered
+   glyph, a colored type badge (PDF/DOC/XLS/PPT/TXT…) and the file name.
+   Paths only — file bodies never enter the page. */
 
 .composer-contexts {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
+.ctx-card {
+  display: flex;
+  flex-direction: column;
+  width: 148px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-canvas);
+  overflow: hidden;
+}
+
+/* Openable cards (sent bubbles) are buttons: strip the UA chrome so the
+   card keeps its exact geometry. */
+button.ctx-card {
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+button.ctx-card:hover {
+  border-color: var(--kodo-border-strong);
+}
+
+button.ctx-card:focus-visible {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: 2px;
+}
+
+/* A lone image is the screenshot case: one large thumbnail over the draft. */
+.composer-contexts .ctx-card--image:only-child {
+  width: min(240px, 100%);
+}
+
+.ctx-card-preview {
+  display: grid;
+  place-items: center;
+  height: 84px;
+  background: var(--kodo-hover);
+  color: var(--kodo-text-secondary);
+}
+
+.ctx-card--image .ctx-card-preview {
+  height: 96px;
+}
+
+.composer-contexts .ctx-card--image:only-child .ctx-card-preview {
+  height: 140px;
+}
+
+.ctx-card-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ctx-card-foot {
+  display: flex;
+  align-items: center;
   gap: 6px;
-  padding: 0 14px 6px;
+  height: 30px;
+  padding: 0 4px 0 6px;
+  border-top: 1px solid var(--kodo-border);
 }
 
-.chip--context {
-  height: 24px;
-  max-width: 240px;
-  padding: 0 4px 0 8px;
-  font-size: var(--kodo-font-xs);
+.ctx-badge {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--kodo-canvas);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.6;
+  letter-spacing: 0.04em;
 }
 
-.chip--context .chip-label {
+.ctx-card-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text);
 }
+
+.ctx-card-foot .chip-remove {
+  flex: none;
+}
+
+/* ── Attachment cards inside message bubbles (same .ctx-card as composer) ── */
 
 .chip-remove {
   display: grid;
@@ -1204,7 +1522,8 @@
 
 @media (max-width: 1199px) {
   .composer {
-    padding: 6px 12px 10px;
+    /* Mirrors .page-inner's 16px side padding at this breakpoint. */
+    padding: 6px 16px 10px;
     min-width: 0;
   }
 
@@ -1223,6 +1542,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 42vw;
+  }
+
+  .composer-agent-trigger {
+    max-width: 40vw;
   }
 
   .composer-model {
@@ -1287,28 +1610,8 @@
 .msg-contexts {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 8px;
   margin-bottom: 6px;
-}
-
-.msg-contexts .chip--static {
-  height: 22px;
-  font-size: var(--kodo-font-xs);
-  font-family: var(--kodo-font-mono);
-}
-
-/* Live model stream preview (batched TextDelta). */
-.stream-preview {
-  margin-top: 8px;
-  padding: 10px 12px;
-  border: 1px dashed var(--kodo-border);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--kodo-canvas) 92%, white);
-}
-
-.stream-preview .final-text {
-  white-space: pre-wrap;
-  margin: 0;
 }
 
 /* Structured approval risk context. */
@@ -1341,16 +1644,6 @@
   animation: kodo-pulse 1.2s ease-in-out infinite;
 }
 
-.stream-caret {
-  display: inline-block;
-  width: 1px;
-  height: 1em;
-  margin-left: 2px;
-  vertical-align: text-bottom;
-  background: var(--kodo-accent);
-  animation: kodo-blink 1s steps(1) infinite;
-}
-
 @keyframes kodo-pulse {
   0%,
   100% {
@@ -1358,17 +1651,6 @@
   }
   50% {
     opacity: 1;
-  }
-}
-
-@keyframes kodo-blink {
-  0%,
-  50% {
-    opacity: 1;
-  }
-  51%,
-  100% {
-    opacity: 0;
   }
 }
 
@@ -1396,13 +1678,20 @@
   font-size: var(--kodo-font-xs);
 }
 
-.reply-action {
-  opacity: 0;
+.reply {
+  position: relative;
 }
 
-.msg-head:hover .reply-action,
-.reply-action:focus-visible {
-  opacity: 1;
+/* A quiet utility row at the very bottom of the reply — 复制回复 / 重新生成 /
+   查看响应轨迹, always visible (2026-09-30), no hover reveal. Icon-only
+   (labels live on aria-label + title); tight gap so the icons read as one
+   group on the reply's chrome column (34px), under whichever body rendered. */
+.reply-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 10px 0 4px 34px;
 }
 
 .trace-expand {
@@ -1433,10 +1722,9 @@
   max-height: 280px;
 }
 
-.code-chip--fail {
-  color: var(--kodo-error);
-  border-color: color-mix(in srgb, var(--kodo-error) 40%, var(--kodo-border));
-}
+/* Shared diff rows — trace density (no viewer gutter padding). */
+.trace-diff .viewer-line { padding: 0; }
+.trace-diff .viewer-ln { width: 16px; }
 
 /* Final answer markdown — conversation body density, not consumer cards. */
 .md {
@@ -1447,7 +1735,12 @@
 .md-para,
 .md-heading,
 .md-list,
-.md-quote {
+.md-quote,
+.md-table-wrap,
+.md-hr,
+.md-formula-block,
+.md-mermaid,
+.md-mermaid-loading {
   margin: 0 0 8px;
 }
 
@@ -1455,17 +1748,81 @@
 .md-heading:last-child,
 .md-list:last-child,
 .md-quote:last-child,
-.md-code:last-child {
+.md-code:last-child,
+.md-table-wrap:last-child,
+.md-hr:last-child,
+.md-formula-block:last-child,
+.md-mermaid:last-child,
+.md-mermaid-loading:last-child {
   margin-bottom: 0;
 }
 
 .md-heading {
-  font-size: var(--kodo-font-md);
   font-weight: 600;
+  scroll-margin-top: 8px;
+}
+
+/* Three tiers: h1–h6 input clamps here, each clearly above the 14px body
+   but inside the compact IDE type scale (deepest tier = section 13px). */
+.md-heading--1 {
+  margin: 14px 0 6px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.md-heading--2 {
+  margin: 12px 0 6px;
+  font-size: 15px;
+}
+
+.md-heading--3 {
+  margin: 10px 0 4px;
+  font-size: var(--kodo-font-md);
 }
 
 .md-list {
   padding-left: 1.25em;
+}
+
+.md-list .md-list {
+  margin: 2px 0 0;
+}
+
+.md-task input {
+  margin-right: 6px;
+  vertical-align: -1px;
+  accent-color: var(--kodo-accent);
+}
+
+/* GFM pipe tables: one bordered surface, 1px grid, no zebra; the wrapper
+   scrolls wide schedule tables horizontally. */
+.md-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+}
+
+.md-table {
+  border-collapse: collapse;
+  font-size: var(--kodo-font-md);
+  line-height: 1.5;
+}
+
+.md-table th,
+.md-table td {
+  padding: 4px 10px;
+  border: 1px solid var(--kodo-border);
+  text-align: left;
+}
+
+.md-table thead th {
+  background: var(--kodo-surface);
+  font-weight: 600;
+}
+
+.md-hr {
+  border: 0;
+  border-top: 1px solid var(--kodo-border);
 }
 
 .md-code {
@@ -1489,10 +1846,304 @@
   font-size: 0.92em;
 }
 
+/* Path-shaped inline code renders as a button — same chip look, UA chrome
+   stripped. The click probes the file before the sidebar panel opens. */
+button.md-code-path {
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+}
+
+button.md-code-path:hover {
+  background: var(--kodo-hover);
+}
+
+button.md-code-path:focus-visible {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: 1px;
+}
+
 .md-quote {
-  padding-left: 10px;
-  border-left: 2px solid var(--kodo-border-strong);
+  padding: 6px 10px;
+  border-left: 3px solid var(--kodo-border-strong);
+  border-radius: 0 var(--kodo-radius-sm) var(--kodo-radius-sm) 0;
+  background: var(--kodo-surface);
   color: var(--kodo-text-secondary);
+}
+
+.md-quote p {
+  margin: 0 0 4px;
+}
+
+.md-quote p:last-child {
+  margin-bottom: 0;
+}
+
+/* `>>` nests: the child keeps the left rule but drops the surface fill so
+   the stack doesn't read as boxed-in-boxed. */
+.md-quote .md-quote {
+  margin: 4px 0 0;
+  background: transparent;
+}
+
+/* `> [!NOTE]` callouts — one left rule per kind, all from audited tokens. */
+.md-callout {
+  border-left-width: 3px;
+}
+
+.md-callout[data-callout="note"] {
+  border-left-color: var(--kodo-accent);
+}
+
+.md-callout[data-callout="tip"] {
+  border-left-color: var(--kodo-success);
+}
+
+.md-callout[data-callout="warning"] {
+  border-left-color: var(--kodo-warning);
+}
+
+.md-callout[data-callout="important"] {
+  border-left-color: var(--kodo-error);
+}
+
+.md-callout-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 2px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+}
+
+/* Footnotes hoist to the answer tail: label, definition rows, back arrow. */
+.md-footnotes {
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--kodo-border);
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+}
+
+.md-footnotes-title {
+  margin-bottom: 4px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  font-weight: 600;
+}
+
+.md-footnote {
+  margin-bottom: 2px;
+  scroll-margin-top: 8px;
+}
+
+.md-footnote:last-child {
+  margin-bottom: 0;
+}
+
+.md-footnote-marker {
+  font-family: var(--kodo-font-mono);
+  font-size: 11px;
+}
+
+.md-fnref a {
+  color: var(--kodo-accent);
+  text-decoration: none;
+}
+
+.md-fnref a:hover {
+  text-decoration: underline;
+}
+
+.md-footnote-back {
+  color: var(--kodo-accent);
+  text-decoration: none;
+  margin-left: 2px;
+}
+
+.md a.md-link {
+  color: var(--kodo-accent);
+  text-decoration: none;
+}
+
+.md a.md-link:hover {
+  text-decoration: underline;
+}
+
+.md a.md-link:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 2px;
+}
+
+/* ==highlight== rides the selected-surface token so contrast stays audited;
+   ~~strikethrough~~ is plain inherited text decoration. */
+.md mark {
+  background: var(--kodo-selected);
+  color: inherit;
+}
+
+/* ```mermaid — rendered SVG in a quiet surface box; the loading note is a
+   dashed twin so the layout doesn't jump when the diagram lands. */
+.md-mermaid-block {
+  position: relative;
+  margin: 0 0 8px;
+}
+
+.md-mermaid-block:last-child {
+  margin-bottom: 0;
+}
+
+.md-mermaid-block .md-mermaid,
+.md-mermaid-block .md-mermaid-loading {
+  margin: 0;
+}
+
+/* Hover-strip above the diagram: source / copy / fullscreen. */
+.md-mermaid-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+
+.md-mermaid-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--kodo-text-secondary);
+  font: inherit;
+  font-size: var(--kodo-font-xs);
+  cursor: pointer;
+}
+
+.md-mermaid-btn:hover {
+  background: var(--kodo-hover);
+  color: var(--kodo-text);
+}
+
+.md-mermaid-btn:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 1px;
+}
+
+.md-mermaid-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.md-mermaid-btn[aria-pressed="true"] {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+/* Fullscreen lightbox: dimmed backdrop, zoomable stage, same dialog stack
+   height family as the settings modal. */
+.md-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: rgb(23 32 51 / 60%);
+}
+
+.md-lightbox-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.md-lightbox-zoom {
+  min-width: 42px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  text-align: center;
+}
+
+.md-lightbox-stage {
+  flex: 1;
+  overflow: auto;
+  padding: 24px;
+  background: var(--kodo-canvas);
+  transform-origin: top center;
+}
+
+.md-lightbox-stage svg {
+  display: block;
+  margin: 0 auto;
+  max-width: none;
+  width: auto;
+  height: auto;
+}
+
+.md-mermaid-loading {
+  border-style: dashed;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.md-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* KaTeX rides at body scale — its 1.21em default shouts next to 14px. */
+.md-formula-block {
+  display: block;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.md-formula-block .katex-display {
+  margin: 0;
+}
+
+/* Block formulas get a hover copy of the LaTeX source. */
+.md-formula-wrap {
+  position: relative;
+}
+
+.md-formula-copy {
+  position: absolute;
+  top: 0;
+  right: 4px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font: inherit;
+  font-size: var(--kodo-font-xs);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.md-formula-wrap:hover .md-formula-copy,
+.md-formula-copy:focus-visible {
+  opacity: 1;
+}
+
+.md-formula-copy:hover {
+  background: var(--kodo-hover);
+  color: var(--kodo-text);
+}
+
+.md-formula-copy:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 1px;
+}
+
+.md .katex {
+  font-size: 1.05em;
 }
 
 .send-queue {
@@ -1596,8 +2247,25 @@
   overflow: auto;
 }
 
-.menu-model-group {
-  display: block;
+/* Two-panel model picker (2026-09-30): providers on the left, the active
+   provider's models on the right — replacing the indented accordion. The
+   trigger sits near the composer's right edge, so the panel right-aligns. */
+.composer-model-anchor .menu {
+  width: min(420px, calc(100vw - 24px));
+  max-width: min(420px, calc(100vw - 24px));
+}
+
+.menu-model-split {
+  display: grid;
+  grid-template-columns: minmax(150px, max-content) minmax(180px, 1fr);
+}
+
+.menu-model-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 4px;
+  border-right: 1px solid var(--kodo-border);
 }
 
 .menu-item--group {
@@ -1605,11 +2273,291 @@
 }
 
 .menu-model-list {
-  padding: 2px 0 4px 12px;
-  border-left: 1px solid var(--kodo-border);
-  margin-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 4px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+/* Names and ids share one row: both truncate instead of pushing the menu wide. */
+.menu-model-list .menu-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .menu-item--selected {
   background: var(--kodo-selected);
+}
+
+/* --------------------------------------------------------- ⌘F find bar -- */
+/* Compact IDE overlay pinned to the top-right of the conversation column —
+   it covers content, never layout (the turn list scrolls underneath). */
+
+.find-bar {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  box-shadow: 0 8px 24px rgb(23 32 51 / 12%);
+}
+
+.find-input {
+  width: 170px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-sm);
+}
+
+.find-input:focus {
+  outline: none;
+  border-color: var(--kodo-accent);
+}
+
+.find-count {
+  min-width: 52px;
+  padding: 0 4px;
+  color: var(--kodo-text-secondary);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* The active hit outlines its whole turn (ask bubble or reply). */
+.find-hit {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 3px;
+}
+
+/* ------------------------------------------------- turn navigator rail -- */
+/* Overlay in the conversation's right gutter: one tick per turn, hover/focus
+   preview, click to scroll (COMPONENTS §16). Consumes no layout width — the
+   stage wraps the scroller so the rail floats over the transcript's inset
+   without extending scrollHeight or reading as a second column. */
+
+.conv-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  /* Container the rail's narrow-hide query measures (the rail is the scroller's
+     sibling — container queries only match ancestors). */
+  container-type: inline-size;
+}
+
+.turn-rail {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.turn-rail-frame {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  width: 28px;
+  /* Fixed-pitch marks never compress: a ladder taller than the band scrolls
+     inside this frame instead of pushing marks off-screen. Percentages resolve
+     against the rail (inset: 0 = the stage's definite height). */
+  height: min(var(--turn-natural-height), calc(100% - 64px), 420px);
+  cursor: pointer;
+  pointer-events: auto;
+  transform: translateY(-50%);
+  transition: height 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Inner scroller: no visible scrollbar, no scroll chaining into the
+   transcript, and gradient fades over the ends that can still scroll. */
+.turn-rail-scroller {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.turn-rail-scroller::-webkit-scrollbar {
+  display: none;
+}
+
+.turn-rail-fade-top {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%);
+}
+
+.turn-rail-fade-bottom {
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%);
+}
+
+.turn-rail-fade-top.turn-rail-fade-bottom {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 24px,
+    #000 calc(100% - 24px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 24px,
+    #000 calc(100% - 24px),
+    transparent 100%
+  );
+}
+
+.turn-rail-marks {
+  position: relative;
+  height: var(--turn-natural-height);
+}
+
+.turn-rail-mark-position {
+  position: absolute;
+  top: calc(var(--turn-natural-position) + var(--turn-rail-inset));
+  right: 0;
+  left: 0;
+  height: 10px;
+  transform: translateY(-50%);
+  transition: top 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* The rail owns pointer input for the whole column, so a mark is a keyboard
+   destination that paints one tick — never a mouse target of its own. */
+.turn-rail-mark {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: none;
+}
+
+.turn-rail-mark::before {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--kodo-border-strong);
+  content: "";
+  transform: translateY(-50%);
+  transition: width 140ms ease, background-color 140ms ease;
+}
+
+/* Ordered before active so that state keeps its stronger tick. */
+.turn-rail-mark-preview::before {
+  width: 18px;
+  background: var(--kodo-text-secondary);
+}
+
+.turn-rail-mark-active::before {
+  width: 20px;
+  background: var(--kodo-accent);
+}
+
+.turn-rail-mark:focus-visible::before {
+  width: 20px;
+  background: var(--kodo-focus-ring);
+}
+
+.turn-rail-mark:focus-visible {
+  outline: var(--kodo-focus-width) solid var(--kodo-focus-ring);
+  outline-offset: var(--kodo-focus-offset);
+}
+
+.turn-rail-preview {
+  position: absolute;
+  /* Centred on its mark: mark positions live in the scrolled ladder, so the
+     frame-level preview subtracts the scroller's offset, then holds clear of
+     both frame ends. */
+  top: clamp(
+    0px,
+    calc(
+      var(--turn-natural-position) + var(--turn-rail-inset) - var(--turn-scroll-top, 0px) - 50px
+    ),
+    calc(100% - 100px)
+  );
+  right: calc(100% + 10px);
+  box-sizing: border-box;
+  width: min(300px, calc(100cqw - 120px));
+  max-height: 100px;
+  overflow: hidden;
+  padding: 10px 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-popover);
+  color: var(--kodo-text);
+  background: var(--kodo-canvas);
+  box-shadow: 0 8px 24px rgb(23 32 51 / 12%);
+  pointer-events: none;
+  animation: turn-rail-preview-enter 120ms ease-out;
+  transition: top 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.turn-rail-preview-prompt,
+.turn-rail-preview-response {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+}
+
+.turn-rail-preview-prompt {
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+  -webkit-line-clamp: 1;
+}
+
+.turn-rail-preview-response {
+  margin-top: 4px;
+  color: var(--kodo-text-secondary);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-xs);
+  -webkit-line-clamp: 3;
+}
+
+@keyframes turn-rail-preview-enter {
+  from {
+    opacity: 0;
+    transform: translateX(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* V1 targets ≥900px content widths; below that the rail steps aside —
+   except in focus mode, where the rail stays visible (it's the navigator
+   for jumping back out into the conversation). */
+@container (max-width: 900px) {
+  .turn-rail {
+    display: none;
+  }
+}
+.app--focus-mode .turn-rail {
+  display: block;
 }

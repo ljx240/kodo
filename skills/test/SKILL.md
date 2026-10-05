@@ -1,5 +1,8 @@
 # Skill: test
 
+## description
+Add or repair tests for existing behavior under a tests-only verification policy.
+
 ## applicable_task_types
 - test
 
@@ -9,6 +12,10 @@ test-first
 ## allowed_tools
 - search
 - read_file
+- list_files
+- find_symbol
+- find_references
+- read_range
 - run_command
 - write_file
 - apply_patch

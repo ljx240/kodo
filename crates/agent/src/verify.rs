@@ -887,7 +887,7 @@ impl VerificationRunner {
                 break;
             }
             let binary = first_token(&planned.command.command);
-            if missing_tools.iter().any(|tool| *tool == binary) {
+            if missing_tools.contains(&binary) {
                 // Same missing tool: running it again cannot succeed. Record
                 // the block without spawning so the trace shows every doomed
                 // step and the summary can say "N steps blocked".
@@ -992,7 +992,7 @@ impl VerificationRunner {
                 break;
             }
             let binary = first_token(&cmd.command);
-            if missing_tools.iter().any(|tool| *tool == binary) {
+            if missing_tools.contains(&binary) {
                 out.push(blocked_outcome(
                     cmd,
                     &cwd,

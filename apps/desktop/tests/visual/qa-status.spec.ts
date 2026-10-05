@@ -24,7 +24,7 @@ async function openLive(page: Page) {
   await page.goto("/");
   await page.locator(".tree-project-main").click();
   await page.locator(".tree-conversation").click();
-  await expect(page.locator(".conv-title")).toHaveText("新对话");
+  await expect(page.locator(".crumb-current")).toHaveText("新对话");
 }
 
 function runItem(id: number, over: Record<string, unknown> = {}) {
@@ -171,7 +171,7 @@ test("exit 127 chains merge into one environment blockage with recovery actions"
 
 });
 
-test("counters are honest: 统计中… / — / 等待步骤完成, never a bare 0", async ({ page }) => {
+test("counters are honest: 统计中… / empty / 等待步骤完成, never a bare 0", async ({ page }) => {
   await stubShell(page, liveCore({ id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false, turns: [] }));
   await openLive(page);
   await page.locator('[data-testid="composer-input"]').fill("统计 tokens");
@@ -206,8 +206,8 @@ test("counters are honest: 统计中… / — / 等待步骤完成, never a bare
   });
   await expect(page.locator(".trace-tokens").first()).toContainText("输入 — tokens");
   await expect(page.locator(".reply")).not.toContainText("0 tokens");
-  // An unmeasurable step shows the unknown mark rather than 0ms.
-  await expect(page.locator(".trace-duration").first()).toHaveText("—");
+  // An unmeasurable step leaves the column empty — never a bare `—` placeholder.
+  await expect(page.locator(".trace-duration").first()).toHaveText("");
 });
 
 test("collapse rules: failed and running rows open, completed rows stay closed", async ({ page }) => {
@@ -220,17 +220,24 @@ test("collapse rules: failed and running rows open, completed rows stay closed",
       at: 1_700_000_000,
       archived: false,
       turns: [
+        // Process-only turn (no final reply): the trace stays on screen after
+        // the run — once a final reply lands the process is hidden by design.
         turn("检查", [
           runItem(1, { command: "cargo build", exitCode: 0, output: "Finished", status: "done" }),
           runItem(2, { command: "cargo test", exitCode: 1, output: "assertion failed", status: "failed", failureClass: "non_zero_exit" }),
-          answerItem(3, "先看结果。"),
         ]),
       ],
     }),
   );
   await openLive(page);
 
-  const rows = page.locator(".trace-row-inner");
+  // The two consecutive runs fold under one group row, and the group opens
+  // itself because it holds the failure.
+  await expect(page.locator(".trace-row--group > .trace-row-inner")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  const rows = page.locator("[data-testid='trace-group-children'] > .trace-row > .trace-row-inner");
   await expect(rows.nth(0)).toHaveAttribute("aria-expanded", "false");
   await expect(rows.nth(1)).toHaveAttribute("aria-expanded", "true");
   await expect(page.locator('[data-testid="trace-run-output"]')).toHaveCount(1);
@@ -269,7 +276,6 @@ test("phases group the trace; internal scheduling stays out of the UI", async ({
           { id: 2, at: 1_700_000_000, status: "done", duration: 0, kind: "search", query: "router", detail: "查找路由实现" },
           { id: 3, at: 1_700_000_000, status: "done", duration: 50, kind: "reasoning", summary: "开始修改", phase: "execute" },
           runItem(4, { command: "cargo test", duration: 42_000 }),
-          answerItem(5, "完成。"),
         ]),
       ],
     }),
@@ -300,7 +306,6 @@ test("consecutive thinking steps fold into one row with a sub-step count", async
           { id: 1, at: 1_700_000_000, status: "done", duration: 10, kind: "reasoning", summary: "一", phase: "prepare" },
           { id: 2, at: 1_700_000_000, status: "done", duration: 10, kind: "reasoning", summary: "二" },
           { id: 3, at: 1_700_000_000, status: "done", duration: 10, kind: "reasoning", summary: "三" },
-          answerItem(4, "想好了。"),
         ]),
       ],
     }),
@@ -317,14 +322,18 @@ test("Inspector nav: panel tabs and rail never share a name", async ({ page }) =
   await page.goto("/ui-demo/conversation");
   await page.waitForLoadState("networkidle");
 
-  await expect(page.locator(".ins-tab")).toHaveText(["Inspector", "终端"]);
+  // 文件 and 浏览 are panel chips now, so the rail section 文件 used to label
+  // is 改动 — a panel and a rail section never share a name.
+  await expect(page.locator(".ins-tab")).toHaveText(["Inspector", "终端", "文件", "浏览"]);
   await expect(page.locator(".rail-btn")).toHaveCount(4);
   await expect(page.locator('[data-testid="rail-summary"]')).toHaveAttribute("aria-label", "概览");
-  await expect(page.locator('[data-testid="rail-files"]')).toHaveAttribute("aria-label", "文件");
+  await expect(page.locator('[data-testid="rail-files"]')).toHaveAttribute("aria-label", "改动");
   await expect(page.locator('[data-testid="rail-tools"]')).toHaveAttribute("aria-label", "工具");
   await expect(page.locator('[data-testid="rail-llm"]')).toHaveAttribute("aria-label", "模型");
   await expect(page.locator('.rail-btn[aria-label="终端"]')).toHaveCount(0);
   await expect(page.locator('.rail-btn[aria-label="Inspector"]')).toHaveCount(0);
+  await expect(page.locator('.rail-btn[aria-label="文件"]')).toHaveCount(0);
+  await expect(page.locator('.rail-btn[aria-label="浏览"]')).toHaveCount(0);
 
   // 终端 is a whole panel of its own; the rail steps aside while it is open.
   await page.locator(".ins-tab", { hasText: "终端" }).click();
@@ -336,7 +345,7 @@ test("Inspector nav: panel tabs and rail never share a name", async ({ page }) =
   await expect(page.locator(".ins-section-title").first()).toHaveText("本轮");
 
   // The rail's section buttons swap the content under the same panel tab.
-  await page.locator('.rail-btn[aria-label="文件"]').click();
+  await page.locator('.rail-btn[aria-label="改动"]').click();
   await expect(page.locator(".ins-section-title")).toHaveText(["修改文件"]);
   await expect(page.locator('[data-testid="rail-files"]')).toHaveAttribute("aria-expanded", "true");
 });
@@ -353,7 +362,6 @@ test("expanders are real buttons with aria-expanded/aria-controls wiring", async
       turns: [
         turn("看输出", [
           runItem(1, { command: "cargo build", exitCode: 127, output: "sh: cargo: command not found", failureClass: "command_not_found", failureTool: "cargo", status: "failed" }),
-          answerItem(2, "被环境挡住了。"),
         ]),
       ],
     }),
@@ -530,7 +538,54 @@ test("undo conflicts never promise to overwrite the user's later edits", async (
   );
 });
 
-test("streaming output is a draft that the final answer replaces in place", async ({ page }) => {
+test("Inspector changed-files diffs render colored rows, not raw headers", async ({ page }) => {
+  await stubShell(
+    page,
+    liveCore(
+      {
+        id: "s1",
+        project: "/tmp/ws/alpha",
+        title: "新对话",
+        at: 1_700_000_000,
+        archived: false,
+        turns: [
+          turn("改一下", [
+            {
+              id: 1,
+              at: 1_700_000_000,
+              status: "done",
+              duration: 5,
+              kind: "fileChange",
+              changes: [{ path: "src/app.ts", added: 1, removed: 1 }],
+            },
+            answerItem(2, "改好了。"),
+          ]),
+        ],
+      },
+      {
+        turnChanges: [
+          {
+            path: "src/app.ts",
+            diff: "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n",
+          },
+        ],
+      },
+    ),
+  );
+  await openLive(page);
+
+  // Overview → 变更文件 section → expand this file's body.
+  await page.locator('[data-testid="ins-review-files"]').click();
+  await page.locator('[data-testid="diff-toggle-src/app.ts"]').click();
+  const body = page.locator('[data-testid="diff-body-src/app.ts"]');
+  await expect(body).toBeVisible();
+  await expect(body.locator(".is-add")).toContainText("new");
+  await expect(body.locator(".is-del")).toContainText("old");
+  await expect(body).not.toContainText("+++ b/");
+  await expect(body).not.toContainText("--- a/");
+});
+
+test("no streaming draft up top — the answer surface appears only when final", async ({ page }) => {
   await stubShell(page, liveCore({ id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false, turns: [] }));
   await openLive(page);
   await page.locator('[data-testid="composer-input"]').fill("写回答");
@@ -540,18 +595,152 @@ test("streaming output is a draft that the final answer replaces in place", asyn
   await emit(page, { type: "textDelta", session: "s1", text: "正在整理" });
   await emit(page, { type: "textDelta", session: "s1", text: "答案草稿内容。" });
 
-  await expect(page.locator('[data-testid="draft-badge"]')).toHaveText("回答草稿");
-  await expect(page.locator('[data-testid="stream-preview"]')).toContainText("正在整理答案草稿内容。");
+  // While the run is live there is no answer surface at all — the draft of the
+  // final reply is never hoisted to the top of the turn.
+  await expect(page.locator('[data-testid="draft-badge"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="stream-preview"]')).toHaveCount(0);
+  await expect(page.locator(".reply .final")).toHaveCount(0);
   await expect(page.locator('[data-testid="answer-conclusion"]')).toHaveCount(0);
 
   await emit(page, { type: "itemCompleted", session: "s1", item: answerItem(1, "最终答案。") });
   await emit(page, { type: "turnComplete", session: "s1" });
 
-  await expect(page.locator('[data-testid="draft-badge"]')).toHaveCount(0);
-  await expect(page.locator('[data-testid="stream-preview"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="answer-conclusion"]')).toBeVisible();
   await expect(page.locator('[data-testid="answer-body"]')).toContainText("最终答案。");
-  // Never both at once: exactly one answer surface.
+  // Exactly one answer surface, and the discarded draft text never surfaces.
+  await expect(page.locator(".reply .final")).toHaveCount(1);
+  await expect(page.locator(".reply")).not.toContainText("正在整理答案草稿内容。");
+});
+
+test("interim stream prose flushes as notes in normal order", async ({ page }) => {
+  await stubShell(page, liveCore({ id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false, turns: [] }));
+  await openLive(page);
+  await page.locator('[data-testid="composer-input"]').fill("跑起来");
+  await page.locator('[data-testid="composer-input"]').press("Enter");
+
+  await emit(page, { type: "turnStarted", session: "s1" });
+  await emit(page, { type: "textDelta", session: "s1", text: "先看项目结构。" });
+  await emit(page, { type: "itemStarted", session: "s1", item: { ...runItem(1), status: "running", output: "" } });
+  await emit(page, { type: "itemCompleted", session: "s1", item: runItem(1) });
+  await emit(page, { type: "textDelta", session: "s1", text: "编译通过，开始修改。" });
+  await emit(page, { type: "itemStarted", session: "s1", item: { ...runItem(2, { command: "cargo test" }), status: "running", output: "" } });
+  await emit(page, { type: "itemCompleted", session: "s1", item: runItem(2, { command: "cargo test" }) });
+
+  // Order is read while the run is live — the trace is on screen then.
+  const notes = page.locator('[data-testid="trace-note"]');
+  await expect(notes).toHaveCount(2);
+  await expect(notes.nth(0)).toContainText("先看项目结构。");
+  await expect(notes.nth(1)).toContainText("编译通过，开始修改。");
+
+  // Arrival order: note, step, note, step — the prose keeps its place in the flow.
+  const order = await page.locator(".trace-groups .trace-row").evaluateAll((rows) =>
+    rows.map((row) => ({
+      note: row.classList.contains("trace-row--note"),
+      text: (row.textContent ?? "").replace(/\s+/g, " ").trim(),
+    })),
+  );
+  expect(order.map((row) => row.note)).toEqual([true, false, true, false]);
+  expect(order[1].text).toContain("cargo check");
+  expect(order[3].text).toContain("cargo test");
+
+  // The trailing stream is the draft of the answer — discarded, never a note.
+  await emit(page, { type: "textDelta", session: "s1", text: "总结草稿" });
+  await emit(page, { type: "itemCompleted", session: "s1", item: answerItem(3, "最终回答。") });
+  await emit(page, { type: "turnComplete", session: "s1" });
+
+  await expect(page.locator('[data-testid="answer-body"]')).toContainText("最终回答。");
+  await expect(page.locator(".reply")).not.toContainText("总结草稿");
+  // Final reply on screen → the process has left the conversation.
+  await expect(page.locator('[data-testid="trace-note"]')).toHaveCount(0);
+});
+
+test("command output renders without ANSI escape garbage", async ({ page }) => {
+  await stubShell(
+    page,
+    liveCore({
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "新对话",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        // Process-only turn (no final reply) keeps the run row on screen.
+        turn("检查", [
+          runItem(1, { output: `${String.fromCharCode(27)}[1m${String.fromCharCode(27)}[92mok${String.fromCharCode(27)}[0m done` }),
+        ]),
+      ],
+    }),
+  );
+  await openLive(page);
+  await page.locator(".trace-row-inner").click();
+  const output = page.locator('[data-testid="trace-run-output"]');
+  await expect(output).toHaveText("ok done");
+});
+
+test("a new conversation's first answer lands live — even when the run finishes before its id exists", async ({
+  page,
+}) => {
+  // autoRun completes the whole turn inside send_message, before the create
+  // resolves — the exact race that used to strand the first turn at 执行中.
+  await stubShell(page, {
+    workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [] },
+    branch: "main",
+    autoRun: { answer: "做好了。", plain: false },
+  });
+  await page.goto("/");
+  await page.locator('button[aria-label="alpha 的操作"]').click();
+  await page.getByRole("menuitem", { name: "新建任务" }).click();
+  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("alpha");
+
+  await page.locator('[data-testid="composer-input"]').fill("你是谁");
+  await page.locator('[data-testid="composer-input"]').press("Enter");
+  await expect(page.locator(".msg-bubble")).toHaveText("你是谁");
+
+  // The answer displays without switching conversations away and back.
+  await expect(page.locator('[data-testid="answer-body"]')).toContainText("做好了。");
+  // And the turn is finished — never stuck at 执行中 with a stop button.
+  await expect(page.locator('[data-testid="agent-progress"]')).toHaveCount(0);
+  // The Codex-style context ring lives in the composer and must clear once
+  // the turn ends too — otherwise an idle reply carries stale tokens.
+  await expect(page.locator('[data-testid="composer-context-ring"]')).toHaveCount(0);
+  await expect(page.locator(".composer-send--stop")).toHaveCount(0);
+  await expect(page.locator('[data-testid="composer-send"]')).toBeVisible();
+  // The first ask also titles the session.
+  await expect(page.locator(".crumb-current")).toHaveText("你是谁");
+});
+
+test("a conversational answer renders as the sentence alone, without report chrome", async ({ page }) => {
+  await stubShell(
+    page,
+    liveCore({ id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false, turns: [] }),
+  );
+  await openLive(page);
+  await page.locator('[data-testid="composer-input"]').fill("你是谁");
+  await page.locator('[data-testid="composer-input"]').press("Enter");
+
+  await emit(page, { type: "turnStarted", session: "s1" });
+  await emit(page, {
+    type: "itemCompleted",
+    session: "s1",
+    item: answerItem(1, "我是 Kodo，一个帮助你阅读、修改和验证当前项目代码的编程助手。", {
+      delivery: "ready",
+      verification: "not_run",
+      plain: true,
+    }),
+  });
+  await emit(page, { type: "turnComplete", session: "s1" });
+
+  await expect(page.locator('[data-testid="answer-plain"]')).toContainText(
+    "我是 Kodo，一个帮助你阅读、修改和验证当前项目代码的编程助手。",
+  );
+  // No conclusion card, no axes line, no done-this-turn, no next steps.
+  await expect(page.locator('[data-testid="answer-conclusion"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="answer-axes"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="final-outcome-pill"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="answer-body"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="answer-next"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="next-review"]')).toHaveCount(0);
+  // Same invariant as the card path: exactly one answer surface.
   await expect(page.locator(".reply .final")).toHaveCount(1);
 });
 
@@ -584,21 +773,48 @@ for (const vp of [
 }
 
 test("zh-CN copy: step labels and actions come from the central map", async ({ page }) => {
-  await page.goto("/ui-demo/conversation");
+  // Step labels now live where the process lives after the final reply: the
+  // Response Trace page (type pills) and the inline trace of a live run
+  // (phase heads). Answer chrome stays on the completed conversation.
+  await page.goto("/ui-demo/trace");
   await page.waitForLoadState("networkidle");
 
-  await expect(page.locator(".trace-label")).toHaveText([
+  await expect(page.locator(".type-pill span")).toHaveText([
     "思考",
     "搜索代码",
     "读取文件",
     "运行命令",
+    "命令输出",
+    "调用模型",
+    "修改文件",
     "运行命令",
     "调用模型",
     "整理回答",
   ]);
-  const labels = await page.locator(".trace-label").allTextContents();
-  expect(labels.join("|")).not.toMatch(/Thinking|Search codebase|Read file|Run command|Call model|Edit files/);
+  const pillLabels = await page.locator(".type-pill span").allTextContents();
+  expect(pillLabels.join("|")).not.toMatch(/Thinking|Search codebase|Read file|Run command|Call model|Edit files/);
 
+  // Phase heads come from the same map on a live run (a run with no final
+  // reply keeps its trace on screen).
+  await stubShell(
+    page,
+    liveCore({
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "新对话",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [
+        turn("想一想", [
+          { id: 1, at: 1_700_000_000, status: "done", duration: 10, kind: "reasoning", summary: "一", phase: "prepare" },
+          { id: 2, at: 1_700_000_000, status: "done", duration: 10, kind: "reasoning", summary: "二", phase: "analyze" },
+          { id: 3, at: 1_700_000_000, status: "done", duration: 10, kind: "reasoning", summary: "三", phase: "execute" },
+          { id: 4, at: 1_700_000_000, status: "done", duration: 10, kind: "reasoning", summary: "四", phase: "summarize" },
+        ]),
+      ],
+    }),
+  );
+  await openLive(page);
   await expect(page.locator(".trace-phase-label")).toHaveText([
     "准备项目上下文",
     "分析任务",
@@ -606,9 +822,22 @@ test("zh-CN copy: step labels and actions come from the central map", async ({ p
     "整理回答",
   ]);
 
-  await expect(page.locator('[data-testid="next-review"]')).toHaveText("查看修改");
-  await expect(page.locator('[data-testid="next-logs"]')).toHaveText("查看详细日志");
-  await expect(page.locator('[data-testid="verify-pill"]')).toHaveText("已通过");
-  await expect(page.locator('[data-testid="final-outcome-pill"]')).toHaveText("已完成");
-  await expect(page.locator('[data-testid="answer-axes"]')).toHaveText("回答：已生成 · 验证：已通过");
+  await page.goto("/ui-demo/conversation");
+  await page.waitForLoadState("networkidle");
+
+  // The fixture holds three turns; scope every per-reply assertion to turn 1.
+  const first = page.locator(".reply").first();
+  await expect(first.locator('[data-testid="next-review"]')).toHaveText("查看修改");
+  // The reply actions are icon-only — the label moves to the tooltip (2026-09-30).
+  await expect(first.locator('[data-testid="reply-trace"]')).toHaveAttribute(
+    "title",
+    "查看响应轨迹",
+  );
+  await expect(first.locator('[data-testid="reply-copy"]')).toHaveAttribute("title", "复制回复");
+  await expect(first.locator('[data-testid="verify-pill"]')).toHaveText("已通过");
+  await expect(first.locator('[data-testid="final-outcome-pill"]')).toHaveText("已完成");
+  await expect(first.locator('[data-testid="answer-axes"]')).toHaveText(
+    "回答：已生成 · 验证：已通过",
+  );
+  await expect(page.locator('[data-testid="topbar-files"]')).toHaveAttribute("aria-label", "查看项目文件");
 });

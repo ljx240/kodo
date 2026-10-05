@@ -5,7 +5,7 @@ Kodo is a minimal coding agent.
 The product goal is not to build a generic admin dashboard or a full IDE.  
 The GUI exists to make project-scoped coding conversations, agent execution, code changes, and verification easy to understand.
 
-## Mandatory UI references
+## Mandatory UI design docs
 
 Before changing any GUI code, read:
 
@@ -15,15 +15,10 @@ Before changing any GUI code, read:
 - `docs/design/UI_ACCEPTANCE.md`
 - `docs/design/DEMO_DATA.md`
 
-Visual references are in:
-
-- `docs/design/references/`
-
-Reference screenshots are the **visual source of truth**.
-
-When text documentation and a reference image disagree:
-- geometry, interaction, responsive behavior and hidden states: follow the docs;
-- visual composition, hierarchy, density and appearance: follow the image.
+These documents are the **source of truth** for the UI — geometry, interaction,
+responsive behavior, hidden states, composition, hierarchy, density and
+appearance all follow them. There are no reference screenshots; do not look for
+any.
 
 ## Do not redesign
 
@@ -72,15 +67,14 @@ There must never be a permanent second conversation sidebar.
 
 For every screen:
 
-1. inspect the corresponding reference image;
-2. read the relevant design rules;
-3. inspect existing reusable components;
-4. implement the smallest correct change;
-5. run Kodo;
-6. open the deterministic demo route/state;
-7. capture a screenshot at the reference viewport;
-8. compare against the reference;
-9. fix differences in this order:
+1. read the relevant design rules;
+2. inspect existing reusable components;
+3. implement the smallest correct change;
+4. run Kodo;
+5. open the deterministic demo route/state;
+6. capture a screenshot at the reference viewport;
+7. check it against the design rules and `UI_ACCEPTANCE.md`;
+8. fix differences in this order:
    - overall layout;
    - panel widths/heights;
    - spacing;
@@ -88,7 +82,7 @@ For every screen:
    - borders/backgrounds;
    - icons;
    - micro details;
-10. repeat until `UI_ACCEPTANCE.md` passes.
+9. repeat until `UI_ACCEPTANCE.md` passes.
 
 A page is not complete because it compiles.
 

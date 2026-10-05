@@ -5,6 +5,10 @@ export type ConversationRef = {
   title: string;
   time: string;
   active?: boolean;
+  /** Which agent space owns it; absent (or legacy) = code. Immutable. */
+  mode?: "work" | "code";
+  /** Raw mtime for recency picks (「继续上次对话」). Missing in demo fixtures. */
+  at?: number;
 };
 
 export type Project = {
@@ -22,7 +26,7 @@ export type Project = {
 export type StepStatus = "done" | "running" | "failed" | "interrupted" | "stopped";
 
 export type TraceStep = {
-  type: "thinking" | "search" | "read" | "run" | "model" | "edit" | "finalize";
+  type: "thinking" | "search" | "read" | "run" | "model" | "edit" | "finalize" | "note";
   label: string;
   detail: string;
   /**
@@ -58,6 +62,10 @@ export type TraceStep = {
   diagnostics?: string | null;
   /** Stable id for expand/collapse + aria wiring. */
   stepId?: number;
+  /** LLM I/O capture ref for `model` steps; surfaces the "查看本次 I/O" button. */
+  llmIoRef?: string | null;
+  /** File-span ref for `edit` steps; opens the before/after modal. */
+  fileSpanRef?: string | null;
 };
 
 export type ChangedFile = {
@@ -73,21 +81,26 @@ export type LlmCall = {
   duration: string;
 };
 
+/** One recorded turn of the demo conversation (fixture holds an array of these). */
+export type DemoTurn = {
+  user: { time: string; content: string };
+  assistant: {
+    time: string;
+    status: StepStatus;
+    duration: string;
+    trace: TraceStep[];
+    final: string;
+    checks: string[];
+  };
+};
+
 export type Fixture = {
   project: { id: string; name: string; path: string; branch: string };
   projects: Project[];
   conversation: {
     id: string;
     title: string;
-    user: { time: string; content: string };
-    assistant: {
-      time: string;
-      status: StepStatus;
-      duration: string;
-      trace: TraceStep[];
-      final: string;
-      checks: string[];
-    };
+    turns: DemoTurn[];
   };
   changed_files: ChangedFile[];
   summary: {

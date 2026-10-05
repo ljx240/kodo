@@ -64,6 +64,13 @@ const READABLE = [
   "--kodo-success-text",
   "--kodo-warning-text",
   "--kodo-error",
+  // Syntax tokens — highlighted code is informational text too.
+  "--kodo-syntax-comment",
+  "--kodo-syntax-keyword",
+  "--kodo-syntax-string",
+  "--kodo-syntax-number",
+  "--kodo-syntax-title",
+  "--kodo-syntax-meta",
 ];
 
 /** Inverse text on solid accent controls. */

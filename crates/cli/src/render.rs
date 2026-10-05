@@ -96,6 +96,10 @@ impl<O: Write, E: Write> Renderer<O, E> {
                     "⚠ 已切换模型 {from_provider}/{from_model} → {to_provider}/{to_model}（{error_class}）"
                 ));
             }
+            // Context telemetry + compaction are surfaced only on the desktop
+            // runner today. The CLI prints nothing here — the user's terminal
+            // shouldn't be flooded with bar percentages mid-turn.
+            SinkEvent::ContextBudget { .. } | SinkEvent::Compacted { .. } => {}
         }
     }
 
@@ -143,7 +147,15 @@ impl<O: Write, E: Write> Renderer<O, E> {
                 self.streamed = false;
             }
             // The Started notice plus turn flow already cover these.
-            Step::Search { .. } | Step::FileRead { .. } | Step::ModelCall { .. } => {
+            Step::Search { .. }
+            | Step::FileRead { .. }
+            | Step::ModelCall { .. }
+            | Step::Thinking { .. }
+            | Step::Compaction { .. }
+            | Step::Failover { .. }
+            | Step::PlanStep { .. }
+            | Step::Permission { .. }
+            | Step::ContextBudget { .. } => {
                 self.close_line();
             }
         }
@@ -195,6 +207,14 @@ fn started_notice(step: &Step) -> String {
             format!("→ 写文件 {paths}")
         }
         Step::AgentMessage { .. } => "→ 起草回答…".to_owned(),
+        // Transparency-side kinds are never shown in the CLI; they only exist
+        // so a `Started`/`Finished` sink pair has a step to carry.
+        Step::Thinking { .. } => String::new(),
+        Step::Compaction { .. } => String::new(),
+        Step::Failover { .. } => String::new(),
+        Step::PlanStep { .. } => String::new(),
+        Step::Permission { .. } => String::new(),
+        Step::ContextBudget { .. } => String::new(),
     }
 }
 

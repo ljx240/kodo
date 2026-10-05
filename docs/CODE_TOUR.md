@@ -46,6 +46,11 @@
 - `checkpoint.rs` / `verify.rs` / `patch.rs` — 检查点、验证、补丁处理。
 - `skill.rs` / `plan.rs` / `state.rs` — 技能流程与计划状态
   （acceptance-first 工作流，验收标准驱动）。
+- `mcp/` — MCP thin client：`McpServerConfig` 配置与密钥拆分（env/headers 值
+  只进 `credentials.log`）、JSON-RPC 信封、stdio / Streamable HTTP 同步传输、
+  `McpClients` 生命周期与 tools 缓存。外部工具以 `mcp__<server>__<tool>` wire 名
+  经 `ToolInvocation::External` 进入既有 registry / 权限 / 轨迹管道；GUI 的
+  工具清单经 `mcp_list_tools` 命令一次性连接读取（密钥只在 shell 进程内合并）。
 - `repomap.rs` / `evidence.rs` / `context.rs` — 仓库地图、证据收集、上下文构建。
 - `lib.rs` — 导出 `FileDelta`、`SinkEvent`、`Step`、`StepKind`、`Permission` 等。
 
@@ -76,7 +81,9 @@ React + Vite：
 - `conversation/` — 对话视图，内嵌 Agent 轨迹
   （思考 / 搜索 / 读文件 / 命令 / 模型 / 写文件）。
 - `inspector/` — 可折叠 Inspector（摘要、变更文件、工具、LLM）。
-- `pages/` — Response Trace / Archive / Settings 页面。
+- `pages/` — Response Trace / Archive / Skills / MCP / Settings 页面
+  （MCP 页管理外部工具服务器：连接器目录（卡片，点击预填添加，每个连接器
+  只添加一次）、启用开关、行内编辑、每服务器工具清单）。
 - `api.ts` — 与 Tauri 后端桥接。
 - `shell/` / `data/` — 布局外壳与 fixture 数据。
 - `styles/` — 样式（含 `conversation.css`）。

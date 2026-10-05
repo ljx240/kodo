@@ -43,7 +43,7 @@ export function ArchiveOverview({
         ? "Claude 3.5 Sonnet"
         : "—";
   const archivedAt = selection?.at || (demo ? "Apr 29, 2024 10:25 AM" : "");
-  const summary = selection?.summary ?? fixture?.assistant.final ?? "—";
+  const summary = selection?.summary ?? fixture?.turns[0].assistant.final ?? "—";
   const canRestore = Boolean(selection && selection.id);
 
   return (

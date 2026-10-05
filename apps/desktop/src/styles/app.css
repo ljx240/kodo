@@ -57,7 +57,10 @@ select {
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    /* 0s, not 0.01ms: mermaid measures nodes synchronously while building a
+       diagram, and any non-zero transition duration makes those reads return
+       the pre-transition value, producing a wildly oversized layout. */
+    transition-duration: 0s !important;
     scroll-behavior: auto !important;
   }
 }
@@ -105,6 +108,8 @@ p {
 }
 
 .main {
+  /* Positioning context for the ⌘F find overlay pinned to this column. */
+  position: relative;
   flex: 1;
   min-width: 0;
   display: flex;
@@ -112,6 +117,26 @@ p {
   background: var(--kodo-canvas);
   overflow-x: hidden;
 }
+
+/* A stowed conversation stays mounted (its run keeps streaming) but paints
+   nothing — the Response Trace route shows instead (2026-09-30). */
+.main--stowed {
+  display: none;
+}
+
+/* Focus mode: the deliberate exception to "conversation is the largest
+   visual region". Inspector grows past its normal cap, conversation drops
+   to a narrow state strip (TopBar crumb + composer + turn rail overlay). */
+.app--focus-mode .content-body > .main {
+  flex: none;
+  width: var(--kodo-focus-mode-column);
+  min-width: var(--kodo-focus-mode-column);
+}
+
+/* In focus mode the conversation collapses to 300px and the Inspector can
+   be dragged up to 1100px inline, but at narrower viewports the three
+   columns would overflow. The clamp lives in inspector.css next to the
+   element that owns the explicit width (.ins-panel). */
 
 .scroll {
   flex: 1;
@@ -173,29 +198,64 @@ p {
   width: 36px;
   height: 36px;
   flex: none;
-  display: grid;
-  place-items: center;
+  display: block;
   border-radius: 9px;
+  /* Accent tile behind the image: it shows through only if the mark fails to
+     load (alt text renders on it), so the block never collapses. */
   background: var(--kodo-accent);
-  color: #fff;
-  font-size: 19px;
-  font-weight: 700;
+  object-fit: cover;
 }
 
-.brand-lines {
+/* Work/Code dropdown trigger (Codex-style: brand name + caret). The menu below
+   picks the agent space; switching swaps the whole space. */
+
+.brand > .menu-anchor {
+  flex: 1;
+  min-width: 0;
+}
+
+.brand-switcher {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  margin: 0 -8px;
+  border: none;
+  border-radius: var(--kodo-radius-sm);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.brand-switcher:hover {
+  background: var(--kodo-hover);
 }
 
 .brand-name {
   font-size: 18px;
   font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--kodo-text);
+  white-space: nowrap;
 }
 
-.brand-tagline {
-  font-size: var(--kodo-font-xs);
+.brand-caret {
+  flex: none;
+  margin-left: -2px;
   color: var(--kodo-text-secondary);
+  transition: transform 0.12s ease;
+}
+
+.brand-caret--open {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-caret {
+    transition: none;
+  }
 }
 
 .sidebar-search {
@@ -275,6 +335,37 @@ p {
   font-size: var(--kodo-font-sm);
 }
 
+/* Conversation filter — one field between the section head and the tree,
+   same geometry as the file viewer's filter (26px, sm, canvas). */
+.tree-filter-bar {
+  flex: none;
+  padding: 2px 0 10px;
+}
+
+.tree-filter {
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-sm);
+}
+
+.tree-filter::placeholder {
+  color: var(--kodo-text-muted);
+}
+
+/* The filter matched nothing in this group — say it, don't show an empty row. */
+.tree-no-match {
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-sm);
+}
+
 .tree {
   flex: 1;
   min-height: 0;
@@ -315,13 +406,17 @@ p {
 }
 
 /* Out of the way until the row is pointed at, so an untouched tree reads the
-   same as it did before projects had operations. */
-.tree-project .tree-more {
+   same as it did before projects had operations. `+` (new task) and `⋯` (row
+   menu) share the policy. */
+.tree-project .tree-more,
+.tree-project .tree-project-add {
   opacity: 0;
 }
 
 .tree-project:hover .tree-more,
-.tree-more:focus-visible {
+.tree-project:hover .tree-project-add,
+.tree-more:focus-visible,
+.tree-project-add:focus-visible {
   opacity: 1;
 }
 
@@ -362,6 +457,14 @@ p {
   font-size: var(--kodo-font-sm);
 }
 
+/* 「未选择项目」 pseudo group: a plain label row inside the same tree — never
+   a project row (no chevron, no add, no menu). */
+.tree-group-head {
+  padding: 6px 8px 2px;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-muted);
+}
+
 .tree-project--open .tree-project-name {
   font-weight: 600;
 }
@@ -372,9 +475,10 @@ p {
   white-space: nowrap;
 }
 
-/* Conversations hang off a thread line drawn below their project. */
+/* Conversations hang off a thread line drawn below their project. The indent
+   stays tight so the rows hug the left like the project rows above them. */
 .tree-conversations {
-  margin-left: 28px;
+  margin-left: 18px;
   border-left: 1px solid var(--kodo-border);
 }
 
@@ -384,7 +488,7 @@ p {
   gap: 11px;
   width: 100%;
   height: 28px;
-  padding: 0 8px 0 12px;
+  padding: 0 8px;
   border-radius: var(--kodo-radius);
   font-size: var(--kodo-font-sm);
   color: var(--kodo-text);
@@ -461,6 +565,31 @@ p {
   opacity: 1;
 }
 
+/* Fold control: a quiet 28px row under the first 5 conversations that
+   reveals the rest of a long list (sidebar tree). */
+.tree-load-all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--kodo-radius);
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+  text-align: left;
+}
+
+.tree-load-all svg {
+  flex: none;
+  color: var(--kodo-text-muted);
+}
+
+.tree-load-all:hover {
+  background: var(--kodo-hover);
+  color: var(--kodo-text);
+}
+
 .welcome-hints {
   display: flex;
   flex-wrap: wrap;
@@ -501,32 +630,6 @@ p {
   background: transparent;
   cursor: pointer;
   text-align: left;
-}
-
-.avatar {
-  flex: none;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  font-weight: 600;
-}
-
-.avatar--user {
-  width: 36px;
-  height: 36px;
-  background: var(--kodo-accent);
-  color: #fff;
-  font-size: 14px;
-}
-
-.avatar--kodo {
-  width: 36px;
-  height: 36px;
-  border-radius: 9px;
-  background: var(--kodo-accent);
-  color: #fff;
-  font-size: 18px;
-  font-weight: 700;
 }
 
 /* --------------------------------------------------------------- topbar -- */
@@ -872,6 +975,23 @@ p {
   background: var(--kodo-hover);
 }
 
+/* The current choice in a selection menu (Work/Code switcher). */
+.menu-item--selected {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+.menu-item--selected svg {
+  color: var(--kodo-accent);
+}
+
+/* Keeps unselected labels on the same column as a check-marked sibling. */
+.menu-item-spacer {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
 .menu-item--danger,
 .menu-item--danger svg {
   color: var(--kodo-error);
@@ -886,6 +1006,21 @@ p {
   font-family: var(--kodo-font-mono);
   font-size: var(--kodo-font-xs);
   white-space: nowrap;
+}
+
+/* Edit-step file chips that open the sidebar file panel. */
+button.code-chip--link {
+  cursor: pointer;
+}
+
+button.code-chip--link:hover {
+  border-color: var(--kodo-accent);
+  color: var(--kodo-accent);
+}
+
+button.code-chip--link:focus-visible {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: 1px;
 }
 
 .provider-models {
@@ -1075,6 +1210,28 @@ p {
   margin: 0 auto;
 }
 
+/* Space identity: mode logo + wordmark above the welcome title. */
+.welcome-identity {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.welcome-identity-logo {
+  display: block;
+  width: 56px;
+  height: 56px;
+}
+
+.welcome-identity-name {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--kodo-text);
+  letter-spacing: -0.015em;
+}
+
 .welcome-title {
   margin: 0 0 8px;
   font-size: 24px;
@@ -1133,13 +1290,174 @@ p {
   font-size: var(--kodo-font-xs);
 }
 
-.conv-title-input {
-  border: 1px solid var(--kodo-border-strong);
-  border-radius: var(--kodo-radius-sm);
-  padding: 2px 8px;
-  font-size: var(--kodo-font-title);
+/* Secondary CTA back into the newest thread of this space. */
+.welcome-continue {
+  display: flex;
+  justify-content: center;
+  margin-top: 14px;
+}
+
+/* ── First-run auto onboarding (Dia-style), 2026-09-23 ─────────────────────
+   Transient startup surface: the hero title is intentional here — the app
+   chrome keeps compact IDE density. Pure canvas, no gradients, no cards. */
+
+.onb {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--kodo-canvas);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  padding: 24px 32px 28px;
+  /* Cadence of one stage — driven by the component's STAGE_MS. */
+  --onb-stage-ms: 3200ms;
+  --onb-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.onb-skip {
+  justify-self: end;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+  padding: 6px 10px;
+  border-radius: var(--kodo-radius);
+}
+
+.onb-skip:hover {
+  color: var(--kodo-text);
+  background: var(--kodo-hover);
+}
+
+.onb-stage {
+  align-self: center;
+  justify-self: center;
+  text-align: center;
+  max-width: 560px;
+}
+
+.onb-kicker {
+  margin: 0 0 14px;
+  font-size: var(--kodo-font-xs);
   font-weight: 600;
-  min-width: 220px;
+  letter-spacing: 0.14em;
+  color: var(--kodo-accent);
+}
+
+.onb-title {
+  margin: 0;
+  font-size: 40px;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  color: var(--kodo-text);
+}
+
+.onb-body {
+  margin: 18px auto 0;
+  max-width: 420px;
+  font-size: var(--kodo-font-chat);
+  line-height: 1.55;
+  color: var(--kodo-text-secondary);
+}
+
+.onb-cta {
+  margin-top: 28px;
+  height: 36px;
+  padding: 0 22px;
+  font-size: var(--kodo-font-md);
+}
+
+/* Staggered fade/rise entrance — children only, so translation never doubles. */
+.onb-kicker {
+  animation: onb-enter 520ms var(--onb-ease) both;
+}
+.onb-title {
+  animation: onb-enter 560ms var(--onb-ease) 70ms both;
+}
+.onb-body {
+  animation: onb-enter 560ms var(--onb-ease) 140ms both;
+}
+.onb-cta {
+  animation: onb-enter 560ms var(--onb-ease) 210ms both;
+}
+
+@keyframes onb-enter {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.onb-dots {
+  display: flex;
+  gap: 10px;
+  justify-self: center;
+  align-self: end;
+}
+
+.onb-dot {
+  padding: 6px 2px;
+  border-radius: 3px;
+}
+
+.onb-dot-bar {
+  display: block;
+  width: 28px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--kodo-border-strong);
+  overflow: hidden;
+}
+
+.onb-dot-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--kodo-accent);
+}
+
+.onb-dot--active .onb-dot-fill {
+  animation: onb-fill var(--onb-stage-ms) linear both;
+}
+
+.onb-dot--done .onb-dot-bar {
+  background: var(--kodo-accent);
+}
+
+@keyframes onb-fill {
+  from {
+    width: 0;
+  }
+  to {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* app.css zeroes animation durations globally; the timing bar would jump to
+     full. Hold the active bar static instead of animating its fill. */
+  .onb-dot--active .onb-dot-fill {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
+}
+
+/* Inline title edit inside the 44px top bar — the crumb swaps its current
+   title for this field (the content title header is gone, 2026-09-30). */
+.conv-title-input {
+  width: min(280px, 36vw);
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--kodo-accent);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  font-weight: 500;
 }
 
 .approval-bar {
@@ -1350,6 +1668,11 @@ p {
 /* ── Provider editor (inline form) ──────────────────────────────────────── */
 
 .provider-editor {
+  display: flex;
+  flex-direction: column;
+  /* Same 15px row rhythm as .settings-card-body — the editor sits in one
+     card-body slot, so its own fields need the spacing the other panes get. */
+  gap: 15px;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
   padding: 12px;
@@ -1372,6 +1695,291 @@ p {
   background: var(--kodo-hover);
 }
 
+/* ── Provider model list (editor) ──────────────────────────────────────── */
+
+.model-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-chip {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.model-chip--active {
+  border-color: var(--kodo-accent);
+}
+
+.model-chip--active .model-chip-label {
+  font-weight: 600;
+}
+
+/* One line per chip: long ids ellipsize inside the label while the remove
+   button stays pinned; min-width: 0 down the chain lets the shrink happen. */
+.model-chip-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 8px;
+  border: none;
+  background: none;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.model-chip-label span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-chip-id {
+  font-family: var(--kodo-font-mono);
+  color: var(--kodo-text-secondary);
+}
+
+.model-chip-remove {
+  flex: none;
+  border: none;
+  border-left: 1px solid var(--kodo-border);
+  background: none;
+  color: var(--kodo-text-secondary);
+  padding: 0 7px;
+  font-size: var(--kodo-font-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.model-chip-remove:hover {
+  background: var(--kodo-error-bg);
+  color: var(--kodo-error);
+}
+
+/* The row spans the full detail pane, so picker, input and buttons share one
+   line; flex-basis keeps them wrapping gracefully in a narrower container. */
+.model-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-toolbar .select {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.model-toolbar .input {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.model-status {
+  margin: 0;
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+}
+
+.model-status--error {
+  color: var(--kodo-error);
+}
+
+/* MCP env / header rows: key and value inputs share the line with a remove
+   button; the flex basis lets them wrap in a narrower pane. */
+.kv-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kv-row .input {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+/* MCP page: the row's leading chevron expands the server's tool list below
+   it; tools are one compact line each (wire-adjacent name + description). */
+.mcp-server-chevron {
+  flex: none;
+}
+
+.mcp-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 12px 34px;
+}
+
+.mcp-tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mcp-tool-desc {
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* MCP connector catalog — the one approved tile grid (DESIGN §9 /
+   COMPONENTS §14): compact IDE tiles, 1px borders, no shadows. Hover only
+   touches border/background. */
+.mcp-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 8px;
+}
+
+.mcp-section-title {
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+  color: var(--kodo-text);
+}
+
+.mcp-section-hint {
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+}
+
+.mcp-catalog {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin-bottom: 22px;
+}
+
+.mcp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-canvas);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.mcp-card:hover {
+  border-color: var(--kodo-border-strong);
+  background: var(--kodo-hover);
+}
+
+.mcp-card:focus-visible {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 1px;
+}
+
+/* Already configured: inert tile — no hover lift, muted text, the foot
+   reads 已添加 instead of ＋添加. */
+.mcp-card--added {
+  cursor: default;
+}
+
+.mcp-card--added:hover {
+  border-color: var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.mcp-card--added .mcp-card-name {
+  color: var(--kodo-text-secondary);
+}
+
+.mcp-card--added .mcp-card-state {
+  color: var(--kodo-success-text);
+}
+
+.mcp-card-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+}
+
+.mcp-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mcp-card-icon {
+  display: flex;
+  flex: none;
+  color: var(--kodo-text-secondary);
+}
+
+.mcp-card-name {
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+  color: var(--kodo-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcp-card-desc {
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.mcp-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.mcp-card-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+}
+
+.mcp-card:hover .mcp-card-add {
+  color: var(--kodo-accent);
+}
+
+.mcp-template-hint {
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+  margin: 0;
+}
+
 .app[data-density="comfortable"] {
   --kodo-space-1: 6px;
   --kodo-space-2: 10px;
@@ -1384,4 +1992,106 @@ p {
 
 .app[data-line-numbers="false"] .line-no {
   display: none;
+}
+
+/* ---------------------------------------------------- command palette -- */
+/* ⌘K quick switcher: the settings modal's shell (backdrop + panel) scaled to
+   a palette and anchored near the top — commands first, sessions below. */
+
+.palette-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  display: grid;
+  place-items: start center;
+  padding-top: 15vh;
+  background: rgb(23 32 51 / 24%);
+}
+
+.palette {
+  width: min(560px, calc(100% - 32px));
+  max-height: 480px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: 14px;
+  background: var(--kodo-canvas);
+  box-shadow: 0 24px 70px rgb(23 32 51 / 20%);
+}
+
+.palette-input {
+  flex: none;
+  height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 1px solid var(--kodo-border);
+  background: transparent;
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-md);
+}
+
+.palette-input:focus {
+  outline: none;
+}
+
+.palette-list {
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.palette-group {
+  padding: 6px 8px 2px;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-xs);
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--kodo-radius-sm);
+  background: transparent;
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.palette-item--active {
+  background: var(--kodo-selected);
+}
+
+.palette-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-item-project {
+  margin-left: auto;
+  flex: none;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-xs);
+}
+
+.palette-empty {
+  margin: 0;
+  padding: 12px 8px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.palette-hint {
+  flex: none;
+  padding: 8px 12px;
+  border-top: 1px solid var(--kodo-border);
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-xs);
 }

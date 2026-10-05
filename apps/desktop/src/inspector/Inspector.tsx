@@ -1,5 +1,6 @@
 import { BarChart3, FileText, Info, Wrench, X } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
+import type { ChangeDto } from "../api";
 import type { RouteName } from "../routes";
 import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
@@ -16,12 +17,33 @@ import {
 import { TraceOverview } from "./TraceInspector";
 
 /**
- * One layer navigates panels (Inspector | 终端), the other navigates sections
- * inside the Inspector panel (概览 / 文件 / 工具 / 模型). The two never share a
- * name or a meaning: Terminal lives only at the panel layer, so the rail stays
- * four items and no label collides across layers.
+ * One layer navigates panels (Inspector | 终端 | 文件 | 浏览), the other
+ * navigates sections inside the Inspector panel (概览 / 改动 / 工具 / 模型).
+ * The two never share a name or a meaning: Terminal, 文件 and 浏览 live only
+ * at the panel layer, so the rail keeps four unique labels and nothing
+ * collides across layers.
  */
-export type InspectorTab = "summary" | "files" | "tools" | "terminal" | "llm" | "help";
+export type InspectorTab =
+  | "summary"
+  | "files"
+  | "tools"
+  | "terminal"
+  | "llm"
+  | "help"
+  | "file"
+  | "browse";
+
+/**
+ * One open-file request for the right-sidebar file panel. `nonce` bumps on
+ * every ask so re-clicking the same path still re-syncs a panel the user
+ * browsed away from (prop identity, not just path, drives the sync effect).
+ */
+export type FilePanelRequest = {
+  path: string | null;
+  tab: "full" | "diff";
+  changes: ChangeDto[];
+  nonce: number;
+};
 
 const RAIL: { tab: InspectorTab; label: string; Icon: typeof Info }[] = [
   { tab: "summary", label: T.inspector.summary, Icon: Info },
@@ -35,8 +57,10 @@ const PANEL_TABS: Record<RouteName, { tab: InspectorTab; label: string }[]> = {
   conversation: [
     { tab: "summary", label: T.inspector.panel },
     { tab: "terminal", label: T.inspector.terminal },
+    { tab: "file", label: T.inspector.file },
+    { tab: "browse", label: T.inspector.browse },
   ],
-  skills: [{ tab: "summary", label: T.inspector.panel }],
+  plugins: [{ tab: "summary", label: T.inspector.panel }],
   trace: [
     { tab: "summary", label: T.inspector.panel },
     { tab: "terminal", label: T.inspector.terminal },
@@ -124,6 +148,12 @@ type Props = {
   archiveSelection?: ArchiveSelection;
   onArchiveRestore?: () => void;
   onOpenTrace?: () => void;
+  /** Slot body for the 文件 panel — FileViewer de-modalized (App mounts it). */
+  filePanel?: ReactNode;
+  /** Slot body for the 浏览 panel — embedded browser (App mounts it). */
+  browsePanel?: ReactNode;
+  /** Width handle on the boundary (App gates it to ≥1200px windows). */
+  resizer?: ReactNode;
 };
 
 export function Inspector({
@@ -139,6 +169,9 @@ export function Inspector({
   archiveSelection = null,
   onArchiveRestore = () => {},
   onOpenTrace = () => {},
+  filePanel = null,
+  browsePanel = null,
+  resizer = null,
 }: Props) {
   const panelTabs = PANEL_TABS[route];
   const allowed = new Set(panelTabs.map((item) => item.tab));
@@ -162,7 +195,11 @@ export function Inspector({
         : rail.some((item) => item.tab === tab)
           ? "summary"
           : panelTabs[0].tab;
-  const showRail = rail.length > 0 && panelActive !== "terminal";
+  // The rail lists sections inside the Inspector panel only — Terminal, 文件
+  // and 浏览 are whole panels of their own, so they show no rail beside themselves.
+  const showRail = rail.length > 0 && panelActive === "summary";
+  // 文件 and 浏览 both own the whole column: they widen it and drop the padding.
+  const wholePanel = panelActive === "file" || panelActive === "browse";
 
   // Narrow viewports draw the panel as an overlay. Opening parks focus inside
   // it; closing hands focus back to whatever opened it, so the keyboard never
@@ -189,7 +226,11 @@ export function Inspector({
   }, [open]);
 
   return (
-    <aside className="inspector" id="kodo-inspector">
+    <aside
+      className={`inspector${wholePanel ? " inspector--wide" : ""}`}
+      id="kodo-inspector"
+    >
+      {open && resizer}
       {showRail && (
         <div className="ins-rail">
           {rail.map(({ tab: railTab, label, Icon }) => (
@@ -239,23 +280,38 @@ export function Inspector({
               aria-label={T.action.close}
               title={T.action.close}
               data-testid="inspector-close"
-              onClick={onClose}
+              // In 文件/浏览 the X steps back to Inspector (the panel stays
+              // usable); from the other panels it closes the panel as before.
+              onClick={() => {
+                if (wholePanel) onSelectTab("summary");
+                else onClose();
+              }}
             >
               <X size={16} strokeWidth={1.8} />
             </button>
           </header>
 
-          <div className="ins-content" role="tabpanel">
-            {contentFor(
-              route,
-              panelActive === "terminal" ? "terminal" : railActive,
-              demo,
-              demoState,
-              live,
-              archiveSelection,
-              onArchiveRestore,
-              onOpenTrace,
-              onSelectTab,
+          <div
+            key={panelActive}
+            className={`ins-content${wholePanel ? " ins-content--flush" : ""}`}
+            role="tabpanel"
+          >
+            {panelActive === "file" ? (
+              filePanel
+            ) : panelActive === "browse" ? (
+              browsePanel
+            ) : (
+              contentFor(
+                route,
+                panelActive === "terminal" ? "terminal" : railActive,
+                demo,
+                demoState,
+                live,
+                archiveSelection,
+                onArchiveRestore,
+                onOpenTrace,
+                onSelectTab,
+              )
             )}
           </div>
         </div>

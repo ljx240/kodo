@@ -1,4 +1,7 @@
-//! Fake-provider flow tests — two per task_type (12 total).
+//! Fake-provider flow tests — two per code task_type (12), plus two
+//! work-mode scenarios (file deliverable and pure conversation) that pin
+//! `TaskType::Work` the way `run()` does, plus a workflow scenario that
+//! resolves the skill by name (the chip path).
 //!
 //! Each scenario runs the real pipeline shape used by `run()`:
 //! classify → SkillRegistry → `TaskPlan::from_skill` → filtered decisions →
@@ -114,14 +117,52 @@ fn run_scenario_with_verify(
     script: Vec<Reply>,
     verify_command: Option<&str>,
 ) -> Outcome {
-    let task_type = classify(message);
+    run_scenario_typed(classify(message), message, script, verify_command)
+}
+
+/// Work-mode scenario: pins `TaskType::Work` exactly the way `run()` does —
+/// `classify` never yields Work on its own.
+fn run_scenario_work(message: &str, script: Vec<Reply>) -> Outcome {
+    run_scenario_typed(TaskType::Work, message, script, None)
+}
+
+fn run_scenario_typed(
+    task_type: TaskType,
+    message: &str,
+    script: Vec<Reply>,
+    verify_command: Option<&str>,
+) -> Outcome {
     let skill = SkillRegistry::builtin()
         .select(task_type)
         .unwrap_or_else(|| panic!("no skill selected for {task_type}"))
         .clone();
+    run_scenario_with_skill(task_type, skill, message, script, verify_command)
+}
 
+/// Named-skill scenario — the chip path: the skill is looked up by name
+/// (`registry.get`) instead of via classify/select, exactly like
+/// `resolve_skill` does in `run()`.
+fn run_scenario_named(name: &str, message: &str, script: Vec<Reply>) -> Outcome {
+    let skill = SkillRegistry::builtin()
+        .get(name)
+        .unwrap_or_else(|| panic!("no skill named {name}"))
+        .clone();
+    let task_type = skill.applicable_task_types[0];
+    run_scenario_with_skill(task_type, skill, message, script, None)
+}
+
+fn run_scenario_with_skill(
+    task_type: TaskType,
+    skill: SkillSpec,
+    message: &str,
+    script: Vec<Reply>,
+    verify_command: Option<&str>,
+) -> Outcome {
     // Planner hook: skill-shaped plan (mirrors `run()`).
     let plan = TaskPlan::from_skill(&skill, message);
+    // Broad registry on purpose: parsing admits every standard tool so the
+    // skill gate below is the layer under test. `run()` parses the filtered
+    // registry first (matrix rows are unit-tested in protocol.rs / skill.rs).
     let registry = ToolRegistry::standard();
     let mut machine = AgentMachine::with_plan(message, plan, Budget::default());
     machine.handle(AgentEvent::TaskReceived);
@@ -199,6 +240,21 @@ fn run_scenario_with_verify(
                                     rejections.push((res.name.clone(), code));
                                     results.push(res);
                                 }
+                                ToolInvocation::External(call) => {
+                                    // `mcp__*` passes the skill gate by design
+                                    // (allowlists narrow builtins only). These
+                                    // fakes have no MCP client — surface an
+                                    // honest failure, never a fake success.
+                                    let args_label = call.args_label();
+                                    let res = ToolResult::failure(
+                                        call.id.clone(),
+                                        call.name.clone(),
+                                        args_label,
+                                        ToolError::execution("external tools are not faked here"),
+                                    );
+                                    executed.push(call.name.clone());
+                                    results.push(res);
+                                }
                             }
                         }
                         machine.handle(AgentEvent::ToolsFinished { results });
@@ -234,6 +290,10 @@ fn tools(calls: serde_json::Value) -> Reply {
 
 fn read_call(id: &str, path: &str) -> serde_json::Value {
     serde_json::json!({"id": id, "name": "read_file", "arguments": {"path": path}})
+}
+
+fn find_symbol_call(id: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({"id": id, "name": "find_symbol", "arguments": {"name": name}})
 }
 
 fn write_call(id: &str, path: &str) -> serde_json::Value {
@@ -693,5 +753,118 @@ fn docs_fake_provider_2_shell_attempt_is_gated_and_no_fake_success() {
     assert_ne!(out.state, AgentState::Finish, "must not fake success");
     assert!(out.terminated);
     assert!(!out.acceptance_ok);
+    assert_done_evidence(&out.plan);
+}
+
+// ---------------------------------------------------------------------------
+// work
+// ---------------------------------------------------------------------------
+
+#[test]
+fn work_fake_provider_delivers_without_verify_and_refuses_symbol_tools() {
+    let out = run_scenario_work(
+        "整理一下这个项目的架构说明",
+        vec![
+            // Model reaches for the symbol navigator — the Work matrix row
+            // never offers it (DESIGN.md §11), so the call is refused.
+            tools(serde_json::json!([
+                find_symbol_call("s1", "main"),
+                read_call("r1", "src/lib.rs"),
+            ])),
+            tools(serde_json::json!([write_call("w1", "ARCHITECTURE.md")])),
+            tools(serde_json::json!([read_call("r2", "ARCHITECTURE.md")])),
+            Reply::Claim,
+        ],
+    );
+    assert_eq!(out.task_type, TaskType::Work);
+    assert_eq!(out.skill.name, "work");
+    assert_eq!(out.skill.verification_policy, VerificationPolicy::None);
+    assert!(
+        !out.plan.requires_verify,
+        "work must never require a verify run"
+    );
+    // The symbol attempt is refused and never executes; file tools do.
+    assert_eq!(out.rejections.len(), 1, "rejections={:?}", out.rejections);
+    assert_eq!(out.rejections[0].0, "find_symbol");
+    assert!(!out.executed.contains(&"find_symbol".to_owned()));
+    assert!(out.executed.contains(&"read_file".to_owned()));
+    assert!(!out.verify_entered, "work never enters the Verify gate");
+    assert_eq!(out.state, AgentState::Finish, "failures={:?}", out.failures);
+    assert!(
+        out.acceptance_ok,
+        "read → deliver → review completes honestly: {:?}",
+        out.failures
+    );
+    assert!(
+        out.files_written.contains(&"ARCHITECTURE.md".to_owned()),
+        "deliverable written inside the project: {:?}",
+        out.files_written
+    );
+    assert_done_evidence(&out.plan);
+}
+
+#[test]
+fn work_pure_conversation_claim_is_the_delivery() {
+    // Work + no project = pure conversation (DESIGN.md §11): no tools exist,
+    // so structural evidence can never arrive. The deliverable-bar plan lets
+    // the claim complete the turn instead of nagging until BudgetExhausted.
+    let out = run_scenario_work("帮我写一份本周的项目周报", vec![Reply::Claim]);
+    assert_eq!(out.task_type, TaskType::Work);
+    assert_eq!(out.skill.name, "work");
+    assert!(
+        out.plan.deliverable_bar,
+        "work plans carry the deliverable bar"
+    );
+    assert!(out.executed.is_empty());
+    assert!(out.rejections.is_empty());
+    assert!(!out.verify_entered, "work never enters the Verify gate");
+    assert_eq!(out.state, AgentState::Finish, "failures={:?}", out.failures);
+    assert!(
+        out.acceptance_ok,
+        "claim is the delivery under the deliverable bar: {:?}",
+        out.failures
+    );
+    assert!(out.failures.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// workflow (Work-space chip skill)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn workflow_fake_provider_runs_chained_commands_and_reports_without_verify() {
+    // Resolved by name — the `【技能：workflow】` chip path, not classify.
+    let out = run_scenario_named(
+        "workflow",
+        "批量整理这批文件并逐步汇报结果",
+        vec![
+            // find_symbol sits outside the Work matrix row — refused, while
+            // the chained command and file tools run.
+            tools(serde_json::json!([
+                find_symbol_call("s1", "main"),
+                command_call("c1", "ls docs"),
+            ])),
+            tools(serde_json::json!([write_call("w1", "docs/batch.md")])),
+            tools(serde_json::json!([read_call("r1", "docs/batch.md")])),
+            Reply::Claim,
+        ],
+    );
+    assert_eq!(out.skill.name, "workflow");
+    assert_eq!(out.task_type, TaskType::Work);
+    assert_eq!(out.skill.verification_policy, VerificationPolicy::None);
+    assert!(
+        out.plan.deliverable_bar,
+        "workflow is a work-family skill: claim is the delivery"
+    );
+    assert!(!out.plan.requires_verify, "verification_policy none");
+    assert_eq!(out.rejections.len(), 1, "rejections={:?}", out.rejections);
+    assert_eq!(out.rejections[0].0, "find_symbol");
+    assert!(!out.executed.contains(&"find_symbol".to_owned()));
+    assert!(out.executed.contains(&"run_command".to_owned()));
+    assert!(out.executed.contains(&"write_file".to_owned()));
+    assert!(!out.verify_entered, "workflow never enters the Verify gate");
+    assert_eq!(out.state, AgentState::Finish, "failures={:?}", out.failures);
+    assert!(out.acceptance_ok, "failures={:?}", out.failures);
+    assert!(out.files_written.contains(&"docs/batch.md".to_owned()));
     assert_done_evidence(&out.plan);
 }

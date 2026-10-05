@@ -85,7 +85,19 @@ pub enum UndoFileState {
     Missing,
 }
 
+/// Kodo's own state directory under the project root (`.kodo/`).
+///
+/// Runtime data (changesets, checkpoints, notes) — never user code. Excluded
+/// from git baselines, change tracking, and write approval so it never shows
+/// up as a "changed file" or prompts the user for its own bookkeeping.
+pub fn is_kodo_state_path(path: &str) -> bool {
+    let path = path.trim();
+    let path = path.strip_prefix("./").unwrap_or(path);
+    path == ".kodo" || path.starts_with(".kodo/")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct TurnChangeSet {
     /// Paths dirty *before* Kodo touched anything (user-owned) — state A.
     pub baseline_dirty: BTreeSet<String>,
@@ -122,7 +134,7 @@ impl TurnChangeSet {
 
     /// Snapshot file contents before Kodo mutates it (records pre-existing git state).
     pub fn snapshot_before(&mut self, project: &Path, relative: &str) {
-        if self.baselines.contains_key(relative) {
+        if is_kodo_state_path(relative) || self.baselines.contains_key(relative) {
             return;
         }
         let full = project.join(relative);
@@ -148,7 +160,13 @@ impl TurnChangeSet {
     /// Record that Kodo changed `relative`. Refreshes after-hash and the
     /// Kodo-only diff (baseline → current). Multiple calls keep first baseline
     /// and update after to the latest Kodo result.
+    ///
+    /// Writes under `.kodo/` are Kodo's own state and are never tracked as
+    /// turn changes (no diff, no undo target, no changed-file row).
     pub fn record_kodo_change(&mut self, project: &Path, relative: &str) {
+        if is_kodo_state_path(relative) {
+            return;
+        }
         if !self.baselines.contains_key(relative) {
             self.snapshot_before(project, relative);
         }
@@ -180,6 +198,65 @@ impl TurnChangeSet {
         );
         let diff = unified_diff(relative, &before, &after);
         self.diffs.insert(relative.to_owned(), diff);
+    }
+
+    /// Fold one turn's capture into the session's accumulated set.
+    ///
+    /// The on-disk changeset is the session's full Kodo delta, so a later
+    /// turn — especially a read-only one whose baseline now sees Kodo's own
+    /// earlier writes as "dirty" — can never wipe diffs the UI still shows.
+    /// Earliest baselines win (first pre-mutation snapshot), latest after
+    /// states win, and each diff is recomputed as the whole Kodo delta.
+    pub fn merged_with(mut self, turn: TurnChangeSet) -> TurnChangeSet {
+        // Drop `.kodo/` state paths from both sides — changesets persisted
+        // before the exclusion existed may still carry them.
+        self.baseline_dirty.retain(|p| !is_kodo_state_path(p));
+        self.kodo_touched.retain(|p| !is_kodo_state_path(p));
+        self.baselines.retain(|p, _| !is_kodo_state_path(p));
+        self.afters.retain(|p, _| !is_kodo_state_path(p));
+        let earlier_touched = self.kodo_touched.clone();
+        for path in turn.baseline_dirty {
+            // A path Kodo already touched is Kodo's own dirt, never user dirt.
+            if !earlier_touched.contains(&path) && !is_kodo_state_path(&path) {
+                self.baseline_dirty.insert(path);
+            }
+        }
+        for (path, snap) in turn.baselines {
+            if !is_kodo_state_path(&path) {
+                self.baselines.entry(path).or_insert(snap);
+            }
+        }
+        for (path, snap) in turn.afters {
+            if !is_kodo_state_path(&path) {
+                self.afters.insert(path, snap);
+            }
+        }
+        for path in turn.kodo_touched {
+            if !is_kodo_state_path(&path) {
+                self.kodo_touched.insert(path);
+            }
+        }
+        if turn.verified.is_some() {
+            self.verified = turn.verified;
+        }
+        self.diffs.clear();
+        for path in &self.kodo_touched {
+            let before = self
+                .baselines
+                .get(path)
+                .and_then(|s| s.bytes.clone())
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            let after = self
+                .afters
+                .get(path)
+                .and_then(|s| s.bytes.clone())
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            let diff = unified_diff(path, &before, &after);
+            self.diffs.insert(path.clone(), diff);
+        }
+        self
     }
 
     /// Files Kodo changed this turn.
@@ -377,7 +454,8 @@ fn git_dirty_paths(project: &Path) -> BTreeSet<String> {
             }
             let path = line[3..].trim();
             let path = path.split(" -> ").last().unwrap_or(path).trim().to_owned();
-            if !path.is_empty() {
+            // `.kodo/` is Kodo's own state dir — never user dirt.
+            if !path.is_empty() && !is_kodo_state_path(&path) {
                 set.insert(path);
             }
         }
@@ -968,11 +1046,200 @@ mod tests {
     }
 
     #[test]
+    fn changeset_snapshot_before_create_records_full_add_diff() {
+        let dir = temp_project("create_add");
+        fs::create_dir_all(dir.join("docs")).unwrap();
+        init_git(&dir);
+
+        let mut cs = TurnChangeSet::capture_baseline(&dir);
+        // The pre-mutation snapshot is what makes the Kodo delta real —
+        // record_kodo_change alone (after the write) would see before == after.
+        cs.snapshot_before(&dir, "docs/intro.md");
+        fs::write(dir.join("docs/intro.md"), "line one\nline two\n").unwrap();
+        cs.record_kodo_change(&dir, "docs/intro.md");
+
+        let diff = cs.diffs.get("docs/intro.md").unwrap();
+        assert!(
+            diff.contains("+line one"),
+            "create must diff as additions: {diff}"
+        );
+        assert!(
+            diff.contains("+line two"),
+            "create must diff as additions: {diff}"
+        );
+        assert!(
+            !diff.contains("no changes"),
+            "create must not report no changes: {diff}"
+        );
+
+        let report = cs.undo_kodo_changes(&dir).unwrap();
+        assert!(report.is_clean(), "conflicts={:?}", report.conflicts);
+        assert!(
+            !dir.join("docs/intro.md").exists(),
+            "undo must delete the created file"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merged_session_keeps_earlier_turn_diffs_and_kodo_ownership() {
+        let dir = temp_project("merge_keep");
+        fs::create_dir_all(dir.join("docs")).unwrap();
+        init_git(&dir);
+
+        // Turn 1 creates the file.
+        let mut t1 = TurnChangeSet::capture_baseline(&dir);
+        t1.snapshot_before(&dir, "docs/intro.md");
+        fs::write(dir.join("docs/intro.md"), "# intro\n").unwrap();
+        t1.record_kodo_change(&dir, "docs/intro.md");
+
+        // Turn 2 is read-only: its baseline now sees Kodo's file as dirty.
+        let t2 = TurnChangeSet::capture_baseline(&dir);
+        // Porcelain collapses untracked trees to `docs/` — still user "dirt"
+        // from turn 2's point of view even though Kodo wrote the file.
+        assert!(
+            t2.baseline_dirty.iter().any(|p| p.starts_with("docs")),
+            "turn 2 baseline should observe the untracked tree as dirty"
+        );
+
+        let merged = t1.clone().merged_with(t2);
+        assert!(merged.kodo_touched.contains("docs/intro.md"));
+        let diff = merged.diffs.get("docs/intro.md").unwrap();
+        assert!(
+            diff.contains("+# intro"),
+            "merged diff must keep additions: {diff}"
+        );
+        assert!(
+            !merged.was_pre_existing("docs/intro.md"),
+            "Kodo's own earlier writes must never read as user-preexisting"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merged_session_diff_is_whole_kodo_delta_across_turns() {
+        let dir = temp_project("merge_delta");
+        fs::write(dir.join("src/a.rs"), "one\n").unwrap();
+        init_git(&dir);
+
+        let mut t1 = TurnChangeSet::capture_baseline(&dir);
+        t1.snapshot_before(&dir, "src/a.rs");
+        fs::write(dir.join("src/a.rs"), "one\ntwo\n").unwrap();
+        t1.record_kodo_change(&dir, "src/a.rs");
+
+        let mut t2 = TurnChangeSet::capture_baseline(&dir);
+        t2.snapshot_before(&dir, "src/a.rs");
+        fs::write(dir.join("src/a.rs"), "ONE\ntwo\n").unwrap();
+        t2.record_kodo_change(&dir, "src/a.rs");
+
+        let merged = t1.merged_with(t2);
+        let diff = merged.diffs.get("src/a.rs").unwrap();
+        assert!(
+            diff.contains("-one"),
+            "session delta must show the first edit: {diff}"
+        );
+        assert!(
+            diff.contains("+ONE"),
+            "session delta must show the second edit: {diff}"
+        );
+        assert!(
+            diff.contains("+two"),
+            "session delta must include turn-1 additions: {diff}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn changeset_diff_marks_added_and_deleted_lines() {
         let diff = unified_diff("src/a.rs", "one\ntwo\nthree\n", "one\nTWO\nthree\nfour\n");
         assert!(diff.contains("--- a/src/a.rs"));
         assert!(diff.contains("-two"));
         assert!(diff.contains("+TWO"));
         assert!(diff.contains("+four"));
+    }
+
+    #[test]
+    fn kodo_state_path_detection() {
+        assert!(is_kodo_state_path(".kodo/"));
+        assert!(is_kodo_state_path(".kodo/changeset-a.json"));
+        assert!(is_kodo_state_path("./.kodo/checkpoints/x"));
+        assert!(is_kodo_state_path(" .kodo/x "));
+        assert!(!is_kodo_state_path(".kodox/x"));
+        assert!(!is_kodo_state_path("src/.kodo/x"));
+        assert!(!is_kodo_state_path("docs/.kodo.md"));
+        assert!(!is_kodo_state_path("src/a.rs"));
+    }
+
+    #[test]
+    fn baseline_excludes_kodo_state_dir() {
+        let dir = temp_project("kodo_state");
+        fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+        init_git(&dir);
+        // Untracked state dir + a real user edit in the same turn.
+        fs::create_dir_all(dir.join(".kodo")).unwrap();
+        fs::write(dir.join(".kodo/changeset-x.json"), "{}").unwrap();
+        fs::write(dir.join("src/a.rs"), "fn a() { /* user */ }\n").unwrap();
+
+        let cs = TurnChangeSet::capture_baseline(&dir);
+        assert!(
+            cs.baseline_dirty.iter().all(|p| !is_kodo_state_path(p)),
+            ".kodo/ must not be baseline dirt: {:?}",
+            cs.baseline_dirty
+        );
+        assert!(cs.baseline_dirty.contains("src/a.rs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn record_ignores_kodo_state_paths() {
+        let dir = temp_project("kodo_record");
+        fs::create_dir_all(dir.join(".kodo")).unwrap();
+        init_git(&dir);
+
+        let mut cs = TurnChangeSet::capture_baseline(&dir);
+        fs::write(dir.join(".kodo/identity.md"), "who\n").unwrap();
+        cs.snapshot_before(&dir, ".kodo/identity.md");
+        cs.record_kodo_change(&dir, ".kodo/identity.md");
+
+        assert!(cs.kodo_changes().is_empty());
+        assert!(cs.baselines.is_empty());
+        assert!(cs.afters.is_empty());
+        assert!(cs.diffs.is_empty());
+        assert!(!cs.was_pre_existing(".kodo/"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_drops_legacy_kodo_state_entries() {
+        // Changesets persisted before the exclusion still carry `.kodo/` rows;
+        // the next fold must clean them out of both sides.
+        let mut old = TurnChangeSet::default();
+        old.baseline_dirty.insert(".kodo/".to_owned());
+        old.baseline_dirty.insert("src/a.rs".to_owned());
+        old.kodo_touched.insert(".kodo/identity.md".to_owned());
+        old.baselines.insert(
+            ".kodo/identity.md".to_owned(),
+            FileSnapshot {
+                path: ".kodo/identity.md".to_owned(),
+                content_hash: "h".to_owned(),
+                existed: true,
+                bytes: None,
+                pre_existing_git: String::new(),
+            },
+        );
+
+        let turn = TurnChangeSet {
+            baseline_dirty: [".kodo/".to_owned()].into_iter().collect(),
+            kodo_touched: [".kodo/again.md".to_owned()].into_iter().collect(),
+            ..Default::default()
+        };
+
+        let merged = old.merged_with(turn);
+        assert_eq!(
+            merged.baseline_dirty.iter().collect::<Vec<_>>(),
+            vec!["src/a.rs"]
+        );
+        assert!(merged.kodo_touched.is_empty());
+        assert!(merged.baselines.is_empty());
     }
 }

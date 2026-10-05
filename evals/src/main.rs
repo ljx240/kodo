@@ -531,6 +531,7 @@ fn run_deterministic(report: &mut EvalReport) {
                 streaming: false,
                 reasoning: false,
                 token_usage: true,
+                context_window_tokens: 32_000,
             }),
             api_key: String::new(),
             ..Provider::new("openai", "", "", "gpt-4o")
@@ -855,6 +856,7 @@ fn run_deterministic(report: &mut EvalReport) {
                 streaming: false,
                 reasoning: false,
                 token_usage: true,
+                context_window_tokens: 32_000,
             }),
             api_key: String::new(),
             ..Provider::new("openai", "", "", "gpt-4o")
@@ -1117,15 +1119,20 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         let mut repairs = 0usize;
         let mut claimed_verified = false;
         let request = RunRequest {
-            project: work.clone(),
+            project: Some(work.clone()),
             message: prompt.clone(),
             pinned_context: Vec::new(),
             provider: Some(provider.clone()),
             permission: Permission::Full,
+            mode: kodo_agent::AgentMode::Code,
             fallback_to_local: false,
             max_output_tokens: 2048,
             extended_thinking: false,
             session_id: Some(format!("eval_{id}")),
+            user_skills_dir: None,
+            mcp_servers: Vec::new(),
+            agent_instructions: None,
+            personas: vec![],
         };
         let alive = || true;
         let approve = |_kind: kodo_agent::StepKind, _cmd: &str| true;
