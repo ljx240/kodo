@@ -6,7 +6,6 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
-use kodo_agent::Provider as AgentProvider;
 use kodo_core::{session, settings, workspace};
 
 use run::{ApprovalChoice, Approvals, Runs, StartArgs};
@@ -193,11 +192,12 @@ fn list_archived() -> Result<Vec<ArchivedItemView>, String> {
                     }
                     kodo_core::session::ItemKind::FileChange { changes } => {
                         for change in changes {
+                            // One path once; line deltas sum across steps/turns.
                             if seen_paths.insert(change.path.clone()) {
                                 files_changed += 1;
-                                added += change.added;
-                                removed += change.removed;
                             }
+                            added += change.added;
+                            removed += change.removed;
                         }
                     }
                     kodo_core::session::ItemKind::AgentMessage { text, .. }
@@ -373,77 +373,9 @@ fn send_message(
         .map_err(|error| error.to_string())?;
     let found = session::load(&dir, &id).map_err(|error| error.to_string())?;
 
-    let settings_path = settings::settings_path();
-    let read_setting = |key: &str| {
-        settings_path
-            .as_ref()
-            .and_then(|path| settings::read(path, key))
-    };
-
-    let permission = run::permission_from_settings(read_setting("permission"));
-
-    let provider = load_providers().ok().and_then(|list| {
-        let active = read_setting("active-provider")
-            .and_then(|raw| raw.parse::<usize>().ok())
-            .unwrap_or(0);
-        let chosen = list
-            .get(active)
-            .cloned()
-            .or_else(|| list.iter().find(|p| p.has_key).cloned());
-        let creds = settings::credentials_path()?;
-        let build = |p: &ProviderView| -> Option<AgentProvider> {
-            let api_key = settings::read_credential(&creds, &p.id).unwrap_or_default();
-            if api_key.is_empty() {
-                return None;
-            }
-            Some(AgentProvider::new(
-                p.template.clone(),
-                api_key,
-                p.endpoint.clone(),
-                p.model_id
-                    .clone()
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or_else(|| p.model.clone()),
-            ))
-        };
-        let primary = chosen.as_ref().and_then(build);
-        let mut primary = primary?;
-        // Populate the failover chain when the user asked to try the next best
-        // model (fallback-behavior != fail). Auth/invalid-model never failover.
-        if read_setting("fallback-behavior").as_deref() != Some("fail") {
-            for p in &list {
-                if Some(&p.id) == chosen.as_ref().map(|c| &c.id) {
-                    continue;
-                }
-                if let Some(fb) = build(p) {
-                    primary.fallbacks.push(fb);
-                }
-            }
-        }
-        // Default model is a runtime consumer: override the primary model so the
-        // Settings control is what the next call actually sends.
-        if let Some(model) = read_setting("default-model") {
-            let model = model.trim().to_owned();
-            if !model.is_empty() {
-                let mut next = AgentProvider::new(
-                    primary.template.clone(),
-                    primary.api_key.clone(),
-                    primary.endpoint.clone(),
-                    model,
-                );
-                next.fallbacks = std::mem::take(&mut primary.fallbacks);
-                primary = next;
-            }
-        }
-        Some(primary)
-    });
-
-    let max_output_tokens = read_setting("max-output-tokens")
-        .and_then(|raw| raw.parse::<u32>().ok())
-        .unwrap_or(4096);
-    let extended_thinking = read_setting("extended-thinking").as_deref() == Some("true");
-    // fallback-behavior=fail means no silent offline answers when a key exists.
-    let fallback_to_local = read_setting("fallback-behavior").as_deref() != Some("fail");
+    // Provider, permission and generation knobs come from the shared shell
+    // config — the same settings.log/credentials.log the CLI reads.
+    let config = kodo_shell::ShellConfig::load(kodo_shell::Overrides::default());
 
     run::start(
         &app,
@@ -455,11 +387,11 @@ fn send_message(
             project: found.project,
             message: text,
             context: context_paths,
-            provider,
-            permission,
-            fallback_to_local,
-            max_output_tokens,
-            extended_thinking,
+            provider: config.provider,
+            permission: config.permission,
+            fallback_to_local: config.fallback_to_local,
+            max_output_tokens: config.max_output_tokens,
+            extended_thinking: config.extended_thinking,
         },
     )?;
 
@@ -602,6 +534,52 @@ fn undo_turn(project: String, id: String) -> Result<view::UndoReportView, String
     })
 }
 
+/// Enumerate every trace artifact (`llm_io/*.json`, `spans/*.json`) for one
+/// turn. Empty when the turn predates the capture layer.
+#[tauri::command]
+fn list_artifacts(
+    session_id: String,
+    turn_seq: u32,
+) -> Result<Vec<view::ArtifactRefView>, String> {
+    kodo_core::traces::list_artifacts(&session_id, turn_seq)
+        .map(|items| items.into_iter().map(view::ArtifactRefView::from).collect())
+        .map_err(|error| error.to_string())
+}
+
+/// Cheap probe — true when the turn directory exists with at least one
+/// artifact subdir. Lets the GUI hide the trace tabs without listing every
+/// file.
+#[tauri::command]
+fn turn_has_artifacts(session_id: String, turn_seq: u32) -> bool {
+    kodo_core::traces::turn_has_artifacts(&session_id, turn_seq)
+}
+
+/// Load one captured LLM call. `ref_path` is the `label` from
+/// [`list_artifacts`] (`llm_io/003.json`).
+#[tauri::command]
+fn load_llm_io(
+    session_id: String,
+    turn_seq: u32,
+    ref_path: String,
+) -> Result<view::LlmIoView, String> {
+    kodo_core::traces::read_llm_io(&session_id, turn_seq, &ref_path)
+        .map(view::LlmIoView::from)
+        .map_err(|error| error.to_string())
+}
+
+/// Load the before/after snapshot for one file write. `ref_path` is the
+/// `label` from [`list_artifacts`] (`spans/002-file-…json`).
+#[tauri::command]
+fn load_file_span(
+    session_id: String,
+    turn_seq: u32,
+    ref_path: String,
+) -> Result<view::FileSpanView, String> {
+    kodo_core::traces::read_file_span(&session_id, turn_seq, &ref_path)
+        .map(view::FileSpanView::from)
+        .map_err(|error| error.to_string())
+}
+
 fn log() -> Result<PathBuf, String> {
     workspace::log_path()
         .ok_or_else(|| "HOME is not set, so there is nowhere to keep the project list".to_owned())
@@ -668,6 +646,10 @@ fn main() {
             read_context_file,
             turn_changes,
             undo_turn,
+            list_artifacts,
+            turn_has_artifacts,
+            load_llm_io,
+            load_file_span,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Kodo");

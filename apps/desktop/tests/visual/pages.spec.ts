@@ -9,6 +9,7 @@ const PAGES = [
   { name: "conversation-inspector-closed", url: "/ui-demo/conversation?inspector=closed" },
   { name: "response-trace", url: "/ui-demo/trace" },
   { name: "archive", url: "/ui-demo/archive" },
+  { name: "skills", url: "/ui-demo/skills" },
   { name: "settings", url: "/ui-demo/settings" },
 ];
 

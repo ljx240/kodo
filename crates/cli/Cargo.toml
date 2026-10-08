@@ -1,0 +1,18 @@
+[package]
+name = "kodo-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "kodo"
+path = "src/main.rs"
+
+[dependencies]
+kodo-core = { path = "../core" }
+kodo-agent = { path = "../agent" }
+kodo-shell = { path = "../shell" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

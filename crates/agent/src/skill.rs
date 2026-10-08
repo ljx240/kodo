@@ -6,7 +6,7 @@
 //! built-in skills are embedded via `include_str!` so the registry is
 //! available with zero filesystem I/O.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::classify::TaskType;
 use crate::context::ContextBudget;
@@ -29,6 +29,9 @@ pub enum ContextStrategy {
     ReviewOnly,
     /// Docs: lightweight docs-oriented context, no deep code packing.
     DocsFocused,
+    /// Work / docs / summaries / Q&A: light docs-style context, no
+    /// reproduction or acceptance-gated build/test pipeline.
+    WorkFocused,
 }
 
 impl ContextStrategy {
@@ -40,6 +43,7 @@ impl ContextStrategy {
             Self::MinimalChange => "minimal-change",
             Self::ReviewOnly => "review-only",
             Self::DocsFocused => "docs-focused",
+            Self::WorkFocused => "work-focused",
         }
     }
 
@@ -51,6 +55,7 @@ impl ContextStrategy {
             "minimal-change" => Some(Self::MinimalChange),
             "review-only" => Some(Self::ReviewOnly),
             "docs-focused" => Some(Self::DocsFocused),
+            "work-focused" => Some(Self::WorkFocused),
             _ => None,
         }
     }
@@ -66,6 +71,11 @@ impl ContextStrategy {
             // Reviews target the named files; slightly tighter packing.
             Self::ReviewOnly => ContextBudget {
                 max_spans: 6,
+                ..ContextBudget::default()
+            },
+            // Work / Q&A / summaries: docs-light, no repro or build refs.
+            Self::WorkFocused => ContextBudget {
+                max_spans: 4,
                 ..ContextBudget::default()
             },
             _ => ContextBudget::default(),
@@ -126,6 +136,10 @@ pub struct SkillSpec {
     pub workflow: Vec<WorkflowStep>,
     pub completion_criteria: Vec<String>,
     pub verification_policy: VerificationPolicy,
+    /// Short human-readable description (from the SKILL.md `## description`
+    /// section). Optional — older built-ins (bug-fix, feature, …) didn't
+    /// ship one. Reaches the system prompt via `skill_prompt_block`.
+    pub description: String,
     /// Short human guidance (kept in the file; only compact excerpts reach prompts).
     pub guidance: String,
 }
@@ -189,7 +203,7 @@ impl SkillSpec {
 // Parser — section-based Markdown, no extra dependencies.
 // ---------------------------------------------------------------------------
 
-fn section_body<'a>(lines: &[&'a str], header: &str) -> Vec<&'a str> {
+pub fn section_body<'a>(lines: &[&'a str], header: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut inside = false;
     for line in lines {
@@ -215,7 +229,7 @@ fn bullets(body: &[&str]) -> Vec<String> {
         .collect()
 }
 
-fn single_line(body: &[&str]) -> String {
+pub fn single_line(body: &[&str]) -> String {
     body.iter()
         .map(|l| l.trim())
         .find(|l| !l.is_empty())
@@ -298,6 +312,8 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
         .collect::<Vec<_>>()
         .join("\n");
 
+    let description = single_line(&section_body(&lines, "description"));
+
     Ok(SkillSpec {
         name,
         applicable_task_types: task_types,
@@ -306,6 +322,7 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
         workflow,
         completion_criteria,
         verification_policy,
+        description,
         guidance,
     })
 }
@@ -318,28 +335,41 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillRegistry {
     skills: Vec<SkillSpec>,
+    /// Names that came in via [`builtin`] and must not be replaced by user
+    /// or project overlays (a chip install that names itself "work" could
+    /// hijack the dispatch — builtins are anchored).
+    builtin_names: std::collections::HashSet<String>,
 }
 
 impl SkillRegistry {
-    /// The six built-in skills, embedded at compile time.
+    /// The eight built-in skills, embedded at compile time.
     pub fn builtin() -> Self {
-        const SOURCES: [&str; 6] = [
+        const SOURCES: [&str; 8] = [
             include_str!("../../../skills/bug-fix/SKILL.md"),
             include_str!("../../../skills/feature/SKILL.md"),
             include_str!("../../../skills/test/SKILL.md"),
             include_str!("../../../skills/refactor/SKILL.md"),
             include_str!("../../../skills/code-review/SKILL.md"),
             include_str!("../../../skills/docs/SKILL.md"),
+            include_str!("../../../skills/work/SKILL.md"),
+            include_str!("../../../skills/workflow/SKILL.md"),
         ];
-        let skills = SOURCES
+        let skills: Vec<SkillSpec> = SOURCES
             .iter()
             .map(|src| parse_skill(src).expect("built-in SKILL.md must parse"))
             .collect();
-        Self { skills }
+        let builtin_names = skills.iter().map(|s| s.name.clone()).collect();
+        Self {
+            skills,
+            builtin_names,
+        }
     }
 
     pub fn from_skills(skills: Vec<SkillSpec>) -> Self {
-        Self { skills }
+        Self {
+            skills,
+            builtin_names: std::collections::HashSet::new(),
+        }
     }
 
     /// Pick the skill whose `applicable_task_types` contains `task_type`.
@@ -356,6 +386,103 @@ impl SkillRegistry {
     pub fn skills(&self) -> &[SkillSpec] {
         &self.skills
     }
+
+    /// Append user/project skills. Later calls win on name collisions among
+    /// user/project skills (project shadows user); **builtin names are
+    /// anchored** — a user or project skill that names itself after a
+    /// builtin is silently dropped so a chip can't hijack dispatch.
+    /// Caller passes in increasing priority order:
+    /// `builtin().with_user(user).with_user(project)`. Returns a fresh
+    /// registry; the receiver is not mutated.
+    pub fn with_user(mut self, skills: Vec<SkillSpec>) -> Self {
+        for s in skills {
+            if self.builtin_names.contains(&s.name) {
+                // Anchor: builtin name stays untouched. A chip install that
+                // happens to pick a builtin name is filtered here, not at
+                // load_user_skills time, so the helper can keep doing plain
+                // directory walks.
+                continue;
+            }
+            if let Some(slot) = self.skills.iter_mut().find(|existing| existing.name == s.name) {
+                *slot = s;
+            } else {
+                self.skills.push(s);
+            }
+        }
+        self
+    }
+}
+
+/// One built-in persona's raw markdown — read-only preview source.
+/// (Placeholder — kept here so `pub use skill::builtin_markdown` resolves
+/// before trait defs land. Real implementation in agents.rs shadows this.)
+pub fn builtin_markdown(name: &str) -> Option<&'static str> {
+    let _ = name;
+    None
+}
+
+// User-skill IO. Built-in skills live in `crates/agent/skills/*` (compiled in
+// via `include_str!`); user/project skills live on disk under
+// `<base>/.kolo/skills/<name>/SKILL.md`. `load_user_skills` scans the
+// directory and skips anything that fails to parse — same shape as the
+// persona store.
+
+fn skill_file(base: &Path, name: &str) -> PathBuf {
+    base.join(format!("{name}.md"))
+}
+
+fn load_skill_dir(dir: &Path) -> Vec<SkillSpec> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Two layouts accepted: flat file `<dir>/<name>.md` and directory
+        // layout `<dir>/<name>/SKILL.md`. The flat shape is what the test
+        // harness and older drafts used; the directory shape mirrors the
+        // built-in skill layout so a user can `cp -r skills/foo my-skills/`
+        // and have it just work.
+        let md = if path.is_dir() {
+            let inside = path.join("SKILL.md");
+            if inside.is_file() { inside } else { continue }
+        } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            path
+        } else {
+            continue;
+        };
+        let Ok(src) = std::fs::read_to_string(&md) else {
+            continue;
+        };
+        if let Ok(s) = parse_skill(&src) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Load every parseable SKILL.md under `<dir>` (both `<dir>/<name>.md`
+/// flat files and `<dir>/<name>/SKILL.md` directory layout). Used both
+/// for the user's global store and the project-scoped store. Returns an
+/// empty Vec when the directory doesn't exist or is empty.
+pub fn load_user_skills(dir: &Path) -> Vec<SkillSpec> {
+    load_skill_dir(dir)
+}
+
+pub fn save_user_skill(dir: &Path, name: &str, markdown: &str) -> Result<(), String> {
+    let path = skill_file(dir, name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, markdown).map_err(|e| e.to_string())
+}
+
+pub fn delete_user_skill(dir: &Path, name: &str) -> Result<(), String> {
+    let path = skill_file(dir, name);
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -383,7 +510,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("no skill for {kind}"));
             assert!(skill.applicable_task_types.contains(&kind));
         }
-        assert_eq!(reg.skills().len(), 6);
+        assert_eq!(reg.skills().len(), 8);
     }
 
     #[test]

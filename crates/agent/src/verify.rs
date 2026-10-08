@@ -80,6 +80,93 @@ impl FailureClass {
     }
 }
 
+/// User-facing failure taxonomy. Classified once in Rust from structured
+/// signals (exit code, denial flag, well-known error shapes) so the UI never
+/// has to guess from display strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandFailureKind {
+    /// The binary itself is missing (exit 127 / "command not found").
+    CommandNotFound,
+    /// The binary exists but cannot be executed (exit 126 / EACCES).
+    PermissionDenied,
+    /// The command ran and returned a non-zero exit code.
+    NonZeroExit,
+    /// The command was killed by its deadline.
+    Timeout,
+    /// The user refused to run this command.
+    Denied,
+    /// Provider/model-level failure surfaced on a command-shaped step.
+    ProviderError,
+    /// The working tree diverged (undo/diff conflict).
+    WorkspaceConflict,
+}
+
+impl CommandFailureKind {
+    /// Stable wire code. The UI maps this to localized copy.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::CommandNotFound => "command_not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::NonZeroExit => "non_zero_exit",
+            Self::Timeout => "timeout",
+            Self::Denied => "denied",
+            Self::ProviderError => "provider_error",
+            Self::WorkspaceConflict => "workspace_conflict",
+        }
+    }
+
+    /// Classify one failed command execution. `None` when nothing failed.
+    pub fn classify(exit_code: Option<i32>, output: &str, denied: bool) -> Option<Self> {
+        if denied {
+            return Some(Self::Denied);
+        }
+        let lower = output.to_ascii_lowercase();
+        if lower.contains("timed out") || lower.contains("timeout after") {
+            return Some(Self::Timeout);
+        }
+        if lower.contains("command not found")
+            || lower.contains(": not found")
+            || lower.contains("is not recognized as an internal or external command")
+            || exit_code == Some(127)
+        {
+            return Some(Self::CommandNotFound);
+        }
+        if exit_code == Some(126)
+            || lower.contains("permission denied")
+            || lower.contains("not executable")
+            || lower.contains("operation not permitted")
+        {
+            return Some(Self::PermissionDenied);
+        }
+        if lower.contains("would be overwritten") || lower.contains("merge conflict") {
+            return Some(Self::WorkspaceConflict);
+        }
+        if exit_code.map(|code| code != 0).unwrap_or(false) {
+            return Some(Self::NonZeroExit);
+        }
+        None
+    }
+
+    /// The missing binary named by a `command not found` style failure, e.g.
+    /// `/bin/sh: cargo: command not found` → `cargo`.
+    pub fn missing_tool(output: &str) -> Option<String> {
+        for marker in [": command not found", ": not found"] {
+            if let Some(index) = output.find(marker) {
+                let before = &output[..index];
+                let tool = before
+                    .rsplit([' ', '\n', '\t', '/', '\\', ':'])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !tool.is_empty() {
+                    return Some(tool.to_owned());
+                }
+            }
+        }
+        None
+    }
+}
+
 /// How early a planned command proves acceptance (run order priority).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VerifyTier {
@@ -783,7 +870,8 @@ impl VerificationRunner {
 
     /// Run a verification plan in tier order. Stops after the first product
     /// failure at ExactRegression (targeted repair) unless `stop_on_fail=false`.
-    /// Infra failures also stop (no point continuing the suite).
+    /// A missing tool blocks every later command that needs the same binary
+    /// (recorded without spawning), and never drives a product-repair loop.
     pub fn run_plan(
         &self,
         project: &Path,
@@ -793,9 +881,28 @@ impl VerificationRunner {
     ) -> Vec<VerificationEvidence> {
         let mut out = Vec::new();
         let cwd = project.display().to_string();
+        let mut missing_tools: Vec<String> = Vec::new();
         for planned in &plan.commands {
             if !alive() {
                 break;
+            }
+            let binary = first_token(&planned.command.command);
+            if missing_tools.iter().any(|tool| *tool == binary) {
+                // Same missing tool: running it again cannot succeed. Record
+                // the block without spawning so the trace shows every doomed
+                // step and the summary can say "N steps blocked".
+                let outcome = blocked_outcome(
+                    &planned.command,
+                    &cwd,
+                    &format!("{binary}: command not found (tool unavailable)"),
+                );
+                out.push(VerificationEvidence::from_outcome(
+                    &outcome,
+                    &cwd,
+                    planned.criterion_ids.clone(),
+                    500,
+                ));
+                continue;
             }
             let outcome = self.run_one(project, &planned.command, alive);
             let ev = VerificationEvidence::from_outcome(
@@ -805,6 +912,15 @@ impl VerificationRunner {
                 500,
             );
             let failed = !ev.ok;
+            if failed {
+                if let Some(tool) = CommandFailureKind::missing_tool(&outcome.output_tail) {
+                    missing_tools.push(tool);
+                    out.push(ev);
+                    // Other tools' commands may still run; same-tool ones are
+                    // skipped above. No point stopping the whole plan.
+                    continue;
+                }
+            }
             out.push(ev);
             if failed && stop_on_fail {
                 // Stop so repair can re-run this targeted command first.
@@ -860,6 +976,7 @@ impl VerificationRunner {
     }
 
     /// Run an explicit command list (already filtered by skill policy).
+    /// Same missing-tool skip rules as [`Self::run_plan`].
     pub fn run_commands(
         &self,
         project: &Path,
@@ -868,12 +985,30 @@ impl VerificationRunner {
         stop_on_fail: bool,
     ) -> Vec<VerifyOutcome> {
         let mut out = Vec::new();
+        let cwd = project.display().to_string();
+        let mut missing_tools: Vec<String> = Vec::new();
         for cmd in cmds {
             if !alive() {
                 break;
             }
+            let binary = first_token(&cmd.command);
+            if missing_tools.iter().any(|tool| *tool == binary) {
+                out.push(blocked_outcome(
+                    cmd,
+                    &cwd,
+                    &format!("{binary}: command not found (tool unavailable)"),
+                ));
+                continue;
+            }
             let outcome = self.run_one(project, cmd, alive);
             let failed = !outcome.ok;
+            if failed {
+                if let Some(tool) = CommandFailureKind::missing_tool(&outcome.output_tail) {
+                    missing_tools.push(tool);
+                    out.push(outcome);
+                    continue;
+                }
+            }
             out.push(outcome);
             if failed && stop_on_fail {
                 break;
@@ -896,6 +1031,35 @@ impl VerificationRunner {
         } else {
             FinalStatus::VerificationFailed
         }
+    }
+}
+
+/// Leading binary of a shell command (`cargo test --lib` → `cargo`).
+fn first_token(command: &str) -> String {
+    command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// A command that was never spawned because its tool is already known missing.
+fn blocked_outcome(cmd: &VerifyCommand, cwd: &str, reason: &str) -> VerifyOutcome {
+    VerifyOutcome {
+        command: cmd.clone(),
+        exit_code: None,
+        ok: false,
+        timed_out: false,
+        cancelled: false,
+        cwd: cwd.to_owned(),
+        duration_ms: 0,
+        output_tail: reason.to_owned(),
+        failure: Some(FailureReport {
+            command: cmd.command.clone(),
+            exit_code: None,
+            primary_error: reason.to_owned(),
+            relevant_files: Vec::new(),
+        }),
     }
 }
 
@@ -1619,5 +1783,75 @@ error[E0308]: mismatched types
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+    #[test]
+    fn failure_kind_classifies_structured_signals() {
+        use CommandFailureKind::*;
+        assert_eq!(
+            CommandFailureKind::classify(Some(127), "/bin/sh: cargo: command not found", false),
+            Some(CommandNotFound)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(
+                Some(127),
+                "/bin/sh: cargo: command not found",
+                true // denial wins: the user never let it run
+            ),
+            Some(Denied)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(Some(126), "permission denied", false),
+            Some(PermissionDenied)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(Some(2), "error: test failed", false),
+            Some(NonZeroExit)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(None, "timed out after 90s", false),
+            Some(Timeout)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(Some(1), "would be overwritten by merge", false),
+            Some(WorkspaceConflict)
+        );
+        assert_eq!(CommandFailureKind::classify(Some(0), "ok", false), None);
+    }
+
+    #[test]
+    fn missing_tool_reads_the_binary_name() {
+        assert_eq!(
+            CommandFailureKind::missing_tool("/bin/sh: cargo: command not found"),
+            Some("cargo".to_owned())
+        );
+        assert_eq!(
+            CommandFailureKind::missing_tool("bash: flub: command not found"),
+            Some("flub".to_owned())
+        );
+        assert_eq!(CommandFailureKind::missing_tool("error: test failed"), None);
+    }
+
+    #[test]
+    fn a_missing_tool_blocks_same_binary_and_skips_the_doomed_chain() {
+        let dir = fixture_with_failing_test();
+        let runner = VerificationRunner::new(10_000);
+        let cmds = vec![
+            VerifyCommand::build("kodo_no_such_tool_xyz build"),
+            VerifyCommand::test("kodo_no_such_tool_xyz test"),
+            VerifyCommand::test("node -e \"process.exit(0)\""),
+        ];
+        let out = runner.run_commands(&dir, &cmds, &|| true, true);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(out.len(), 3, "every planned command gets a row");
+        assert!(!out[0].ok, "first attempt runs and fails");
+        assert!(!out[1].ok, "second is blocked");
+        assert_eq!(out[1].duration_ms, 0, "blocked rows never spawned");
+        assert!(
+            out[1].output_tail.contains("tool unavailable"),
+            "blocked rows say why: {}",
+            out[1].output_tail
+        );
+        assert!(out[2].ok, "a different tool still runs after a missing one");
     }
 }

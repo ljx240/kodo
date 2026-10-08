@@ -1,4 +1,5 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useId, useState, type ReactNode } from "react";
+import { T } from "../i18n";
 
 /**
  * Compact conversation markdown.
@@ -6,9 +7,37 @@ import { Fragment, type ReactNode } from "react";
  * COMPONENTS.md asks FinalResponse to render markdown with mono code blocks.
  * The conversation column is IDE-dense, so this stays a small local parser —
  * headings, lists, fenced/inline code, bold — not a full CommonMark engine.
+ * Long code folds behind 显示完整代码 and many headings get a small TOC, so a
+ * long answer reads as a summary first.
  */
 export function Markdown({ text }: { text: string }) {
-  return <div className="md">{renderBlocks(text)}</div>;
+  const blocks = parseBlocks(text);
+  const headings = blocks.flatMap((block, index) =>
+    block.kind === "heading" ? [{ index, text: block.text, id: headingId(index) }] : [],
+  );
+  const showToc = headings.length >= 4;
+
+  return (
+    <div className="md">
+      {showToc && (
+        <nav className="md-toc" aria-label={T.reply.toc} data-testid="md-toc">
+          <span className="md-toc-title">{T.reply.toc}</span>
+          <ol className="md-toc-list">
+            {headings.map((heading) => (
+              <li key={heading.id}>
+                <a href={`#${heading.id}`}>{heading.text}</a>
+              </li>
+            ))}
+          </ol>
+        </nav>
+      )}
+      {blocks.map((block, index) => renderBlock(block, index, headingId(index)))}
+    </div>
+  );
+}
+
+function headingId(index: number): string {
+  return `md-h-${index}`;
 }
 
 type Block =
@@ -18,7 +47,7 @@ type Block =
   | { kind: "quote"; text: string }
   | { kind: "para"; text: string };
 
-function renderBlocks(source: string): ReactNode[] {
+function parseBlocks(source: string): Block[] {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
   const blocks: Block[] = [];
   let i = 0;
@@ -87,46 +116,77 @@ function renderBlocks(source: string): ReactNode[] {
     blocks.push({ kind: "para", text: para.join("\n") });
   }
 
-  return blocks.map((block, index) => {
-    switch (block.kind) {
-      case "code":
-        return (
-          <pre key={index} className="md-code" data-lang={block.lang || undefined}>
-            <code>{block.body}</code>
-          </pre>
-        );
-      case "heading": {
-        const Tag = (`h${Math.min(4, Math.max(3, block.level + 1))}` as const) as "h3" | "h4";
-        return (
-          <Tag key={index} className="md-heading">
-            {inline(block.text)}
-          </Tag>
-        );
-      }
-      case "list": {
-        const ListTag = block.ordered ? "ol" : "ul";
-        return (
-          <ListTag key={index} className="md-list">
-            {block.items.map((item, itemIndex) => (
-              <li key={itemIndex}>{inline(item)}</li>
-            ))}
-          </ListTag>
-        );
-      }
-      case "quote":
-        return (
-          <blockquote key={index} className="md-quote">
-            {inline(block.text)}
-          </blockquote>
-        );
-      default:
-        return (
-          <p key={index} className="md-para">
-            {inline(block.text)}
-          </p>
-        );
+  return blocks;
+}
+
+const CODE_FOLD_LINES = 10;
+const CODE_SHOWN_LINES = 6;
+
+function CodeBlock({ body, lang }: { body: string; lang: string }) {
+  const preId = useId();
+  const lines = body.split("\n");
+  const long = lines.length > CODE_FOLD_LINES;
+  // Long code reads as a summary first: the head of the block, then the rest
+  // only when asked for.
+  const [expanded, setExpanded] = useState(false);
+  const shown = !long || expanded ? body : lines.slice(0, CODE_SHOWN_LINES).join("\n");
+
+  return (
+    <div className="md-code-wrap">
+      <pre className="md-code" id={preId} data-lang={lang || undefined}>
+        <code>{shown}</code>
+      </pre>
+      {long && (
+        <button
+          type="button"
+          className="md-code-toggle"
+          aria-expanded={expanded}
+          aria-controls={preId}
+          data-testid="md-code-toggle"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? T.reply.hideCode : T.reply.showCode}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function renderBlock(block: Block, index: number, id: string): ReactNode {
+  switch (block.kind) {
+    case "code":
+      return <CodeBlock key={index} body={block.body} lang={block.lang} />;
+    case "heading": {
+      const Tag = (`h${Math.min(4, Math.max(3, block.level + 1))}` as const) as "h3" | "h4";
+      return (
+        <Tag key={index} className="md-heading" id={id}>
+          {inline(block.text)}
+        </Tag>
+      );
     }
-  });
+    case "list": {
+      const ListTag = block.ordered ? "ol" : "ul";
+      return (
+        <ListTag key={index} className="md-list">
+          {block.items.map((item, itemIndex) => (
+            <li key={itemIndex}>{inline(item)}</li>
+          ))}
+        </ListTag>
+      );
+    }
+    case "quote":
+      return (
+        <blockquote key={index} className="md-quote">
+          {inline(block.text)}
+        </blockquote>
+      );
+    default:
+      return (
+        <p key={index} className="md-para">
+          {inline(block.text)}
+        </p>
+      );
+  }
 }
 
 /** Bold + inline code + fenced markers stripped for emphasis. */

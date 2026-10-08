@@ -168,8 +168,8 @@ export function maskApiKey(key: string, hasKey?: boolean): string {
 }
 
 /** What the provider picker shows. */
-export function providerModelLabel(config: ProviderConfig): string {
-  return config.displayName || config.modelId || config.model || "";
+export function providerModelLabel(config: ProviderConfig | null | undefined): string {
+  return config?.displayName || config?.modelId || config?.model || "";
 }
 
 /** What the backend will send. */

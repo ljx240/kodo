@@ -284,14 +284,21 @@
   background: var(--kodo-hover);
 }
 
-.archive-table th:nth-child(1) { width: 42px; }
-.archive-table th:nth-child(2) { width: 194px; }
-.archive-table th:nth-child(3) { width: 210px; }
-.archive-table th:nth-child(4) { width: 112px; }
-.archive-table th:nth-child(5) { width: 100px; }
-.archive-table th:nth-child(6) { width: 98px; }
-.archive-table th:nth-child(7) { width: 107px; }
-.archive-table th:nth-child(8) { width: 33px; }
+/* Six columns per LAYOUT §7. The old track map still carried eight columns
+   from a previous table shape and crushed Conversation to ~50px, which pushed
+   its header into Summary. Percentages track the table width at any viewport. */
+.archive-table th:nth-child(1) { width: 26%; }
+.archive-table th:nth-child(2) { width: 22%; }
+.archive-table th:nth-child(3) { width: 15%; }
+.archive-table th:nth-child(4) { width: 14%; }
+.archive-table th:nth-child(5) { width: 13%; }
+.archive-table th:nth-child(6) { width: 10%; }
+
+.archive-table th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .archive-table .row--selected {
   background: var(--kodo-selected);
@@ -311,11 +318,30 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .arc-title svg {
   flex: none;
   color: var(--kodo-text-secondary);
+}
+
+/* The text sits in its own span so the flex row can shrink and the title
+   truncates instead of overflowing the fixed column. */
+.arc-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-pill {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .arc-summary {
@@ -462,6 +488,13 @@
 .settings-nav-item svg {
   flex: none;
   color: var(--kodo-text-secondary);
+}
+
+/* Category list emptied by the page-head search. */
+.settings-nav-empty {
+  padding: 8px 10px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
 }
 
 .settings-nav-item:hover {
@@ -644,4 +677,226 @@
   color: var(--kodo-text-secondary);
   font-size: 10px;
   line-height: 1.4;
+}
+
+/* --- Modal chrome for the transparency viewers (LLM I/O, file spans). --- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 11, 17, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 60;
+  padding: 24px;
+}
+
+.modal {
+  background: var(--kodo-surface, #14181f);
+  border: 1px solid var(--kodo-border, #232732);
+  border-radius: 10px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  width: min(720px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal--wide {
+  width: min(1080px, calc(100vw - 48px));
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--kodo-border, #232732);
+  flex: 0 0 auto;
+}
+
+.modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--kodo-text, #e8eaed);
+  margin: 0;
+}
+
+.modal-body {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal-body--scroll {
+  overflow-y: auto;
+}
+
+.modal-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.modal-cols h4 {
+  font-size: 12px;
+  color: var(--kodo-text-secondary);
+  margin: 0 0 6px 0;
+  font-weight: 500;
+}
+
+.modal-foot {
+  padding: 10px 18px;
+  border-top: 1px solid var(--kodo-border, #232732);
+  font-size: 11px;
+}
+
+/* --- LLM I/O viewer --- */
+
+.llm-io {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.llm-io-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--kodo-border, #232732);
+}
+
+.llm-io-bar-meta {
+  flex: 1 1 auto;
+  font-size: 13px;
+  color: var(--kodo-text);
+}
+
+.llm-io-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.llm-io-col h4 {
+  font-size: 12px;
+  color: var(--kodo-text-secondary);
+  margin: 0 0 10px 0;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.llm-io-block {
+  margin-bottom: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--kodo-border, #232732);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.llm-io-block > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--kodo-text-secondary);
+  gap: 8px;
+  list-style: none;
+}
+
+.llm-io-block > summary::-webkit-details-marker {
+  display: none;
+}
+
+.llm-io-pre {
+  font-family: var(--kodo-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--kodo-text);
+  margin: 10px 0 0 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
+}
+
+/* --- File span modal --- */
+
+.file-span-pre {
+  font-family: var(--kodo-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--kodo-text);
+  margin: 0;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 4px;
+  white-space: pre;
+  overflow: auto;
+  max-height: 480px;
+}
+
+/* --- Thinking view (reasoning + thinking blocks aggregated) --- */
+
+.thinking-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.thinking-list-item {
+  border-left: 2px solid var(--kodo-border, #232732);
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.thinking-list-phase {
+  font-size: 11px;
+  color: var(--kodo-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+/* --- Trace page artifact row (LLM I/O list / spans list) --- */
+
+.artifact-row {
+  display: grid;
+  grid-template-columns: 60px 1fr auto;
+  gap: 10px;
+  padding: 8px 12px;
+  align-items: center;
+  border-bottom: 1px solid var(--kodo-border, #232732);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.artifact-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.artifact-row .artifact-kind {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--kodo-text-secondary);
+  letter-spacing: 0.04em;
+}
+
+.artifact-row .artifact-label {
+  font-family: var(--kodo-mono, ui-monospace, SFMono-Regular, monospace);
+}
+
+.artifact-row .artifact-size {
+  color: var(--kodo-text-secondary);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
 }

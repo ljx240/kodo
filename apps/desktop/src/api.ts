@@ -40,10 +40,41 @@ export type WorkspaceDto = {
 
 export type StepStatusDto = "running" | "done" | "failed";
 
+/** Three orthogonal axes. Backend-computed; the UI maps codes to copy. */
+export type LifecycleStatus =
+  | "queued"
+  | "working"
+  | "awaiting_approval"
+  | "completed"
+  | "stopped"
+  | "interrupted"
+  | "failed";
+export type DeliveryStatus = "ready" | "partial" | "blocked" | "failed";
+export type VerificationStatus = "not_run" | "running" | "passed" | "failed" | "blocked";
+export type OutcomeStatus =
+  | "working"
+  | "queued"
+  | "awaiting_approval"
+  | "partially_completed"
+  | "blocked_by_environment"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "interrupted";
+
+export type TurnStatusDto = {
+  lifecycle: LifecycleStatus;
+  delivery: DeliveryStatus;
+  verification: VerificationStatus;
+  outcome: OutcomeStatus;
+};
+
 export type ChangeDto = {
   path: string;
   added: number;
   removed: number;
+  /** Times this turn edited the path (merged steps count once per edit). */
+  edits?: number;
 };
 
 export type ItemDto = {
@@ -52,7 +83,14 @@ export type ItemDto = {
   status: StepStatusDto;
   duration: number | null;
 } & (
-  | { kind: "reasoning"; summary: string }
+  | {
+      kind: "reasoning";
+      summary: string;
+      /** Public phase code; empty/absent on legacy rows. */
+      phase?: string;
+      /** Internal scheduling diagnostics — Debug surfaces only. */
+      diagnostics?: string | null;
+    }
   | { kind: "search"; query: string; detail: string }
   | { kind: "fileRead"; path: string; detail: string }
   | {
@@ -61,10 +99,34 @@ export type ItemDto = {
       cwd: string;
       output: string;
       exitCode: number | null;
+      denied?: boolean;
+      /** Structured failure taxonomy code from the backend. */
+      failureClass?: string | null;
+      /** Missing binary when failureClass is command_not_found. */
+      failureTool?: string | null;
     }
-  | { kind: "modelCall"; model: string; inputTokens: number; outputTokens: number }
-  | { kind: "fileChange"; changes: ChangeDto[] }
-  | { kind: "agentMessage"; text: string; checks: string[] }
+  | {
+      kind: "modelCall";
+      model: string;
+      inputTokens: number;
+      outputTokens: number;
+      /** Reference to `traces/<session>/<turn>/llm_io/<seq>.json`. */
+      llmIoRef?: string | null;
+    }
+  | {
+      kind: "fileChange";
+      changes: ChangeDto[];
+      /** Reference to `traces/<session>/<turn>/spans/<seq>-file-…json`. */
+      fileSpanRef?: string | null;
+    }
+  | {
+      kind: "agentMessage";
+      text: string;
+      checks: string[];
+      /** Structured outcome axes written by the agent. */
+      delivery?: string;
+      verification?: string;
+    }
 );
 
 export type ItemKindDto = ItemDto["kind"];
@@ -79,6 +141,8 @@ export type TurnDto = {
   /** Recovery stamped a killed run as interrupted (never Completed). */
   interrupted?: boolean;
   error: string | null;
+  /** Backend-computed status axes (absent on live/demo turns — derived). */
+  status?: TurnStatusDto;
 };
 
 export type SessionDto = {
@@ -211,6 +275,92 @@ export function turnChanges(project: string, id: string): Promise<TurnChangeDto[
 /** Undo only Kodo's changes; user-only and post-turn user edits are never overwritten. */
 export function undoTurn(project: string, id: string): Promise<UndoReportDto | null> {
   return write<UndoReportDto>("undo_turn", { project, id });
+}
+
+/** Two artifact kinds live under `traces/<session>/<turn>/`. */
+export type ArtifactKind = "llm_io" | "file_span";
+
+/** A single artifact surfaced by `list_artifacts` for one turn. */
+export type ArtifactRefDto = {
+  kind: ArtifactKind;
+  /** 1-based sequence inside the turn. */
+  seq: number;
+  /** Display label such as `llm_io/001.json` or `spans/002-file-…json`. */
+  label: string;
+  sizeBytes: number;
+  at: number;
+};
+
+export type LlmIoRequestDto = {
+  system: string;
+  /** Provider-shaped message array (kept opaque; the viewer renders it). */
+  messages: unknown;
+};
+
+export type LlmIoResponseDto = {
+  text: string;
+  /** Anthropic-style reasoning_content; empty when the model didn't think. */
+  reasoningContent: string;
+  nativeToolCalls: unknown;
+};
+
+export type LlmIoDto = {
+  seq: number;
+  at: number;
+  model: string;
+  protocol: string;
+  finishReason: string;
+  /** Provider end-to-end latency, excluding failover retries. */
+  providerLatencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  request: LlmIoRequestDto;
+  response: LlmIoResponseDto;
+};
+
+/**
+ * Before/after snapshot for one captured file write. `contentAfter` is null
+ * when the operation created or deleted the file (no "after" body to record).
+ */
+export type FileSpanDto = {
+  path: string;
+  contentBefore: string;
+  contentAfter: string | null;
+  /** The tool-call id from the model that produced this span (for 回链). */
+  toolCallId: string;
+  /** Wall-clock time the span was captured. */
+  at: number;
+};
+
+/** List every artifact the turn persisted. Null in demo mode (no traces dir). */
+export function listArtifacts(
+  sessionId: string,
+  turnSeq: number,
+): Promise<ArtifactRefDto[] | null> {
+  return read<ArtifactRefDto[]>("list_artifacts", { sessionId, turnSeq });
+}
+
+/** True when the turn has any persisted artifact (LLM I/O or file spans). */
+export function turnHasArtifacts(sessionId: string, turnSeq: number): Promise<boolean | null> {
+  return read<boolean>("turn_has_artifacts", { sessionId, turnSeq });
+}
+
+/** Load the full I/O for one model call. */
+export function loadLlmIo(
+  sessionId: string,
+  turnSeq: number,
+  refPath: string,
+): Promise<LlmIoDto | null> {
+  return read<LlmIoDto>("load_llm_io", { sessionId, turnSeq, refPath });
+}
+
+/** Load the before/after snapshot for one file write. */
+export function loadFileSpan(
+  sessionId: string,
+  turnSeq: number,
+  refPath: string,
+): Promise<FileSpanDto | null> {
+  return read<FileSpanDto>("load_file_span", { sessionId, turnSeq, refPath });
 }
 
 export function workspace(): Promise<WorkspaceDto | null> {

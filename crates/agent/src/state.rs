@@ -67,6 +67,18 @@ pub struct Budget {
     /// Soft context budget: max packed context chars charged this turn.
     pub max_context_chars: usize,
     pub context_chars_used: usize,
+    /// Last reported input-tokens from the provider (most recent model call).
+    /// `0` means the provider did not report or this turn never called a model.
+    pub last_input_tokens: u32,
+    /// Total reported input-tokens across all model calls in this turn.
+    /// Used by the UI to show monotonic consumption against the model window.
+    pub cumulative_input_tokens: u64,
+    /// Effective context window the UI / compaction should plan against
+    /// (tokens). Mirrors the provider's preset or user override at call time.
+    pub window_tokens: u32,
+    /// How many history-compaction passes have succeeded. Surfaced in the
+    /// `Prompt` so the UI can show "已压缩 N 条".
+    pub compacted_count: u32,
 }
 
 impl Default for Budget {
@@ -82,6 +94,10 @@ impl Default for Budget {
             repair_wall_ms: 0,
             max_context_chars: 80_000,
             context_chars_used: 0,
+            last_input_tokens: 0,
+            cumulative_input_tokens: 0,
+            window_tokens: 32_000,
+            compacted_count: 0,
         }
     }
 }
@@ -120,6 +136,55 @@ impl Budget {
         self.context_chars_used = self.context_chars_used.saturating_add(chars);
     }
 
+    /// Record input tokens from one model call. Saturates so an outlier does
+    /// not poison the running total (defensive: a runaway provider returning
+    /// 2^32 tokens should not overflow the budget struct).
+    pub fn charge_tokens(&mut self, input_tokens: u32) {
+        self.last_input_tokens = input_tokens;
+        self.cumulative_input_tokens = self
+            .cumulative_input_tokens
+            .saturating_add(input_tokens as u64);
+    }
+
+    /// Record one mid-turn compaction pass. Just bumps `compacted_count` —
+    /// the next `charge_tokens` call will overwrite `last_input_tokens` with
+    /// a smaller reading, so the UI naturally sees a drop.
+    pub fn record_compaction(&mut self) {
+        self.compacted_count = self.compacted_count.saturating_add(1);
+    }
+
+    /// Refresh the planned context window (provider preset or user override).
+    /// Called once at the start of every turn before any model call.
+    pub fn set_window(&mut self, window: u32) {
+        self.window_tokens = window.max(1);
+    }
+
+    /// Percent (0..=100) of the planned window the last model call consumed.
+    /// Returns 0 when no model call has happened this turn yet.
+    pub fn percent_used(&self) -> u8 {
+        if self.window_tokens == 0 || self.last_input_tokens == 0 {
+            return 0;
+        }
+        // Round to nearest integer; clamp to 100 even when the provider
+        // returned a slightly-oversized estimate (e.g. counting-tool overhead).
+        let raw = (self.last_input_tokens as u64 * 100) / self.window_tokens as u64;
+        raw.min(100) as u8
+    }
+
+    /// Short summary used in the final agent message when the turn ends with
+    /// budget pressure. Format mirrors the desktop UI: "12.4k / 200k · 6%".
+    pub fn context_summary(&self) -> String {
+        if self.window_tokens == 0 {
+            return String::new();
+        }
+        format!(
+            "{} / {} · {}%",
+            shrink_tokens(self.last_input_tokens as u64),
+            shrink_tokens(self.window_tokens as u64),
+            self.percent_used()
+        )
+    }
+
     /// Auto-trip Failed only for rounds/tools; repair caps are checked on the
     /// repair transition itself (so denial→Plan is not stolen by BudgetExhausted).
     pub fn any_exhausted(&self) -> bool {
@@ -128,7 +193,7 @@ impl Budget {
 
     pub fn summary(&self) -> String {
         format!(
-            "rounds {}/{} · tools {}/{} · repairs {}/{} · repair_wall {}/{}ms",
+            "rounds {}/{} · tools {}/{} · repairs {}/{} · repair_wall {}/{}ms · tokens {}/{}",
             self.rounds_used,
             self.max_rounds,
             self.tool_calls_used,
@@ -136,8 +201,57 @@ impl Budget {
             self.repairs_used,
             self.max_repairs,
             self.repair_wall_ms,
-            self.max_repair_wall_ms
+            self.max_repair_wall_ms,
+            self.last_input_tokens,
+            self.window_tokens,
         )
+    }
+
+    /// Read-only summary family budget: many tool calls, no repairs.
+    ///
+    /// Read-only tasks (「为我输出该项目架构」,「总结仓库结构」, etc.) need
+    /// 20-30+ tool calls just to map a project — well past the code-mode
+    /// default of 32. They never mutate the project or trigger repair cycles,
+    /// so we keep `max_repairs = 0` (fail fast on denials) and lift the tool
+    /// and round caps. Context window also doubles because list-heavy tasks
+    /// accumulate a lot of repo_map output.
+    ///
+    /// `is_summary_family()` is the predicate callers use to pick the right
+    /// diagnostic style at Finish time.
+    pub fn for_summary() -> Self {
+        Self {
+            max_rounds: 12,
+            max_tool_calls: 128,
+            max_repairs: 0,
+            rounds_used: 0,
+            tool_calls_used: 0,
+            repairs_used: 0,
+            max_repair_wall_ms: 0,
+            repair_wall_ms: 0,
+            max_context_chars: 160_000,
+            context_chars_used: 0,
+            ..Self::default()
+        }
+    }
+
+    /// True when the budget was configured for the read-only summary family
+    /// (no repairs, ≥ 64 tool calls). Used by `run()` to surface a calmer
+    /// diagnostic when even that ceiling trips.
+    pub fn is_summary_family(&self) -> bool {
+        self.max_repairs == 0 && self.max_tool_calls >= 64
+    }
+}
+
+/// Shrink a token count to a short human label (e.g. 12_400 -> "12.4k").
+/// Falls back to plain digits below 1k. Mirrors the desktop UI's
+/// `formatTokens()` helper so the final agent message reads the same.
+fn shrink_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -751,6 +865,12 @@ mod tests {
             .map(|inv| match inv {
                 crate::protocol::ToolInvocation::Ready(c) => tools.execute(c),
                 crate::protocol::ToolInvocation::Rejected(r) => ToolResult::from_rejection(r),
+                crate::protocol::ToolInvocation::External(e) => ToolResult::failure(
+                    e.id.clone(),
+                    e.name.clone(),
+                    e.args_label(),
+                    ToolError::execution("external tools are not faked here"),
+                ),
             })
             .collect();
         m.handle(AgentEvent::ToolsFinished { results });
@@ -1322,6 +1442,12 @@ mod tests {
             .map(|inv| match inv {
                 crate::protocol::ToolInvocation::Ready(c) => tools.execute(c),
                 crate::protocol::ToolInvocation::Rejected(r) => ToolResult::from_rejection(r),
+                crate::protocol::ToolInvocation::External(e) => ToolResult::failure(
+                    e.id.clone(),
+                    e.name.clone(),
+                    e.args_label(),
+                    ToolError::execution("external tools are not faked here"),
+                ),
             })
             .collect();
         m.handle(AgentEvent::ToolsFinished { results });
@@ -1363,5 +1489,86 @@ mod tests {
         });
         m.handle(AgentEvent::VerifyFinished { ok: true });
         assert_eq!(m.state(), &AgentState::Finish);
+    }
+
+    // --- Budget token accounting (Phase A: water-level visibility) -------
+
+    #[test]
+    fn budget_charge_tokens_accumulates() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        b.charge_tokens(0);
+        assert_eq!(b.last_input_tokens, 0);
+        assert_eq!(b.cumulative_input_tokens, 0);
+        assert_eq!(b.percent_used(), 0);
+
+        b.charge_tokens(12_400);
+        assert_eq!(b.last_input_tokens, 12_400);
+        assert_eq!(b.cumulative_input_tokens, 12_400);
+        assert_eq!(b.percent_used(), 6);
+
+        b.charge_tokens(150_000);
+        assert_eq!(b.last_input_tokens, 150_000);
+        assert_eq!(b.cumulative_input_tokens, 12_400 + 150_000);
+        assert_eq!(b.percent_used(), 75);
+    }
+
+    #[test]
+    fn budget_percent_clamps_at_100() {
+        let mut b = Budget::default();
+        b.set_window(32_000);
+        b.charge_tokens(50_000); // over-sized estimate, clamp to 100
+        assert_eq!(b.percent_used(), 100);
+    }
+
+    #[test]
+    fn budget_charge_tokens_saturates_against_u64() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        for _ in 0..5 {
+            b.charge_tokens(u32::MAX);
+        }
+        assert!(b.cumulative_input_tokens <= (u32::MAX as u64) * 5);
+    }
+
+    #[test]
+    fn budget_context_summary_uses_short_labels() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        b.charge_tokens(12_400);
+        assert_eq!(b.context_summary(), "12.4k / 200.0k · 6%");
+    }
+
+    #[test]
+    fn budget_context_summary_empty_when_no_window() {
+        let mut b = Budget::default();
+        b.window_tokens = 0;
+        b.charge_tokens(12_400);
+        assert_eq!(b.context_summary(), "");
+    }
+
+    /// Phase 0 second-pass — summary budget lifts tool/round caps and zeroes
+    /// repairs, but stays well-bounded so the loop still fail-closes.
+    #[test]
+    fn budget_for_summary_has_zero_repairs_and_at_least_64_tools() {
+        let b = Budget::for_summary();
+        assert_eq!(b.max_repairs, 0, "summary tasks never trigger repairs");
+        assert_eq!(b.max_repair_wall_ms, 0, "summary tasks fail fast on denials");
+        assert!(
+            b.max_tool_calls >= 64,
+            "summary tasks need ≥ 64 tool calls to map a real project: {}",
+            b.max_tool_calls
+        );
+        assert!(b.max_rounds >= 6, "summary tasks span ≥ 6 rounds");
+        assert!(b.max_context_chars >= 80_000);
+    }
+
+    #[test]
+    fn budget_is_summary_family_predicate_works() {
+        let code = Budget::default();
+        assert!(!code.is_summary_family(), "default code budget must NOT be summary family");
+
+        let summary = Budget::for_summary();
+        assert!(summary.is_summary_family(), "for_summary() must be summary family");
     }
 }

@@ -4,6 +4,7 @@ import { formatDuration } from "../conversation/trace";
 import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
 import { llmFromTurn } from "../data/liveContext";
+import { T } from "../i18n";
 import { MetaRow, Section } from "./Section";
 import { ChangedFilesSection } from "./ResponseInspector";
 
@@ -21,7 +22,7 @@ export function LlmCallsDetailed({ demo, demoState, live }: {
         duration: call.duration,
       }));
   return (
-    <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title="LLM calls" count={calls.length}>
+    <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title={T.inspector.llmCalls} count={calls.length}>
       <div className="ins-body">
         {calls.length === 0 ? (
           <p className="ins-note">暂无模型调用。</p>
@@ -34,9 +35,9 @@ export function LlmCallsDetailed({ demo, demoState, live }: {
                 <span className="llm-model">{call.model}</span>
                 <span className="llm-time">{call.duration}</span>
               </div>
-              <MetaRow label="Input tokens">{call.input_tokens}</MetaRow>
-              <MetaRow label="Output tokens">{call.output_tokens}</MetaRow>
-              <MetaRow label="Duration">{call.duration}</MetaRow>
+              <MetaRow label={T.inspector.inputTokens}>{call.input_tokens}</MetaRow>
+              <MetaRow label={T.inspector.outputTokens}>{call.output_tokens}</MetaRow>
+              <MetaRow label={T.inspector.duration}>{call.duration}</MetaRow>
             </div>
           ))
         )}
@@ -52,15 +53,15 @@ function MetadataSection({ demo, demoState, live }: {
 }) {
   const meta = demoState?.responseMeta;
   return (
-    <Section icon={<BarChart3 size={14} strokeWidth={1.7} />} title="Metadata">
+    <Section icon={<BarChart3 size={14} strokeWidth={1.7} />} title={T.inspector.metadata}>
       <div className="ins-body">
-        <MetaRow label="Model">
+        <MetaRow label={T.inspector.model}>
           {!demo ? (live?.reply?.steps.length ? "见 LLM 卡片" : "—") : meta?.model ?? "—"}
         </MetaRow>
-        <MetaRow label="Total steps">
+        <MetaRow label={T.inspector.totalSteps}>
           {!demo ? (live?.reply?.steps.length ?? 0) : meta?.totalSteps ?? 0}
         </MetaRow>
-        <MetaRow label="Workspace">
+        <MetaRow label={T.inspector.workspace}>
           {!demo ? live?.projectPath || "—" : meta?.workspace ?? "—"}
         </MetaRow>
       </div>
@@ -147,7 +148,7 @@ export function ReplyMeta({
           <button
             type="button"
             className="icon-btn icon-btn--sm"
-            aria-label="Copy reply id"
+            aria-label={T.conv.copyReplyId}
             data-testid="copy-reply-id"
             title="复制 Reply ID 到剪贴板"
             onClick={copyReplyId}

@@ -1,0 +1,11 @@
+{
+  "package": "kodo-transparent-icons-pack",
+  "files": [
+    "kodo-icon-transparent-1254.png",
+    "kodo-code-icon-transparent-1254.png",
+    "kodo-work-icon-transparent-1254.png"
+  ],
+  "format": "png",
+  "background": "transparent",
+  "size": "1254x1254"
+}

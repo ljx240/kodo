@@ -1,6 +1,7 @@
-import { ChevronRight, Container, FileText, Pencil, Search, Terminal } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { ChevronRight, Container, FileText, Pencil, Search, Sparkles, Terminal } from "lucide-react";
+import { useId, useState, type ReactNode } from "react";
 import type { ChangedFile } from "../data/types";
+import { T, toolAlias } from "../i18n";
 
 export function Section({
   icon,
@@ -17,37 +18,46 @@ export function Section({
 }) {
   // The chevron the reference draws on every card is a disclosure, and it was
   // drawn but dead. A card with nothing under it stays inert rather than
-  // offering to open onto nothing.
+  // offering to open onto nothing. Collapsible headers are real buttons —
+  // keyboard, focus and aria come from the platform, not a role="button" div.
   const [open, setOpen] = useState(true);
   const collapsible = Boolean(children);
+  const bodyId = useId();
   const toggle = () => collapsible && setOpen((value) => !value);
+
+  const headInner = (
+    <>
+      <span className="ins-section-icon">{icon}</span>
+      <span className="ins-section-title">{title}</span>
+      {count !== undefined && <span className="ins-badge">{count}</span>}
+      <span className="spacer" />
+      {meta}
+      {/* The glyph is left exactly as the reference draws it, in both states:
+          rotating it would be a change nothing asked for. */}
+      <ChevronRight size={14} strokeWidth={1.9} className="ins-chevron" />
+    </>
+  );
 
   return (
     <section className="ins-section">
-      <header
-        className={`ins-section-head${collapsible ? " ins-section-head--toggle" : ""}`}
-        role={collapsible ? "button" : undefined}
-        tabIndex={collapsible ? 0 : undefined}
-        aria-expanded={collapsible ? open : undefined}
-        onClick={toggle}
-        onKeyDown={(event) => {
-          if (!collapsible) return;
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            toggle();
-          }
-        }}
-      >
-        <span className="ins-section-icon">{icon}</span>
-        <h3>{title}</h3>
-        {count !== undefined && <span className="ins-badge">{count}</span>}
-        <span className="spacer" />
-        {meta}
-        {/* The glyph is left exactly as the reference draws it, in both states:
-            rotating it would be a change nothing asked for. */}
-        <ChevronRight size={14} strokeWidth={1.9} className="ins-chevron" />
-      </header>
-      {open && children}
+      {collapsible ? (
+        <button
+          type="button"
+          className="ins-section-head ins-section-head--toggle"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={toggle}
+        >
+          {headInner}
+        </button>
+      ) : (
+        <div className="ins-section-head">{headInner}</div>
+      )}
+      {open && (
+        <div className="ins-section-body" id={bodyId}>
+          {children}
+        </div>
+      )}
     </section>
   );
 }
@@ -73,20 +83,25 @@ export function FileRow({ file }: { file: ChangedFile }) {
 }
 
 const TOOL_ICONS: Record<string, typeof Search> = {
-  "Search codebase": Search,
-  "Read file": FileText,
-  "Run command": Terminal,
-  Docker: Container,
-  "Edit file": Pencil,
+  [T.step.thinking]: Sparkles,
+  [T.step.search]: Search,
+  [T.step.read]: FileText,
+  [T.step.run]: Terminal,
+  [T.step.model]: Sparkles,
+  [T.step.edit]: Pencil,
+  [T.step.finalize]: FileText,
 };
 
 export function ToolRow({ name, count }: { name: string; count: number }) {
-  const Icon = TOOL_ICONS[name] ?? Terminal;
+  const label = toolAlias(name);
+  const Icon = TOOL_ICONS[label] ?? Terminal;
   return (
     <div className="tool-row">
       <Icon size={14} strokeWidth={1.7} className="tool-icon" />
-      <span className="tool-name">{name}</span>
+      <span className="tool-name">{label}</span>
       <span className="tool-count">{count}×</span>
     </div>
   );
 }
+
+export { Container };

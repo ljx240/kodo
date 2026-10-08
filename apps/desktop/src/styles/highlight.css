@@ -1,0 +1,62 @@
+/* highlight.js token colors — the only place .hljs-* rules may appear.
+   Mapped scopes → syntax tokens (tokens.css); anything unlisted inherits
+   the surrounding text color, which keeps unknown grammars readable.
+   Loaded last in main.tsx so no component rule out-specifies a token. */
+
+.hljs-comment,
+.hljs-quote {
+  color: var(--kodo-syntax-comment);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-type,
+.hljs-doctag {
+  color: var(--kodo-syntax-keyword);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-attr {
+  color: var(--kodo-syntax-string);
+}
+
+/* Diff hunks (```diff in answers) — GitHub-palette green/red. */
+.hljs-addition {
+  color: var(--kodo-syntax-addition);
+}
+
+.hljs-deletion {
+  color: var(--kodo-syntax-keyword);
+}
+
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-built_in,
+.hljs-variable {
+  color: var(--kodo-syntax-number);
+}
+
+.hljs-title,
+.hljs-name,
+.hljs-section,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: var(--kodo-syntax-title);
+}
+
+.hljs-meta,
+.hljs-meta .hljs-keyword {
+  color: var(--kodo-syntax-meta);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}
