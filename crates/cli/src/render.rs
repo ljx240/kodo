@@ -369,6 +369,7 @@ mod tests {
                         removed: 2,
                     },
                 ],
+                file_span_ref: None,
             },
             duration_ms: 0,
             denied: false,

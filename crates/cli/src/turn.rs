@@ -116,7 +116,7 @@ impl TurnContext {
             return Ok(id.clone());
         }
         let title = session_title(message);
-        let id = session::open(&self.session_dir, &self.project, &title, session::now())
+        let id = session::open(&self.session_dir, &self.project, &title, session::now(), session::Mode::Code)
             .map_err(|error| format!("创建会话失败：{error}"))?;
         self.session_id = Some(id.clone());
         Ok(id)
@@ -219,6 +219,8 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 4096,
             extended_thinking: false,
+            mode: kodo_agent::AgentMode::Code,
+            mcp_servers: Vec::new(),
         };
         TurnContext::new(project, session_dir, config)
     }
@@ -261,10 +263,10 @@ mod tests {
         fs::create_dir_all(&proj_a).expect("proj-a");
         fs::create_dir_all(&proj_b).expect("proj-b");
 
-        let id_old = session::open(&sessions, &proj_a, "old", 100).expect("old");
-        let id_new = session::open(&sessions, &proj_a, "new", 200).expect("new");
-        let id_other = session::open(&sessions, &proj_b, "other", 300).expect("other");
-        let id_arch = session::open(&sessions, &proj_a, "arch", 400).expect("arch");
+        let id_old = session::open(&sessions, &proj_a, "old", 100, session::Mode::Code).expect("old");
+        let id_new = session::open(&sessions, &proj_a, "new", 200, session::Mode::Code).expect("new");
+        let id_other = session::open(&sessions, &proj_b, "other", 300, session::Mode::Code).expect("other");
+        let id_arch = session::open(&sessions, &proj_a, "arch", 400, session::Mode::Code).expect("arch");
         session::archive(&sessions, &id_arch).expect("archive");
 
         let mut ctx = temp_ctx(proj_a.clone(), sessions.clone());

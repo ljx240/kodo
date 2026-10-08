@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
-use kodo_agent::{self as agent, AgentMode, SinkEvent, StepKind};
+use kodo_agent::{self as agent, SinkEvent, StepKind};
 use kodo_shell::{approval_fingerprint, step_kind_label, Logged, TurnLogger, TurnOutcome};
 
 use crate::view::{ItemView, RunEvent};
@@ -125,15 +125,26 @@ impl Drop for ApprovalTicket {
 pub struct StartArgs {
     pub dir: PathBuf,
     pub id: String,
-    pub project: PathBuf,
+    /// `None` = no project selected (Work-mode pure conversation).
+    pub project: Option<PathBuf>,
     pub message: String,
     /// Project-relative context paths pinned for this turn.
     pub context: Vec<String>,
     pub provider: Option<agent::Provider>,
     pub permission: Permission,
+    pub mode: agent::AgentMode,
     pub fallback_to_local: bool,
     pub max_output_tokens: u32,
     pub extended_thinking: bool,
+    /// MCP servers from the shared shell config (empty = no external tools).
+    pub mcp_servers: Vec<agent::mcp::McpServerConfig>,
+    /// Persona instructions resolved by the entry point (插件 · 智能体);
+    /// `None` = no agent selected for this send.
+    pub agent_instructions: Option<String>,
+    /// Persona chain (preferred when non-empty). Each block carries its
+    /// defaults / examples; `lib.rs::run` substitutes the declared
+    /// template variables and emits the chain header.
+    pub personas: Vec<agent::PersonaBlock>,
 }
 
 pub fn start(
@@ -166,7 +177,7 @@ pub fn start(
         let approve_id = args.id.clone();
         let approve_approvals = approvals.clone();
         let approve_app = app.clone();
-        let approve_project = args.project.clone();
+        let approve_project = args.project.clone().unwrap_or_default();
         let approve_runs = runs.clone();
         let permission = args.permission;
         let approve_seq = Arc::new(Mutex::new(0u32));
@@ -330,33 +341,72 @@ pub fn start(
                         );
                     }
                 }
-                // Transparency-side events below: the session log already
-                // captured the payload via `logger_ref.record(&event)` above.
-                // The Tauri RunEvent surface does not yet carry them; UI
-                // wiring (live context bar, compaction toast, AskUser dialog)
-                // is a follow-up — drop at the event boundary for now.
-                SinkEvent::ContextBudget { .. }
-                | SinkEvent::Compacted { .. }
-                | SinkEvent::AskUser { .. } => {}
+                SinkEvent::ContextBudget {
+                    used,
+                    window,
+                    percent,
+                    cumulative_chars,
+                    compacted_count,
+                    last_model,
+                } => {
+                    let _ = record_app.emit(
+                        "run:event",
+                        RunEvent::ContextBudget {
+                            session: record_id.clone(),
+                            used,
+                            window,
+                            percent,
+                            cumulative_chars,
+                            compacted_count,
+                            last_model,
+                        },
+                    );
+                }
+                SinkEvent::Compacted {
+                    dropped,
+                    summarized_into,
+                    freed_pct,
+                } => {
+                    let _ = record_app.emit(
+                        "run:event",
+                        RunEvent::Compacted {
+                            session: record_id.clone(),
+                            dropped,
+                            summarized_into,
+                            freed_pct,
+                        },
+                    );
+                }
+                SinkEvent::AskUser { question, options } => {
+                    let _ = record_app.emit(
+                        "run:event",
+                        RunEvent::AskUser {
+                            session: record_id.clone(),
+                            question,
+                            options,
+                        },
+                    );
+                }
             }
             record_runs.is_live(&record_id)
         };
 
         let request = agent::RunRequest {
-            project: Some(args.project.clone()),
+            project: args.project.clone(),
             message: args.message.clone(),
             pinned_context: args.context.clone(),
             provider: args.provider.clone(),
             permission: args.permission,
-            mode: AgentMode::Code,
+            mode: args.mode,
             fallback_to_local: args.fallback_to_local,
             max_output_tokens: args.max_output_tokens,
             extended_thinking: args.extended_thinking,
             session_id: Some(args.id.clone()),
-            user_skills_dir: None,
-            mcp_servers: Vec::new(),
-            agent_instructions: None,
-            personas: Vec::new(),
+            // Same directory the skill CRUD commands read/write.
+            user_skills_dir: kodo_core::settings::state_dir().map(|d| d.join("skills")),
+            mcp_servers: args.mcp_servers.clone(),
+            agent_instructions: args.agent_instructions.clone(),
+            personas: args.personas.clone(),
         };
 
         let result = agent::run(&request, &alive, &approve, &mut sink);

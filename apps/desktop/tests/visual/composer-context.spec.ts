@@ -22,7 +22,7 @@ async function openLiveConversation(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.locator(".tree-project-main").click();
   await page.locator(".tree-conversation").click();
-  await expect(page.locator(".conv-title")).toHaveText("修复路由");
+  await expect(page.locator(".crumb-current")).toHaveText("修复路由");
 }
 
 test("no decorative Mic button remains in the composer", async ({ page }) => {
@@ -141,6 +141,88 @@ test("remove a context chip", async ({ page }) => {
   await expect(page.locator('[data-context-path="README.md"]')).toBeVisible();
 });
 
+test("attachment cards render per type: image thumbnail, PDF/Office/TXT badges", async ({ page }) => {
+  await stubShell(
+    page,
+    liveCore({
+      files: ["notes.txt"],
+      pickFiles: [
+        "/tmp/shot.png",
+        "/tmp/report.pdf",
+        "/tmp/budget.xlsx",
+        "/tmp/spec.docx",
+        "notes.txt",
+      ],
+      externalFiles: ["/tmp/shot.png", "/tmp/report.pdf", "/tmp/budget.xlsx", "/tmp/spec.docx"],
+    }),
+  );
+  await openLiveConversation(page);
+
+  await attachFiles(page);
+  await expect(page.locator("[data-context-path]")).toHaveCount(5);
+
+  // Image → thumbnail card with a real <img> preview.
+  const image = page.locator('[data-context-path="/tmp/shot.png"]');
+  await expect(image).toHaveClass(/ctx-card--image/);
+  await expect(image.locator(".ctx-card-preview img")).toHaveAttribute("src", /^data:image\/png/);
+  await expect(image.locator(".ctx-badge")).toHaveText("IMG");
+
+  // PDF → gray card, dark badge, file name (Codex reference).
+  const pdf = page.locator('[data-context-path="/tmp/report.pdf"]');
+  await expect(pdf).toHaveClass(/ctx-card--pdf/);
+  await expect(pdf.locator(".ctx-card-name")).toHaveText("report.pdf");
+  await expect(pdf.locator(".ctx-badge")).toHaveText("PDF");
+  await expect(pdf.locator(".ctx-badge")).toHaveCSS("background-color", "rgb(31, 35, 40)");
+
+  // Office spreadsheets / docs get their own marks.
+  await expect(page.locator('[data-context-path="/tmp/budget.xlsx"] .ctx-badge')).toHaveText("XLS");
+  await expect(page.locator('[data-context-path="/tmp/budget.xlsx"] .ctx-badge')).toHaveCSS(
+    "background-color",
+    "rgb(33, 115, 70)",
+  );
+  await expect(page.locator('[data-context-path="/tmp/spec.docx"] .ctx-badge')).toHaveText("DOC");
+  await expect(page.locator('[data-context-path="/tmp/spec.docx"] .ctx-badge')).toHaveCSS(
+    "background-color",
+    "rgb(43, 87, 154)",
+  );
+
+  // Plain text → TXT badge, still removable via the shared hook.
+  const text = page.locator('[data-context-path="notes.txt"]');
+  await expect(text).toHaveClass(/ctx-card--text/);
+  await expect(text.locator(".ctx-badge")).toHaveText("TXT");
+  await expect(text.locator(".ctx-card-name")).toHaveText("notes.txt");
+
+  // Cards sit above the draft, not on the bottom control line.
+  const order = await page.evaluate(() => {
+    const contexts = document.querySelector(".composer-contexts")?.getBoundingClientRect();
+    const row = document.querySelector(".composer-row")?.getBoundingClientRect();
+    return contexts && row ? contexts.top < row.top : null;
+  });
+  expect(order).toBe(true);
+});
+
+test("a single image attachment shows one large thumbnail above the input", async ({ page }) => {
+  await stubShell(
+    page,
+    liveCore({
+      pickFiles: ["/tmp/shot.png"],
+      externalFiles: ["/tmp/shot.png"],
+    }),
+  );
+  await openLiveConversation(page);
+
+  await attachFiles(page);
+  const card = page.locator('[data-context-path="/tmp/shot.png"]');
+  await expect(card).toBeVisible();
+  const size = await card.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    const preview = el.querySelector(".ctx-card-preview")?.getBoundingClientRect();
+    return { width: rect.width, previewHeight: preview?.height ?? 0 };
+  });
+  expect(size.width).toBeGreaterThanOrEqual(200);
+  expect(size.previewHeight).toBeGreaterThanOrEqual(120);
+});
+
 test("send passes structured context in the invoke payload, not in the ask text", async ({ page }) => {
   await stubShell(page, liveCore({ pickFiles: ["src/app.ts"] }));
   await openLiveConversation(page);
@@ -152,11 +234,16 @@ test("send passes structured context in the invoke payload, not in the ask text"
 
   await expect(page.locator(".msg-bubble")).toHaveText("看看这个文件");
   await expect(page.locator(".msg-bubble")).not.toContainText("src/app.ts");
-  await expect(page.locator('[data-testid="msg-contexts"] [data-context-path], .msg-contexts .chip')).toContainText(
-    "src/app.ts",
-  );
-  // chips in the sent message are static (not removable after send)
-  await expect(page.locator(".msg-user .chip--context")).toHaveCount(1);
+  // Sent bubbles render the same attachment card as the composer: filename in
+  // the card, full path on the title/attribute, no bare-path chip.
+  const card = page.locator('.msg-user [data-context-path="src/app.ts"]');
+  await expect(card).toBeVisible();
+  await expect(card).toHaveAttribute("title", "src/app.ts");
+  await expect(card.locator(".ctx-card-name")).toHaveText("app.ts");
+  await expect(card).toHaveClass(/ctx-card--text/);
+  // Static in the bubble — no remove control, no legacy path chip.
+  await expect(card.locator(".chip-remove")).toHaveCount(0);
+  await expect(page.locator(".msg-user .chip--context")).toHaveCount(0);
 
   const log = await page.evaluate(
     () => (window as unknown as { __sendLog?: Array<{ text: string; context: string[] }> }).__sendLog ?? [],
@@ -164,6 +251,61 @@ test("send passes structured context in the invoke payload, not in the ask text"
   expect(log).toHaveLength(1);
   expect(log[0].text).toBe("看看这个文件");
   expect(log[0].context).toEqual(["src/app.ts"]);
+});
+
+test("sent image keeps its real thumbnail in the bubble", async ({ page }) => {
+  await stubShell(page, liveCore({ files: ["src/shot.png"], pickFiles: ["src/shot.png"] }));
+  await openLiveConversation(page);
+
+  await attachFiles(page);
+  await expect(page.locator('.composer-contexts [data-context-path="src/shot.png"] img')).toBeVisible();
+
+  await page.locator(".composer-input").fill("看看这张图");
+  await page.locator(".composer-input").press("Enter");
+
+  // The probe taken at pick time survives into the bubble — same card, same thumbnail.
+  const card = page.locator('.msg-user [data-context-path="src/shot.png"]');
+  await expect(card).toBeVisible();
+  await expect(card).toHaveClass(/ctx-card--image/);
+  await expect(card.locator("img")).toHaveAttribute("src", /^data:image\//);
+  await expect(card.locator(".ctx-card-name")).toHaveText("shot.png");
+  await expect(card.locator(".chip-remove")).toHaveCount(0);
+});
+
+test("preloaded turn degrades an unprobed PDF to a typed card, not a path chip", async ({ page }) => {
+  await stubShell(
+    page,
+    liveCore({
+      session: {
+        id: "s1",
+        project: "/tmp/ws/alpha",
+        title: "修复路由",
+        at: 1_700_000_000,
+        archived: false,
+        turns: [
+          {
+            ask: "这份规范怎么说",
+            context: ["docs/spec.pdf"],
+            items: [],
+            done: true,
+            stopped: false,
+            error: null,
+          },
+        ],
+      },
+    }),
+  );
+  await openLiveConversation(page);
+
+  // Reload path: only the stored path is known — extension guess supplies the
+  // kind/badge, and the lazy re-probe skips non-images on purpose.
+  const card = page.locator('.msg-user [data-context-path="docs/spec.pdf"]');
+  await expect(card).toBeVisible();
+  await expect(card).toHaveClass(/ctx-card--pdf/);
+  await expect(card.locator(".ctx-card-name")).toHaveText("spec.pdf");
+  await expect(card.locator("img")).toHaveCount(0);
+  await expect(card).toHaveAttribute("title", "docs/spec.pdf");
+  await expect(page.locator(".msg-user .chip--context")).toHaveCount(0);
 });
 
 test("can attach an external absolute file from the filesystem picker", async ({ page }) => {

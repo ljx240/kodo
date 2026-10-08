@@ -12,6 +12,10 @@ repro-first
 ## allowed_tools
 - search
 - read_file
+- list_files
+- find_symbol
+- find_references
+- read_range
 - run_command
 - write_file
 - apply_patch

@@ -19,13 +19,7 @@ Read:
 - `docs/design/UI_ACCEPTANCE.md`
 - `docs/design/DEMO_DATA.md`
 
-Inspect the target image in:
-
-- `docs/design/references/`
-
-State which reference image you are implementing.
-
-## Analyze the image
+## Analyze the screen
 
 Before changing code, identify:
 
@@ -95,7 +89,7 @@ Use viewport:
 
 Capture screenshot.
 
-Compare it with the reference.
+Check it against the design rules and `UI_ACCEPTANCE.md`.
 
 Repeat until `UI_ACCEPTANCE.md` passes.
 

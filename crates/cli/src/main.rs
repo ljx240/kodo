@@ -61,6 +61,7 @@ fn run(parsed: args::Args) -> i32 {
 
     let config = ShellConfig::load(Overrides {
         permission: parsed.permission,
+        mode: parsed.mode,
         model: parsed.model,
     });
     let mut ctx = TurnContext::new(project, session_dir, config);

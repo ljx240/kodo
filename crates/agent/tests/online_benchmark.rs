@@ -67,3 +67,28 @@ fn online_read_only_smoke() {
         answer.chars().take(200).collect::<String>()
     );
 }
+
+/// Live websearch smoke — confirms DDG is reachable and `parse_results` is
+/// still aligned with the real HTML. PR CI skips this; run on demand:
+/// ```bash
+/// cargo test -p kodo-agent --test online_benchmark -- --ignored websearch_live_returns_hits --nocapture
+/// ```
+#[test]
+#[ignore = "requires network; never run on PR CI"]
+fn websearch_live_returns_hits() {
+    let hits = kodo_agent::websearch::search("tauri webview window", 5)
+        .expect("live websearch must succeed when DDG is reachable");
+    assert!(!hits.is_empty(), "live query must produce at least one hit");
+    let first = &hits[0];
+    assert!(!first.title.is_empty(), "first hit title must be non-empty");
+    assert!(
+        !first.url.is_empty(),
+        "first hit url must be non-empty (after the uddg unwrap)"
+    );
+    assert!(!first.snippet.is_empty(), "first hit snippet must be non-empty");
+    eprintln!(
+        "live websearch returned {} hit(s); first title = {:?}",
+        hits.len(),
+        first.title,
+    );
+}

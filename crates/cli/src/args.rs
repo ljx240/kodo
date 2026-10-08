@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use kodo_agent::Permission;
+use kodo_agent::{AgentMode, Permission};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -10,6 +10,8 @@ pub struct Args {
     pub project: PathBuf,
     /// `--permission` flag; `None` → the shared settings store decides.
     pub permission: Option<Permission>,
+    /// `--mode` flag; `None` → the shared settings store decides.
+    pub mode: Option<AgentMode>,
     /// `--session <id>`: resume this session.
     pub session: Option<String>,
     /// `-c/--continue`: resume the most recent session for this project.
@@ -36,6 +38,7 @@ pub const USAGE: &str = "\
 选项:
   --project <目录>        项目根目录（默认当前目录）
   --permission <模式>     ask | auto | full（默认读取与桌面端共享的设置）
+  --mode <模式>           work | code（默认读取与桌面端共享的设置）
   --session <id>          继续指定会话
   -c, --continue          继续本项目最近一次会话
   --model <模型>          覆盖默认模型（仅本次进程）
@@ -54,6 +57,7 @@ REPL 命令:
 pub fn parse(argv: &[String]) -> Parsed {
     let mut project: Option<PathBuf> = None;
     let mut permission: Option<Permission> = None;
+    let mut mode: Option<AgentMode> = None;
     let mut session: Option<String> = None;
     let mut resume_last = false;
     let mut model: Option<String> = None;
@@ -87,6 +91,15 @@ pub fn parse(argv: &[String]) -> Parsed {
                 },
                 Err(err) => return err,
             },
+            "--mode" => match take_value("--mode") {
+                Ok(value) => match value.as_str() {
+                    "work" | "code" => mode = Some(AgentMode::parse(&value)),
+                    other => {
+                        return Parsed::Error(format!("--mode 必须是 work 或 code，收到：{other}"))
+                    }
+                },
+                Err(err) => return err,
+            },
             "--session" => match take_value("--session") {
                 Ok(value) => session = Some(value),
                 Err(err) => return err,
@@ -110,6 +123,7 @@ pub fn parse(argv: &[String]) -> Parsed {
     Parsed::Run(Args {
         project: project.unwrap_or_else(|| PathBuf::from(".")),
         permission,
+        mode,
         session,
         resume_last,
         model,
@@ -148,10 +162,19 @@ mod tests {
         let args = run(&[]);
         assert_eq!(args.project, PathBuf::from("."));
         assert_eq!(args.permission, None);
+        assert_eq!(args.mode, None);
         assert_eq!(args.session, None);
         assert!(!args.resume_last);
         assert_eq!(args.model, None);
         assert_eq!(args.message, None);
+    }
+
+    #[test]
+    fn mode_flag_parses_work_and_code() {
+        assert_eq!(run(&["--mode", "work"]).mode, Some(AgentMode::Work));
+        assert_eq!(run(&["--mode", "code"]).mode, Some(AgentMode::Code));
+        let err = error(&["--mode", "bogus"]);
+        assert!(err.contains("--mode"), "{err}");
     }
 
     #[test]

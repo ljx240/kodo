@@ -38,8 +38,9 @@ fn kind_label_zh(kind: StepKind) -> &'static str {
     match kind {
         StepKind::Command => "运行命令",
         StepKind::FileChange => "编辑文件",
-        // The prompt only ever fires for Command/FileChange (gated by
-        // `Permission::needs_approval`); the rest are unreachable.
+        StepKind::ExternalTool => "调用外部工具",
+        // The prompt only ever fires for Command/FileChange/ExternalTool
+        // (gated by `Permission::needs_approval`); the rest are unreachable.
         other => step_kind_label(other),
     }
 }

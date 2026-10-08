@@ -28,6 +28,7 @@ credentials.log
 settings.log
 projects.log
 sessions/
+.kodo/
 
 # Env / keys
 .env

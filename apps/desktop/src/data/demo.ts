@@ -6,6 +6,8 @@
  * clocks, random ids and real machine state in screenshot fixtures.
  */
 
+import type { McpServerDto, McpToolDto } from "../api";
+
 export type TimelineRow = {
   n: number;
   time: string;
@@ -177,3 +179,59 @@ export const archivedConversations: ArchivedConversation[] = [
 ];
 
 export const archiveFooter = { from: 1, to: 20, total: 42, pages: [1, 2, 3] };
+
+/**
+ * Demo fixture for the MCP page on `/ui-demo/mcp` (plain browser): one
+ * enabled stdio server with a masked env value and one disabled http server,
+ * so the screenshot shows both transport chips and both toggle states. The
+ * masks are display-only stand-ins — a real workspace loads its own
+ * `mcp-servers` entry with per-value masks from `mask_mcp_values`.
+ */
+export const DEMO_MCP_SERVERS: McpServerDto[] = [
+  {
+    id: "demo-filesystem",
+    name: "filesystem",
+    enabled: true,
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    env: { API_TOKEN: "••••9f3a" },
+    url: "",
+    headers: {},
+  },
+  {
+    id: "demo-remote",
+    name: "remote-tools",
+    enabled: false,
+    transport: "http",
+    command: "",
+    args: [],
+    env: {},
+    url: "https://mcp.example.com/mcp",
+    headers: { Authorization: "••••c21b" },
+  },
+];
+
+/**
+ * Demo fixture for the per-server tool list on `/ui-demo/mcp` (plain browser):
+ * names and descriptions only — the real page reads these through
+ * `mcp_list_tools`, which never hands schemas or secrets to the webview.
+ * Tool names are wire-adjacent code; descriptions stay English like the rest
+ * of the recorded fixture data (DESIGN §10).
+ */
+export const DEMO_MCP_TOOLS: Record<string, McpToolDto[]> = {
+  "demo-filesystem": [
+    { name: "read_file", description: "Read the complete contents of a file." },
+    { name: "read_multiple_files", description: "Read several files in one call." },
+    { name: "write_file", description: "Create or overwrite a file with new content." },
+    { name: "edit_file", description: "Make selective edits with string replacement." },
+    { name: "list_directory", description: "List entries with [FILE] / [DIR] markers." },
+    { name: "directory_tree", description: "Return a recursive JSON tree of a directory." },
+    { name: "search_files", description: "Search files matching a text pattern." },
+    { name: "get_file_info", description: "Report size, timestamps and permissions." },
+  ],
+  "demo-remote": [
+    { name: "fetch_ticket", description: "Fetch one ticket with its comments." },
+    { name: "search_tickets", description: "Search tickets by query string." },
+  ],
+};

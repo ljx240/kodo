@@ -1,3 +1,5 @@
+<img src="docs/logos/kodo-transparent-icons-pack/kodo-code-icon-transparent-1254.png" width="96" alt="Kodo" />
+
 # Kodo
 
 极简 Coding Agent 桌面工作台：**项目 → 会话 → Agent 执行轨迹 → 最终回答 → 变更文件**。

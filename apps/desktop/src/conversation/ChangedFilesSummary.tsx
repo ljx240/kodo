@@ -17,6 +17,10 @@ type Props = {
   /** Undo this turn's Kodo edits. Omitted in demo / while a run is live. */
   onUndo?: (() => void) | null;
   undoing?: boolean;
+  /** Result of the last undo (已撤销 / 本轮没有可撤销 / conflict detail). */
+  undoMessage?: string | null;
+  /** Open one changed file in the file viewer. Omitted in demo. */
+  onOpenFile?: ((path: string) => void) | null;
 };
 
 const FOLD_AT = 3;
@@ -37,6 +41,8 @@ export function ChangedFilesSummary({
   onView,
   onUndo = null,
   undoing = false,
+  undoMessage = null,
+  onOpenFile = null,
 }: Props) {
   const [showAll, setShowAll] = useState(false);
   if (files <= 0 || changes.length === 0) return null;
@@ -96,14 +102,27 @@ export function ChangedFilesSummary({
         </button>
       </header>
 
+      {undoMessage && (
+        <p className="changed-note changed-undo-note" data-testid="undo-result" role="status">
+          {undoMessage}
+        </p>
+      )}
+
       <div className="changed-group" data-testid="changed-kodo">
         <h4 className="changed-group-head">{T.files.kodoEdits}</h4>
         <ul className="changed-file-list">
           {shown.map((change) => (
             <li key={change.path} className="changed-file-row">
-              <span className="changed-file-path" title={change.path}>
+              <button
+                type="button"
+                className="changed-file-path"
+                title={onOpenFile ? T.files.openFile : change.path}
+                data-testid={`changed-open-${change.path}`}
+                disabled={!onOpenFile}
+                onClick={() => onOpenFile?.(change.path)}
+              >
                 {change.path}
-              </span>
+              </button>
               <span className="changed-file-edits">{T.files.edits(change.edits ?? 1)}</span>
               <span className="changed-file-delta">
                 <span className="delta-add">+{change.added}</span>{" "}

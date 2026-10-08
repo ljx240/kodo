@@ -1,5 +1,8 @@
 # Skill: docs
 
+## description
+Update documentation accurately; no compile verification is required.
+
 ## applicable_task_types
 - docs
 
@@ -9,6 +12,10 @@ docs-focused
 ## allowed_tools
 - search
 - read_file
+- list_files
+- find_symbol
+- find_references
+- read_range
 - write_file
 - apply_patch
 - replace_range

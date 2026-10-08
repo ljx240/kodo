@@ -1,6 +1,7 @@
 import type {
   ChangeDto,
   DeliveryStatus,
+  InterimNote,
   ItemDto,
   LifecycleStatus,
   OutcomeStatus,
@@ -32,6 +33,20 @@ function isPhase(code: string | undefined): code is PhaseCode {
   return Boolean(code) && (PHASE_CODES as readonly string[]).includes(code as string);
 }
 
+/**
+ * ANSI control sequences (colors, weights) that terminals emit and browsers
+ * show as garbage like `[1m[92m`. Display text is cleaned; the session log
+ * keeps the raw output. The ESC literal is built from its code point so this
+ * source stays plain ASCII.
+ */
+export function stripAnsi(text: string): string {
+  const esc = String.fromCharCode(27);
+  return text
+    .replace(new RegExp(esc + "\\[[0-9;?]*[ -/]*[@-~]", "g"), "")
+    .replace(new RegExp(esc + "\\][^" + esc + "]*(?:\\x07|" + esc + "\\\\)?", "g"), "")
+    .replace(new RegExp(esc + "[@-Z\\\\-_]", "g"), "");
+}
+
 /** One stored item, as the trace renders it. */
 export function toStep(item: ItemDto): TraceStep {
   const base = {
@@ -48,20 +63,20 @@ export function toStep(item: ItemDto): TraceStep {
       return {
         ...base,
         type: "thinking",
-        detail: item.summary,
+        detail: stripAnsi(item.summary),
         diagnostics: item.diagnostics ?? null,
       };
     case "search":
-      return { ...base, type: "search", chip: item.query, detail: item.detail };
+      return { ...base, type: "search", chip: stripAnsi(item.query), detail: stripAnsi(item.detail) };
     case "fileRead":
-      return { ...base, type: "read", chip: item.path, detail: item.detail };
+      return { ...base, type: "read", chip: stripAnsi(item.path), detail: stripAnsi(item.detail) };
     case "commandExecution":
       return {
         ...base,
         type: "run",
-        chip: item.command,
+        chip: stripAnsi(item.command),
         detail: "",
-        output: item.output || undefined,
+        output: item.output ? stripAnsi(item.output) : undefined,
         cwd: item.cwd,
         exitCode: item.exitCode,
         denied: item.denied ?? false,
@@ -77,6 +92,7 @@ export function toStep(item: ItemDto): TraceStep {
         model: item.model,
         input_tokens: formatTokens(item.inputTokens, item.status),
         output_tokens: formatTokens(item.outputTokens, item.status),
+        llmIoRef: item.llmIoRef ?? null,
       };
     case "fileChange":
       return {
@@ -84,6 +100,7 @@ export function toStep(item: ItemDto): TraceStep {
         type: "edit",
         detail: describe(item.changes),
         files: item.changes.map((change) => change.path),
+        fileSpanRef: item.fileSpanRef ?? null,
       };
     case "agentMessage":
       return { ...base, type: "finalize", detail: "", phase: "summarize" };
@@ -132,6 +149,8 @@ export type PhaseGroup = {
 /** What one turn renders as, once its items are read. */
 export type Reply = {
   steps: TraceStep[];
+  /** Conversational answer (你是谁/你好): the sentence alone, no report card. */
+  plain: boolean;
   /** Consecutive same-phase runs — the default trace grouping. */
   phases: PhaseGroup[];
   status: RunStatus;
@@ -155,6 +174,9 @@ export type Reply = {
   tokens: string | null;
   /** Real token counts; nulls mean "not counted yet", never 0. */
   tokensPending: boolean;
+  /** Live context-window telemetry from the most recent model call. `null`
+   *  until the first `ContextBudget` event arrives this turn. */
+  contextBudget: ContextBudget | null;
   verify: VerifyCounts;
   /** Consecutive same-root-cause failures merged into one card. */
   failureGroups: FailureGroup[];
@@ -179,10 +201,13 @@ export function toReply(turn: TurnDto, running: boolean, awaitingApproval = fals
     (status.lifecycle === "interrupted" || status.lifecycle === "stopped" || status.lifecycle === "failed")
       ? status.lifecycle
       : null;
-  const steps = turn.items
-    .filter((item) => item.kind !== "agentMessage")
-    .map(toStep)
-    .map((step) => (remapRunningTo && step.status === "running" ? { ...step, status: remapRunningTo } : step));
+  const steps = mergeNotes(
+    turn.items
+      .filter((item) => item.kind !== "agentMessage")
+      .map(toStep)
+      .map((step) => (remapRunningTo && step.status === "running" ? { ...step, status: remapRunningTo } : step)),
+    turn.notes ?? [],
+  );
   const rawChanges = turn.items.flatMap((item) => (item.kind === "fileChange" ? item.changes : []));
   const changes = mergeChanges(rawChanges);
   const modelCalls = turn.items.filter((item) => item.kind === "modelCall");
@@ -203,6 +228,7 @@ export function toReply(turn: TurnDto, running: boolean, awaitingApproval = fals
 
   return {
     steps,
+    plain: answer?.kind === "agentMessage" ? Boolean(answer.plain) : false,
     phases: groupPhases(steps),
     status,
     final: answer?.kind === "agentMessage" ? sanitizeAssistantText(answer.text) : null,
@@ -220,6 +246,7 @@ export function toReply(turn: TurnDto, running: boolean, awaitingApproval = fals
     models,
     tokens: modelCalls.length > 0 ? `${formatTokens(input, "done")} → ${formatTokens(output, "done")}` : null,
     tokensPending,
+    contextBudget: null,
     verify,
     failureGroups,
   };
@@ -295,11 +322,24 @@ export function outcomeFor(
   return "partially_completed";
 }
 
-/** How many acceptance checks passed / failed / were blocked by the environment. */
+/**
+ * How many acceptance checks passed / failed / were blocked by the environment.
+ *
+ * A turn with structured reasoning phases counts only the commands inside
+ * the verify phase — the exploratory runs in execute are the story of how,
+ * not the verdict, and counting them produced the contradiction
+ * 「未通过 · 通过 15 · 失败 0」 when verification never ran (2026-09-30).
+ * Fixtures without reasoning phases (the answer step's lone `summarize`
+ * marker is not enough) keep the flat run count.
+ */
 export function verifyCounts(steps: TraceStep[]): VerifyCounts {
   const counts: VerifyCounts = { passed: 0, failed: 0, blocked: 0, notRun: 0 };
+  const phased = steps.some((step) => step.type === "thinking" && isPhase(step.phase));
+  let current: PhaseCode = "prepare";
   for (const step of steps) {
+    if (isPhase(step.phase)) current = step.phase;
     if (step.type !== "run") continue;
+    if (phased && current !== "verify") continue;
     const cls = step.failureClass;
     const failed = step.status === "failed" || step.denied || (step.exitCode != null && step.exitCode !== 0);
     if (!failed) {
@@ -369,6 +409,42 @@ function typePhase(type: TraceStep["type"]): PhaseCode {
 }
 
 /**
+ * Interim stream prose, folded into the step list at the item boundary that
+ * flushed it (`beforeId`) so the trace keeps arrival order. Anchors that never
+ * matched a visible step (the item is the answer itself) still land last rather
+ * than being dropped silently.
+ */
+function mergeNotes(steps: TraceStep[], notes: InterimNote[]): TraceStep[] {
+  if (notes.length === 0) return steps;
+  const noteStep = (note: InterimNote): TraceStep => ({
+    type: "note",
+    label: "",
+    detail: sanitizeAssistantText(stripAnsi(note.text)),
+    duration: "",
+    durationMs: null,
+    status: "done",
+    stepId: note.id,
+  });
+  const byAnchor = new Map<number, InterimNote[]>();
+  for (const note of notes) {
+    const list = byAnchor.get(note.beforeId);
+    if (list) list.push(note);
+    else byAnchor.set(note.beforeId, [note]);
+  }
+  const merged: TraceStep[] = [];
+  for (const step of steps) {
+    const anchored = step.stepId != null ? byAnchor.get(step.stepId) : undefined;
+    if (anchored) {
+      merged.push(...anchored.map(noteStep));
+      byAnchor.delete(step.stepId!);
+    }
+    merged.push(step);
+  }
+  for (const leftover of byAnchor.values()) merged.push(...leftover.map(noteStep));
+  return merged;
+}
+
+/**
  * Group consecutive same-phase steps. Phase comes from the structured field on
  * reasoning steps and is inherited by the steps between them — never parsed
  * out of summary text. Fixture steps with no phase at all fall back to the
@@ -420,7 +496,8 @@ export function groupPhases(steps: TraceStep[]): PhaseGroup[] {
       : measured
         ? formatDuration(sum) || ""
         : "";
-    group.count = group.steps.length;
+    // Interim prose rows ride along but are not steps.
+    group.count = group.steps.filter((step) => step.type !== "note").length;
   }
   return groups;
 }
@@ -430,19 +507,55 @@ export function phaseLabel(code: string): string {
   return T.phase.unknown;
 }
 
-/** Removes provider protocol and internal workflow notes from user-facing text. */
+/**
+ * Removes provider protocol and internal workflow notes from user-facing text.
+ * Tag-protocol spans (`<tool_call` / `<function=NAME` / `<parameter=KEY`)
+ * go first — they are multi-line and several calls can share one line.
+ * Matching is indexOf-based: a regex literal cannot hold the closers because
+ * their slash would end the literal.
+ */
 export function sanitizeAssistantText(text: string): string {
-  return text
+  const withoutTags = stripTagSpans(text);
+  return withoutTags
     .split("\n")
     .filter((line) => {
       const trimmed = line.trimStart();
       return !trimmed.includes('"tool_calls"') &&
+        !trimmed.includes("<function=") &&
+        !trimmed.includes("<parameter=") &&
         !/^[-*]?\s*\*\*(工具协议|技能系统|工作原则|Verification status)\*\*/.test(trimmed) &&
         !/^[-*]?\s*\*\*Verification status:\*\*/.test(trimmed);
     })
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/** Drops every <tool_call…</tool_call> / <function=…</function> / <parameter=…</parameter> span (debris included). */
+function stripTagSpans(text: string): string {
+  const pairs: Array<[string, string]> = [
+    ["<tool_call", "</tool_call>"],
+    ["<function=", "</function>"],
+    ["<parameter=", "</parameter>"],
+  ];
+  let out = text;
+  for (const [open, close] of pairs) {
+    let result = "";
+    let rest = out;
+    for (;;) {
+      const start = rest.indexOf(open);
+      if (start < 0) {
+        result += rest;
+        break;
+      }
+      result += rest.slice(0, start);
+      const end = rest.indexOf(close, start + open.length);
+      if (end < 0) break;
+      rest = rest.slice(end + close.length);
+    }
+    out = result;
+  }
+  return out;
 }
 
 /**
@@ -480,12 +593,11 @@ function describe(changes: ChangeDto[]): string {
 }
 
 /**
- * Milliseconds as `820ms`, `1.5s`, `1m 12s`. Unknown reads `—`; a sub-reading
- * of 0 ms is hidden by returning "" (renderers omit the chip entirely).
+ * Milliseconds as `820ms`, `1.5s`, `1m 12s`. Unknown and sub-readings of 0 ms
+ * both return "" — renderers omit the placeholder rather than showing `—`.
  */
 export function formatDuration(ms: number | null | undefined): string {
-  if (ms == null) return T.reply.unknownDuration;
-  if (ms <= 0) return "";
+  if (ms == null || ms <= 0) return "";
 
   if (ms < 1000) return `${ms}ms`;
 
@@ -504,6 +616,34 @@ export function formatTokens(count: number, status?: string): string {
   if (status === "running") return T.tokens.counting;
   if (!count) return T.tokens.pending;
   return count < 1000 ? String(count) : `${(count / 1000).toFixed(1)}k`;
+}
+
+/** Live context-window telemetry (mirrors Rust `SinkEvent::ContextBudget`). */
+export type ContextBudget = {
+  used: number;
+  window: number;
+  percent: number;
+  cumulativeChars: number;
+  compactedCount: number;
+  lastModel: string;
+};
+
+/** Compact "12.4k / 200k · 6%" string for the Codex-style bar label. */
+export function formatContextBudget(b: ContextBudget): string {
+  return `${formatTokenPair(b.used)} / ${formatTokenPair(b.window)} · ${b.percent}%`;
+}
+
+/** Single number shrinker (e.g. 12480 → "12.5k"); mirror of Rust's
+ *  `shrink_tokens` in `state.rs` so numbers read the same end-to-end. */
+function formatTokenPair(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+/** Toast copy for `RunEvent::Compacted` — "已压缩 N 条 · 释放 X%"。 */
+export function formatCompactToast(dropped: number, freedPct: number): string {
+  return `${T.budget.compacted(dropped)} · ${T.budget.freed(freedPct)}`;
 }
 
 /** Session titles default to 新对话 until the first ask supplies a real one. */

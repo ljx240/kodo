@@ -282,6 +282,22 @@ fn walk(root: &Path, dir: &Path, hits: &mut Vec<String>, query: &str, depth: usi
 }
 
 pub fn read_text(path: &Path, max_lines: usize) -> String {
+    // Spreadsheets extract cell text instead of failing on the binary body
+    // (same path pinned attachments take). The row budget approximates the
+    // caller's line budget at ~120 chars per row.
+    if crate::office::is_spreadsheet(&path.to_string_lossy()) {
+        let budget = max_lines.saturating_mul(120);
+        match crate::office::read_spreadsheet(path, budget) {
+            Ok(sheet) => {
+                let mut out = sheet.text;
+                if sheet.truncated {
+                    out.push_str(&format!("\n… 表格内容按预算截断（{} 个 sheet）", sheet.sheets));
+                }
+                return out;
+            }
+            Err(error) => return format!("(无法读取: {error})"),
+        }
+    }
     let Ok(raw) = fs::read_to_string(path) else {
         return "(无法读取)".to_owned();
     };
@@ -956,12 +972,34 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
     }) {
         bump(CommandRisk::FilesystemWrite);
     }
-    if tokens.iter().any(|t| t == ">" || t == ">>")
-        && tokens
-            .iter()
-            .any(|t| t.starts_with('/') || t.starts_with("~"))
-    {
-        bump(CommandRisk::Catastrophic);
+    // Write redirection: judge the redirect's own target, not "any `>` plus any
+    // absolute path anywhere". `2>/dev/null` and `2>&1` are noise suppression,
+    // not writes (they tokenize as `2` `>` `/dev/null` / `&` and used to ask
+    // for approval as 灾难性操作 on plain read-only commands). Absolute /
+    // `$HOME` targets can clobber system files from any command (`> /etc/hosts`)
+    // and stay catastrophic even in Full; a workspace-relative target is an
+    // ordinary file write.
+    for (i, token) in tokens.iter().enumerate() {
+        if token != ">" && token != ">>" {
+            continue;
+        }
+        let target = tokens
+            .get(i + 1)
+            .map(|s| s.trim_matches(|c| c == '\'' || c == '"'))
+            .unwrap_or("");
+        let sink = target.is_empty()
+            || target == "&" // `2>&1`
+            || target == "/dev/null"
+            || target.starts_with("/dev/std")
+            || target.starts_with("/dev/fd/");
+        if sink {
+            continue;
+        }
+        if target.starts_with('/') || target.starts_with('~') || target.starts_with("$HOME") {
+            bump(CommandRisk::Catastrophic);
+        } else {
+            bump(CommandRisk::FilesystemWrite);
+        }
     }
 
     // Pipe-to-shell is catastrophic (download + execute).
@@ -1392,6 +1430,47 @@ mod tests {
         assert_eq!(
             classify_command_risk("sudo rm -rf /"),
             CommandRisk::Catastrophic
+        );
+    }
+
+    #[test]
+    fn stderr_noise_suppression_is_read_only() {
+        // Regression: `2>/dev/null` used to tokenize as `2` `>` `/dev/null` and
+        // trip "any `>` + any absolute path" → Catastrophic, so the UI-review
+        // `ls … 2>/dev/null; wc -l …` asked for approval as 灾难性操作 even in
+        // 自动批准安全操作 mode.
+        let command = "ls apps/desktop/src/styles apps/desktop/src/pages apps/desktop/src/shell apps/desktop/src/conversation apps/desktop/src/inspector apps/desktop/src/settings 2>/dev/null; wc -l apps/desktop/src/styles/*.css";
+        assert_eq!(classify_command_risk(command), CommandRisk::ReadOnly);
+        assert!(!crate::Permission::Auto.needs_approval(crate::StepKind::Command, Some(command)));
+        assert_eq!(
+            classify_command_risk("grep -rn foo src 2>&1 | head -20"),
+            CommandRisk::ReadOnly
+        );
+        assert_eq!(
+            classify_command_risk("ls /etc 2>/dev/null"),
+            CommandRisk::ReadOnly
+        );
+        assert_eq!(
+            classify_command_risk("make > /dev/null 2>&1"),
+            CommandRisk::ReadOnly
+        );
+        // A genuine absolute-target write still classifies as catastrophic…
+        assert_eq!(
+            classify_command_risk("echo x > /etc/hosts"),
+            CommandRisk::Catastrophic
+        );
+        assert_eq!(
+            classify_command_risk("echo x 2>/etc/hosts"),
+            CommandRisk::Catastrophic
+        );
+        assert_eq!(
+            classify_command_risk("echo x > ~/.bashrc"),
+            CommandRisk::Catastrophic
+        );
+        // …and a workspace-relative redirect is an ordinary file write.
+        assert_eq!(
+            classify_command_risk("wc -l src/*.rs > count.txt"),
+            CommandRisk::FilesystemWrite
         );
     }
 

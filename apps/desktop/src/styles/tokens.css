@@ -36,6 +36,15 @@
   --kodo-success-bg-soft: #e9f7ef;
   --kodo-error-bg: #fef2f2;
 
+  /* ── Syntax highlighting (highlight.js, all ≥4.5:1 on every surface) ─── */
+  --kodo-syntax-comment: #667085;
+  --kodo-syntax-keyword: #cf222e;
+  --kodo-syntax-string: #0a3069;
+  --kodo-syntax-number: #0550ae;
+  --kodo-syntax-title: #8250df;
+  --kodo-syntax-meta: #bc4c00;
+  --kodo-syntax-addition: #1a7f37;
+
   /* ── Focus ────────────────────────────────────────────────────────────── */
   --kodo-focus-ring: #2563eb;
   --kodo-focus-width: 2px;
@@ -59,7 +68,13 @@
   /* ── Shell geometry ───────────────────────────────────────────────────── */
   --kodo-sidebar-width: 260px;
   --kodo-inspector-width: 330px;
+  /* 文件/浏览 panel borrows a wider column: tree + content side by side. */
+  --kodo-inspector-file-width: 640px;
   --kodo-inspector-rail-width: 40px;
+  /* Focus mode (Inspector ≥ 900px) is the deliberate exception to the
+     "conversation is the largest visual region" rule — the column drops to
+     this width so the Inspector can grow up to --kodo-inspector-width: 1100px. */
+  --kodo-focus-mode-column: 300px;
   --kodo-topbar-height: 44px;
   --kodo-control-height: 32px;
 
@@ -116,6 +131,15 @@
   --kodo-success-bg: #10251c;
   --kodo-success-bg-soft: #10251c;
   --kodo-error-bg: #2a1515;
+
+  /* Syntax — provisional GitHub-dark family; V1 ships light only. */
+  --kodo-syntax-comment: #8b949e;
+  --kodo-syntax-keyword: #ff7b72;
+  --kodo-syntax-string: #a5d6ff;
+  --kodo-syntax-number: #79c0ff;
+  --kodo-syntax-title: #d2a8ff;
+  --kodo-syntax-meta: #ffa657;
+  --kodo-syntax-addition: #3fb950;
 
   --kodo-focus-ring: #7aa2ff;
 }

@@ -363,8 +363,11 @@ fn benchmark_01_read_only_question() {
 
     let (passed, detail, outcome) = match cap {
         Ok(c) => {
+            // 2026-09-29: a read-only question is the conversational channel —
+            // it ships as plain Q&A (ready + not_run), so the task-run
+            // "Verification status" footer must NOT be appended.
             let ok = !c.cancelled
-                && c.answer.contains("Verification status")
+                && !c.answer.contains("Verification status")
                 && c.file_changes.is_empty();
             (
                 ok,

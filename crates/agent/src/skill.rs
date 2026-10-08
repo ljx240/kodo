@@ -314,6 +314,17 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
 
     let description = single_line(&section_body(&lines, "description"));
 
+    // No explicit `## description` — fall back to the first completion
+    // criterion so the system prompt still has a one-line summary.
+    let description = if description.is_empty() {
+        completion_criteria
+            .first()
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        description
+    };
+
     Ok(SkillSpec {
         name,
         applicable_task_types: task_types,
@@ -469,12 +480,13 @@ pub fn load_user_skills(dir: &Path) -> Vec<SkillSpec> {
     load_skill_dir(dir)
 }
 
-pub fn save_user_skill(dir: &Path, name: &str, markdown: &str) -> Result<(), String> {
+pub fn save_user_skill(dir: &Path, name: &str, markdown: &str) -> Result<SkillSpec, String> {
     let path = skill_file(dir, name);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&path, markdown).map_err(|e| e.to_string())
+    std::fs::write(&path, markdown).map_err(|e| e.to_string())?;
+    parse_skill(markdown)
 }
 
 pub fn delete_user_skill(dir: &Path, name: &str) -> Result<(), String> {

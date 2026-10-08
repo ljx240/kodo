@@ -174,13 +174,26 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             model,
             input_tokens,
             output_tokens,
-            ..
+            protocol,
+            finish_reason,
+            saw_reasoning,
+            duration_ms,
+            provider_latency_ms,
+            retry_index,
+            llm_io_ref,
         } => ItemKind::ModelCall {
             model: model.clone(),
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
+            protocol: protocol.clone(),
+            finish_reason: finish_reason.clone(),
+            saw_reasoning: *saw_reasoning,
+            duration_ms: *duration_ms,
+            provider_latency_ms: *provider_latency_ms,
+            retry_index: *retry_index,
+            llm_io_ref: llm_io_ref.clone(),
         },
-        Step::FileChange { changes, .. } => ItemKind::FileChange {
+        Step::FileChange { changes, file_span_ref, .. } => ItemKind::FileChange {
             changes: changes
                 .iter()
                 .map(
@@ -195,6 +208,7 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
                     },
                 )
                 .collect(),
+            file_span_ref: file_span_ref.clone(),
         },
         Step::AgentMessage {
             text,
@@ -324,7 +338,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("tempdir");
         let project = tmp.join("proj");
         std::fs::create_dir_all(&project).expect("proj");
-        let id = session::open(&dir, &project, "t", session::now()).expect("open");
+        let id = session::open(&dir, &project, "t", session::now(), session::Mode::Code).expect("open");
         // Items attach to the turn an `ask` line opens — same order the shell writes.
         session::record_ask(&dir, &id, session::now(), "跑 ls").expect("ask");
 
