@@ -21,7 +21,7 @@ use kodo_agent::provider::{
     ProviderFailureClass, ProviderMessage, ToolSchema,
 };
 use kodo_agent::tools::{command_run, CommandOutcomeKind};
-use kodo_agent::{AgentEvidenceKind, AgentSkillRegistry, Permission, RunRequest, TaskType};
+use kodo_agent::{AgentEvidenceKind, AgentMode, AgentSkillRegistry, Permission, RunRequest, TaskType};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -1124,7 +1124,7 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             pinned_context: Vec::new(),
             provider: Some(provider.clone()),
             permission: Permission::Full,
-            mode: kodo_agent::AgentMode::Code,
+            mode: AgentMode::Code,
             fallback_to_local: false,
             max_output_tokens: 2048,
             extended_thinking: false,
@@ -1132,7 +1132,7 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
-            personas: vec![],
+            personas: Vec::new(),
         };
         let alive = || true;
         let approve = |_kind: kodo_agent::StepKind, _cmd: &str| true;

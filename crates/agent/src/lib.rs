@@ -1614,8 +1614,6 @@ fn patch_approval_step(
             }],
             file_span_ref: None,
         };
-            }],
-        };
         let keep = finish_step(denied, 0, true, emit);
         return Ok((
             keep,

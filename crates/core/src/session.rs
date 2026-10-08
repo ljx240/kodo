@@ -1541,6 +1541,7 @@ mod tests {
                         removed: 8,
                     },
                 ],
+                file_span_ref: None,
             },
             ItemKind::agent_message(
                 "已修复。".to_owned(),

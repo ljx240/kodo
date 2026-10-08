@@ -43,7 +43,7 @@ fn online_read_only_smoke() {
         user_skills_dir: None,
         mcp_servers: Vec::new(),
         agent_instructions: None,
-        personas: vec![],
+        personas: Vec::new(),
     };
 
     let mut answer = String::new();

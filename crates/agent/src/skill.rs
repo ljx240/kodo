@@ -7,7 +7,7 @@
 //! available with zero filesystem I/O. User skills load from a caller-supplied
 //! directory ([`load_user_skills`]) — this crate never resolves paths itself.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::classify::TaskType;
 use crate::context::ContextBudget;
@@ -30,7 +30,8 @@ pub enum ContextStrategy {
     ReviewOnly,
     /// Docs: lightweight docs-oriented context, no deep code packing.
     DocsFocused,
-    /// Work mode: general deliverables; light context, no repo-map depth.
+    /// Work / docs / summaries / Q&A: light docs-style context, no
+    /// reproduction or acceptance-gated build/test pipeline.
     WorkFocused,
 }
 
@@ -76,6 +77,11 @@ impl ContextStrategy {
             // Reviews target the named files; slightly tighter packing.
             Self::ReviewOnly => ContextBudget {
                 max_spans: 6,
+                ..ContextBudget::default()
+            },
+            // Work / Q&A / summaries: docs-light, no repro or build refs.
+            Self::WorkFocused => ContextBudget {
+                max_spans: 4,
                 ..ContextBudget::default()
             },
             _ => ContextBudget::default(),
@@ -212,7 +218,7 @@ impl SkillSpec {
 // Parser — section-based Markdown, no extra dependencies.
 // ---------------------------------------------------------------------------
 
-pub(crate) fn section_body<'a>(lines: &[&'a str], header: &str) -> Vec<&'a str> {
+pub fn section_body<'a>(lines: &[&'a str], header: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut inside = false;
     for line in lines {
@@ -238,7 +244,7 @@ fn bullets(body: &[&str]) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn single_line(body: &[&str]) -> String {
+pub fn single_line(body: &[&str]) -> String {
     body.iter()
         .map(|l| l.trim())
         .find(|l| !l.is_empty())
@@ -362,6 +368,10 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillRegistry {
     skills: Vec<SkillSpec>,
+    /// Names that came in via [`builtin`] and must not be replaced by user
+    /// or project overlays (a chip install that names itself "work" could
+    /// hijack the dispatch — builtins are anchored).
+    builtin_names: std::collections::HashSet<String>,
 }
 
 /// Embedded built-in skill sources, keyed by name, in registry order.
@@ -400,24 +410,32 @@ pub fn builtin_markdown(name: &str) -> Option<&'static str> {
 impl SkillRegistry {
     /// The eight built-in skills, embedded at compile time.
     pub fn builtin() -> Self {
-        let skills = BUILTIN_SOURCES
+        const SOURCES: [&str; 8] = [
+            include_str!("../../../skills/bug-fix/SKILL.md"),
+            include_str!("../../../skills/feature/SKILL.md"),
+            include_str!("../../../skills/test/SKILL.md"),
+            include_str!("../../../skills/refactor/SKILL.md"),
+            include_str!("../../../skills/code-review/SKILL.md"),
+            include_str!("../../../skills/docs/SKILL.md"),
+            include_str!("../../../skills/work/SKILL.md"),
+            include_str!("../../../skills/workflow/SKILL.md"),
+        ];
+        let skills: Vec<SkillSpec> = SOURCES
             .iter()
-            .map(|(_, src)| parse_skill(src).expect("built-in SKILL.md must parse"))
+            .map(|src| parse_skill(src).expect("built-in SKILL.md must parse"))
             .collect();
-        Self { skills }
+        let builtin_names = skills.iter().map(|s| s.name.clone()).collect();
+        Self {
+            skills,
+            builtin_names,
+        }
     }
 
     pub fn from_skills(skills: Vec<SkillSpec>) -> Self {
-        Self { skills }
-    }
-
-    /// Builtins first, extra skills appended (project then user in
-    /// `build_skill_registry`): `select()`'s first-match fallback always lands
-    /// on a builtin; `get(name)` (the chip path) reaches extras too and is
-    /// first-match, so earlier extras shadow later ones on a name collision.
-    pub fn with_user(mut self, user: Vec<SkillSpec>) -> Self {
-        self.skills.extend(user);
-        self
+        Self {
+            skills,
+            builtin_names: std::collections::HashSet::new(),
+        }
     }
 
     /// Pick the skill whose `applicable_task_types` contains `task_type`.
@@ -434,15 +452,76 @@ impl SkillRegistry {
     pub fn skills(&self) -> &[SkillSpec] {
         &self.skills
     }
+
+    /// Append user/project skills. **Earlier extras shadow later ones** on a
+    /// name collision; **builtin names are anchored** — a user or project
+    /// skill that names itself after a builtin is silently dropped so a chip
+    /// can't hijack dispatch. Caller passes extras in decreasing priority
+    /// order: `builtin().with_user(project).with_user(user)` lets project
+    /// win. Returns a fresh registry; the receiver is not mutated.
+    pub fn with_user(mut self, skills: Vec<SkillSpec>) -> Self {
+        for s in skills {
+            if self.builtin_names.contains(&s.name) {
+                // Anchor: builtin name stays untouched. A chip install that
+                // happens to pick a builtin name is filtered here, not at
+                // load_user_skills time, so the helper can keep doing plain
+                // directory walks.
+                continue;
+            }
+            if self.skills.iter().any(|existing| existing.name == s.name) {
+                // Earlier extras win on a duplicate name — drop the newcomer.
+                continue;
+            }
+            self.skills.push(s);
+        }
+        self
+    }
 }
 
-// ---------------------------------------------------------------------------
-// User skill store — flat `<dir>/<name>.md`. The directory is always supplied
-// by the caller (`RunRequest.user_skills_dir` / the Tauri `skills_dir()`):
-// this crate has no core dependency and must stay hermetic in tests.
-// ---------------------------------------------------------------------------
+// User-skill IO. Built-in skills live in `crates/agent/skills/*` (compiled in
+// via `include_str!`); user/project skills live on disk under
+// `<base>/.kolo/skills/<name>/SKILL.md`. `load_user_skills` scans the
+// directory and skips anything that fails to parse — same shape as the
+// persona store.
 
-/// Chip ids and file stems: `[A-Za-z0-9_-]{1,64}`.
+fn skill_file(base: &Path, name: &str) -> PathBuf {
+    base.join(format!("{name}.md"))
+}
+
+fn load_skill_dir(dir: &Path) -> Vec<SkillSpec> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Two layouts accepted: flat file `<dir>/<name>.md` and directory
+        // layout `<dir>/<name>/SKILL.md`. The flat shape is what the test
+        // harness and older drafts used; the directory shape mirrors the
+        // built-in skill layout so a user can `cp -r skills/foo my-skills/`
+        // and have it just work.
+        let md = if path.is_dir() {
+            let inside = path.join("SKILL.md");
+            if inside.is_file() { inside } else { continue }
+        } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            path
+        } else {
+            continue;
+        };
+        let Ok(src) = std::fs::read_to_string(&md) else {
+            continue;
+        };
+        if let Ok(s) = parse_skill(&src) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Load every parseable SKILL.md under `<dir>` (both `<dir>/<name>.md`
+/// flat files and `<dir>/<name>/SKILL.md` directory layout). Used both
+/// for the user's global store and the project-scoped store. Returns an
+/// empty Vec when the directory doesn't exist or is empty.
 fn valid_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64

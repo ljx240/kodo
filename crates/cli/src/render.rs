@@ -96,10 +96,12 @@ impl<O: Write, E: Write> Renderer<O, E> {
                     "⚠ 已切换模型 {from_provider}/{from_model} → {to_provider}/{to_model}（{error_class}）"
                 ));
             }
-            // Context telemetry + compaction are surfaced only on the desktop
-            // runner today. The CLI prints nothing here — the user's terminal
-            // shouldn't be flooded with bar percentages mid-turn.
-            SinkEvent::ContextBudget { .. } | SinkEvent::Compacted { .. } => {}
+            // Transparency-side events — session log already captured them
+            // via TurnLogger. The CLI renderer intentionally drops them at
+            // this layer to keep stdout uncluttered.
+            SinkEvent::ContextBudget { .. }
+            | SinkEvent::Compacted { .. }
+            | SinkEvent::AskUser { .. } => {}
         }
     }
 
@@ -117,7 +119,7 @@ impl<O: Write, E: Write> Renderer<O, E> {
                 };
                 self.notice(&line);
             }
-            Step::FileChange { changes } => {
+            Step::FileChange { changes, .. } => {
                 for change in changes {
                     self.notice(&format!(
                         "✎ 已编辑 {}（+{} -{}）",
@@ -158,6 +160,14 @@ impl<O: Write, E: Write> Renderer<O, E> {
             | Step::ContextBudget { .. } => {
                 self.close_line();
             }
+            // Transparency-side steps: no per-line stdout for the CLI —
+            // session log already captured them via TurnLogger.
+            Step::Thinking { .. }
+            | Step::Compaction { .. }
+            | Step::Failover { .. }
+            | Step::PlanStep { .. }
+            | Step::Permission { .. }
+            | Step::ContextBudget { .. } => {}
         }
     }
 
@@ -198,7 +208,7 @@ fn started_notice(step: &Step) -> String {
         Step::FileRead { path, .. } => format!("→ 读取 {path}"),
         Step::Command { command, .. } => format!("→ 跑 {command}"),
         Step::ModelCall { model, .. } => format!("→ 调用模型 {model}"),
-        Step::FileChange { changes } => {
+        Step::FileChange { changes, .. } => {
             let paths = changes
                 .iter()
                 .map(|c| c.path.as_str())
@@ -207,14 +217,13 @@ fn started_notice(step: &Step) -> String {
             format!("→ 写文件 {paths}")
         }
         Step::AgentMessage { .. } => "→ 起草回答…".to_owned(),
-        // Transparency-side kinds are never shown in the CLI; they only exist
-        // so a `Started`/`Finished` sink pair has a step to carry.
-        Step::Thinking { .. } => String::new(),
-        Step::Compaction { .. } => String::new(),
-        Step::Failover { .. } => String::new(),
-        Step::PlanStep { .. } => String::new(),
-        Step::Permission { .. } => String::new(),
-        Step::ContextBudget { .. } => String::new(),
+        // Transparency-side steps: surface no per-line notice in the CLI.
+        Step::Thinking { .. }
+        | Step::Compaction { .. }
+        | Step::Failover { .. }
+        | Step::PlanStep { .. }
+        | Step::Permission { .. }
+        | Step::ContextBudget { .. } => String::new(),
     }
 }
 

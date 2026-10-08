@@ -7,7 +7,7 @@ use std::fs;
 use std::io::{Stderr, Stdout};
 use std::path::{Path, PathBuf};
 
-use kodo_agent::{tools, Permission, RunRequest, SinkEvent};
+use kodo_agent::{tools, AgentMode, Permission, RunRequest, SinkEvent};
 use kodo_core::session;
 use kodo_shell::{Logged, ShellConfig, TurnLogger, TurnOutcome};
 

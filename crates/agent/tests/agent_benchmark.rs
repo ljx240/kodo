@@ -233,7 +233,7 @@ fn run_scenario(
         user_skills_dir: None,
         mcp_servers: Vec::new(),
         agent_instructions: None,
-        personas: vec![],
+        personas: Vec::new(),
     };
 
     let cancel_after = Arc::new(AtomicUsize::new(
@@ -284,7 +284,7 @@ fn run_scenario(
                     answer = text.clone();
                     checks = c.clone();
                 }
-                if let Step::FileChange { changes } = &step {
+                if let Step::FileChange { changes, .. } = &step {
                     for ch in changes {
                         file_changes.push(ch.path.clone());
                     }
@@ -324,7 +324,7 @@ fn preview(step: &Step) -> String {
         Step::FileRead { path, .. } => format!("read:{path}"),
         Step::Command { command, .. } => format!("command:{command}"),
         Step::ModelCall { model, .. } => format!("model:{model}"),
-        Step::FileChange { changes } => {
+        Step::FileChange { changes, .. } => {
             let paths: Vec<_> = changes.iter().map(|c| c.path.clone()).collect();
             format!("write:{}", paths.join(","))
         }

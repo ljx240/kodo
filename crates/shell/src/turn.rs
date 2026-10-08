@@ -193,7 +193,7 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             retry_index: *retry_index,
             llm_io_ref: llm_io_ref.clone(),
         },
-        Step::FileChange { changes } => ItemKind::FileChange {
+        Step::FileChange { changes, file_span_ref, .. } => ItemKind::FileChange {
             changes: changes
                 .iter()
                 .map(
@@ -208,6 +208,7 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
                     },
                 )
                 .collect(),
+            file_span_ref: file_span_ref.clone(),
         },
         Step::AgentMessage {
             text,
@@ -222,14 +223,17 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             verification: verification.clone(),
             plain: *plain,
         },
+        // Transparency-side steps never carry user-facing content; render them
+        // as `Reasoning` chips with a stable phase so the trace UI can still
+        // surface them and the session log stays closed.
         Step::Thinking {
             content,
             phase,
             source,
-        } => ItemKind::Thinking {
-            content: content.clone(),
+        } => ItemKind::Reasoning {
+            summary: format!("thinking ({source})"),
             phase: phase.clone(),
-            source: source.clone(),
+            diagnostics: Some(content.clone()),
         },
         Step::Compaction {
             dropped,
@@ -237,12 +241,12 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             freed_pct,
             source_summary,
             covered_messages,
-        } => ItemKind::Compaction {
-            dropped: *dropped,
-            summarized_into: *summarized_into,
-            freed_pct: *freed_pct,
-            source_summary: source_summary.clone(),
-            covered_messages: *covered_messages,
+        } => ItemKind::Reasoning {
+            summary: format!(
+                "compacted {covered_messages} messages into {summarized_into} ({dropped} dropped, {freed_pct}% freed)"
+            ),
+            phase: "compact".into(),
+            diagnostics: Some(source_summary.clone()),
         },
         Step::Failover {
             from_provider,
@@ -252,14 +256,12 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             to_provider,
             to_model,
             retry_index,
-        } => ItemKind::Failover {
-            from_provider: from_provider.clone(),
-            from_model: from_model.clone(),
-            error_class: error_class.clone(),
-            error: error.clone(),
-            to_provider: to_provider.clone(),
-            to_model: to_model.clone(),
-            retry_index: *retry_index,
+        } => ItemKind::Reasoning {
+            summary: format!(
+                "failover retry #{retry_index}: {from_provider}/{from_model} -> {to_provider}/{to_model} ({error_class})"
+            ),
+            phase: "failover".into(),
+            diagnostics: Some(error.clone()),
         },
         Step::PlanStep {
             step_id,
@@ -268,24 +270,23 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             status,
             triggered_by,
             evidence,
-        } => ItemKind::PlanStep {
-            step_id: step_id.clone(),
-            title: title.clone(),
-            kind: kind.clone(),
-            status: status.clone(),
-            triggered_by: triggered_by.clone(),
-            evidence: evidence.clone(),
+        } => ItemKind::Reasoning {
+            summary: format!("plan step {step_id} ({kind}) {status}: {title}"),
+            phase: "plan".into(),
+            diagnostics: Some(format!(
+                "triggered_by={:?} evidence={:?}",
+                triggered_by, evidence
+            )),
         },
         Step::Permission {
             kind,
             detail,
             decision,
             context,
-        } => ItemKind::Permission {
-            kind: kind.clone(),
-            detail: detail.clone(),
-            decision: decision.clone(),
-            context: context.clone(),
+        } => ItemKind::Reasoning {
+            summary: format!("permission {kind}: {decision}"),
+            phase: "permission".into(),
+            diagnostics: Some(format!("{detail} | {context}")),
         },
         Step::ContextBudget {
             used,
@@ -294,13 +295,12 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             cumulative_chars,
             compacted_count,
             last_model,
-        } => ItemKind::ContextBudget {
-            used: *used,
-            window: *window,
-            percent: *percent,
-            cumulative_chars: *cumulative_chars,
-            compacted_count: *compacted_count,
-            last_model: last_model.clone(),
+        } => ItemKind::Reasoning {
+            summary: format!(
+                "context {percent}% ({used}/{window}) after {cumulative_chars} chars, {compacted_count} compactions, model={last_model}"
+            ),
+            phase: "budget".into(),
+            diagnostics: None,
         },
     }
 }
@@ -338,8 +338,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("tempdir");
         let project = tmp.join("proj");
         std::fs::create_dir_all(&project).expect("proj");
-        let id =
-            session::open(&dir, &project, "t", session::now(), session::Mode::Code).expect("open");
+        let id = session::open(&dir, &project, "t", session::now(), session::Mode::Code).expect("open");
         // Items attach to the turn an `ask` line opens — same order the shell writes.
         session::record_ask(&dir, &id, session::now(), "跑 ls").expect("ask");
 
@@ -387,6 +386,7 @@ mod tests {
                 added: 1,
                 removed: 0,
             }],
+            file_span_ref: None,
         };
         logger.record(&SinkEvent::Started {
             step: denied.clone(),
@@ -441,7 +441,8 @@ mod tests {
                         path: "p".into(),
                         added: 2,
                         removed: 1,
-                    }]
+                    }],
+                    file_span_ref: None,
                 },
                 true
             ),
@@ -453,8 +454,8 @@ mod tests {
                     model: "m".into(),
                     input_tokens: 1,
                     output_tokens: 2,
-                    protocol: "native".into(),
-                    finish_reason: "stop".into(),
+                    protocol: String::new(),
+                    finish_reason: String::new(),
                     saw_reasoning: false,
                     duration_ms: 0,
                     provider_latency_ms: 0,

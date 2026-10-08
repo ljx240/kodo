@@ -458,6 +458,121 @@ pub struct UndoConflictView {
     pub message: String,
 }
 
+/// One persisted artifact under `traces/<session>/<turn>/`. Mirrors
+/// `kodo_core::traces::ArtifactRef` but keeps the field names the GUI agreed to.
+#[derive(serde::Serialize, Clone)]
+pub struct ArtifactRefView {
+    /// `llm_io` | `file_span`.
+    pub kind: &'static str,
+    /// Sequential number within `kind`.
+    pub seq: u32,
+    /// Path relative to the turn dir — used as the third arg when loading.
+    #[serde(rename = "label")]
+    pub label: String,
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes: u64,
+    /// Seconds since the Unix epoch.
+    pub at: u64,
+}
+
+impl From<kodo_core::traces::ArtifactRef> for ArtifactRefView {
+    fn from(reference: kodo_core::traces::ArtifactRef) -> Self {
+        ArtifactRefView {
+            kind: reference.kind,
+            seq: reference.seq,
+            label: reference.label,
+            size_bytes: reference.size_bytes,
+            at: reference.at,
+        }
+    }
+}
+
+/// One captured LLM call. The request/response bodies are passed through as
+/// opaque JSON values so the viewer renders them verbatim — Kodo never has
+/// to know the provider's exact shape.
+#[derive(serde::Serialize, Clone)]
+pub struct LlmIoView {
+    pub seq: u32,
+    pub at: u64,
+    pub model: String,
+    pub protocol: String,
+    #[serde(rename = "finishReason")]
+    pub finish_reason: String,
+    #[serde(rename = "providerLatencyMs")]
+    pub provider_latency_ms: u64,
+    #[serde(rename = "inputTokens")]
+    pub input_tokens: u32,
+    #[serde(rename = "outputTokens")]
+    pub output_tokens: u32,
+    pub request: LlmIoRequestView,
+    pub response: LlmIoResponseView,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct LlmIoRequestView {
+    pub system: String,
+    /// Opaque provider-shaped message array.
+    pub messages: serde_json::Value,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct LlmIoResponseView {
+    pub text: String,
+    #[serde(rename = "reasoningContent")]
+    pub reasoning_content: String,
+    #[serde(rename = "nativeToolCalls")]
+    pub native_tool_calls: serde_json::Value,
+}
+
+impl From<kodo_core::traces::LlmIoCapture> for LlmIoView {
+    fn from(capture: kodo_core::traces::LlmIoCapture) -> Self {
+        LlmIoView {
+            seq: capture.seq,
+            at: capture.at,
+            model: capture.model,
+            protocol: capture.protocol,
+            finish_reason: capture.finish_reason,
+            provider_latency_ms: capture.provider_latency_ms,
+            input_tokens: capture.input_tokens,
+            output_tokens: capture.output_tokens,
+            request: LlmIoRequestView {
+                system: capture.request.system,
+                messages: capture.request.messages,
+            },
+            response: LlmIoResponseView {
+                text: capture.response.text,
+                reasoning_content: capture.response.reasoning_content,
+                native_tool_calls: capture.response.native_tool_calls,
+            },
+        }
+    }
+}
+
+/// Before/after snapshot for one captured file write.
+#[derive(serde::Serialize, Clone)]
+pub struct FileSpanView {
+    pub path: String,
+    #[serde(rename = "contentBefore")]
+    pub content_before: String,
+    #[serde(rename = "contentAfter")]
+    pub content_after: Option<String>,
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: String,
+    pub at: u64,
+}
+
+impl From<kodo_core::traces::FileSpanCapture> for FileSpanView {
+    fn from(capture: kodo_core::traces::FileSpanCapture) -> Self {
+        FileSpanView {
+            path: capture.path,
+            content_before: capture.content_before,
+            content_after: capture.content_after,
+            tool_call_id: capture.tool_call_id,
+            at: capture.seq as u64,
+        }
+    }
+}
+
 impl From<session::Item> for ItemView {
     fn from(item: session::Item) -> Self {
         let detail = match item.kind {
@@ -807,135 +922,6 @@ pub struct ArchivedItemView {
     pub removed: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Trace artifacts (Phase D — transparency UI)
-//
-// The session log stores chips with `llm_io_ref` pointers; the body lives
-// under `~/Library/Application Support/Kodo/traces/<session>/<turn>/…`. These
-// DTOs and the matching commands in `main.rs` let the webview open those
-// captures without holding the whole log in memory.
-// ---------------------------------------------------------------------------
-
-/// One trace artifact (LLM I/O capture or file span), as the trace-page
-/// list pane needs it.
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArtifactRefView {
-    /// `"llm_io"` or `"file_span"`.
-    pub kind: &'static str,
-    pub seq: u32,
-    pub label: String,
-    #[serde(rename = "sizeBytes")]
-    pub size_bytes: u64,
-    /// Seconds since the Unix epoch.
-    pub at: u64,
-}
-
-impl From<traces::ArtifactRef> for ArtifactRefView {
-    fn from(value: traces::ArtifactRef) -> Self {
-        Self {
-            kind: value.kind,
-            seq: value.seq,
-            label: value.label,
-            size_bytes: value.size_bytes,
-            at: value.at,
-        }
-    }
-}
-
-/// One full LLM I/O capture. `request.messages` is kept opaque so the
-/// renderer doesn't have to special-case each provider shape.
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LlmIoView {
-    pub seq: u32,
-    pub model: String,
-    pub protocol: String,
-    pub retry_index: u32,
-    #[serde(rename = "providerLatencyMs")]
-    pub provider_latency_ms: u64,
-    #[serde(rename = "finishReason")]
-    pub finish_reason: String,
-    #[serde(rename = "inputTokens")]
-    pub input_tokens: u32,
-    #[serde(rename = "outputTokens")]
-    pub output_tokens: u32,
-    #[serde(rename = "sawReasoning")]
-    pub saw_reasoning: bool,
-    pub at: u64,
-    pub request: LlmIoRequestView,
-    pub response: LlmIoResponseView,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LlmIoRequestView {
-    pub system: String,
-    pub messages: serde_json::Value,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LlmIoResponseView {
-    pub text: String,
-    #[serde(rename = "reasoningContent")]
-    pub reasoning_content: String,
-    #[serde(rename = "nativeToolCalls")]
-    pub native_tool_calls: serde_json::Value,
-}
-
-impl From<traces::LlmIoCapture> for LlmIoView {
-    fn from(value: traces::LlmIoCapture) -> Self {
-        Self {
-            seq: value.seq,
-            model: value.model,
-            protocol: value.protocol,
-            retry_index: value.retry_index,
-            provider_latency_ms: value.provider_latency_ms,
-            finish_reason: value.finish_reason,
-            input_tokens: value.input_tokens,
-            output_tokens: value.output_tokens,
-            saw_reasoning: value.saw_reasoning,
-            at: value.at,
-            request: LlmIoRequestView {
-                system: value.request.system,
-                messages: value.request.messages,
-            },
-            response: LlmIoResponseView {
-                text: value.response.text,
-                reasoning_content: value.response.reasoning_content,
-                native_tool_calls: value.response.native_tool_calls,
-            },
-        }
-    }
-}
-
-/// One file-span snapshot (before/after content of one tool's write).
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileSpanView {
-    pub path: String,
-    #[serde(rename = "contentBefore")]
-    pub content_before: String,
-    /// `None` for create/delete of an empty/missing file.
-    #[serde(rename = "contentAfter")]
-    pub content_after: Option<String>,
-    #[serde(rename = "toolCallId")]
-    pub tool_call_id: String,
-    pub seq: u32,
-}
-
-impl From<traces::FileSpanCapture> for FileSpanView {
-    fn from(value: traces::FileSpanCapture) -> Self {
-        Self {
-            path: value.path,
-            content_before: value.content_before,
-            content_after: value.content_after,
-            tool_call_id: value.tool_call_id,
-            seq: value.seq,
-        }
-    }
-}
 
 /// One model inside a provider's configured model list.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Default, PartialEq, Debug)]
