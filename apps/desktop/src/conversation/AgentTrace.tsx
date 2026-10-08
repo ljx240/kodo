@@ -51,18 +51,26 @@ function failureLine(step: TraceStep): string | null {
  * a command its cwd/exit code/output, a file edit the paths and unified diffs,
  * a model its token counts. `detail` is the fallback for the rest. Internal
  * scheduling diagnostics are intentionally not here; they live in 运行详情.
+ *
+ * `onOpenLlmIo` / `onOpenSpan` let the parent page wire the trace-modal
+ * viewers that live outside the conversation; this component only knows the
+ * "查看本次 I/O / 查看 patch 前文件" affordances exist.
  */
 function Expanded({
   step,
   fileDiffs,
   subSteps,
   panelId,
+  onOpenLlmIo,
+  onOpenSpan,
 }: {
   step: TraceStep;
   fileDiffs?: Record<string, string> | null;
   subSteps?: TraceStep[];
   /** Target of the row button's aria-controls — every branch carries it. */
   panelId: string;
+  onOpenLlmIo?: ((ref: string) => void) | null;
+  onOpenSpan?: ((ref: string) => void) | null;
 }) {
   if (subSteps && subSteps.length > 0) {
     return (
@@ -125,6 +133,18 @@ function Expanded({
           ) : (
             <pre className="trace-output">{step.detail}</pre>
           )}
+          {step.fileSpanRef && onOpenSpan && (
+            <div className="trace-expand-actions">
+              <button
+                type="button"
+                className="link-btn"
+                data-testid="trace-open-span"
+                onClick={() => onOpenSpan(step.fileSpanRef!)}
+              >
+                {T.action.viewSource}
+              </button>
+            </div>
+          )}
         </div>
       );
     }
@@ -141,6 +161,18 @@ function Expanded({
           <pre className="trace-output">
             {`${step.model}\n输入 ${step.input_tokens} tokens · 输出 ${step.output_tokens} tokens`}
           </pre>
+          {step.llmIoRef && onOpenLlmIo && (
+            <div className="trace-expand-actions">
+              <button
+                type="button"
+                className="link-btn"
+                data-testid="trace-open-llm-io"
+                onClick={() => onOpenLlmIo(step.llmIoRef!)}
+              >
+                {T.action.viewIo}
+              </button>
+            </div>
+          )}
         </div>
       );
     default:
@@ -163,10 +195,14 @@ function TraceItem({
   row,
   fileDiffs,
   rowKey,
+  onOpenLlmIo,
+  onOpenSpan,
 }: {
   row: RowData;
   fileDiffs?: Record<string, string> | null;
   rowKey: string;
+  onOpenLlmIo?: ((ref: string) => void) | null;
+  onOpenSpan?: ((ref: string) => void) | null;
 }) {
   const { step, subSteps } = row;
   // `null` until the reader opens the row themselves. The default is a function
@@ -253,7 +289,16 @@ function TraceItem({
         </span>
       </button>
 
-      {shown && <Expanded step={step} fileDiffs={fileDiffs} subSteps={subSteps} panelId={panelId} />}
+      {shown && (
+        <Expanded
+          step={step}
+          fileDiffs={fileDiffs}
+          subSteps={subSteps}
+          panelId={panelId}
+          onOpenLlmIo={onOpenLlmIo ?? null}
+          onOpenSpan={onOpenSpan ?? null}
+        />
+      )}
     </li>
   );
 }
@@ -279,10 +324,14 @@ function PhaseBlock({
   group,
   fileDiffs,
   phaseIndex,
+  onOpenLlmIo,
+  onOpenSpan,
 }: {
   group: PhaseGroup;
   fileDiffs?: Record<string, string> | null;
   phaseIndex: number;
+  onOpenLlmIo?: ((ref: string) => void) | null;
+  onOpenSpan?: ((ref: string) => void) | null;
 }) {
   // Phases start open so the steps stay one glance away; the header line is
   // what collapses them. Step rows inside follow their own expand rules.
@@ -326,6 +375,8 @@ function PhaseBlock({
               row={row}
               fileDiffs={fileDiffs}
               rowKey={`${phaseIndex}-${index}`}
+              onOpenLlmIo={onOpenLlmIo ?? null}
+              onOpenSpan={onOpenSpan ?? null}
             />
           ))}
         </ol>
@@ -342,16 +393,29 @@ function PhaseBlock({
 export function AgentTrace({
   steps,
   fileDiffs = null,
+  onOpenLlmIo = null,
+  onOpenSpan = null,
 }: {
   steps: TraceStep[];
   /** Unified diffs keyed by project-relative path (`turn_changes`). */
   fileDiffs?: Record<string, string> | null;
+  /** Click handler for a model row's "查看本次 I/O" affordance. */
+  onOpenLlmIo?: ((ref: string) => void) | null;
+  /** Click handler for an edit row's "查看 patch 前文件" affordance. */
+  onOpenSpan?: ((ref: string) => void) | null;
 }) {
   const phases = groupPhases(steps);
   return (
     <div className="trace-groups" data-testid="trace-groups">
       {phases.map((group, index) => (
-        <PhaseBlock key={`${group.phase}-${index}`} group={group} fileDiffs={fileDiffs} phaseIndex={index} />
+        <PhaseBlock
+          key={`${group.phase}-${index}`}
+          group={group}
+          fileDiffs={fileDiffs}
+          phaseIndex={index}
+          onOpenLlmIo={onOpenLlmIo}
+          onOpenSpan={onOpenSpan}
+        />
       ))}
     </div>
   );

@@ -793,6 +793,8 @@ export function ConversationPage({
                         undoingChanges={undoingChanges}
                         preExisting={last ? turnMeta.preExisting : []}
                         conflicts={last ? turnMeta.conflicts : []}
+                        sessionId={liveSession ? conversationId : null}
+                        turnSeq={index}
                       />
                     </Fragment>
                   );

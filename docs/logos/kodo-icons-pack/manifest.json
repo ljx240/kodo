@@ -1,0 +1,10 @@
+{
+  "package": "kodo-icons-pack",
+  "files": [
+    "kodo-icon-primary-1024.png",
+    "kodo-code-icon-1024.png",
+    "kodo-work-icon-1024.png"
+  ],
+  "format": "png",
+  "size_hint": "1024x1024"
+}

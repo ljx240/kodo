@@ -1,9 +1,12 @@
 import { Check, CircleAlert, Copy, RefreshCw, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { loadFileSpan, loadLlmIo, type FileSpanDto, type LlmIoDto } from "../api";
 import type { DeliveryStatus, VerificationStatus } from "../api";
 import { T } from "../i18n";
 import { AgentTrace } from "./AgentTrace";
 import { ChangedFilesSummary } from "./ChangedFilesSummary";
+import { FileSpanModal } from "./FileSpanModal";
+import { LlmIoViewer } from "./LlmIoViewer";
 import { Markdown } from "./Markdown";
 import { sanitizeAssistantText, type FailureGroup, type Reply } from "./trace";
 
@@ -38,6 +41,11 @@ type Props = {
   preExisting?: string[];
   /** Paths whose working tree diverged from Kodo's after-hash. */
   conflicts?: string[];
+  /** Session id + current turn index so the trace-modal viewers can call the
+   *  trace commands. Omitted on demo / pre-capture turns — AgentTrace then
+   *  hides its "查看 I/O / patch 前文件" affordances. */
+  sessionId?: string | null;
+  turnSeq?: number | null;
 };
 
 /**
@@ -64,11 +72,53 @@ export function AssistantReply({
   undoingChanges = false,
   preExisting = [],
   conflicts = [],
+  sessionId = null,
+  turnSeq = null,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const [answerExpanded, setAnswerExpanded] = useState(false);
   const [ignoredVerification, setIgnoredVerification] = useState(false);
+  const [openLlmIoRef, setOpenLlmIoRef] = useState<string | null>(null);
+  const [llmIo, setLlmIo] = useState<LlmIoDto | null>(null);
+  const [llmIoLoading, setLlmIoLoading] = useState(false);
+  const [openSpanRef, setOpenSpanRef] = useState<string | null>(null);
+  const [span, setSpan] = useState<FileSpanDto | null>(null);
+  const [spanLoading, setSpanLoading] = useState(false);
   const copyTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!openLlmIoRef || !sessionId || turnSeq === null) {
+      setLlmIo(null);
+      return;
+    }
+    let alive = true;
+    setLlmIoLoading(true);
+    void loadLlmIo(sessionId, turnSeq, openLlmIoRef).then((data) => {
+      if (!alive) return;
+      setLlmIo(data);
+      setLlmIoLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [openLlmIoRef, sessionId, turnSeq]);
+
+  useEffect(() => {
+    if (!openSpanRef || !sessionId || turnSeq === null) {
+      setSpan(null);
+      return;
+    }
+    let alive = true;
+    setSpanLoading(true);
+    void loadFileSpan(sessionId, turnSeq, openSpanRef).then((data) => {
+      if (!alive) return;
+      setSpan(data);
+      setSpanLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [openSpanRef, sessionId, turnSeq]);
 
   useEffect(() => {
     return () => {
@@ -194,7 +244,20 @@ export function AssistantReply({
         </p>
       )}
 
-      <AgentTrace steps={reply.steps} fileDiffs={fileDiffs} />
+      <AgentTrace
+        steps={reply.steps}
+        fileDiffs={fileDiffs}
+        onOpenLlmIo={
+          sessionId && turnSeq !== null
+            ? (ref) => setOpenLlmIoRef(ref)
+            : null
+        }
+        onOpenSpan={
+          sessionId && turnSeq !== null
+            ? (ref) => setOpenSpanRef(ref)
+            : null
+        }
+      />
 
       {showFinal && (
         <div className="final">
@@ -290,7 +353,75 @@ export function AssistantReply({
           </span>
         </div>
       )}
+
+      {openLlmIoRef && (
+        <LlmIoModal
+          capture={llmIo}
+          loading={llmIoLoading}
+          onClose={() => setOpenLlmIoRef(null)}
+        />
+      )}
+
+      {openSpanRef && (
+        <FileSpanModal
+          span={span}
+          loading={spanLoading}
+          onClose={() => setOpenSpanRef(null)}
+        />
+      )}
     </article>
+  );
+}
+
+/**
+ * Inline modal wrapper around [`LlmIoViewer`] — the viewer is built for the
+ * trace page's two-column layout, so on the conversation we frame it in the
+ * modal chrome from the rest of the transparency UI.
+ */
+function LlmIoModal({
+  capture,
+  loading,
+  onClose,
+}: {
+  capture: LlmIoDto | null;
+  loading: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="modal modal--wide" role="dialog" aria-modal="true" aria-label={T.page.llmIo.title}>
+        <header className="modal-head">
+          <h3 className="modal-title">{T.page.llmIo.title}</h3>
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label={T.action.close}
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </header>
+        <div className="modal-body modal-body--scroll">
+          {loading || !capture ? (
+            <p className="empty-note">{T.page.loadingTrace}</p>
+          ) : (
+            <LlmIoViewer
+              artifacts={[{ kind: "llm_io", seq: capture.seq, label: `llm_io/${String(capture.seq).padStart(3, "0")}.json`, sizeBytes: 0, at: capture.at }]}
+              activeIndex={0}
+              onSelect={() => undefined}
+              capture={capture}
+              loading={false}
+            />
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

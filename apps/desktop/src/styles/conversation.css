@@ -1613,3 +1613,28 @@
 .menu-item--selected {
   background: var(--kodo-selected);
 }
+
+/* ---------------------------------------------------------------------------
+   Trace affordance row (Phase F — transparency)
+   --------------------------------------------------------------------------- */
+
+.trace-expand-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.link-btn:hover {
+  color: var(--kodo-accent-strong, var(--kodo-accent));
+}

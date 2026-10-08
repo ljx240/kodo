@@ -58,6 +58,10 @@ export type TraceStep = {
   diagnostics?: string | null;
   /** Stable id for expand/collapse + aria wiring. */
   stepId?: number;
+  /** LLM I/O capture ref for `model` steps; surfaces the "查看本次 I/O" button. */
+  llmIoRef?: string | null;
+  /** File-span ref for `edit` steps; opens the before/after modal. */
+  fileSpanRef?: string | null;
 };
 
 export type ChangedFile = {

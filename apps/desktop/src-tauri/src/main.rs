@@ -534,6 +534,52 @@ fn undo_turn(project: String, id: String) -> Result<view::UndoReportView, String
     })
 }
 
+/// Enumerate every trace artifact (`llm_io/*.json`, `spans/*.json`) for one
+/// turn. Empty when the turn predates the capture layer.
+#[tauri::command]
+fn list_artifacts(
+    session_id: String,
+    turn_seq: u32,
+) -> Result<Vec<view::ArtifactRefView>, String> {
+    kodo_core::traces::list_artifacts(&session_id, turn_seq)
+        .map(|items| items.into_iter().map(view::ArtifactRefView::from).collect())
+        .map_err(|error| error.to_string())
+}
+
+/// Cheap probe — true when the turn directory exists with at least one
+/// artifact subdir. Lets the GUI hide the trace tabs without listing every
+/// file.
+#[tauri::command]
+fn turn_has_artifacts(session_id: String, turn_seq: u32) -> bool {
+    kodo_core::traces::turn_has_artifacts(&session_id, turn_seq)
+}
+
+/// Load one captured LLM call. `ref_path` is the `label` from
+/// [`list_artifacts`] (`llm_io/003.json`).
+#[tauri::command]
+fn load_llm_io(
+    session_id: String,
+    turn_seq: u32,
+    ref_path: String,
+) -> Result<view::LlmIoView, String> {
+    kodo_core::traces::read_llm_io(&session_id, turn_seq, &ref_path)
+        .map(view::LlmIoView::from)
+        .map_err(|error| error.to_string())
+}
+
+/// Load the before/after snapshot for one file write. `ref_path` is the
+/// `label` from [`list_artifacts`] (`spans/002-file-…json`).
+#[tauri::command]
+fn load_file_span(
+    session_id: String,
+    turn_seq: u32,
+    ref_path: String,
+) -> Result<view::FileSpanView, String> {
+    kodo_core::traces::read_file_span(&session_id, turn_seq, &ref_path)
+        .map(view::FileSpanView::from)
+        .map_err(|error| error.to_string())
+}
+
 fn log() -> Result<PathBuf, String> {
     workspace::log_path()
         .ok_or_else(|| "HOME is not set, so there is nowhere to keep the project list".to_owned())
@@ -600,6 +646,10 @@ fn main() {
             read_context_file,
             turn_changes,
             undo_turn,
+            list_artifacts,
+            turn_has_artifacts,
+            load_llm_io,
+            load_file_span,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Kodo");

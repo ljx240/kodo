@@ -340,6 +340,121 @@ pub struct UndoConflictView {
     pub message: String,
 }
 
+/// One persisted artifact under `traces/<session>/<turn>/`. Mirrors
+/// `kodo_core::traces::ArtifactRef` but keeps the field names the GUI agreed to.
+#[derive(serde::Serialize, Clone)]
+pub struct ArtifactRefView {
+    /// `llm_io` | `file_span`.
+    pub kind: &'static str,
+    /// Sequential number within `kind`.
+    pub seq: u32,
+    /// Path relative to the turn dir — used as the third arg when loading.
+    #[serde(rename = "label")]
+    pub label: String,
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes: u64,
+    /// Seconds since the Unix epoch.
+    pub at: u64,
+}
+
+impl From<kodo_core::traces::ArtifactRef> for ArtifactRefView {
+    fn from(reference: kodo_core::traces::ArtifactRef) -> Self {
+        ArtifactRefView {
+            kind: reference.kind,
+            seq: reference.seq,
+            label: reference.label,
+            size_bytes: reference.size_bytes,
+            at: reference.at,
+        }
+    }
+}
+
+/// One captured LLM call. The request/response bodies are passed through as
+/// opaque JSON values so the viewer renders them verbatim — Kodo never has
+/// to know the provider's exact shape.
+#[derive(serde::Serialize, Clone)]
+pub struct LlmIoView {
+    pub seq: u32,
+    pub at: u64,
+    pub model: String,
+    pub protocol: String,
+    #[serde(rename = "finishReason")]
+    pub finish_reason: String,
+    #[serde(rename = "providerLatencyMs")]
+    pub provider_latency_ms: u64,
+    #[serde(rename = "inputTokens")]
+    pub input_tokens: u32,
+    #[serde(rename = "outputTokens")]
+    pub output_tokens: u32,
+    pub request: LlmIoRequestView,
+    pub response: LlmIoResponseView,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct LlmIoRequestView {
+    pub system: String,
+    /// Opaque provider-shaped message array.
+    pub messages: serde_json::Value,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct LlmIoResponseView {
+    pub text: String,
+    #[serde(rename = "reasoningContent")]
+    pub reasoning_content: String,
+    #[serde(rename = "nativeToolCalls")]
+    pub native_tool_calls: serde_json::Value,
+}
+
+impl From<kodo_core::traces::LlmIoCapture> for LlmIoView {
+    fn from(capture: kodo_core::traces::LlmIoCapture) -> Self {
+        LlmIoView {
+            seq: capture.seq,
+            at: capture.at,
+            model: capture.model,
+            protocol: capture.protocol,
+            finish_reason: capture.finish_reason,
+            provider_latency_ms: capture.provider_latency_ms,
+            input_tokens: capture.input_tokens,
+            output_tokens: capture.output_tokens,
+            request: LlmIoRequestView {
+                system: capture.request.system,
+                messages: capture.request.messages,
+            },
+            response: LlmIoResponseView {
+                text: capture.response.text,
+                reasoning_content: capture.response.reasoning_content,
+                native_tool_calls: capture.response.native_tool_calls,
+            },
+        }
+    }
+}
+
+/// Before/after snapshot for one captured file write.
+#[derive(serde::Serialize, Clone)]
+pub struct FileSpanView {
+    pub path: String,
+    #[serde(rename = "contentBefore")]
+    pub content_before: String,
+    #[serde(rename = "contentAfter")]
+    pub content_after: Option<String>,
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: String,
+    pub at: u64,
+}
+
+impl From<kodo_core::traces::FileSpanCapture> for FileSpanView {
+    fn from(capture: kodo_core::traces::FileSpanCapture) -> Self {
+        FileSpanView {
+            path: capture.path,
+            content_before: capture.content_before,
+            content_after: capture.content_after,
+            tool_call_id: capture.tool_call_id,
+            at: capture.seq as u64,
+        }
+    }
+}
+
 impl From<session::Item> for ItemView {
     fn from(item: session::Item) -> Self {
         let detail = match item.kind {
