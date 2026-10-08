@@ -1,40 +1,15 @@
-import { Check, ChevronRight, Minus, Square, X } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { splitDetail, type TraceStep } from "../data/types";
 import { T, failureCopy } from "../i18n";
-import { groupPhases, type PhaseGroup } from "./trace";
+import { DiffRows } from "./diff";
+import { formatDuration, groupPhases, stripAnsi, type PhaseGroup } from "./trace";
 
-function StatusMark({ status }: { status: TraceStep["status"] }) {
-  if (status === "done") {
-    return (
-      <span className="trace-mark trace-mark--done">
-        <Check size={11} strokeWidth={3} />
-      </span>
-    );
-  }
-  if (status === "failed") {
-    return (
-      <span className="trace-mark trace-mark--failed">
-        <X size={11} strokeWidth={3} />
-      </span>
-    );
-  }
-  if (status === "interrupted") {
-    return (
-      <span className="trace-mark trace-mark--interrupted">
-        <Minus size={11} strokeWidth={3} />
-      </span>
-    );
-  }
-  if (status === "stopped") {
-    return (
-      <span className="trace-mark trace-mark--stopped">
-        <Square size={8} strokeWidth={2.5} />
-      </span>
-    );
-  }
-  return <span className="trace-mark trace-mark--running" />;
-}
+/**
+ * Quiet status, in words: the row class carries the state for tests/CSS, the
+ * duration column reports it in text (进行中 / 已中断 / 已停止), and failures
+ * spell out the cause. No status icons — they shouted louder than the content.
+ */
 
 /** A run step's failure, in words — never color alone. */
 function failureLine(step: TraceStep): string | null {
@@ -51,26 +26,22 @@ function failureLine(step: TraceStep): string | null {
  * a command its cwd/exit code/output, a file edit the paths and unified diffs,
  * a model its token counts. `detail` is the fallback for the rest. Internal
  * scheduling diagnostics are intentionally not here; they live in 运行详情.
- *
- * `onOpenLlmIo` / `onOpenSpan` let the parent page wire the trace-modal
- * viewers that live outside the conversation; this component only knows the
- * "查看本次 I/O / 查看 patch 前文件" affordances exist.
  */
 function Expanded({
   step,
   fileDiffs,
   subSteps,
   panelId,
-  onOpenLlmIo,
-  onOpenSpan,
+  onOpenFile = null,
 }: {
   step: TraceStep;
   fileDiffs?: Record<string, string> | null;
   subSteps?: TraceStep[];
   /** Target of the row button's aria-controls — every branch carries it. */
   panelId: string;
-  onOpenLlmIo?: ((ref: string) => void) | null;
-  onOpenSpan?: ((ref: string) => void) | null;
+  /** Open an edited path in the sidebar file panel. The chip sits in the
+   *  expanded panel (a sibling of the row button), so it may nest safely. */
+  onOpenFile?: ((path: string) => void) | null;
 }) {
   if (subSteps && subSteps.length > 0) {
     return (
@@ -78,7 +49,7 @@ function Expanded({
         <ul className="trace-thinking-list" data-testid="trace-thinking-list">
           {subSteps.map((sub, index) => (
             <li key={index} className="trace-thinking-item">
-              {sub.detail}
+              {stripAnsi(sub.detail)}
             </li>
           ))}
         </ul>
@@ -89,11 +60,7 @@ function Expanded({
     case "run": {
       const meta = [
         step.cwd ? `cwd ${step.cwd}` : null,
-        step.exitCode === undefined || step.exitCode === null
-          ? step.status === "running"
-            ? "exit —"
-            : null
-          : T.reply.exitCode(step.exitCode),
+        step.exitCode === undefined || step.exitCode === null ? null : T.reply.exitCode(step.exitCode),
       ]
         .filter(Boolean)
         .join(" · ");
@@ -105,7 +72,11 @@ function Expanded({
             </div>
           )}
           <pre className="trace-output" data-testid="trace-run-output">
-            {step.output ?? (step.status === "running" ? T.reply.inProgress : "尚无输出")}
+            {step.output != null
+              ? stripAnsi(step.output)
+              : step.status === "running"
+                ? T.reply.inProgress
+                : "尚无输出"}
           </pre>
         </div>
       );
@@ -120,11 +91,24 @@ function Expanded({
                 const diff = fileDiffs?.[path];
                 return (
                   <li key={path}>
-                    <code className="code-chip">{path}</code>
+                    {onOpenFile ? (
+                      <button
+                        type="button"
+                        className="code-chip code-chip--link"
+                        data-testid="trace-file-chip"
+                        onClick={() => onOpenFile(path)}
+                      >
+                        {path}
+                      </button>
+                    ) : (
+                      <code className="code-chip">{path}</code>
+                    )}
                     {diff ? (
-                      <pre className="trace-output trace-diff" data-testid={`trace-diff-${path}`}>
-                        {diff}
-                      </pre>
+                      <DiffRows
+                        diff={diff}
+                        className="trace-output trace-diff"
+                        testid={`trace-diff-${path}`}
+                      />
                     ) : null}
                   </li>
                 );
@@ -132,18 +116,6 @@ function Expanded({
             </ul>
           ) : (
             <pre className="trace-output">{step.detail}</pre>
-          )}
-          {step.fileSpanRef && onOpenSpan && (
-            <div className="trace-expand-actions">
-              <button
-                type="button"
-                className="link-btn"
-                data-testid="trace-open-span"
-                onClick={() => onOpenSpan(step.fileSpanRef!)}
-              >
-                {T.action.viewSource}
-              </button>
-            </div>
           )}
         </div>
       );
@@ -161,18 +133,6 @@ function Expanded({
           <pre className="trace-output">
             {`${step.model}\n输入 ${step.input_tokens} tokens · 输出 ${step.output_tokens} tokens`}
           </pre>
-          {step.llmIoRef && onOpenLlmIo && (
-            <div className="trace-expand-actions">
-              <button
-                type="button"
-                className="link-btn"
-                data-testid="trace-open-llm-io"
-                onClick={() => onOpenLlmIo(step.llmIoRef!)}
-              >
-                {T.action.viewIo}
-              </button>
-            </div>
-          )}
         </div>
       );
     default:
@@ -189,20 +149,20 @@ type RowData = {
   step: TraceStep;
   /** Consecutive thinking steps folded into one row. */
   subSteps?: TraceStep[];
+  /** Consecutive same-type steps folded under one group row (2+). */
+  group?: TraceStep[];
 };
 
 function TraceItem({
   row,
   fileDiffs,
   rowKey,
-  onOpenLlmIo,
-  onOpenSpan,
+  onOpenFile = null,
 }: {
   row: RowData;
   fileDiffs?: Record<string, string> | null;
   rowKey: string;
-  onOpenLlmIo?: ((ref: string) => void) | null;
-  onOpenSpan?: ((ref: string) => void) | null;
+  onOpenFile?: ((path: string) => void) | null;
 }) {
   const { step, subSteps } = row;
   // `null` until the reader opens the row themselves. The default is a function
@@ -223,8 +183,20 @@ function TraceItem({
 
   const toggle = () => setToggled(!shown);
 
+  // Duration when measured; otherwise the live status in words. Unmeasured and
+  // unremarkable reads empty — never a bare `—` placeholder.
   const durationText =
-    step.status === "running" ? T.reply.inProgress : step.duration || T.reply.unknownDuration;
+    step.status === "running"
+      ? T.reply.inProgress
+      : step.duration
+        ? step.duration
+        : step.status === "interrupted"
+          ? T.outcome.interrupted
+          : step.status === "stopped"
+            ? T.outcome.stopped
+            : step.status === "failed"
+              ? T.outcome.failed
+              : "";
 
   const isRun = step.type === "run";
   const affordance = isRun
@@ -249,9 +221,8 @@ function TraceItem({
           <ChevronRight size={14} strokeWidth={1.9} className={shown ? "rot-90" : undefined} />
         </span>
 
-        <span className="trace-line">
-          <StatusMark status={step.status} />
 
+        <span className="trace-line">
           <span className="trace-label">{step.label}</span>
 
           <span className="trace-body">
@@ -271,7 +242,7 @@ function TraceItem({
             )}
 
             {isRun && step.exitCode != null && step.exitCode !== 0 && (
-              <code className="code-chip code-chip--fail" data-testid="trace-exit-code">
+              <code className="code-chip" data-testid="trace-exit-code">
                 {T.reply.exitCode(step.exitCode)}
               </code>
             )}
@@ -295,24 +266,40 @@ function TraceItem({
           fileDiffs={fileDiffs}
           subSteps={subSteps}
           panelId={panelId}
-          onOpenLlmIo={onOpenLlmIo ?? null}
-          onOpenSpan={onOpenSpan ?? null}
+          onOpenFile={onOpenFile}
         />
       )}
     </li>
   );
 }
 
-function foldThinking(steps: TraceStep[]): RowData[] {
+/**
+ * Rows a phase renders. Consecutive thinking steps fold into one row with a
+ * sub-step list; two or more other consecutive same-type steps fold under one
+ * group row whose second level is each individual step (expand again for its
+ * detail). Notes stay loose so interim prose keeps its place; a lone step
+ * stays a plain row.
+ */
+function foldRows(steps: TraceStep[]): RowData[] {
   const rows: RowData[] = [];
   for (const step of steps) {
     const last = rows[rows.length - 1];
-    if (step.type === "thinking" && last?.subSteps) {
-      last.subSteps.push(step);
+    if (step.type === "thinking") {
+      if (last?.subSteps) {
+        last.subSteps.push(step);
+        continue;
+      }
+      rows.push({ step, subSteps: [step] });
       continue;
     }
-    if (step.type === "thinking") {
-      rows.push({ step, subSteps: [step] });
+    // Notes are prose, not actions — never folded.
+    if (step.type === "note") {
+      rows.push({ step });
+      continue;
+    }
+    if (last && !last.subSteps && last.step.type === step.type) {
+      if (last.group) last.group.push(step);
+      else last.group = [last.step, step];
       continue;
     }
     rows.push({ step });
@@ -320,18 +307,88 @@ function foldThinking(steps: TraceStep[]): RowData[] {
   return rows;
 }
 
+/**
+ * Two or more consecutive steps of one type, as one quiet row (`调用模型 ·
+ * 3 次 · 28.1s`). Expanding shows each call on the second level; each of those
+ * opens its own detail. A cluster that is running or holds a failure opens
+ * itself — a problem is never hidden behind the fold.
+ */
+function TypeGroup({
+  steps,
+  fileDiffs,
+  rowKey,
+  onOpenFile = null,
+}: {
+  steps: TraceStep[];
+  fileDiffs?: Record<string, string> | null;
+  rowKey: string;
+  onOpenFile?: ((path: string) => void) | null;
+}) {
+  const [open, setOpen] = useState<boolean | null>(null);
+  const autoOpen = steps.some(
+    (step) => step.status === "running" || step.status === "failed" || Boolean(step.denied),
+  );
+  const shown = open ?? autoOpen;
+  const panelId = `trace-group-${rowKey}`;
+  const anyRunning = steps.some((step) => step.status === "running");
+  const measured = steps.some((step) => typeof step.durationMs === "number" && step.durationMs > 0);
+  const sum = steps.reduce(
+    (total, step) => total + (typeof step.durationMs === "number" && step.durationMs > 0 ? step.durationMs : 0),
+    0,
+  );
+  const durationText = anyRunning ? T.reply.inProgress : measured ? formatDuration(sum) || "" : "";
+
+  return (
+    <li className="trace-row trace-row--group">
+      <button
+        type="button"
+        className="trace-row-inner"
+        aria-expanded={shown}
+        aria-controls={panelId}
+        onClick={() => setOpen(!shown)}
+      >
+        <span className="trace-toggle">
+          <ChevronRight size={14} strokeWidth={1.9} className={shown ? "rot-90" : undefined} />
+        </span>
+
+        <span className="trace-line">
+          <span className="trace-label">{steps[0].label}</span>
+          <span className="trace-body">
+            <code className="code-chip" data-testid="trace-group-count">
+              {T.reply.groupCount(steps.length)}
+            </code>
+          </span>
+          <span className="trace-duration">{durationText}</span>
+        </span>
+      </button>
+
+      {shown && (
+        <ol className="trace trace--nested" id={panelId} data-testid="trace-group-children">
+          {steps.map((step, index) => (
+            <TraceItem
+              key={`${step.type}-${step.stepId ?? index}`}
+              row={{ step }}
+              fileDiffs={fileDiffs}
+              rowKey={`${rowKey}-${index}`}
+              onOpenFile={onOpenFile}
+            />
+          ))}
+        </ol>
+      )}
+    </li>
+  );
+}
+
 function PhaseBlock({
   group,
   fileDiffs,
   phaseIndex,
-  onOpenLlmIo,
-  onOpenSpan,
+  onOpenFile = null,
 }: {
   group: PhaseGroup;
   fileDiffs?: Record<string, string> | null;
   phaseIndex: number;
-  onOpenLlmIo?: ((ref: string) => void) | null;
-  onOpenSpan?: ((ref: string) => void) | null;
+  onOpenFile?: ((path: string) => void) | null;
 }) {
   // Phases start open so the steps stay one glance away; the header line is
   // what collapses them. Step rows inside follow their own expand rules.
@@ -352,7 +409,7 @@ function PhaseBlock({
         : T.verification.failed
       : group.durationLabel;
   const meta = [T.reply.stepsCount(group.count), statusWord].filter(Boolean).join(" · ");
-  const rows = foldThinking(group.steps);
+  const rows = foldRows(group.steps);
 
   return (
     <section className="trace-phase" data-testid={`trace-phase-${group.phase}`}>
@@ -369,16 +426,33 @@ function PhaseBlock({
       </button>
       {shown && (
         <ol className="trace" id={panelId}>
-          {rows.map((row, index) => (
-            <TraceItem
-              key={`${row.step.type}-${row.step.chip ?? "n"}-${index}`}
-              row={row}
-              fileDiffs={fileDiffs}
-              rowKey={`${phaseIndex}-${index}`}
-              onOpenLlmIo={onOpenLlmIo ?? null}
-              onOpenSpan={onOpenSpan ?? null}
-            />
-          ))}
+          {rows.map((row, index) =>
+            row.step.type === "note" ? (
+              <li
+                key={`note-${row.step.stepId ?? index}`}
+                className="trace-row trace-row--note"
+                data-testid="trace-note"
+              >
+                <p className="trace-note">{stripAnsi(row.step.detail)}</p>
+              </li>
+            ) : row.group ? (
+              <TypeGroup
+                key={`group-${row.group[0].type}-${index}`}
+                steps={row.group}
+                fileDiffs={fileDiffs}
+                rowKey={`${phaseIndex}-${index}`}
+                onOpenFile={onOpenFile}
+              />
+            ) : (
+              <TraceItem
+                key={`${row.step.type}-${row.step.chip ?? "n"}-${index}`}
+                row={row}
+                fileDiffs={fileDiffs}
+                rowKey={`${phaseIndex}-${index}`}
+                onOpenFile={onOpenFile}
+              />
+            ),
+          )}
         </ol>
       )}
     </section>
@@ -393,16 +467,13 @@ function PhaseBlock({
 export function AgentTrace({
   steps,
   fileDiffs = null,
-  onOpenLlmIo = null,
-  onOpenSpan = null,
+  onOpenFile = null,
 }: {
   steps: TraceStep[];
   /** Unified diffs keyed by project-relative path (`turn_changes`). */
   fileDiffs?: Record<string, string> | null;
-  /** Click handler for a model row's "查看本次 I/O" affordance. */
-  onOpenLlmIo?: ((ref: string) => void) | null;
-  /** Click handler for an edit row's "查看 patch 前文件" affordance. */
-  onOpenSpan?: ((ref: string) => void) | null;
+  /** Open an edited path in the sidebar file panel. */
+  onOpenFile?: ((path: string) => void) | null;
 }) {
   const phases = groupPhases(steps);
   return (
@@ -413,8 +484,7 @@ export function AgentTrace({
           group={group}
           fileDiffs={fileDiffs}
           phaseIndex={index}
-          onOpenLlmIo={onOpenLlmIo}
-          onOpenSpan={onOpenSpan}
+          onOpenFile={onOpenFile}
         />
       ))}
     </div>

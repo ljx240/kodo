@@ -1,26 +1,36 @@
 import {
+  ArrowLeft,
   BarChart3,
-  Brain,
   Check,
   CheckCircle2,
   Circle,
-  FileText,
   Folder,
   Pencil,
   Play,
   Search,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useState } from "react";
-import { listArtifacts, loadSession, type ArtifactRefDto, type SessionDto } from "../api";
-import { FileSpanModal } from "../conversation/FileSpanModal";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  listArtifacts,
+  loadFileSpan,
+  loadLlmIo,
+  loadSession,
+  type ArtifactRefDto,
+  type FileSpanDto,
+  type LlmIoDto,
+  type SessionDto,
+} from "../api";
 import { LlmIoViewer } from "../conversation/LlmIoViewer";
+import { ThinkingView } from "../conversation/ThinkingView";
+import { FileSpanModal } from "../conversation/FileSpanModal";
 import { formatDuration, formatTokens, mergeChanges, totals } from "../conversation/trace";
 import { type DemoState, type DemoState as Demo } from "../data/demoState";
 import type { ChangedFile } from "../data/types";
 import { ReplyMeta } from "../inspector/TraceInspector";
 import { FileRow } from "../inspector/Section";
 import { T, toolAlias } from "../i18n";
+import { navigate } from "../routes";
 
 const TABS = [
   { id: "timeline", label: T.page.traceTabs.timeline },
@@ -155,6 +165,32 @@ function liveTimeline(session: SessionDto): {
   };
 }
 
+/**
+ * The page's only chrome: a back control into the conversation, plus the
+ * response path. Returning is one click (or one conversation click in the
+ * sidebar) — never a dead end.
+ */
+function TraceTopBar({ demoMode, children }: { demoMode: boolean; children?: ReactNode }) {
+  return (
+    <header className="topbar topbar--plain">
+      <div className="topbar-left">
+        <button
+          type="button"
+          className="icon-btn icon-btn--sm"
+          aria-label={T.action.backToConversation}
+          title={T.action.backToConversation}
+          data-testid="trace-back"
+          onClick={() => navigate(demoMode ? "/ui-demo/conversation" : "/conversation")}
+        >
+          <ArrowLeft size={15} strokeWidth={1.8} />
+        </button>
+        {children}
+      </div>
+      <span className="spacer" />
+    </header>
+  );
+}
+
 export function TracePage({
   demo,
   conversationId,
@@ -168,12 +204,9 @@ export function TracePage({
   const demoMode = Boolean(demo);
   const [tab, setTab] = useState<Tab>("timeline");
   const [session, setSession] = useState<SessionDto | null>(live ?? null);
-  const [artifacts, setArtifacts] = useState<ArtifactRefDto[] | null>(null);
-  const [selectedArtifact, setSelectedArtifact] = useState<{
-    kind: ArtifactRefDto["kind"];
-    seq: number;
-    label: string;
-  } | null>(null);
+  const [openSpanRef, setOpenSpanRef] = useState<ArtifactRefDto | null>(null);
+  const [openSpan, setOpenSpan] = useState<FileSpanDto | null>(null);
+  const [openSpanLoading, setOpenSpanLoading] = useState<boolean>(false);
 
   useEffect(() => {
     if (demoMode) {
@@ -197,24 +230,28 @@ export function TracePage({
     };
   }, [demoMode, conversationId, live]);
 
-  // Load artifacts for the latest turn whenever the session id changes.
-  const lastTurnSeq = session ? session.turns.length - 1 : null;
   useEffect(() => {
-    setArtifacts(null);
-    setSelectedArtifact(null);
-    if (!session || lastTurnSeq === null || lastTurnSeq < 0) return;
+    if (!openSpanRef || demoMode || !session) {
+      setOpenSpan(null);
+      return;
+    }
+    const turnSeq = session.turns.length - 1;
+    setOpenSpanLoading(true);
     let alive = true;
-    void listArtifacts(session.id, lastTurnSeq).then((list) => {
-      if (alive) setArtifacts(list ?? []);
+    void loadFileSpan(session.id, turnSeq, openSpanRef.label).then((data) => {
+      if (!alive) return;
+      setOpenSpan(data);
+      setOpenSpanLoading(false);
     });
     return () => {
       alive = false;
     };
-  }, [session?.id, lastTurnSeq]);
+  }, [openSpanRef, demoMode, session]);
 
   if (!demoMode && !conversationId) {
     return (
       <main className="main">
+        <TraceTopBar demoMode={demoMode} />
         <div className="scroll">
           <p className="empty-note">{T.page.selectConversation}</p>
         </div>
@@ -225,6 +262,7 @@ export function TracePage({
   if (!demoMode && !session) {
     return (
       <main className="main">
+        <TraceTopBar demoMode={demoMode} />
         <div className="scroll">
           <p className="empty-note">{T.page.loadingTrace}</p>
         </div>
@@ -235,7 +273,8 @@ export function TracePage({
   const data = demoMode && demo
     ? {
         rows: demo.timeline,
-        final: demo.conversation.assistant.final,
+        // The demo Response Trace records turn 1's run (pairs with demo.timeline).
+        final: demo.conversation.turns[0].assistant.final,
         checks: [] as string[],
         files: demo.changedFiles,
         done: true,
@@ -256,6 +295,7 @@ export function TracePage({
   if (!demoMode && data.rows.length === 0) {
     return (
       <main className="main">
+        <TraceTopBar demoMode={demoMode} />
         <div className="scroll">
           <p className="empty-note">{T.page.emptyTrace}</p>
         </div>
@@ -279,7 +319,7 @@ export function TracePage({
 
   return (
     <main className="main">
-      <header className="topbar topbar--plain">
+      <TraceTopBar demoMode={demoMode}>
         <nav className="crumbs">
           <Folder size={14} strokeWidth={1.7} />
           <span>{data.crumbProject}</span>
@@ -288,8 +328,7 @@ export function TracePage({
           <span className="crumb-sep">/</span>
           <span className="crumb-current">{T.page.responseTrace}</span>
         </nav>
-        <span className="spacer" />
-      </header>
+      </TraceTopBar>
 
       <div className="scroll">
         <div className="page-inner page-inner--wide">
@@ -368,19 +407,27 @@ export function TracePage({
 
           {tab === "llmIo" && (
             <LlmIoTab
-              session={session}
-              artifacts={artifacts ?? []}
-              onSelect={setSelectedArtifact}
+              demoMode={demoMode}
+              sessionId={demoMode ? null : session!.id}
+              turnSeq={demoMode ? null : session!.turns.length - 1}
             />
           )}
 
-          {tab === "thinking" && <ThinkingTab rows={data.rows} />}
+          {tab === "thinking" && (
+            <ThinkingView
+              demoMode={demoMode}
+              rows={data.rows}
+            />
+          )}
 
           {tab === "spans" && (
             <SpansTab
-              session={session}
-              artifacts={(artifacts ?? []).filter((a) => a.kind === "file_span")}
-              onSelect={setSelectedArtifact}
+              demoMode={demoMode}
+              sessionId={demoMode ? null : session!.id}
+              turnSeq={demoMode ? null : session!.turns.length - 1}
+              onOpenSpan={(ref) => {
+                if (!demoMode) setOpenSpanRef(ref);
+              }}
             />
           )}
 
@@ -435,233 +482,154 @@ export function TracePage({
         </div>
       </div>
 
-      {selectedArtifact && session && lastTurnSeq !== null && lastTurnSeq >= 0 && (
-        <TraceArtifactModal
-          session={session}
-          turnSeq={lastTurnSeq}
-          artifact={selectedArtifact}
-          onClose={() => setSelectedArtifact(null)}
+      {openSpanRef && (
+        <FileSpanModal
+          span={openSpan}
+          loading={openSpanLoading}
+          onClose={() => {
+            setOpenSpanRef(null);
+            setOpenSpan(null);
+          }}
         />
       )}
     </main>
   );
 }
 
-/** Three tab bodies for the transparency layer. The LLM I/O tab loads its
- *  capture on demand; the spans tab opens the file-span modal directly. */
+// ---------------------------------------------------------------------------
+// Tab bodies (Phase E — transparency surface)
+//
+// Each tab is a small self-contained component so the page stays focused on
+// layout. They all share the same lifecycle: while the user is on the tab
+// they lazy-load the matching artifact list once.
+// ---------------------------------------------------------------------------
+
 function LlmIoTab({
-  session,
-  artifacts,
-  onSelect,
-}: {
-  session: SessionDto | null;
-  artifacts: ArtifactRefDto[];
-  onSelect: (a: { kind: ArtifactRefDto["kind"]; seq: number; label: string }) => void;
-}) {
-  const llmArtifacts = artifacts.filter((a) => a.kind === "llm_io");
-  if (!session) {
-    return <p className="empty-note">{T.page.llmIo.empty}</p>;
-  }
-  if (llmArtifacts.length === 0) {
-    return <p className="empty-note">{T.page.llmIo.empty}</p>;
-  }
-  return (
-    <div className="llm-io">
-      {llmArtifacts.map((artifact) => (
-        <div
-          className="artifact-row"
-          key={artifact.label}
-          data-testid={`llm-io-row-${artifact.seq}`}
-          onClick={() => onSelect(artifact)}
-        >
-          <span className="artifact-kind">
-            <Sparkles size={11} strokeWidth={1.7} />
-          </span>
-          <span className="artifact-label">{artifact.label}</span>
-          <span className="artifact-size">{(artifact.sizeBytes / 1024).toFixed(1)} KB</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ThinkingTab({ rows }: { rows: TimelineRow[] }) {
-  const thoughts = rows.filter((row) => row.type === "Thinking");
-  if (thoughts.length === 0) {
-    return <p className="empty-note">{T.page.thinkingView.empty}</p>;
-  }
-  return (
-    <ol className="thinking-list" data-testid="thinking-list">
-      {thoughts.map((row) => (
-        <li className="thinking-list-item" key={`${row.n}-${row.title}`}>
-          <div className="thinking-list-phase">
-            <Brain size={11} strokeWidth={1.7} />
-            <span>{T.page.thinkingView.summary}</span>
-          </div>
-          <div className="tl-note">{row.note ?? row.title}</div>
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-function SpansTab({
-  session,
-  artifacts,
-  onSelect,
-}: {
-  session: SessionDto | null;
-  artifacts: ArtifactRefDto[];
-  onSelect: (a: { kind: ArtifactRefDto["kind"]; seq: number; label: string }) => void;
-}) {
-  if (!session) {
-    return <p className="empty-note">{T.page.spansView.empty}</p>;
-  }
-  if (artifacts.length === 0) {
-    return <p className="empty-note">{T.page.spansView.empty}</p>;
-  }
-  return (
-    <div className="llm-io">
-      {artifacts.map((artifact) => (
-        <div
-          className="artifact-row"
-          key={artifact.label}
-          data-testid={`span-row-${artifact.seq}`}
-          onClick={() => onSelect(artifact)}
-        >
-          <span className="artifact-kind">
-            <FileText size={11} strokeWidth={1.7} />
-          </span>
-          <span className="artifact-label">{artifact.label}</span>
-          <span className="artifact-size">{(artifact.sizeBytes / 1024).toFixed(1)} KB</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/** One modal that hosts either the LLM I/O viewer or the file-span viewer. */
-function TraceArtifactModal({
-  session,
+  demoMode,
+  sessionId,
   turnSeq,
-  artifact,
-  onClose,
 }: {
-  session: SessionDto;
-  turnSeq: number;
-  artifact: { kind: ArtifactRefDto["kind"]; seq: number; label: string };
-  onClose: () => void;
+  demoMode: boolean;
+  sessionId: string | null;
+  turnSeq: number | null;
 }) {
-  if (artifact.kind === "llm_io") {
-    return (
-      <TraceLlmIoModal
-        session={session}
-        turnSeq={turnSeq}
-        refPath={artifact.label}
-        onClose={onClose}
-      />
-    );
+  const [refs, setRefs] = useState<ArtifactRefDto[] | null>(null);
+  const [active, setActive] = useState<number>(0);
+  const [capture, setCapture] = useState<LlmIoDto | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (demoMode || sessionId === null || turnSeq === null) return;
+    let alive = true;
+    setRefs(null);
+    setCapture(null);
+    setActive(0);
+    void listArtifacts(sessionId, turnSeq).then((list) => {
+      if (!alive) return;
+      setRefs((list ?? []).filter((a) => a.kind === "llm_io"));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [demoMode, sessionId, turnSeq]);
+
+  useEffect(() => {
+    if (!refs || refs.length === 0) {
+      setCapture(null);
+      return;
+    }
+    const sel = refs[Math.min(active, refs.length - 1)];
+    if (!sel || !sessionId || turnSeq === null) return;
+    let alive = true;
+    setLoading(true);
+    void loadLlmIo(sessionId, turnSeq, sel.label).then((data) => {
+      if (!alive) return;
+      setCapture(data);
+      setLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [refs, active, sessionId, turnSeq]);
+
+  if (demoMode) {
+    return <p className="empty-note">{T.page.llmIo.empty}</p>;
+  }
+  if (!refs) {
+    return <p className="empty-note">{T.page.loadingTrace}</p>;
+  }
+  if (refs.length === 0) {
+    return <p className="empty-note">{T.page.llmIo.empty}</p>;
   }
   return (
-    <TraceFileSpanModal
-      session={session}
-      turnSeq={turnSeq}
-      refPath={artifact.label}
-      onClose={onClose}
+    <LlmIoViewer
+      artifacts={refs}
+      activeIndex={active}
+      onSelect={setActive}
+      capture={capture}
+      loading={loading}
     />
   );
 }
 
-function TraceLlmIoModal({
-  session,
+function SpansTab({
+  demoMode,
+  sessionId,
   turnSeq,
-  refPath,
-  onClose,
+  onOpenSpan,
 }: {
-  session: SessionDto;
-  turnSeq: number;
-  refPath: string;
-  onClose: () => void;
+  demoMode: boolean;
+  sessionId: string | null;
+  turnSeq: number | null;
+  onOpenSpan: (ref: ArtifactRefDto) => void;
 }) {
-  const [capture, setCapture] = useState<import("../api").LlmIoDto | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [refs, setRefs] = useState<ArtifactRefDto[] | null>(null);
+
   useEffect(() => {
+    if (demoMode || sessionId === null || turnSeq === null) return;
     let alive = true;
-    setLoading(true);
-    void import("../api").then(({ loadLlmIo }) =>
-      loadLlmIo(session.id, turnSeq, refPath).then((data) => {
-        if (alive) {
-          setCapture(data);
-          setLoading(false);
-        }
-      }),
-    );
+    void listArtifacts(sessionId, turnSeq).then((list) => {
+      if (!alive) return;
+      const spans = (list ?? []).filter((a) => a.kind === "file_span");
+      setRefs(spans);
+    });
     return () => {
       alive = false;
     };
-  }, [session.id, turnSeq, refPath]);
+  }, [demoMode, sessionId, turnSeq]);
 
+  if (demoMode) {
+    return <p className="empty-note">{T.page.spansView.empty}</p>;
+  }
+  if (!refs) {
+    return <p className="empty-note">{T.page.loadingTrace}</p>;
+  }
+  if (refs.length === 0) {
+    return <p className="empty-note">{T.page.spansView.empty}</p>;
+  }
   return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="modal modal--wide" role="dialog" aria-modal="true" aria-label={T.page.llmIo.title}>
-        <header className="modal-head">
-          <h3 className="modal-title">{T.page.llmIo.title}</h3>
-          <button type="button" className="icon-btn" aria-label={T.action.close} onClick={onClose}>
-            ×
+    <div className="artifact-list">
+      {refs.map((ref) => {
+        const pathHint = ref.label.split("/").pop() ?? ref.label;
+        return (
+          <button
+            key={ref.label}
+            type="button"
+            className="artifact-row"
+            onClick={() => onOpenSpan(ref)}
+            title={ref.label}
+          >
+            <code className="code-chip">{pathHint}</code>
+            <span className="muted">
+              {(ref.sizeBytes / 1024).toFixed(1)} KiB
+            </span>
           </button>
-        </header>
-        <div className="modal-body modal-body--scroll">
-          {loading || !capture ? (
-            <p className="empty-note">{T.page.llmIo.loading}</p>
-          ) : (
-            <LlmIoViewer
-              artifacts={[{ kind: "llm_io", seq: capture.seq, label: refPath, sizeBytes: 0, at: capture.at }]}
-              activeIndex={0}
-              onSelect={() => undefined}
-              capture={capture}
-              loading={false}
-            />
-          )}
-        </div>
-      </div>
+        );
+      })}
     </div>
   );
 }
 
-function TraceFileSpanModal({
-  session,
-  turnSeq,
-  refPath,
-  onClose,
-}: {
-  session: SessionDto;
-  turnSeq: number;
-  refPath: string;
-  onClose: () => void;
-}) {
-  const [span, setSpan] = useState<import("../api").FileSpanDto | null>(null);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    void import("../api").then(({ loadFileSpan }) =>
-      loadFileSpan(session.id, turnSeq, refPath).then((data) => {
-        if (alive) {
-          setSpan(data);
-          setLoading(false);
-        }
-      }),
-    );
-    return () => {
-      alive = false;
-    };
-  }, [session.id, turnSeq, refPath]);
-
-  return <FileSpanModal span={span} loading={loading} onClose={onClose} />;
-}
+// ---------------------------------------------------------------------------
+// Hook the open-span modal state up to the page
+// ---------------------------------------------------------------------------

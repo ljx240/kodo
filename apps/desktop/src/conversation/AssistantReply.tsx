@@ -1,28 +1,29 @@
-import { Check, CircleAlert, Copy, RefreshCw, Square } from "lucide-react";
+import { BarChart3, Check, CircleAlert, Copy, RefreshCw, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { loadFileSpan, loadLlmIo, type FileSpanDto, type LlmIoDto } from "../api";
 import type { DeliveryStatus, VerificationStatus } from "../api";
 import { T } from "../i18n";
 import { AgentTrace } from "./AgentTrace";
 import { ChangedFilesSummary } from "./ChangedFilesSummary";
-import { FileSpanModal } from "./FileSpanModal";
-import { LlmIoViewer } from "./LlmIoViewer";
 import { Markdown } from "./Markdown";
-import { sanitizeAssistantText, type FailureGroup, type Reply } from "./trace";
+import type { FailureGroup, Reply } from "./trace";
+import { formatCompactToast } from "./trace";
 
 type Props = {
-  time: string;
   reply: Reply;
+  /** True while this turn's reply is the active ⌘F find hit. */
+  findHit?: boolean;
+  /** Position in the turn list — the TurnRail's addressing hook. */
+  turnIndex?: number;
   /** True while this turn is the one being generated. */
   running: boolean;
-  /** Live assistant text accumulated from provider stream deltas. */
-  streamText?: string;
   /** Structured progress phase from the agent (not chain-of-thought). */
   progress?: { phase: string; detail: string } | null;
   /** Seconds since the running turn started, or null when idle. */
   elapsed?: number | null;
   /** True while the runner is waiting for an approval decision. */
   waitingApproval?: boolean;
+  /** One-shot toast for a compaction pass; auto-clears after the call. */
+  compactToast?: { dropped: number; freedPct: number } | null;
   /** One line per provider switch observed on the streaming path. */
   failovers?: string[];
   onViewFiles: () => void;
@@ -30,22 +31,24 @@ type Props = {
   onRegenerate?: (() => void) | null;
   /** Re-run after fixing the environment (missing tools, permissions). */
   onRetryEnvironment?: (() => void) | null;
-  /** Open the full run log (运行详情). */
+  /** Open the Response Trace page for this run (查看响应轨迹). */
   onOpenLogs?: (() => void) | null;
   /** Unified diffs for file-change steps. */
   fileDiffs?: Record<string, string> | null;
   /** Undo this turn's Kodo edits. Omitted in demo / while a run is live. */
   onUndoChanges?: (() => void) | null;
   undoingChanges?: boolean;
+  /** Result of the last undo attempt. */
+  undoMessage?: string | null;
+  /** Open one changed file in the file viewer. Omitted in demo. */
+  onOpenFile?: ((path: string) => void) | null;
+  /** Open a path mentioned in the answer's markdown (inline code) in the
+   *  right sidebar. Heuristic only — the click probes before opening. */
+  onOpenPath?: ((path: string) => void) | null;
   /** Paths the user had already modified before this turn. */
   preExisting?: string[];
   /** Paths whose working tree diverged from Kodo's after-hash. */
   conflicts?: string[];
-  /** Session id + current turn index so the trace-modal viewers can call the
-   *  trace commands. Omitted on demo / pre-capture turns — AgentTrace then
-   *  hides its "查看 I/O / patch 前文件" affordances. */
-  sessionId?: string | null;
-  turnSeq?: number | null;
 };
 
 /**
@@ -55,13 +58,14 @@ type Props = {
  * are separate — a usable answer with a blocked check is not a failed answer.
  */
 export function AssistantReply({
-  time,
   reply,
+  findHit = false,
+  turnIndex,
   running,
-  streamText = "",
   progress = null,
   elapsed = null,
   waitingApproval = false,
+  compactToast = null,
   failovers = [],
   onViewFiles,
   onRegenerate = null,
@@ -69,56 +73,17 @@ export function AssistantReply({
   onOpenLogs = null,
   fileDiffs = null,
   onUndoChanges = null,
+  undoMessage = null,
+  onOpenFile = null,
+  onOpenPath = null,
   undoingChanges = false,
   preExisting = [],
   conflicts = [],
-  sessionId = null,
-  turnSeq = null,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const [answerExpanded, setAnswerExpanded] = useState(false);
   const [ignoredVerification, setIgnoredVerification] = useState(false);
-  const [openLlmIoRef, setOpenLlmIoRef] = useState<string | null>(null);
-  const [llmIo, setLlmIo] = useState<LlmIoDto | null>(null);
-  const [llmIoLoading, setLlmIoLoading] = useState(false);
-  const [openSpanRef, setOpenSpanRef] = useState<string | null>(null);
-  const [span, setSpan] = useState<FileSpanDto | null>(null);
-  const [spanLoading, setSpanLoading] = useState(false);
   const copyTimer = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (!openLlmIoRef || !sessionId || turnSeq === null) {
-      setLlmIo(null);
-      return;
-    }
-    let alive = true;
-    setLlmIoLoading(true);
-    void loadLlmIo(sessionId, turnSeq, openLlmIoRef).then((data) => {
-      if (!alive) return;
-      setLlmIo(data);
-      setLlmIoLoading(false);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [openLlmIoRef, sessionId, turnSeq]);
-
-  useEffect(() => {
-    if (!openSpanRef || !sessionId || turnSeq === null) {
-      setSpan(null);
-      return;
-    }
-    let alive = true;
-    setSpanLoading(true);
-    void loadFileSpan(sessionId, turnSeq, openSpanRef).then((data) => {
-      if (!alive) return;
-      setSpan(data);
-      setSpanLoading(false);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [openSpanRef, sessionId, turnSeq]);
 
   useEffect(() => {
     return () => {
@@ -148,10 +113,9 @@ export function AssistantReply({
           : `${T.reply.working}...`
         : null;
 
-  // Streaming text is a draft; the final answer replaces it in place once the
-  // turn completes, so the two never render together.
-  const showDraft = running && streamText.length > 0;
-  const showFinal = Boolean(reply.final) && !showDraft;
+  // No streaming draft up top: the answer surface appears only once the final
+  // reply lands (2026-09-23). Interim prose rides in the trace in order.
+  const showFinal = Boolean(reply.final);
   const finalText = reply.final ?? "";
   const { summary, rest } = summarizeAnswer(finalText);
   const answerBody = answerExpanded ? finalText : summary;
@@ -161,45 +125,16 @@ export function AssistantReply({
   const axesLine = `${T.reply.answerState(T.delivery[reply.status.delivery])} · ${T.reply.verifyState(
     T.verification[reply.status.verification],
   )}`;
+  // No speaker header (2026-09-30): left/right alignment carries who spoke.
+  // Copy/regenerate/trace live in a quiet row at the reply's bottom instead.
+  const canCopy = !running && Boolean(reply.final);
+  const canRegenerate =
+    !running &&
+    Boolean(onRegenerate) &&
+    Boolean(reply.final || reply.stopped || reply.error || reply.interrupted);
 
   return (
-    <article className="reply">
-      <div className="msg-head">
-        <span className="avatar avatar--kodo">K</span>
-        <span className="msg-author">Kodo</span>
-        {time && <span className="msg-time">{time}</span>}
-        {reply.models.length > 0 && (
-          <code className="code-chip code-chip--model" data-testid="reply-model">
-            {reply.models[reply.models.length - 1]}
-          </code>
-        )}
-        <span className="spacer" />
-        {!running && reply.final && (
-          <button
-            type="button"
-            className="icon-btn icon-btn--sm reply-action"
-            aria-label={copied ? T.action.copied : T.action.copy}
-            data-testid="reply-copy"
-            title={copied ? T.action.copied : T.action.copy}
-            onClick={() => void copyFinal()}
-          >
-            {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={1.8} />}
-          </button>
-        )}
-        {!running && onRegenerate && (reply.final || reply.stopped || reply.error || reply.interrupted) && (
-          <button
-            type="button"
-            className="icon-btn icon-btn--sm reply-action"
-            aria-label={T.action.regenerate}
-            data-testid="reply-regenerate"
-            title={T.action.regenerate}
-            onClick={onRegenerate}
-          >
-            <RefreshCw size={13} strokeWidth={1.8} />
-          </button>
-        )}
-      </div>
-
+    <article className={findHit ? "reply find-hit" : "reply"} data-turn-index={turnIndex}>
       {statusLine && (
         <p className="reply-working" data-testid="agent-progress" aria-live="polite">
           <span className="reply-working-dot" aria-hidden />
@@ -207,24 +142,26 @@ export function AssistantReply({
             {outcomeWord}
           </span>
           {statusLine}
-          {running && streamText ? <span className="stream-caret" aria-hidden /> : null}
         </p>
       )}
+
+      {/* The horizontal in-reply context bar was retired in favour of the
+          Codex-style ring at the bottom of the composer (single source of
+          truth). The compact toast below still surfaces compaction
+          activity directly under the trace, so the user keeps visibility
+          without the duplicated header bar. */}
+
+      {compactToast ? (
+        <p className="reply-compact-toast" data-testid="compact-toast" aria-live="polite">
+          {formatCompactToast(compactToast.dropped, compactToast.freedPct)}
+        </p>
+      ) : null}
 
       {failovers.map((line) => (
         <p key={line} className="reply-failover" data-testid="failover-note">
           {line}
         </p>
       ))}
-
-      {showDraft && (
-        <div className="final stream-preview" data-testid="stream-preview">
-          <span className="draft-badge" data-testid="draft-badge">
-            {T.reply.draft}
-          </span>
-          <p className="final-text">{sanitizeAssistantText(streamText)}</p>
-        </div>
-      )}
 
       {reply.stopped && (
         <p className="reply-stopped" data-testid="reply-stopped">
@@ -244,22 +181,23 @@ export function AssistantReply({
         </p>
       )}
 
-      <AgentTrace
-        steps={reply.steps}
-        fileDiffs={fileDiffs}
-        onOpenLlmIo={
-          sessionId && turnSeq !== null
-            ? (ref) => setOpenLlmIoRef(ref)
-            : null
-        }
-        onOpenSpan={
-          sessionId && turnSeq !== null
-            ? (ref) => setOpenSpanRef(ref)
-            : null
-        }
-      />
+      {/* The process stays on screen only while there is no final reply —
+          running turns, and turns that ended without one. Once the answer
+          lands the conversation shows the reply alone; the full process lives
+          in the Response Trace page (2026-09-24). */}
+      {!showFinal && (
+        <AgentTrace steps={reply.steps} fileDiffs={fileDiffs} onOpenFile={onOpenFile} />
+      )}
 
-      {showFinal && (
+      {/* Conversational answers render as the sentence alone (2026-09-23):
+          no conclusion card, no axes line, no next-step chrome. */}
+      {showFinal && reply.plain && (
+        <div className="final" data-testid="answer-plain">
+          <Markdown text={finalText} onOpenPath={onOpenPath} />
+        </div>
+      )}
+
+      {showFinal && !reply.plain && (
         <div className="final">
           {/* 1. 结论 — the high-level result and the two independent axes. */}
           <section className="answer-conclusion" data-testid="answer-conclusion">
@@ -280,7 +218,7 @@ export function AssistantReply({
           {/* 2. 本次完成 — long answers read as a summary first. */}
           <section className="answer-body" data-testid="answer-body">
             <h3 className="answer-section-head">{T.reply.doneThisTurn}</h3>
-            <Markdown text={answerBody} />
+            <Markdown text={answerBody} onOpenPath={onOpenPath} />
             {rest && (
               <button
                 type="button"
@@ -315,6 +253,8 @@ export function AssistantReply({
               onView={onViewFiles}
               onUndo={onUndoChanges}
               undoing={undoingChanges}
+              undoMessage={undoMessage}
+              onOpenFile={onOpenFile}
             />
           )}
 
@@ -335,93 +275,67 @@ export function AssistantReply({
                   {T.action.retryEnvironment}
                 </button>
               )}
-              {onOpenLogs && (
-                <button type="button" className="btn btn--sm" data-testid="next-logs" onClick={onOpenLogs}>
-                  {T.action.viewLogs}
-                </button>
-              )}
             </div>
           </section>
         </div>
       )}
 
-      {!running && (reply.tokens || reply.steps.length > 0) && (
+      {/* Step/token accounting is process metadata: it leaves with the trace
+          once the final reply lands (只显示最终回复正文). */}
+      {!showFinal && !running && (reply.tokens || reply.steps.length > 0) && (
         <div className="reply-footer" data-testid="reply-footer">
           <span>
-            {T.reply.stepsCount(reply.steps.length)}
+            {T.reply.stepsCount(reply.steps.filter((step) => step.type !== "note").length)}
             {reply.tokens || reply.tokensPending ? ` · tokens ${reply.tokensPending ? T.tokens.counting : reply.tokens}` : ""}
           </span>
         </div>
       )}
 
-      {openLlmIoRef && (
-        <LlmIoModal
-          capture={llmIo}
-          loading={llmIoLoading}
-          onClose={() => setOpenLlmIoRef(null)}
-        />
-      )}
-
-      {openSpanRef && (
-        <FileSpanModal
-          span={span}
-          loading={spanLoading}
-          onClose={() => setOpenSpanRef(null)}
-        />
-      )}
-    </article>
-  );
-}
-
-/**
- * Inline modal wrapper around [`LlmIoViewer`] — the viewer is built for the
- * trace page's two-column layout, so on the conversation we frame it in the
- * modal chrome from the rest of the transparency UI.
- */
-function LlmIoModal({
-  capture,
-  loading,
-  onClose,
-}: {
-  capture: LlmIoDto | null;
-  loading: boolean;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="modal modal--wide" role="dialog" aria-modal="true" aria-label={T.page.llmIo.title}>
-        <header className="modal-head">
-          <h3 className="modal-title">{T.page.llmIo.title}</h3>
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label={T.action.close}
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </header>
-        <div className="modal-body modal-body--scroll">
-          {loading || !capture ? (
-            <p className="empty-note">{T.page.loadingTrace}</p>
-          ) : (
-            <LlmIoViewer
-              artifacts={[{ kind: "llm_io", seq: capture.seq, label: `llm_io/${String(capture.seq).padStart(3, "0")}.json`, sizeBytes: 0, at: capture.at }]}
-              activeIndex={0}
-              onSelect={() => undefined}
-              capture={capture}
-              loading={false}
-            />
+      {/* A quiet utility row at the very bottom of the reply — always visible,
+          so 复制回复 / 重新生成 / 查看响应轨迹 never hide behind hover
+          (2026-09-30). Icon-only: the label moves to aria-label + title,
+          same as the message copy button. It shows whichever the turn allows. */}
+      {(canCopy || canRegenerate || onOpenLogs) && (
+        <div className="reply-actions">
+          {canCopy && (
+            <button
+              type="button"
+              className="icon-btn icon-btn--sm"
+              data-testid="reply-copy"
+              aria-label={copied ? T.action.copied : T.action.copy}
+              title={copied ? T.action.copied : T.action.copy}
+              onClick={() => void copyFinal()}
+            >
+              {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={1.8} />}
+            </button>
+          )}
+          {canRegenerate && (
+            <button
+              type="button"
+              className="icon-btn icon-btn--sm"
+              data-testid="reply-regenerate"
+              aria-label={T.action.regenerate}
+              title={T.action.regenerate}
+              onClick={() => onRegenerate?.()}
+            >
+              <RefreshCw size={13} strokeWidth={1.8} />
+            </button>
+          )}
+          {onOpenLogs && (
+            <button
+              type="button"
+              className="icon-btn icon-btn--sm"
+              data-testid="reply-trace"
+              aria-label={T.action.viewTrace}
+              title={T.action.viewTrace}
+              onClick={onOpenLogs}
+            >
+              <BarChart3 size={13} strokeWidth={1.8} />
+            </button>
           )}
         </div>
-      </div>
-    </div>
+      )}
+    </article>
   );
 }
 
