@@ -149,15 +149,7 @@ impl<O: Write, E: Write> Renderer<O, E> {
                 self.streamed = false;
             }
             // The Started notice plus turn flow already cover these.
-            Step::Search { .. }
-            | Step::FileRead { .. }
-            | Step::ModelCall { .. }
-            | Step::Thinking { .. }
-            | Step::Compaction { .. }
-            | Step::Failover { .. }
-            | Step::PlanStep { .. }
-            | Step::Permission { .. }
-            | Step::ContextBudget { .. } => {
+            Step::Search { .. } | Step::FileRead { .. } | Step::ModelCall { .. } => {
                 self.close_line();
             }
             // Transparency-side steps: no per-line stdout for the CLI —
@@ -377,6 +369,7 @@ mod tests {
                         removed: 2,
                     },
                 ],
+                file_span_ref: None,
             },
             duration_ms: 0,
             denied: false,

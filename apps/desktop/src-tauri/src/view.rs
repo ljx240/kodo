@@ -1290,6 +1290,7 @@ mod tests {
             (
                 ItemKind::FileChange {
                     changes: Vec::new(),
+                    file_span_ref: None,
                 },
                 "fileChange",
             ),
