@@ -494,7 +494,9 @@ fn respond_approval(
 #[tauri::command]
 fn turn_changes(project: String, id: String) -> Result<Vec<view::TurnChangeView>, String> {
     let root = Path::new(&project);
-    let changeset = kodo_agent::load_changeset(root, &id)?;
+    let Some(changeset) = kodo_agent::load_changeset(root, &id)? else {
+        return Ok(Vec::new());
+    };
     let mut out = Vec::new();
     for path in changeset.kodo_changes() {
         let user_preexisting = changeset.was_pre_existing(path);

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
-use kodo_agent::{self as agent, SinkEvent, StepKind};
+use kodo_agent::{self as agent, AgentMode, SinkEvent, StepKind};
 use kodo_shell::{approval_fingerprint, step_kind_label, Logged, TurnLogger, TurnOutcome};
 
 use crate::view::{ItemView, RunEvent};
@@ -330,20 +330,33 @@ pub fn start(
                         );
                     }
                 }
+                // Transparency-side events below: the session log already
+                // captured the payload via `logger_ref.record(&event)` above.
+                // The Tauri RunEvent surface does not yet carry them; UI
+                // wiring (live context bar, compaction toast, AskUser dialog)
+                // is a follow-up — drop at the event boundary for now.
+                SinkEvent::ContextBudget { .. }
+                | SinkEvent::Compacted { .. }
+                | SinkEvent::AskUser { .. } => {}
             }
             record_runs.is_live(&record_id)
         };
 
         let request = agent::RunRequest {
-            project: args.project.clone(),
+            project: Some(args.project.clone()),
             message: args.message.clone(),
             pinned_context: args.context.clone(),
             provider: args.provider.clone(),
             permission: args.permission,
+            mode: AgentMode::Code,
             fallback_to_local: args.fallback_to_local,
             max_output_tokens: args.max_output_tokens,
             extended_thinking: args.extended_thinking,
             session_id: Some(args.id.clone()),
+            user_skills_dir: None,
+            mcp_servers: Vec::new(),
+            agent_instructions: None,
+            personas: Vec::new(),
         };
 
         let result = agent::run(&request, &alive, &approve, &mut sink);

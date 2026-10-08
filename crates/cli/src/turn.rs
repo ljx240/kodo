@@ -7,7 +7,7 @@ use std::fs;
 use std::io::{Stderr, Stdout};
 use std::path::{Path, PathBuf};
 
-use kodo_agent::{tools, Permission, RunRequest, SinkEvent};
+use kodo_agent::{tools, AgentMode, Permission, RunRequest, SinkEvent};
 use kodo_core::session;
 use kodo_shell::{Logged, ShellConfig, TurnLogger, TurnOutcome};
 
@@ -139,15 +139,20 @@ impl TurnContext {
         .map_err(|error| format!("写入会话失败：{error}"))?;
 
         let request = RunRequest {
-            project: self.project.clone(),
+            project: Some(self.project.clone()),
             message: message.to_owned(),
             pinned_context: Vec::new(),
             provider: self.config.provider.clone(),
             permission: self.permission,
+            mode: AgentMode::Code,
             fallback_to_local: self.config.fallback_to_local,
             max_output_tokens: self.config.max_output_tokens,
             extended_thinking: self.config.extended_thinking,
             session_id: Some(session_id.clone()),
+            user_skills_dir: None,
+            mcp_servers: Vec::new(),
+            agent_instructions: None,
+            personas: Vec::new(),
         };
 
         let mut logger = TurnLogger::new(self.session_dir.clone(), session_id);

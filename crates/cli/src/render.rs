@@ -96,6 +96,12 @@ impl<O: Write, E: Write> Renderer<O, E> {
                     "⚠ 已切换模型 {from_provider}/{from_model} → {to_provider}/{to_model}（{error_class}）"
                 ));
             }
+            // Transparency-side events — session log already captured them
+            // via TurnLogger. The CLI renderer intentionally drops them at
+            // this layer to keep stdout uncluttered.
+            SinkEvent::ContextBudget { .. }
+            | SinkEvent::Compacted { .. }
+            | SinkEvent::AskUser { .. } => {}
         }
     }
 
@@ -113,7 +119,7 @@ impl<O: Write, E: Write> Renderer<O, E> {
                 };
                 self.notice(&line);
             }
-            Step::FileChange { changes } => {
+            Step::FileChange { changes, .. } => {
                 for change in changes {
                     self.notice(&format!(
                         "✎ 已编辑 {}（+{} -{}）",
@@ -146,6 +152,14 @@ impl<O: Write, E: Write> Renderer<O, E> {
             Step::Search { .. } | Step::FileRead { .. } | Step::ModelCall { .. } => {
                 self.close_line();
             }
+            // Transparency-side steps: no per-line stdout for the CLI —
+            // session log already captured them via TurnLogger.
+            Step::Thinking { .. }
+            | Step::Compaction { .. }
+            | Step::Failover { .. }
+            | Step::PlanStep { .. }
+            | Step::Permission { .. }
+            | Step::ContextBudget { .. } => {}
         }
     }
 
@@ -186,7 +200,7 @@ fn started_notice(step: &Step) -> String {
         Step::FileRead { path, .. } => format!("→ 读取 {path}"),
         Step::Command { command, .. } => format!("→ 跑 {command}"),
         Step::ModelCall { model, .. } => format!("→ 调用模型 {model}"),
-        Step::FileChange { changes } => {
+        Step::FileChange { changes, .. } => {
             let paths = changes
                 .iter()
                 .map(|c| c.path.as_str())
@@ -195,6 +209,13 @@ fn started_notice(step: &Step) -> String {
             format!("→ 写文件 {paths}")
         }
         Step::AgentMessage { .. } => "→ 起草回答…".to_owned(),
+        // Transparency-side steps: surface no per-line notice in the CLI.
+        Step::Thinking { .. }
+        | Step::Compaction { .. }
+        | Step::Failover { .. }
+        | Step::PlanStep { .. }
+        | Step::Permission { .. }
+        | Step::ContextBudget { .. } => String::new(),
     }
 }
 
