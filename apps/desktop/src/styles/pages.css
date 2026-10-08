@@ -395,6 +395,8 @@
 .settings-modal-panel {
   position: relative;
   z-index: 1;
+  display: flex;
+  flex-direction: column;
   width: min(980px, 100%);
   height: min(720px, 100%);
   overflow: hidden;
@@ -899,4 +901,350 @@
   color: var(--kodo-text-secondary);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
+}
+
+/* -------------------------------------------------------------- modal head/body/foot (fv-* / skill-detail-*) -- */
+/* Companion rules for the fv-* / skill-detail-* classes used by
+   SkillDetailModal and AgentDetailModal. The flex column on
+   .settings-modal-panel (above) sets the layout grid; these rules give
+   the head/body/foot their geometry, borders and spacing so the panel
+   looks like a real settings-modal card rather than stacked blocks. */
+
+.fv-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 64px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.fv-title {
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+  color: var(--kodo-text);
+  letter-spacing: 0.01em;
+}
+
+.fv-head .spacer { flex: 1; }
+
+.skill-detail-panel { /* identity class on the panel; layout comes from
+                        .settings-modal-panel which is the actual
+                        container. */ }
+
+.skill-detail-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  line-height: 1.55;
+}
+
+.skill-detail-body--edit {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.skill-detail-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  padding: 0 24px;
+  border-top: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.skill-detail-section {
+  margin-top: 18px;
+}
+.skill-detail-section:first-child { margin-top: 0; }
+.skill-detail-section h3 {
+  margin: 0 0 8px;
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--kodo-text-secondary);
+}
+
+.skill-detail-detail {
+  margin: 0 0 12px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  line-height: 1.55;
+}
+
+.skill-detail-md {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-surface);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+  color: var(--kodo-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.skill-detail-list {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  line-height: 1.6;
+}
+.skill-detail-list li { margin: 2px 0; }
+.skill-detail-list strong {
+  color: var(--kodo-text-secondary);
+  font-weight: 500;
+  margin-right: 4px;
+}
+.skill-detail-list code {
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  background: var(--kodo-surface);
+  padding: 1px 6px;
+  border-radius: var(--kodo-radius-sm);
+}
+
+.skill-detail-source {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+}
+
+.skill-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.skill-detail-tags > span,
+.skill-detail-tags > code {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-family: var(--kodo-font-mono);
+}
+
+.skill-detail-steps {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+}
+.skill-detail-steps li { margin: 4px 0; }
+.skill-detail-kind {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 8px;
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+}
+
+.skill-detail-examples {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  counter-reset: ex;
+}
+.skill-detail-examples > li {
+  counter-increment: ex;
+  position: relative;
+  padding: 8px 0 12px 28px;
+  border-bottom: 1px solid var(--kodo-border-subtle);
+}
+.skill-detail-examples > li:last-child { border-bottom: 0; }
+.skill-detail-examples > li::before {
+  content: counter(ex);
+  position: absolute;
+  left: 0; top: 8px;
+  width: 20px; height: 20px;
+  display: grid; place-items: center;
+  border-radius: 999px;
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+}
+.skill-detail-example-label {
+  margin: 8px 0 4px;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+  font-weight: 500;
+}
+
+/* skill editor (SkillDetailModal / AgentDetailModal edit/new body) */
+.skill-editor {
+  display: block;
+  width: 100%;
+  min-height: 320px;
+  padding: 12px 14px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-surface);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.55;
+  color: var(--kodo-text);
+  resize: vertical;
+}
+.skill-editor:focus {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.skill-editor-name {
+  display: block;
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-canvas);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-md);
+  color: var(--kodo-text);
+}
+.skill-editor-name:focus {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.skill-editor-error {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--kodo-error);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-error-bg);
+  color: var(--kodo-error);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+}
+
+.agent-editor-instructions {
+  min-height: 220px;
+}
+
+/* -------------------------------------------------------------- agent row (Plugins · Agents tab) -- */
+/* Companion rules for the .agent-row / .agent-open family used by
+   AgentsTab. Mirrors the .skill-row geometry (52px row, 12px gap) so the
+   agents list reads with the same density as the skills list. */
+
+.skills-card-head {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  color: var(--kodo-text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--kodo-border);
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+}
+.agent-row:last-child { border-bottom: 0; }
+
+.agent-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  min-height: 52px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-open:hover { background: var(--kodo-hover); }
+.agent-open:focus-visible {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: -2px;
+  border-radius: var(--kodo-radius-sm);
+}
+
+.agent-row-name {
+  flex: none;
+  font-size: var(--kodo-font-md);
+  font-weight: 500;
+  color: var(--kodo-text);
+}
+
+.agent-row-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-row-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.agent-row-favorite {
+  flex: none;
+  margin-left: 4px;
+  color: var(--kodo-text-secondary);
+}
+.agent-row-favorite--on { color: var(--kodo-accent); }
+
+.agent-row--project .agent-row-badge {
+  background: var(--kodo-success-bg-soft);
+  color: var(--kodo-success-text);
+}
+.agent-row--builtin .agent-row-badge {
+  /* the 内置 pill is the same accent-tinted style as the row's badge
+     class — explicit override here so future row variants don't
+     silently inherit a different tint. */
 }
