@@ -165,8 +165,8 @@ export function AgentDetailModal({ mode, name, initial, projectPath, onClose, on
         onClick={onClose}
       />
       <div className="settings-modal-panel skill-detail-panel">
-        <header className="fv-head">
-          <span className="fv-title">{title}</span>
+        <header className="modal-head">
+          <span className="modal-title">{title}</span>
           <span className="spacer" />
           <button
             type="button"

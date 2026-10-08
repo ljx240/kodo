@@ -651,3 +651,281 @@
 /* Shared diff rows — Inspector density (no viewer gutter padding). */
 .diff-block .viewer-line { padding: 0; }
 .diff-block .viewer-ln { width: 16px; }
+
+/* -------------------------------------------------------------- file viewer (fv-*) -- */
+/* Companion rules for the fv-* class family used by FileViewer (rendered inside
+   the 文件 panel — see COMPONENTS §10). The fv-head / fv-title here are
+   distinct from the modal-head / modal-title on AgentDetailModal /
+   SkillDetailModal (64px modal chrome) — these are the 52px panel head of the
+   de-modalized FileViewer. The tree sits on the left in the wide inspector
+   (640px) and folds into a 260px drawer in compact mode (windows <1200px). */
+
+.fv {
+  background: var(--kodo-canvas);
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.fv-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 0 12px 0 18px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.fv-title {
+  flex: none;
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+  color: var(--kodo-text);
+}
+
+.fv-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fv-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* Wide inspector (default): tree is a fixed 240px column on the left. */
+.fv-tree {
+  flex: none;
+  width: 240px;
+  border-right: 1px solid var(--kodo-border);
+  background: var(--kodo-sidebar);
+  padding: 10px 0 14px;
+  overflow-y: auto;
+}
+
+.fv-tree-head {
+  margin: 0;
+  padding: 4px 14px 8px;
+  font-size: var(--kodo-font-xs);
+  font-weight: 600;
+  color: var(--kodo-text-secondary);
+}
+
+.fv-filter-bar {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px 8px;
+}
+
+.fv-filter {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-sm);
+}
+.fv-filter:focus {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.fv-only-changed {
+  flex: none;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.fv-only-changed:hover { background: var(--kodo-hover); }
+.fv-only-changed--on {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  border-color: transparent;
+}
+
+.fv-tree-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fv-tree-row {
+  width: 100%;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--kodo-text);
+  font-family: var(--kodo-font-ui);
+  font-size: var(--kodo-font-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.fv-tree-row:hover { background: var(--kodo-hover); }
+
+.fv-tree-file--active {
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+}
+
+.fv-tree-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fv-tree-icon {
+  flex: none;
+  color: var(--kodo-text-muted);
+}
+.fv-tree-file--active .fv-tree-icon { color: var(--kodo-accent); }
+
+.fv-tree-delta {
+  flex: none;
+  margin-left: auto;
+  font-size: var(--kodo-font-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fv-caret {
+  flex: none;
+  color: var(--kodo-text-muted);
+  transition: transform 120ms ease;
+}
+.fv-caret--open { transform: rotate(90deg); }
+
+.fv-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fv-tabs {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.fv-tab {
+  padding: 6px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  cursor: pointer;
+}
+.fv-tab:hover { color: var(--kodo-text); }
+.fv-tab--active {
+  border-bottom-color: var(--kodo-accent);
+  color: var(--kodo-text);
+}
+
+.fv-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--kodo-canvas);
+}
+
+.fv-note {
+  margin: 0;
+  padding: 18px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+.fv-note--error { color: var(--kodo-error); }
+
+.fv-code {
+  margin: 0;
+  padding: 10px 0;
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.55;
+}
+
+.fv-diff-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  background: var(--kodo-canvas);
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.fv-diff-stats {
+  font-size: var(--kodo-font-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fv-preview { padding: 16px 20px; }
+.fv-preview--image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+.fv-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 72vh;
+  background: var(--kodo-surface);
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  object-fit: contain;
+}
+
+.delta-add { color: var(--kodo-success-text); font-size: var(--kodo-font-sm); }
+.delta-del { color: var(--kodo-error); font-size: var(--kodo-font-sm); }
+
+/* Compact mode (windows <1200px): the tree drops in as a 260px left drawer
+   toggled by the FolderTree button. The drawer overlays the body and closes
+   on file selection. */
+.fv--compact .fv-tree {
+  display: none;
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 260px;
+  box-shadow: 6px 0 18px rgb(0 0 0 / 14%);
+}
+.fv--compact.fv--tree-open .fv-tree { display: block; }

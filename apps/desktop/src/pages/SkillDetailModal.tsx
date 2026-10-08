@@ -277,9 +277,9 @@ export function SkillDetailModal({
         aria-label={T.action.close}
         onClick={onClose}
       />
-      <div className="settings-modal-panel skill-detail-panel">
-        <header className="fv-head">
-          <span className="fv-title">{title}</span>
+      <div className="settings-modal-panel skill-detail-panel skill-detail-panel--narrow">
+        <header className="modal-head">
+          <span className="modal-title">{title}</span>
           {!editing && resolved && (
             <span className="skill-detail-source">
               {resolved === "user"

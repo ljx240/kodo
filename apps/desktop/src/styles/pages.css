@@ -910,7 +910,7 @@
    the head/body/foot their geometry, borders and spacing so the panel
    looks like a real settings-modal card rather than stacked blocks. */
 
-.fv-head {
+.modal-head {
   flex: none;
   display: flex;
   align-items: center;
@@ -921,18 +921,27 @@
   background: var(--kodo-canvas);
 }
 
-.fv-title {
+.modal-title {
   font-size: var(--kodo-font-md);
   font-weight: 600;
   color: var(--kodo-text);
   letter-spacing: 0.01em;
 }
 
-.fv-head .spacer { flex: 1; }
+.modal-head .spacer { flex: 1; }
 
 .skill-detail-panel { /* identity class on the panel; layout comes from
                         .settings-modal-panel which is the actual
                         container. */ }
+
+/* §13c SkillDetailModal: narrower than AgentDetailModal (640px vs 980px).
+   The same `.skill-detail-panel` marker sits on both modals' root, so the
+   narrow variant is opt-in via this modifier class (AgentDetailModal
+   inherits the 980px settings-modal-panel geometry by default). */
+.skill-detail-panel--narrow {
+  width: min(640px, 100%);
+  height: min(720px, 100%);
+}
 
 .skill-detail-body {
   flex: 1 1 auto;
