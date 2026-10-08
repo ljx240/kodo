@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use kodo_agent::{Permission, Provider, RunRequest, SinkEvent, Step, StepKind};
+use kodo_agent::{AgentMode, Permission, Provider, RunRequest, SinkEvent, Step, StepKind};
 
 /// Minimal online smoke: one read-only question against a real endpoint.
 /// Skips cleanly when the key env var is missing.
@@ -30,15 +30,20 @@ fn online_read_only_smoke() {
 
     let provider = Provider::new("openai", key, endpoint, model);
     let request = RunRequest {
-        project: project.clone(),
+        project: Some(project.clone()),
         message: "What is this repository? One sentence.".into(),
         pinned_context: vec![],
         provider: Some(provider),
         permission: Permission::Auto,
+        mode: AgentMode::Code,
         fallback_to_local: true,
         max_output_tokens: 256,
         extended_thinking: false,
         session_id: None,
+        user_skills_dir: None,
+        mcp_servers: Vec::new(),
+        agent_instructions: None,
+        personas: Vec::new(),
     };
 
     let mut answer = String::new();

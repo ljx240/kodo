@@ -199,6 +199,11 @@ fn run_scenario_with_verify(
                                     rejections.push((res.name.clone(), code));
                                     results.push(res);
                                 }
+                                ToolInvocation::External(_call) => {
+                                    // Scenario harness is native-only; treat
+                                    // external calls as silently dropped so the
+                                    // loop can continue past them.
+                                }
                             }
                         }
                         machine.handle(AgentEvent::ToolsFinished { results });

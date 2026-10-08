@@ -1,5 +1,8 @@
 # Skill: bug-fix
 
+## description
+Reproduce a bug, locate its root cause, apply the smallest fix, and verify the fix passes the same reproduction plus project tests.
+
 ## applicable_task_types
 - bug-fix
 

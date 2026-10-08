@@ -3769,8 +3769,8 @@ fn build_skill_registry(user_skills_dir: Option<&Path>, project: Option<&Path>) 
         .map(|p| load_user_skills(&p.join(".kodo").join("skills")))
         .unwrap_or_default();
     SkillRegistry::builtin()
-        .with_user(project_skills)
         .with_user(user)
+        .with_user(project_skills)
 }
 
 /// The active-skill block appended to the system prompt. The skill body is
