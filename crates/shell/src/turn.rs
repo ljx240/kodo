@@ -174,12 +174,13 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             model,
             input_tokens,
             output_tokens,
+            ..
         } => ItemKind::ModelCall {
             model: model.clone(),
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
         },
-        Step::FileChange { changes } => ItemKind::FileChange {
+        Step::FileChange { changes, .. } => ItemKind::FileChange {
             changes: changes
                 .iter()
                 .map(
@@ -207,6 +208,85 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             delivery: delivery.clone(),
             verification: verification.clone(),
             plain: *plain,
+        },
+        // Transparency-side steps never carry user-facing content; render them
+        // as `Reasoning` chips with a stable phase so the trace UI can still
+        // surface them and the session log stays closed.
+        Step::Thinking {
+            content,
+            phase,
+            source,
+        } => ItemKind::Reasoning {
+            summary: format!("thinking ({source})"),
+            phase: phase.clone(),
+            diagnostics: Some(content.clone()),
+        },
+        Step::Compaction {
+            dropped,
+            summarized_into,
+            freed_pct,
+            source_summary,
+            covered_messages,
+        } => ItemKind::Reasoning {
+            summary: format!(
+                "compacted {covered_messages} messages into {summarized_into} ({dropped} dropped, {freed_pct}% freed)"
+            ),
+            phase: "compact".into(),
+            diagnostics: Some(source_summary.clone()),
+        },
+        Step::Failover {
+            from_provider,
+            from_model,
+            error_class,
+            error,
+            to_provider,
+            to_model,
+            retry_index,
+        } => ItemKind::Reasoning {
+            summary: format!(
+                "failover retry #{retry_index}: {from_provider}/{from_model} -> {to_provider}/{to_model} ({error_class})"
+            ),
+            phase: "failover".into(),
+            diagnostics: Some(error.clone()),
+        },
+        Step::PlanStep {
+            step_id,
+            title,
+            kind,
+            status,
+            triggered_by,
+            evidence,
+        } => ItemKind::Reasoning {
+            summary: format!("plan step {step_id} ({kind}) {status}: {title}"),
+            phase: "plan".into(),
+            diagnostics: Some(format!(
+                "triggered_by={:?} evidence={:?}",
+                triggered_by, evidence
+            )),
+        },
+        Step::Permission {
+            kind,
+            detail,
+            decision,
+            context,
+        } => ItemKind::Reasoning {
+            summary: format!("permission {kind}: {decision}"),
+            phase: "permission".into(),
+            diagnostics: Some(format!("{detail} | {context}")),
+        },
+        Step::ContextBudget {
+            used,
+            window,
+            percent,
+            cumulative_chars,
+            compacted_count,
+            last_model,
+        } => ItemKind::Reasoning {
+            summary: format!(
+                "context {percent}% ({used}/{window}) after {cumulative_chars} chars, {compacted_count} compactions, model={last_model}"
+            ),
+            phase: "budget".into(),
+            diagnostics: None,
         },
     }
 }
@@ -292,6 +372,7 @@ mod tests {
                 added: 1,
                 removed: 0,
             }],
+            file_span_ref: None,
         };
         logger.record(&SinkEvent::Started {
             step: denied.clone(),
@@ -346,7 +427,8 @@ mod tests {
                         path: "p".into(),
                         added: 2,
                         removed: 1,
-                    }]
+                    }],
+                    file_span_ref: None,
                 },
                 true
             ),
@@ -357,7 +439,14 @@ mod tests {
                 &Step::ModelCall {
                     model: "m".into(),
                     input_tokens: 1,
-                    output_tokens: 2
+                    output_tokens: 2,
+                    protocol: String::new(),
+                    finish_reason: String::new(),
+                    saw_reasoning: false,
+                    duration_ms: 0,
+                    provider_latency_ms: 0,
+                    retry_index: 0,
+                    llm_io_ref: None,
                 },
                 false
             )),

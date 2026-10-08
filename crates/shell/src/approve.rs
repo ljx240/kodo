@@ -39,6 +39,16 @@ pub fn step_kind_label(kind: StepKind) -> &'static str {
         StepKind::ModelCall => "call model",
         StepKind::FileChange => "edit files",
         StepKind::AgentMessage => "draft answer",
+        // Approval kinds that never gate (per `StepKind` doc), but still need a
+        // stable label so `approval_fingerprint` keeps producing unique strings.
+        StepKind::ExternalTool => "external tool",
+        StepKind::WebSearch => "web search",
+        StepKind::Thinking => "thinking",
+        StepKind::Compaction => "compact history",
+        StepKind::Failover => "failover",
+        StepKind::PlanStep => "plan step",
+        StepKind::Permission => "permission",
+        StepKind::ContextBudget => "context budget",
     }
 }
 
