@@ -904,8 +904,11 @@ p {
   color: var(--kodo-text-secondary);
 }
 
-.chip-icon {
-  color: var(--kodo-accent) !important;
+/* Accent on chip icons is reserved for chips that *offer* a choice the user can
+   click. Report-only chips (topbar branch) fall through to the neutral
+   `.chip svg` color above. */
+.composer-skill .chip-icon {
+  color: var(--kodo-accent);
 }
 
 /* A chip that reports rather than offers a choice — the branch, which Kodo has
