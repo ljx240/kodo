@@ -187,6 +187,24 @@ export function Composer({
     input.current?.focus();
   }, [editSeed, draftKey]);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  /** Welcome-stage hint buttons (and any future external trigger) ask the
+   *  composer to take focus and optionally seed the draft. We use a CustomEvent
+   *  rather than a forwarded ref / context so callers outside the composer
+   *  tree (e.g. the welcome-stage JSX) do not need to know the composer's
+   *  internals. */
+  useEffect(() => {
+    const onFocus = (event: Event) => {
+      const detail = (event as CustomEvent<string | undefined>).detail;
+      if (typeof detail === "string" && detail.length > 0) {
+        setDraft((current) => (current.startsWith(detail) ? current : detail));
+      }
+      input.current?.focus();
+    };
+    window.addEventListener("kodo:focus-composer", onFocus);
+    return () => window.removeEventListener("kodo:focus-composer", onFocus);
+  }, []);
+
   const [permission, setPermission] = useState<Permission>(DEFAULT_PERMISSION);
   /** + opens a floating action menu anchored to the composer box. */
   const [plusOpen, setPlusOpen] = useState(false);

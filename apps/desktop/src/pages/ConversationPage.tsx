@@ -1,4 +1,4 @@
-import { Check, Copy, Pencil } from "lucide-react";
+import { ArrowRight, Check, Copy, Pencil } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   loadSession,
@@ -1178,22 +1178,43 @@ export function ConversationPage({
                         : "直接提问或粘贴报错都可以；选中项目后我会读代码、改代码。"}
                   </p>
                   <div className="welcome-hints" data-testid="welcome-hints">
-                    <span className="welcome-hint">/ 调用技能</span>
-                    <span className="welcome-hint">+ 附加文件</span>
-                    <span className="welcome-hint">运行中可排队下一条</span>
-                  </div>
-                  {continueLast && onOpenConversation && (
-                    <div className="welcome-continue">
+                    <button
+                      type="button"
+                      className="welcome-hint welcome-hint--btn"
+                      data-testid="welcome-hint-skills"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent("kodo:focus-composer", { detail: "/" }),
+                        )
+                      }
+                    >
+                      {T.welcome.hintSkills}
+                    </button>
+                    <button
+                      type="button"
+                      className="welcome-hint welcome-hint--btn"
+                      data-testid="welcome-hint-attach"
+                      onClick={() =>
+                        window.dispatchEvent(new CustomEvent("kodo:focus-composer"))
+                      }
+                    >
+                      {T.welcome.hintAttach}
+                    </button>
+                    <span className="welcome-hint welcome-hint--static">
+                      {T.welcome.hintQueue}
+                    </span>
+                    {continueLast && onOpenConversation && (
                       <button
                         type="button"
-                        className="btn"
+                        className="btn btn--primary btn--sm welcome-continue"
                         data-testid="welcome-continue"
                         onClick={() => onOpenConversation(continueLast.id)}
                       >
+                        <ArrowRight size={12} strokeWidth={2} />
                         <span>{T.welcome.continueLast}</span>
                       </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
                 {composer}
               </div>

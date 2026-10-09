@@ -1258,25 +1258,54 @@ button.code-chip--link:focus-visible {
   padding: 6px 10px 10px;
 }
 
+/* Inline chip row. The first two are real buttons (welcome-hint--btn) that
+   focus the composer and seed the draft; the third is a passive hint; the
+   last (when present) is the "continue last conversation" primary CTA. */
 .welcome-hints {
   margin-top: 14px;
   gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 .welcome-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 4px 8px;
   border: 1px solid var(--kodo-border);
   border-radius: 999px;
   background: color-mix(in srgb, var(--kodo-canvas) 78%, var(--kodo-surface));
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-xs);
+  line-height: 1;
+  white-space: nowrap;
 }
 
-/* Secondary CTA back into the newest thread of this space. */
+.welcome-hint--btn {
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--kodo-font-xs);
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.welcome-hint--btn:hover {
+  background: var(--kodo-hover);
+  color: var(--kodo-text);
+  border-color: var(--kodo-border-strong);
+}
+
+/* Passive hint — no border, no hover. */
+.welcome-hint--static {
+  border-color: transparent;
+  background: transparent;
+  color: var(--kodo-text-muted);
+}
+
+/* Inline primary CTA on the same row as the hints. */
 .welcome-continue {
-  display: flex;
-  justify-content: center;
-  margin-top: 14px;
+  margin-left: 4px;
 }
 
 /* ── First-run auto onboarding (Dia-style), 2026-09-23 ─────────────────────

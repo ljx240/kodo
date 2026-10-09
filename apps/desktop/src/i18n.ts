@@ -631,6 +631,9 @@ export const T = {
   },
   welcome: {
     continueLast: "继续上次对话",
+    hintSkills: "/ 调用技能",
+    hintAttach: "+ 附加文件",
+    hintQueue: "运行中可排队下一条",
   },
   verify: {
     passed: "通过",
