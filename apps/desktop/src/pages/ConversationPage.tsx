@@ -81,11 +81,8 @@ type Props = {
   /** Same path the sidebar/palette take — the welcome 「继续上次对话」 CTA. */
   onOpenConversation?: (id: string) => void;
   projects: Project[];
-  onSelectProject: (id: string | null) => void;
-  onAddProject: () => Promise<void>;
   projectName?: string;
   projectPath?: string;
-  branch: string | null;
   /**
    * Hidden but still mounted — the Response Trace route keeps a live run's
    * page alive so its event stream never tears down mid-answer (2026-09-30).
@@ -210,11 +207,8 @@ export function ConversationPage({
   onOpenSettings,
   onOpenConversation,
   projects,
-  onSelectProject,
-  onAddProject,
   projectName = "",
   projectPath = "",
-  branch,
   stowed = false,
   demo = null,
   personaListBySession,
@@ -650,12 +644,6 @@ export function ConversationPage({
     setContexts((current) => (current.includes(path) ? current : [...current, path]));
   };
 
-  const addProject = () => {
-    setPageError(null);
-    void onAddProject().catch((failure) => {
-      setPageError({ message: `添加项目失败：${errorMessage(failure)}` });
-    });
-  };
 
   const rename = (next: string) => {
     if (!sessionId) return;
@@ -1058,7 +1046,6 @@ export function ConversationPage({
     }
     return best;
   }, [projects, conversationId]);
-  const showProjectContext = !demoMode && sessionId === null && turns.length === 0;
 
   const composer = (
     <Composer
@@ -1067,12 +1054,6 @@ export function ConversationPage({
       defaultModel={defaultModel}
       onSelectProvider={onSelectProvider}
       onSelectProviderModel={onSelectProviderModel}
-      projects={projects}
-      onSelectProject={onSelectProject}
-      onAddProject={addProject}
-      projectName={projectName}
-      branch={branch}
-      showProjectContext={showProjectContext}
       agentMode={agentMode}
       ready={!demoMode}
       running={running}

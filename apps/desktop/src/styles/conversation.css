@@ -836,41 +836,6 @@
   min-width: 0;
 }
 
-/* A new task chooses its project directly below the dialog. The row disappears
-   as soon as the first turn is created. */
-.composer-project-context {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  padding: 2px 14px 0;
-}
-
-.composer-project-picker {
-  width: 180px;
-  min-width: 160px;
-  max-width: min(320px, 70%);
-  overflow: hidden;
-  color: var(--kodo-text);
-  cursor: pointer;
-}
-
-.composer-project-picker span {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.composer-project-picker:hover,
-.composer-project-picker[aria-expanded="true"] {
-  background: var(--kodo-hover);
-}
-
-.composer-branch {
-  flex: none;
-}
-
 .composer-skills {
   display: flex;
   flex-wrap: wrap;

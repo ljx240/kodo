@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { coreInfo, gitBranch, listAgents, pickFolder, setting, setSetting } from "./api";
+import { coreInfo, gitBranch, listAgents, setting, setSetting } from "./api";
 import { loadDemoState, type DemoState } from "./data/demoState";
 import { T } from "./i18n";
 import { DEFAULT_MODEL, MODEL_SETTING } from "./data/models";
@@ -495,13 +495,6 @@ export function App() {
     setAgentMode(next);
   };
 
-  const addProjectForTask = async () => {
-    const path = await pickFolder();
-    if (!path) return;
-    await workspace.add(path);
-    newChat(path);
-  };
-
   // Rebuild the query with URLSearchParams so `?type=` (the 插件 tab) and any
   // other param survive — string concatenation would silently reset the tab.
   const setInspectorOpen = (open: boolean) => {
@@ -743,11 +736,8 @@ export function App() {
               onOpenSettings={() => setSettingsOpen(true)}
               onOpenConversation={openConversation}
               projects={workspace.projects.filter((project) => project.path !== "")}
-              onSelectProject={(id) => newChat(id)}
-              onAddProject={addProjectForTask}
               projectName={projectName}
               projectPath={activeProject?.path ?? ""}
-              branch={branch}
               demo={demoState}
               onRetitle={async (id, title) => {
                 await workspace.retitle(id, title);

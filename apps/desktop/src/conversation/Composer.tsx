@@ -4,10 +4,7 @@ import {
   Bot,
   Check,
   ChevronDown,
-  Folder,
   FolderSearch,
-  FolderPlus,
-  GitBranch,
   Paperclip,
   Plus,
   Puzzle,
@@ -40,7 +37,6 @@ import {
   providerModelId,
   templateById,
 } from "../data/providers";
-import type { Project } from "../data/types";
 import { skillSpace, skillsFor } from "../data/skills";
 import { type Permission, PERMISSIONS, PERMISSION_SETTING, DEFAULT_PERMISSION, DEFAULT_MODEL } from "../data/models";
 import { fileLook, kindFromPath } from "../fileKind";
@@ -61,18 +57,6 @@ type Props = {
   providers: ProviderConfig[];
   /** Settings' Default model — shown when no provider is active (§5b). */
   defaultModel?: string;
-  /** Registered projects available to a new conversation. */
-  projects: Project[];
-  /** Select the project context for a new conversation. */
-  onSelectProject: (id: string | null) => void;
-  /** Open the existing project registration flow for a new conversation. */
-  onAddProject: () => void;
-  /** Current project display name. */
-  projectName: string;
-  /** Current project's git branch, when available. */
-  branch: string | null;
-  /** Project and branch context is only shown before the first turn. */
-  showProjectContext: boolean;
   /** Which agent space is showing — picks the skill list. */
   agentMode: string;
   /** Switch to a different provider. */
@@ -144,12 +128,6 @@ export function Composer({
   provider,
   providers,
   defaultModel,
-  projects,
-  onSelectProject,
-  onAddProject,
-  projectName,
-  branch,
-  showProjectContext,
   agentMode,
   onSelectProvider,
   onSelectProviderModel,
@@ -1236,72 +1214,6 @@ export function Composer({
         {/* Pinned context cards render on top of the draft (above). */}
 
       </div>
-
-      {showProjectContext && (
-        <div className="composer-project-context" data-testid="composer-project-context">
-          <Menu
-            trigger={({ open, toggle }) => (
-              <button
-                type="button"
-                className="chip composer-project-picker"
-                data-testid="composer-project-picker"
-                aria-label="选择项目"
-                aria-expanded={open}
-                onClick={toggle}
-              >
-                <Folder size={14} strokeWidth={1.7} />
-                <span data-testid="composer-project-name">{projectName || "未选择项目"}</span>
-                <ChevronDown size={13} strokeWidth={1.9} />
-              </button>
-            )}
-          >
-            {(close) =>
-              <>
-                {projects.length > 0 ? (
-                  projects.map((project) => (
-                    <MenuItem
-                      key={project.id}
-                      icon={<Folder size={14} strokeWidth={1.8} />}
-                      label={project.name}
-                      onSelect={() => {
-                        close();
-                        onSelectProject(project.id);
-                      }}
-                    />
-                  ))
-                ) : (
-                  <div className="menu-item menu-item--static">暂无可用项目</div>
-                )}
-
-                <div className="menu-separator" />
-                <MenuItem
-                  icon={<FolderPlus size={14} strokeWidth={1.8} />}
-                  label="添加新项目"
-                  onSelect={() => {
-                    close();
-                    onAddProject();
-                  }}
-                />
-                {projectPath && (
-                  <MenuItem
-                    icon={<X size={14} strokeWidth={1.9} />}
-                    label="清除项目选择"
-                    onSelect={() => {
-                      close();
-                      onSelectProject(null);
-                    }}
-                  />
-                )}
-              </>
-            }
-          </Menu>
-
-          <span className="chip chip--static composer-branch" data-testid="composer-branch">
-            <GitBranch size={14} strokeWidth={1.7} />
-            <span>{branch ?? "无分支"}</span>
-          </span>
-        </div>
-      )}
 
       {(queueCount > 0 || running) && (
         <div className="composer-status" data-testid="composer-status">
