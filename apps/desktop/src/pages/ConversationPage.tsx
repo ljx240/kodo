@@ -43,9 +43,6 @@ import { kindFromPath } from "../fileKind";
 import { snapshotFromTurn, type LiveSnapshot } from "../data/liveContext";
 import { type ProviderConfig } from "../data/providers";
 import type { Project } from "../data/types";
-// The per-space identity logos — blue tile for Kodo Code, violet K for Kodo Work.
-import kodoCodeMark from "../assets/kodo-code-mark.png";
-import kodoWorkMark from "../assets/kodo-work-mark.png";
 import { T } from "../i18n";
 import { navigate } from "../routes";
 import type { ConvActions } from "../shell/TopBar";
@@ -1191,22 +1188,6 @@ export function ConversationPage({
             {showWelcome ? (
               <div className="welcome-stage" data-testid="welcome">
                 <div className="welcome-copy">
-                  <div
-                    className="welcome-identity"
-                    data-testid="welcome-identity"
-                    data-mode={agentMode}
-                  >
-                    <img
-                      className="welcome-identity-logo"
-                      src={agentMode === "work" ? kodoWorkMark : kodoCodeMark}
-                      alt=""
-                      width={56}
-                      height={56}
-                    />
-                    <span className="welcome-identity-name">
-                      {agentMode === "work" ? T.nav.brandWork : T.nav.brandCode}
-                    </span>
-                  </div>
                   <h2 className="welcome-title">今天想做什么？</h2>
                   <p className="welcome-sub empty-note" data-testid="welcome-sub">
                     {agentMode === "work"

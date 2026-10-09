@@ -1203,8 +1203,8 @@ button.code-chip--link:focus-visible {
   align-items: stretch;
   gap: 20px;
   /* Optical center: a little low of true middle, matching mainstream agents. */
-  padding: 48px 0 72px;
-  min-height: min(420px, 100%);
+  padding: 32px 0 56px;
+  min-height: 100%;
 }
 
 .welcome-copy {
@@ -1213,31 +1213,12 @@ button.code-chip--link:focus-visible {
   margin: 0 auto;
 }
 
-/* Space identity: mode logo + wordmark above the welcome title. */
-.welcome-identity {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.welcome-identity-logo {
-  display: block;
-  width: 56px;
-  height: 56px;
-}
-
-.welcome-identity-name {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--kodo-text);
-  letter-spacing: -0.015em;
-}
-
+/* Welcome title — kept at the project title token size per LAYOUT §1
+   ("Avoid a large page header"). The sidebar already carries the brand
+   logo + wordmark, so the welcome stage does not repeat them. */
 .welcome-title {
   margin: 0 0 8px;
-  font-size: 24px;
+  font-size: var(--kodo-font-title);
   font-weight: 600;
   color: var(--kodo-text);
   letter-spacing: -0.025em;
