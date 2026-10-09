@@ -119,7 +119,7 @@ const PERM_ICONS: Record<Permission, typeof Shield> = {
 const PERM_CONFIG: Record<Permission, { label: string; color: string }> = {
   ask: { label: "请求批准", color: "var(--kodo-accent)" },
   auto: { label: "自动批准安全操作", color: "var(--kodo-success-text)" },
-  full: { label: "完全访问", color: "var(--kodo-warning-text)" },
+  full: { label: "项目内自动执行", color: "var(--kodo-warning-text)" },
 };
 
 const openSettings = () => navigate(isDesktop() ? "/settings" : "/ui-demo/settings");
@@ -808,7 +808,10 @@ export function Composer({
               trigger={({ open, toggle }) => (
                 <button
                   type="button"
-                  className="composer-agent-trigger"
+                  className={
+                    "composer-agent-trigger" +
+                    (personaChain.length === 0 ? " composer-agent-trigger--placeholder" : "")
+                  }
                   data-testid="composer-agent-trigger"
                   aria-label={T.composer.agentAria}
                   aria-expanded={open}

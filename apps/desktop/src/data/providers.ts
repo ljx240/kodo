@@ -208,9 +208,19 @@ export function maskApiKey(key: string, hasKey?: boolean): string {
   return `已保存 · …${key.slice(-4)}`;
 }
 
+/** Strips trailing version/channel tags that leak from raw model ids. Cosmetic
+ *  only — `providerModelId` (the wire value) is unchanged. */
+const VERSION_SUFFIX = /-(preview|latest|exp|beta|alpha)(\b|$)/i;
+
+function prettifyModelLabel(raw: string): string {
+  const s = raw.trim();
+  if (!s) return "";
+  return s.replace(VERSION_SUFFIX, "") || raw;
+}
+
 /** What the provider picker shows. */
 export function providerModelLabel(config: ProviderConfig | null | undefined): string {
-  return config?.displayName || config?.modelId || config?.model || "";
+  return prettifyModelLabel(config?.displayName || config?.modelId || config?.model || "");
 }
 
 /** What the backend will send. */

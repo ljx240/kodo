@@ -928,6 +928,44 @@
   background: var(--kodo-hover);
 }
 
+/* ── Agent (persona) trigger ───────────────────────────────────────────────
+   A dashed muted border marks the unselected state ("无智能体" is a
+   placeholder, not a real pick). Hover / open promotes it to a solid
+   border + normal text color. */
+
+.composer-agent-trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px dashed var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: transparent;
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  min-width: 0;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+
+.composer-agent-trigger:hover,
+.composer-agent-trigger[aria-expanded="true"] {
+  background: var(--kodo-hover);
+}
+
+.composer-agent-trigger--placeholder {
+  color: var(--kodo-text-muted);
+  border-style: dashed;
+}
+
+.composer-agent-trigger--placeholder:hover,
+.composer-agent-trigger--placeholder[aria-expanded="true"] {
+  border-style: solid;
+  border-color: var(--kodo-border-strong);
+  color: var(--kodo-text-secondary);
+}
+
 /* ── Model / permission pickers open upward (composer sits at the bottom).
    Exclude the + menu: it is positioned against `.composer-box` instead. */
 .composer-left .menu:not(.composer-plus-menu),
