@@ -1232,32 +1232,30 @@ button.code-chip--link:focus-visible {
   line-height: 1.55;
 }
 
+/* Welcome composer shares the conversation content column (836px) and the
+   collapsed 84–92px box height from LAYOUT §3. The base `.composer-send`
+   rule (30×30) is reused — no route-scoped override. */
 .welcome-stage .composer {
-  width: min(680px, 100%);
+  width: min(836px, 100%);
   margin: 0 auto;
   padding: 0;
 }
 
 .main--welcome .composer-box {
-  min-height: 108px;
+  min-height: 88px;
 }
 
 .main--welcome .composer-row {
-  padding: 16px 16px 8px;
+  padding: 10px 8px 6px;
 }
 
 .main--welcome .composer-input {
-  min-height: 30px;
+  min-height: 28px;
   font-size: 15px;
 }
 
 .main--welcome .composer-controls {
   padding: 6px 10px 10px;
-}
-
-.main--welcome .composer-send {
-  width: 32px;
-  height: 32px;
 }
 
 .welcome-hints {
