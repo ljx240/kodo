@@ -126,6 +126,12 @@ function CaptureBody({
         <h4>{T.page.llmIo.request}</h4>
         <SystemPrompt system={capture.request.system} />
         <Messages messages={capture.request.messages} />
+        {Array.isArray(capture.request.tools) && capture.request.tools.length > 0 && (
+          <details className="llm-io-block">
+            <summary>工具定义</summary>
+            <pre className="llm-io-pre">{JSON.stringify(capture.request.tools, null, 2)}</pre>
+          </details>
+        )}
       </section>
       <section className="llm-io-col">
         <h4>{T.page.llmIo.response}</h4>

@@ -1,6 +1,7 @@
 import { Database, FolderOpen, Info, Keyboard, SquareArrowOutUpRight, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import { T } from "../i18n";
+import type { PluginType } from "../routes";
 
 /** Static help card — no chevron: a disclosure glyph with no toggle would be a dead affordance. */
 function HelpCard({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
@@ -16,12 +17,28 @@ function HelpCard({ icon, title, children }: { icon: ReactNode; title: string; c
   );
 }
 
-export function HelpOverview() {
+export function HelpOverview({ pluginType }: { pluginType?: PluginType }) {
+  if (pluginType) {
+    const help = T.page.pluginHelp[pluginType];
+    return (
+      <>
+        <HelpCard icon={<Info size={14} strokeWidth={1.7} />} title={help.title}>
+          <p className="ins-note">{help.body}</p>
+        </HelpCard>
+        <HelpCard icon={<FolderOpen size={14} strokeWidth={1.7} />} title="使用范围">
+          <p className="ins-note">{help.scope}</p>
+        </HelpCard>
+        <HelpCard icon={<Keyboard size={14} strokeWidth={1.7} />} title={T.inspector.helpShortcuts}>
+          <p className="ins-note">{T.inspector.helpShortcutsBody}</p>
+        </HelpCard>
+      </>
+    );
+  }
   return (
     <>
       <HelpCard icon={<Info size={14} strokeWidth={1.7} />} title={T.inspector.helpAbout}>
         <p className="ins-note">
-          归档会话会从侧边栏隐藏，但日志文件仍完整保留。可在 Archive 页通过 Inspector 恢复。
+          归档会话会从侧边栏隐藏，但记录仍完整保留。可在「归档」页面选择会话并恢复。
         </p>
       </HelpCard>
 

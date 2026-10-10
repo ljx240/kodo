@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { coreInfo, gitBranch, listAgents, setting, setSetting } from "./api";
+import { coreInfo, gitBranch, listAgents, pickFolder, setting, setSetting } from "./api";
 import { loadDemoState, type DemoState } from "./data/demoState";
 import { T } from "./i18n";
 import { DEFAULT_MODEL, MODEL_SETTING } from "./data/models";
@@ -689,6 +689,15 @@ export function App() {
             }
             route={route.name}
             crumbProject={projectName}
+            projectPath={activeProject?.path ?? ""}
+            projectOptions={workspace.projects.filter((project) => Boolean(project.path))}
+            onSelectProject={activeConversationId === null && !liveSnapshot?.running ? newChat : undefined}
+            onAddProject={workspace.live ? async () => {
+              const picked = await pickFolder();
+              if (!picked) return;
+              await workspace.add(picked);
+              newChat(picked);
+            } : undefined}
             crumbTitle={
               demoState?.conversation.title ??
               workspace.projects
@@ -838,6 +847,8 @@ export function App() {
             demo={route.demo}
             demoState={demoState}
             live={liveSnapshot}
+            project={activeProject ? { name: activeProject.name, path: activeProject.path ?? "" } : null}
+            pluginType={route.pluginType}
             archiveSelection={archiveSelection}
             onArchiveRestore={() => {
               if (!archiveSelection) return;

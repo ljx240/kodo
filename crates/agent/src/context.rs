@@ -306,7 +306,12 @@ impl ContextManager {
 
     /// Current on-disk content hash for a project-relative path.
     pub fn file_version(&self, relative: &str) -> String {
-        let full = self.root.join(relative);
+        let Ok(full) = crate::tools::resolve_in_project(&self.root, relative) else {
+            return "unreadable".into();
+        };
+        if fs::metadata(&full).is_ok_and(|m| m.len() > 8 * 1024 * 1024) {
+            return "too_large".into();
+        }
         match fs::read(&full) {
             Ok(bytes) => hash_bytes(&bytes),
             Err(_) => "missing".into(),
@@ -440,7 +445,9 @@ impl ContextManager {
             if !should_index_path(&rel) || seen.contains(&rel) {
                 continue;
             }
-            let full = self.root.join(&rel);
+            let Ok(full) = crate::tools::resolve_in_project(&self.root, &rel) else {
+                continue;
+            };
             let size = fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
             self.file_map.push(FileEntry {
                 path: rel,
@@ -522,7 +529,7 @@ impl ContextManager {
 
     /// Range read: lines `[start_line, end_line]` inclusive, 1-based.
     /// Records a versioned Observation and refreshes path staleness.
-    /// Absolute paths are allowed for user-pinned external context (e.g. ~/Downloads).
+    /// Model and automatic reads always remain in the project.
     pub fn read_range(
         &mut self,
         path: &str,
@@ -530,17 +537,30 @@ impl ContextManager {
         end_line: usize,
         reason: &str,
     ) -> Result<ContextSpan, String> {
-        if path.trim().is_empty() {
-            return Err("empty path".into());
-        }
-        if path.contains("..") {
-            return Err("path escapes the project root".into());
-        }
-        let full = if Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            self.root.join(path)
-        };
+        let full = crate::tools::resolve_in_project(&self.root, path)?;
+        self.read_resolved_range(path, start_line, end_line, reason, full)
+    }
+
+    /// Called only for paths explicitly supplied as user attachments.
+    pub fn read_pinned_range(
+        &mut self,
+        path: &str,
+        start_line: usize,
+        end_line: usize,
+        reason: &str,
+    ) -> Result<ContextSpan, String> {
+        let full = crate::tools::resolve_pinned_file(&self.root, path)?;
+        self.read_resolved_range(path, start_line, end_line, reason, full)
+    }
+
+    fn read_resolved_range(
+        &mut self,
+        path: &str,
+        start_line: usize,
+        end_line: usize,
+        reason: &str,
+        full: PathBuf,
+    ) -> Result<ContextSpan, String> {
         if !full.is_file() {
             return Err(format!("file not found: {path}"));
         }
@@ -553,7 +573,13 @@ impl ContextManager {
             let sheet = crate::office::read_spreadsheet(&full, self.budget.max_span_chars)
                 .map_err(|e| format!("spreadsheet read failed: {e}"))?;
             (sheet.text, sheet.truncated)
+        } else if crate::office::is_docx(path) {
+            let document = crate::office::read_docx(&full, self.budget.max_span_chars)?;
+            (document.text, document.truncated)
         } else {
+            if meta.len() > 8 * 1024 * 1024 {
+                return Err(format!("text file exceeds 8 MiB: {path}"));
+            }
             if is_binary_meta(&meta, &full) {
                 return Err(format!("binary file refused: {path}"));
             }
@@ -920,6 +946,9 @@ fn walk_collect(
             continue;
         }
         let path = entry.path();
+        if entry.file_type().map(|t| t.is_symlink()).unwrap_or(true) {
+            continue;
+        }
         if path.is_dir() {
             walk_collect(root, &path, out, alive)?;
         } else if path.is_file() {
@@ -942,6 +971,9 @@ fn walk_collect(
 }
 
 fn should_index_path(rel: &str) -> bool {
+    if crate::tools::is_sensitive_relative_path(rel) {
+        return false;
+    }
     let normalized = rel.replace('\\', "/");
     for seg in normalized.split('/') {
         if is_ignored_dir(seg) {
@@ -1095,7 +1127,7 @@ fn grep_file(
     tokens: &[String],
     query: &str,
 ) -> Option<ContextSpan> {
-    let full = root.join(&entry.path);
+    let full = crate::tools::resolve_in_project(root, &entry.path).ok()?;
     let text = fs::read_to_string(&full).ok()?;
     if text.bytes().take(4096).any(|b| b == 0) {
         return None;
@@ -1419,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn range_read_allows_absolute_external_pin() {
+    fn range_read_allows_only_explicit_absolute_external_pin() {
         let root = make_fixture();
         let external_dir = std::env::temp_dir().join(format!("kodo_ext_{}", std::process::id()));
         fs::create_dir_all(&external_dir).expect("temp dir");
@@ -1428,14 +1460,17 @@ mod tests {
         let abs = external.to_string_lossy().into_owned();
 
         let mut m = manager(&root);
+        assert!(m.read_range(&abs, 1, 2, "model read").is_err());
         let span = m
-            .read_range(&abs, 1, 2, "pinned by user")
+            .read_pinned_range(&abs, 1, 2, "pinned by user")
             .expect("absolute external read");
         assert_eq!(span.snippet, "hello from outside\nsecond line");
         assert_eq!(span.path, abs);
 
         m.scan(&|| true).expect("scan");
-        let pin = m.read_range(&abs, 1, 2, "pinned by user").expect("re-read");
+        let pin = m
+            .read_pinned_range(&abs, 1, 2, "pinned by user")
+            .expect("re-read");
         m.pin(pin);
         let out = m.collect(UNIQUE, &|| true).expect("collect");
         assert!(out.iter().any(|s| s.pinned && s.path == abs));
@@ -1454,9 +1489,13 @@ mod tests {
         let xlsx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qa.xlsx");
         let rel = xlsx.to_string_lossy().into_owned();
         let span = m
-            .read_range(&rel, 1, 400, "pinned by user")
+            .read_pinned_range(&rel, 1, 400, "pinned by user")
             .expect("spreadsheet reads as a span");
-        assert!(span.snippet.contains("## sheet: 缴费基数"), "{}", span.snippet);
+        assert!(
+            span.snippet.contains("## sheet: 缴费基数"),
+            "{}",
+            span.snippet
+        );
         assert!(span.snippet.contains("养老保险\t4494"), "{}", span.snippet);
         assert!(span.total_lines >= 4, "rows become lines");
         let _ = fs::remove_dir_all(&root);

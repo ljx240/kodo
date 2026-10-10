@@ -79,6 +79,8 @@
   color: #fff;
 }
 
+[data-theme="dark"] .rail-btn--active svg { color: var(--kodo-canvas); }
+
 .ins-panel {
   width: var(--kodo-inspector-width);
   flex: none;
@@ -318,6 +320,8 @@
 }
 
 .ins-section {
+  flex: none;
+  min-width: 0;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
 }

@@ -45,6 +45,7 @@ export type Core = {
     project?: string;
     agent?: string | null;
     agents?: string[];
+    budgetFamily?: string | null;
   }>;
   /**
    * Make `send_message` finish its run before resolving — the exact race a
@@ -53,7 +54,7 @@ export type Core = {
    */
   autoRun?: { answer: string; plain?: boolean };
   /** Captured `respond_approval` payloads. */
-  approvalLog?: Array<{ id: string; step: number; approved: boolean; sessionWide: boolean }>;
+  approvalLog?: Array<{ id: string; step: number; approved: boolean; sessionWide: boolean; runId?: number }>;
   /** `turn_changes` payload for inline diffs. */
   turnChanges?: Array<{ path: string; diff: string; userPreexisting?: boolean; undoState?: string; conflict?: boolean }>;
   /** Full file bodies for the file viewer (`read_project_file`). */
@@ -118,9 +119,10 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
       project?: string;
       agent?: string | null;
       agents?: string[];
+      budgetFamily?: string | null;
     }> = [];
     (window as unknown as { __sendLog?: unknown }).__sendLog = sendLog;
-    const approvalLog: Array<{ id: string; step: number; approved: boolean; sessionWide: boolean }> = [];
+    const approvalLog: Array<{ id: string; step: number; approved: boolean; sessionWide: boolean; runId?: number }> = [];
     (window as unknown as { __approvalLog?: unknown }).__approvalLog = approvalLog;
     const listModelCalls: Array<{ template: string; endpoint: string; providerId?: string }> = [];
     (window as unknown as { __listModelCalls?: unknown }).__listModelCalls = listModelCalls;
@@ -135,6 +137,8 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     (window as unknown as { __deleteLog?: unknown }).__deleteLog = deleteLog;
     const providersLog: unknown[] = [];
     (window as unknown as { __providersLog?: unknown }).__providersLog = providersLog;
+    const browseLog: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    (window as unknown as { __browseLog?: unknown }).__browseLog = browseLog;
     let providersState = (config.providers ?? []) as Array<Record<string, unknown>>;
     /** `save_skill` / `delete_skill` calls, for asserting CRUD reached the core. */
     const skillOps: Array<{ op: "save" | "delete"; name: string }> = [];
@@ -319,6 +323,7 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
               step: Number(args?.step ?? 0),
               approved: Boolean(args?.approved),
               sessionWide: Boolean((args as { sessionWide?: unknown })?.sessionWide),
+              ...(args?.runId !== undefined ? { runId: Number(args.runId) } : {}),
             });
             return null;
           case "turn_changes":
@@ -437,6 +442,7 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
               id: String(args?.id ?? ""),
               text: String(args?.text ?? ""),
               context: contextPaths,
+              budgetFamily: typeof args?.budgetFamily === "string" ? args.budgetFamily : null,
               project: String(args?.project ?? ""),
               // Persona resolved at send time — null reaches the backend as
               // "no agent selected" (插件 · 智能体). `agents` is the full chain
@@ -592,6 +598,12 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             agentsLog.push({ op: "delete", name });
             return null;
           }
+          case "browse_open":
+          case "browse_close":
+          case "browse_set_url":
+          case "browse_set_position":
+            browseLog.push({ command, args });
+            return null;
           default:
             return null;
         }

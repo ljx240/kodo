@@ -432,52 +432,54 @@ export function TracePage({
           )}
 
           {tab === "timeline" && (
-            <table className="timeline">
-              <thead>
-                <tr>
-                  <th className="col-n">{T.page.timelineColumns.n}</th>
-                  <th className="col-time">{T.page.timelineColumns.time}</th>
-                  <th className="col-duration">{T.page.timelineColumns.duration}</th>
-                  <th className="col-type">{T.page.timelineColumns.type}</th>
-                  <th>{T.page.timelineColumns.details}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.rows.map((row) => (
-                  <tr key={`${row.n}-${row.title}`}>
-                    <td className="col-n">{row.n}</td>
-                    <td className="col-time mono">{row.time}</td>
-                    <td className="col-duration mono">{row.duration}</td>
-                    <td className="col-type">
-                      <TypePill type={row.type} />
-                    </td>
-                    <td>
-                      <div className="tl-title">
-                        <span>{toolAlias(row.title)}</span>
-                        {row.chip && <code className="code-chip">{row.chip}</code>}
-                        {row.chips?.map((chip) => (
-                          <code key={chip} className="code-chip">
-                            {chip}
-                          </code>
-                        ))}
-                        {row.delta && (
-                          <>
-                            <span className="delta-add">+{row.delta.added}</span>
-                            <span className="delta-del">-{row.delta.removed}</span>
-                          </>
-                        )}
-                        {row.ok && (
-                          <span className="tl-ok">
-                            <Check size={12} strokeWidth={3} />
-                          </span>
-                        )}
-                      </div>
-                      <div className="tl-note">{row.note}</div>
-                    </td>
+            <div className="table-scroll" role="region" aria-label="执行时间线" tabIndex={0}>
+              <table className="timeline">
+                <thead>
+                  <tr>
+                    <th className="col-n">{T.page.timelineColumns.n}</th>
+                    <th className="col-time">{T.page.timelineColumns.time}</th>
+                    <th className="col-duration">{T.page.timelineColumns.duration}</th>
+                    <th className="col-type">{T.page.timelineColumns.type}</th>
+                    <th>{T.page.timelineColumns.details}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.rows.map((row) => (
+                    <tr key={`${row.n}-${row.title}`}>
+                      <td className="col-n">{row.n}</td>
+                      <td className="col-time mono">{row.time}</td>
+                      <td className="col-duration mono">{row.duration}</td>
+                      <td className="col-type">
+                        <TypePill type={row.type} />
+                      </td>
+                      <td>
+                        <div className="tl-title">
+                          <span>{toolAlias(row.title)}</span>
+                          {row.chip && <code className="code-chip">{row.chip}</code>}
+                          {row.chips?.map((chip) => (
+                            <code key={chip} className="code-chip">
+                              {chip}
+                            </code>
+                          ))}
+                          {row.delta && (
+                            <>
+                              <span className="delta-add">+{row.delta.added}</span>
+                              <span className="delta-del">-{row.delta.removed}</span>
+                            </>
+                          )}
+                          {row.ok && (
+                            <span className="tl-ok">
+                              <Check size={12} strokeWidth={3} />
+                            </span>
+                          )}
+                        </div>
+                        <div className="tl-note">{row.note}</div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </div>

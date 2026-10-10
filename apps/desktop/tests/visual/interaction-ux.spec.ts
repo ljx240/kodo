@@ -494,7 +494,7 @@ test("TOC scroll-follow highlights the active heading and caps its height", asyn
   await page.locator(".tree-conversation").click();
 
   await expect(page.locator('[data-testid="md-toc"] a')).toHaveCount(30);
-  // 30 entries exceed the 40vh cap — the list scrolls inside the box.
+  // Long directories scroll inside their bounded list.
   const scroll = await page.locator(".md-toc-list").evaluate((el) => ({
     scrollHeight: el.scrollHeight,
     clientHeight: el.clientHeight,
@@ -507,8 +507,10 @@ test("TOC scroll-follow highlights the active heading and caps its height", asyn
 
   // Jumping to the first heading lands it at the container top — inside the
   // band — so its entry lights up.
-  await page.locator("#md-h-0").evaluate((el) => el.scrollIntoView({ block: "start" }));
-  await expect(page.locator(".md-toc a.md-toc-active")).toHaveAttribute("href", "#md-h-0");
+  const firstHeading = page.locator(".md-heading").first();
+  const firstId = await firstHeading.getAttribute("id");
+  await firstHeading.evaluate((el) => el.scrollIntoView({ block: "start" }));
+  await expect(page.locator(".md-toc a.md-toc-active")).toHaveAttribute("href", `#${firstId}`);
 });
 
 test("final answer renders KaTeX formulas and mermaid diagrams after lazy load", async ({

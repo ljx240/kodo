@@ -222,6 +222,7 @@ fn run_scenario(
     let request = RunRequest {
         project: Some(project.to_path_buf()),
         message: message.to_owned(),
+        conversation_history: Vec::new(),
         pinned_context: Vec::new(),
         provider: Some(provider),
         permission,
@@ -229,11 +230,13 @@ fn run_scenario(
         fallback_to_local: true,
         max_output_tokens: 1024,
         extended_thinking: false,
+        local_trace: false,
         session_id: None,
         user_skills_dir: None,
         mcp_servers: Vec::new(),
         agent_instructions: None,
         personas: Vec::new(),
+        budget_family: None,
     };
 
     let cancel_after = Arc::new(AtomicUsize::new(

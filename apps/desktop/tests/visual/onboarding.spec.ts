@@ -116,18 +116,18 @@ test("demo routes never show the onboarding", async ({ page }) => {
   await expect(page.locator(".crumb-current")).toBeVisible();
 });
 
-test("capture: onboarding stages at the reference viewport", async ({ page }) => {
+test("capture: onboarding stages at the reference viewport", async ({ page }, testInfo) => {
   await stubShell(page, firstRun());
   await page.goto("/");
   const onb = page.locator('[data-testid="onboarding"]');
   await expect(onb).toContainText("Get code done.");
-  await onb.screenshot({ path: "../../.kodo/shots/onboarding-1-welcome.png" });
+  await onb.screenshot({ path: testInfo.outputPath("onboarding-1-welcome.png") });
 
   for (let index = 1; index < 4; index += 1) {
     await page.locator(`[data-testid="onboarding-dot-${index}"]`).click();
     await expect(page.locator('[data-testid="onboarding-stage"]')).toBeVisible();
     // Let the entrance settle so the capture shows the resting state.
     await page.waitForTimeout(700);
-    await onb.screenshot({ path: `../../.kodo/shots/onboarding-${index + 1}-stage.png` });
+    await onb.screenshot({ path: testInfo.outputPath(`onboarding-${index + 1}-stage.png`) });
   }
 });

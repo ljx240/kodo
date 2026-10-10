@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { isDesktop, setSetting, setting } from "../api";
 import { T } from "../i18n";
 
@@ -43,7 +43,7 @@ export function AutoOnboarding({ demo }: { demo: boolean }) {
     return () => window.clearTimeout(timer);
   }, [state, stage, last]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (state !== "open") return;
     skipRef.current?.focus();
   }, [state]);
@@ -53,7 +53,7 @@ export function AutoOnboarding({ demo }: { demo: boolean }) {
     if (isDesktop()) void setSetting(ONBOARDING_KEY, "true");
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (state !== "open") return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") finish();

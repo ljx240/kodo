@@ -1,6 +1,7 @@
 /* -------------------------------------------------------- response trace -- */
 
 .reply-card {
+  container: reply-card / inline-size;
   margin: 28px 0 8px;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
@@ -36,12 +37,13 @@
    the summary column against it, rather than splitting the row in half. */
 .reply-card-body {
   display: grid;
-  grid-template-columns: 2fr 3fr;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
   gap: 19px;
   padding: 2px 18px 18px 76px;
 }
 
 .reply-meta {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -69,6 +71,26 @@
   gap: 6px;
   margin: 0;
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.reply-meta-row .code-chip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reply-meta-row .icon-btn { flex: none; }
+
+@container reply-card (max-width: 640px) {
+  .reply-card-body {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 2px 18px 18px;
+    gap: 14px;
+  }
+  .reply-card-head { padding: 16px 18px 10px; }
+  .reply-mark { margin-right: 0; }
+  .reply-meta-row { grid-template-columns: 84px minmax(0, 1fr); }
 }
 
 .copied-hint {
@@ -100,9 +122,12 @@
   gap: 18px;
   margin-bottom: 15px;
   border-bottom: 1px solid var(--kodo-border);
+  overflow-x: auto;
 }
 
 .page-tab {
+  flex: none;
+  white-space: nowrap;
   height: 36px;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
@@ -122,6 +147,7 @@
 }
 
 .timeline {
+  min-width: 640px;
   width: 100%;
   border-collapse: collapse;
   font-size: var(--kodo-font-md);
@@ -172,6 +198,19 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tl-title .code-chip {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
 }
 
 .tl-note {
@@ -249,6 +288,7 @@
    column widths are what hold the gaps. Columns are fixed so the conversation
    title and summary truncate instead of wrapping the row taller. */
 .archive-table {
+  min-width: 680px;
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
@@ -257,7 +297,7 @@
 
 .archive-table th {
   height: 35px;
-  padding: 0;
+  padding: 0 8px;
   border-bottom: 1px solid var(--kodo-border);
   background: var(--kodo-surface);
   color: var(--kodo-text-secondary);
@@ -268,7 +308,7 @@
 
 .archive-table td {
   height: 35px;
-  padding: 0;
+  padding: 0 8px;
   border-bottom: 1px solid var(--kodo-border-subtle);
   vertical-align: middle;
   white-space: nowrap;
@@ -319,6 +359,8 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
+  width: 100%;
+  text-align: left;
 }
 
 .arc-title svg {
@@ -418,6 +460,8 @@
 }
 
 .skill-row {
+  width: 100%;
+  text-align: left;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -427,9 +471,69 @@
   color: var(--kodo-text-secondary);
 }
 
-.skill-row:last-child { border-bottom: 0; }
-.skill-row-label { color: var(--kodo-text); font-size: var(--kodo-font-md); }
-.skill-row code { margin-left: auto; color: var(--kodo-text-secondary); }
+.skill-row:last-child,
+.user-skill-row:last-child { border-bottom: 0; }
+
+.skill-row:hover,
+.user-skill-row:hover { background: var(--kodo-hover); }
+
+.skill-row svg,
+.user-skill-open svg,
+.agent-open svg { flex: none; }
+
+.skill-row-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+}
+
+.skill-row code,
+.user-skill-open code {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--kodo-text-secondary);
+}
+
+.user-skill-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.user-skill-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  color: var(--kodo-text-secondary);
+  text-align: left;
+}
+
+.skill-row-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.skills-empty {
+  padding: 16px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.6;
+}
 
 /* A category column and the detail beside it. The column is fixed so switching
    categories never moves the text the user is reading. */
@@ -514,8 +618,9 @@
 }
 
 .settings-detail {
+  container: settings-card / inline-size;
   width: min(760px, 100%);
-  min-height: 290px;
+  min-height: 0;
   margin: 16px auto 0;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
@@ -597,7 +702,8 @@
    11px, which is what keeps them on one line beside their selects. */
 .setting-hint {
   color: var(--kodo-text-secondary);
-  font-size: 10px;
+  font-size: var(--kodo-font-xs);
+  line-height: 1.5;
 }
 
 .setting-icon {
@@ -610,6 +716,8 @@
    Permissions hints, which sit beside it, on one line. The reference gives the
    select and slider rows, whose hint sits underneath, a fixed column instead. */
 .setting-control {
+  min-width: 0;
+  max-width: 100%;
   flex: none;
   display: flex;
   flex-direction: column;
@@ -1119,6 +1227,33 @@
   color: var(--kodo-text);
   resize: vertical;
 }
+
+.skill-detail-body--edit > .skill-editor { flex: 1 0 220px; }
+.skill-detail-body--edit > :not(.skill-editor) { flex: none; }
+
+/* Adapt to the actual workspace column, including an open Inspector. */
+@container workspace (max-width: 720px) {
+  .settings-layout { flex-direction: column; }
+  .settings-nav {
+    width: 100%;
+    flex-direction: row;
+    padding: 10px 14px;
+    border-right: 0;
+    border-bottom: 1px solid var(--kodo-border);
+    overflow-x: auto;
+  }
+  .settings-nav-item { flex: none; white-space: nowrap; }
+  .filters { flex-wrap: wrap; gap: 10px; }
+  .filters .field { flex: 1 1 140px; min-width: 0; width: auto; }
+  .table-foot { flex-wrap: wrap; }
+}
+
+@container settings-card (max-width: 520px) {
+  .setting-row--field { flex-direction: column; gap: 6px; }
+  .setting-row--field > .setting-text { flex: none; }
+  .setting-row--field > .setting-control { width: 100%; }
+  .setting-row--field > .setting-icon { display: none; }
+}
 .skill-editor:focus {
   outline: 2px solid var(--kodo-focus-ring);
   outline-offset: -1px;
@@ -1212,7 +1347,12 @@
 }
 
 .agent-row-name {
-  flex: none;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
   font-size: var(--kodo-font-md);
   font-weight: 500;
   color: var(--kodo-text);

@@ -142,15 +142,15 @@ export function ReplyMeta({
   return (
     <dl className="reply-meta">
       <div className="reply-meta-row">
-        <dt>Reply ID</dt>
+        <dt>回复编号</dt>
         <dd>
-          <code className="code-chip">{replyId}</code>
+          <code className="code-chip" title={replyId}>{replyId}</code>
           <button
             type="button"
             className="icon-btn icon-btn--sm"
             aria-label={T.conv.copyReplyId}
             data-testid="copy-reply-id"
-            title="复制 Reply ID 到剪贴板"
+            title="复制回复编号"
             onClick={copyReplyId}
           >
             <Copy size={13} strokeWidth={1.8} />
@@ -168,15 +168,15 @@ export function ReplyMeta({
         </dd>
       </div>
       <div className="reply-meta-row">
-        <dt>Started at</dt>
+        <dt>开始时间</dt>
         <dd>{startedAt}</dd>
       </div>
       <div className="reply-meta-row">
-        <dt>Duration</dt>
+        <dt>耗时</dt>
         <dd>{duration}</dd>
       </div>
       <div className="reply-meta-row">
-        <dt>Model</dt>
+        <dt>模型</dt>
         <dd>{model}</dd>
       </div>
     </dl>

@@ -1,5 +1,9 @@
-import { ArrowRight, Check, Copy, Pencil } from "lucide-react";
+import { ArrowRight, BookOpen, Bug, Check, Copy, Pencil, Sparkles, Wrench } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+// Welcome-identity marks — same family as the sidebar brand mark, one per
+// agent space (DESIGN §11). Vite resolves these to hashed asset URLs.
+import kodoCodeMark from "../assets/kodo-code-mark.png";
+import kodoWorkMark from "../assets/kodo-work-mark.png";
 import {
   loadSession,
   onRunEvent,
@@ -112,6 +116,7 @@ type Props = {
 };
 
 type Approval = {
+  runId?: number;
   step: number;
   kind: string;
   detail: string;
@@ -172,6 +177,8 @@ function demoReplyFor(demo: DemoState, index: number): Reply {
     final: turn.assistant.final,
     checks: turn.assistant.checks,
     changes,
+    // The legacy fixture has no post-write read events to attest a readback.
+    documentReadbacks: [],
     ...totals(changes),
     interrupted: false,
     stopped: false,
@@ -182,6 +189,7 @@ function demoReplyFor(demo: DemoState, index: number): Reply {
     contextBudget: null,
     verify,
     failureGroups: mergeFailures(steps),
+    failureReason: null,
   };
 }
 
@@ -247,6 +255,10 @@ export function ConversationPage({
   /** One-shot toast for the most recent compaction pass; auto-cleared. */
   const [compactToast, setCompactToast] = useState<{ dropped: number; freedPct: number } | null>(null);
   const compactToastTimerRef = useRef<number | null>(null);
+  /** One-shot toast for an adaptive mid-turn budget lift. Cleared on the
+   *  next turnStarted / stop, or after 1500 ms if no follow-up arrives. */
+  const [budgetLiftToast, setBudgetLiftToast] = useState<{ detail: string } | null>(null);
+  const budgetLiftTimerRef = useRef<number | null>(null);
   const [queue, setQueueState] = useState<PendingSend[]>([]);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(null);
@@ -341,9 +353,14 @@ export function ConversationPage({
     setFailover(null);
     setBudget(null);
     setCompactToast(null);
+    setBudgetLiftToast(null);
     if (compactToastTimerRef.current !== null) {
       window.clearTimeout(compactToastTimerRef.current);
       compactToastTimerRef.current = null;
+    }
+    if (budgetLiftTimerRef.current !== null) {
+      window.clearTimeout(budgetLiftTimerRef.current);
+      budgetLiftTimerRef.current = null;
     }
     applyQueue([]);
     setRunStartedAt(null);
@@ -444,6 +461,7 @@ export function ConversationPage({
   const sessionIdRef = useRef<string | null>(null);
   sessionIdRef.current = sessionId;
   const createInFlightRef = useRef(false);
+  const runGenerationsRef = useRef(new Map<string, number>());
   const racedEventsRef = useRef<RunEventDto[]>([]);
   const handleEventRef = useRef<(event: RunEventDto) => void>(() => {});
   const stopRequestedRef = useRef(false);
@@ -471,7 +489,7 @@ export function ConversationPage({
     });
   };
 
-  const dispatchSend = async (text: string, context: string[], opts?: { skipTitle?: boolean }) => {
+  const dispatchSend = async (text: string, context: string[], opts?: { skipTitle?: boolean; budgetFamily?: string | null }) => {
     const payload = { text, context };
     const targetId = sessionId ?? "";
     setPageError(null);
@@ -484,9 +502,14 @@ export function ConversationPage({
     setProgress(null);
     setBudget(null);
     setCompactToast(null);
+    setBudgetLiftToast(null);
     if (compactToastTimerRef.current !== null) {
       window.clearTimeout(compactToastTimerRef.current);
       compactToastTimerRef.current = null;
+    }
+    if (budgetLiftTimerRef.current !== null) {
+      window.clearTimeout(budgetLiftTimerRef.current);
+      budgetLiftTimerRef.current = null;
     }
     stickToBottomRef.current = true;
     stopRequestedRef.current = false;
@@ -500,7 +523,14 @@ export function ConversationPage({
     }
     try {
       const personaChain = personaChainRef.current;
-      const createdId = await sendMessage(targetId, text, context, projectPath, personaChain);
+      const createdId = await sendMessage(
+        targetId,
+        text,
+        context,
+        projectPath,
+        personaChain,
+        opts?.budgetFamily ?? null,
+      );
       // Stamp the chain's first entry as just-used; recents are an MRU,
       // so the next send will move it back to the top automatically.
       if (personaChain.length > 0) recordRecentAgent(personaChain[0]);
@@ -573,6 +603,16 @@ export function ConversationPage({
     void dispatchSend(last.ask, last.context ?? [], { skipTitle: true });
   };
 
+  /** Retry unfinished work with extended headroom, preserving task policy,
+   *  existing files and public conversation history. This starts a new run;
+   *  the backend must re-inspect files rather than trusting a failed claim. */
+  const continueTurn = () => {
+    if (!sessionId || running) return;
+    const last = [...turns].reverse().find((turn) => turn.ask.trim());
+    if (!last) return;
+    void dispatchSend(last.ask, last.context ?? [], { skipTitle: true, budgetFamily: "extended" });
+  };
+
   const stop = () => {
     setApproval(null);
     // Stop 后不再产生用户可见 TextDelta。
@@ -632,7 +672,7 @@ export function ConversationPage({
     const pending = approval;
     setApproval(null);
     setApprovalError(null);
-    void respondApproval(sessionId, pending.step, approved, sessionWide).catch((failure) => {
+    void respondApproval(sessionId, pending.step, approved, sessionWide, pending.runId).catch((failure) => {
       const label = !approved ? "拒绝" : sessionWide ? "本会话允许" : "允许";
       setApprovalError(
         `审批响应失败：${errorMessage(failure)}（${label} step ${pending.step}）`,
@@ -708,8 +748,17 @@ export function ConversationPage({
   };
 
   const handleEvent = (event: RunEventDto) => {
+    if (event.runId !== undefined) {
+      const current = runGenerationsRef.current.get(event.session);
+      if (event.type === "turnStarted") {
+        if (current !== undefined && event.runId < current) return;
+        runGenerationsRef.current.set(event.session, event.runId);
+      } else if (current !== undefined && event.runId !== current) return;
+      else runGenerationsRef.current.set(event.session, event.runId);
+    }
     if (event.type === "approvalRequest") {
       setApproval({
+        runId: event.runId,
         step: event.step,
         kind: event.kind,
         detail: event.detail ?? "",
@@ -728,6 +777,19 @@ export function ConversationPage({
     }
     if (event.type === "progress") {
       setProgress({ phase: event.phase, detail: event.detail });
+      // Adaptive budget lift rides the same `progress` channel; surface it
+      // as a dedicated toast (auto-clears) so the user can see the cap
+      // moved, not just the running-status line.
+      if (event.phase === "budget-lift") {
+        setBudgetLiftToast({ detail: event.detail });
+        if (budgetLiftTimerRef.current !== null) {
+          window.clearTimeout(budgetLiftTimerRef.current);
+        }
+        budgetLiftTimerRef.current = window.setTimeout(() => {
+          setBudgetLiftToast(null);
+          budgetLiftTimerRef.current = null;
+        }, 1500);
+      }
       return;
     }
     if (event.type === "contextBudget") {
@@ -785,9 +847,14 @@ export function ConversationPage({
       setFailover(null);
       setBudget(null);
       setCompactToast(null);
+      setBudgetLiftToast(null);
       if (compactToastTimerRef.current !== null) {
         window.clearTimeout(compactToastTimerRef.current);
         compactToastTimerRef.current = null;
+      }
+      if (budgetLiftTimerRef.current !== null) {
+        window.clearTimeout(budgetLiftTimerRef.current);
+        budgetLiftTimerRef.current = null;
       }
       setRunStartedAt((current) => current ?? Date.now());
     }
@@ -800,9 +867,14 @@ export function ConversationPage({
       setProgress(null);
       setBudget(null);
       setCompactToast(null);
+      setBudgetLiftToast(null);
       if (compactToastTimerRef.current !== null) {
         window.clearTimeout(compactToastTimerRef.current);
         compactToastTimerRef.current = null;
+      }
+      if (budgetLiftTimerRef.current !== null) {
+        window.clearTimeout(budgetLiftTimerRef.current);
+        budgetLiftTimerRef.current = null;
       }
       setRunStartedAt(null);
       if (event.type === "turnComplete") {
@@ -1169,14 +1241,97 @@ export function ConversationPage({
             {showWelcome ? (
               <div className="welcome-stage" data-testid="welcome">
                 <div className="welcome-copy">
-                  <h2 className="welcome-title">今天想做什么？</h2>
+                  {/* Space identity (DESIGN §11): the mode logo + the
+                     `Kodo Code` / `Kodo Work` wordmark sits above the title
+                     so a fresh 新建任务 is unambiguous before the first
+                     message. `data-mode` powers the test and any future
+                     per-space chrome tweaks. */}
+                  <div
+                    className="welcome-identity"
+                    data-testid="welcome-identity"
+                    data-mode={agentMode}
+                  >
+                    <img
+                      className="welcome-identity-mark"
+                      src={agentMode === "work" ? kodoWorkMark : kodoCodeMark}
+                      alt=""
+                      width={22}
+                      height={22}
+                    />
+                    <span className="welcome-identity-name">
+                      {agentMode === "work" ? T.nav.brandWork : T.nav.brandCode}
+                    </span>
+                  </div>
+                  <h2 className="welcome-title">{T.welcome.title}</h2>
                   <p className="welcome-sub empty-note" data-testid="welcome-sub">
                     {agentMode === "work"
-                      ? "写文档、做总结、提问都可以；选中项目后我还能读写项目里的文件。"
+                      ? T.welcome.subtitleWork
                       : projectPath
-                        ? "描述任务或粘贴报错，我会在当前项目里读代码、改代码。"
-                        : "直接提问或粘贴报错都可以；选中项目后我会读代码、改代码。"}
+                        ? T.welcome.subtitleCode
+                        : T.welcome.subtitleCodeNoProject}
                   </p>
+                  <div className="welcome-tasks" data-testid="welcome-tasks">
+                    <button
+                      type="button"
+                      className="welcome-task"
+                      data-testid="welcome-task-understand"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent("kodo:focus-composer", {
+                            detail: T.welcome.taskUnderstandPrompt,
+                          }),
+                        )
+                      }
+                    >
+                      <BookOpen size={14} strokeWidth={1.8} className="welcome-task-icon" />
+                      <span className="welcome-task-label">{T.welcome.taskUnderstand}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="welcome-task"
+                      data-testid="welcome-task-implement"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent("kodo:focus-composer", {
+                            detail: T.welcome.taskImplementPrompt,
+                          }),
+                        )
+                      }
+                    >
+                      <Sparkles size={14} strokeWidth={1.8} className="welcome-task-icon" />
+                      <span className="welcome-task-label">{T.welcome.taskImplement}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="welcome-task"
+                      data-testid="welcome-task-fix"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent("kodo:focus-composer", {
+                            detail: T.welcome.taskFixPrompt,
+                          }),
+                        )
+                      }
+                    >
+                      <Wrench size={14} strokeWidth={1.8} className="welcome-task-icon" />
+                      <span className="welcome-task-label">{T.welcome.taskFix}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="welcome-task"
+                      data-testid="welcome-task-review"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent("kodo:focus-composer", {
+                            detail: T.welcome.taskReviewPrompt,
+                          }),
+                        )
+                      }
+                    >
+                      <Bug size={14} strokeWidth={1.8} className="welcome-task-icon" />
+                      <span className="welcome-task-label">{T.welcome.taskReview}</span>
+                    </button>
+                  </div>
                   <div className="welcome-hints" data-testid="welcome-hints">
                     <button
                       type="button"
@@ -1195,7 +1350,7 @@ export function ConversationPage({
                       className="welcome-hint welcome-hint--btn"
                       data-testid="welcome-hint-attach"
                       onClick={() =>
-                        window.dispatchEvent(new CustomEvent("kodo:focus-composer"))
+                        window.dispatchEvent(new CustomEvent("kodo:attach-files"))
                       }
                     >
                       {T.welcome.hintAttach}
@@ -1206,7 +1361,7 @@ export function ConversationPage({
                     {continueLast && onOpenConversation && (
                       <button
                         type="button"
-                        className="btn btn--primary btn--sm welcome-continue"
+                        className="btn btn--sm welcome-continue"
                         data-testid="welcome-continue"
                         onClick={() => onOpenConversation(continueLast.id)}
                       >
@@ -1288,6 +1443,7 @@ export function ConversationPage({
                           elapsed={running && last ? elapsed : null}
                           waitingApproval={running && last ? Boolean(approval) : false}
                           compactToast={running && last ? compactToast : null}
+                          budgetLiftToast={running && last ? budgetLiftToast : null}
                           failovers={last ? failovers : []}
                           onViewFiles={() => {
                             const first = reply.changes[0]?.path ?? null;
@@ -1295,6 +1451,11 @@ export function ConversationPage({
                           }}
                           onRegenerate={liveSession && last && !running ? regenerate : null}
                           onRetryEnvironment={liveSession && last && !running ? regenerate : null}
+                          onContinueTurn={
+                            liveSession && last && !running && reply.failureReason === "budget_exhausted"
+                              ? continueTurn
+                              : null
+                          }
                           onOpenLogs={onOpenTrace}
                           fileDiffs={fileDiffs}
                           onUndoChanges={liveSession && last && !running && Boolean(projectPath) ? undoChanges : null}

@@ -87,6 +87,9 @@ pub fn classify(message: &str) -> TaskType {
     if m.is_empty() {
         return TaskType::Feature;
     }
+    if is_document_output(m) {
+        return TaskType::Docs;
+    }
 
     let scores: [(TaskType, u32); 6] = [
         (
@@ -231,6 +234,50 @@ pub fn classify(message: &str) -> TaskType {
         }
     }
     best
+}
+
+/// Saving an answer is a file task, even when its filename contains "架构".
+pub(crate) fn is_document_output(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if [
+        "如何",
+        "怎么",
+        "怎样",
+        "how to",
+        "修复",
+        "实现",
+        "重构",
+        "fix ",
+        "implement",
+        "refactor",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+    {
+        return false;
+    }
+    let output = [
+        "输出到",
+        "保存到",
+        "保存为",
+        "存成",
+        "写入",
+        "写到",
+        "写进",
+        "导出",
+        "另存为",
+        "落盘",
+        "save ",
+        "export ",
+        "write ",
+        "output to",
+    ]
+    .iter()
+    .any(|word| lower.contains(word));
+    let document = [".md", "markdown", "文档", "docs/", "docs下", "docs 下"]
+        .iter()
+        .any(|word| lower.contains(word));
+    output && document
 }
 
 #[cfg(test)]

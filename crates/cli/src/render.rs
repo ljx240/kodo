@@ -101,7 +101,8 @@ impl<O: Write, E: Write> Renderer<O, E> {
             // this layer to keep stdout uncluttered.
             SinkEvent::ContextBudget { .. }
             | SinkEvent::Compacted { .. }
-            | SinkEvent::AskUser { .. } => {}
+            | SinkEvent::AskUser { .. }
+            | SinkEvent::LocalTrace { .. } => {}
         }
     }
 
@@ -309,6 +310,7 @@ mod tests {
                 checks: vec!["cargo check".into()],
                 delivery: "ready".into(),
                 verification: "passed".into(),
+                failure_reason: String::new(),
                 plain: false,
             },
             duration_ms: 0,
@@ -330,6 +332,7 @@ mod tests {
                 checks: Vec::new(),
                 delivery: "ready".into(),
                 verification: "not_run".into(),
+                failure_reason: String::new(),
                 plain: false,
             },
             duration_ms: 0,

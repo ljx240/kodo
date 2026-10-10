@@ -57,18 +57,39 @@ pub fn line_diff_counts(old: &str, new: &str) -> (u32, u32) {
         return (0, n as u32);
     }
 
-    // LCS length table — O(n*m); files here are project sources, fine for phase 1.
-    let mut dp = vec![vec![0u32; m + 1]; n + 1];
-    for i in 0..n {
-        for j in 0..m {
-            if a[i] == b[j] {
-                dp[i + 1][j + 1] = dp[i][j] + 1;
-            } else {
-                dp[i + 1][j + 1] = dp[i][j + 1].max(dp[i + 1][j]);
-            }
-        }
+    let prefix = a
+        .iter()
+        .zip(&b)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = a[prefix..]
+        .iter()
+        .rev()
+        .zip(b[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let a = &a[prefix..n - suffix];
+    let b = &b[prefix..m - suffix];
+    // shortcut: report the changed middle as a replacement above 4M cells;
+    // use a bounded Myers diff if exact huge-rewrite counts become necessary.
+    if a.len().saturating_mul(b.len()) > 4_000_000 {
+        return (b.len() as u32, a.len() as u32);
     }
-    let lcs = dp[n][m] as u32;
+    let (rows, columns) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    let mut previous = vec![0u32; columns.len() + 1];
+    let mut current = previous.clone();
+    for row in rows {
+        for (j, column) in columns.iter().enumerate() {
+            current[j + 1] = if row == column {
+                previous[j] + 1
+            } else {
+                previous[j + 1].max(current[j])
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+        current.fill(0);
+    }
+    let lcs = previous[columns.len()] + prefix as u32 + suffix as u32;
     let added = (m as u32).saturating_sub(lcs);
     let removed = (n as u32).saturating_sub(lcs);
     (added, removed)
@@ -277,7 +298,11 @@ pub fn create_file(project: &Path, path: &str, content: &str) -> Result<PatchOut
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| ToolError::execution(e.to_string()))?;
     }
-    fs::write(&full, content).map_err(|e| ToolError::execution(e.to_string()))?;
+    if crate::office::is_docx(path) {
+        crate::office::write_docx(&full, content).map_err(ToolError::execution)?;
+    } else {
+        fs::write(&full, content).map_err(|e| ToolError::execution(e.to_string()))?;
+    }
     let added = content.lines().count() as u32;
     Ok(PatchOutcome {
         path: path.trim().to_owned(),
@@ -324,15 +349,16 @@ mod tests {
     use super::*;
 
     fn fixture() -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "kodo-patch-{}-{}",
+            "kodo-patch-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src")).unwrap();
         dir
     }
@@ -497,5 +523,14 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, ToolErrorCode::PathEscape);
         let _ = fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn large_shared_prefix_and_bounded_replacement_have_stable_counts() {
+        let old = "unchanged\n".repeat(100_000) + "old\n";
+        let new = "unchanged\n".repeat(100_000) + "new\n";
+        assert_eq!(line_diff_counts(&old, &new), (1, 1));
+        let old = "a\n".repeat(5000);
+        let new = "b\n".repeat(5000);
+        assert_eq!(line_diff_counts(&old, &new), (5000, 5000));
     }
 }

@@ -133,6 +133,7 @@ pub struct SkillSpec {
     pub applicable_task_types: Vec<TaskType>,
     pub context_strategy: ContextStrategy,
     pub allowed_tools: Vec<ToolName>,
+    pub allowed_external_tools: Vec<String>,
     pub workflow: Vec<WorkflowStep>,
     pub completion_criteria: Vec<String>,
     pub verification_policy: VerificationPolicy,
@@ -154,7 +155,15 @@ impl SkillSpec {
     pub fn allows_label(&self, label: &str) -> bool {
         ToolName::parse(label)
             .map(|t| self.allows(t))
-            .unwrap_or(false)
+            .unwrap_or_else(|| {
+                self.context_strategy != ContextStrategy::ReviewOnly
+                    && label.starts_with("mcp__")
+                    && self.allowed_external_tools.iter().any(|pattern| {
+                        pattern
+                            .strip_suffix('*')
+                            .map_or(pattern == label, |prefix| label.starts_with(prefix))
+                    })
+            })
     }
 
     /// Gate one tool call. Returns a structured failure for disallowed tools —
@@ -291,6 +300,15 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
         .map(|raw| ToolName::parse(&raw).ok_or_else(|| format!("unknown tool `{raw}`")))
         .collect::<Result<_, _>>()?;
 
+    let allowed_external_tools = bullets(&section_body(&lines, "allowed_external_tools"));
+    if allowed_external_tools.iter().any(|name| {
+        !name.starts_with("mcp__") || name[..name.len().saturating_sub(1)].contains('*')
+    }) {
+        return Err(
+            "external allowlist must use mcp__ wire names or a trailing prefix wildcard".into(),
+        );
+    }
+
     let policy_raw = single_line(&section_body(&lines, "verification_policy"));
     let verification_policy = VerificationPolicy::parse(&policy_raw)
         .ok_or_else(|| format!("unknown verification_policy `{policy_raw}`"))?;
@@ -317,10 +335,7 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
     // No explicit `## description` — fall back to the first completion
     // criterion so the system prompt still has a one-line summary.
     let description = if description.is_empty() {
-        completion_criteria
-            .first()
-            .cloned()
-            .unwrap_or_default()
+        completion_criteria.first().cloned().unwrap_or_default()
     } else {
         description
     };
@@ -330,6 +345,7 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
         applicable_task_types: task_types,
         context_strategy,
         allowed_tools,
+        allowed_external_tools,
         workflow,
         completion_criteria,
         verification_policy,
@@ -341,6 +357,17 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
+
+const SOURCES: [&str; 8] = [
+    include_str!("../../../skills/bug-fix/SKILL.md"),
+    include_str!("../../../skills/feature/SKILL.md"),
+    include_str!("../../../skills/test/SKILL.md"),
+    include_str!("../../../skills/refactor/SKILL.md"),
+    include_str!("../../../skills/code-review/SKILL.md"),
+    include_str!("../../../skills/docs/SKILL.md"),
+    include_str!("../../../skills/work/SKILL.md"),
+    include_str!("../../../skills/workflow/SKILL.md"),
+];
 
 /// Selects the active skill for a classified task type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,16 +382,6 @@ pub struct SkillRegistry {
 impl SkillRegistry {
     /// The eight built-in skills, embedded at compile time.
     pub fn builtin() -> Self {
-        const SOURCES: [&str; 8] = [
-            include_str!("../../../skills/bug-fix/SKILL.md"),
-            include_str!("../../../skills/feature/SKILL.md"),
-            include_str!("../../../skills/test/SKILL.md"),
-            include_str!("../../../skills/refactor/SKILL.md"),
-            include_str!("../../../skills/code-review/SKILL.md"),
-            include_str!("../../../skills/docs/SKILL.md"),
-            include_str!("../../../skills/work/SKILL.md"),
-            include_str!("../../../skills/workflow/SKILL.md"),
-        ];
         let skills: Vec<SkillSpec> = SOURCES
             .iter()
             .map(|src| parse_skill(src).expect("built-in SKILL.md must parse"))
@@ -414,7 +431,11 @@ impl SkillRegistry {
                 // directory walks.
                 continue;
             }
-            if let Some(slot) = self.skills.iter_mut().find(|existing| existing.name == s.name) {
+            if let Some(slot) = self
+                .skills
+                .iter_mut()
+                .find(|existing| existing.name == s.name)
+            {
                 *slot = s;
             } else {
                 self.skills.push(s);
@@ -424,12 +445,15 @@ impl SkillRegistry {
     }
 }
 
-/// One built-in persona's raw markdown — read-only preview source.
-/// (Placeholder — kept here so `pub use skill::builtin_markdown` resolves
-/// before trait defs land. Real implementation in agents.rs shadows this.)
+/// Built-in skill preview uses the same embedded source as execution.
 pub fn builtin_markdown(name: &str) -> Option<&'static str> {
-    let _ = name;
-    None
+    SOURCES.iter().copied().find(|src| {
+        src.lines().any(|line| {
+            line.trim()
+                .strip_prefix("# Skill:")
+                .is_some_and(|title| title.trim() == name)
+        })
+    })
 }
 
 // User-skill IO. Built-in skills live in `crates/agent/skills/*` (compiled in
@@ -456,7 +480,11 @@ fn load_skill_dir(dir: &Path) -> Vec<SkillSpec> {
         // and have it just work.
         let md = if path.is_dir() {
             let inside = path.join("SKILL.md");
-            if inside.is_file() { inside } else { continue }
+            if inside.is_file() {
+                inside
+            } else {
+                continue;
+            }
         } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
             path
         } else {
@@ -719,5 +747,21 @@ mod tests {
         let docs = skill_of(TaskType::Docs);
         let bug = skill_of(TaskType::BugFix);
         assert!(docs.context_strategy.budget().max_spans < bug.context_strategy.budget().max_spans);
+    }
+    #[test]
+    fn external_tools_need_a_skill_allowlist_and_review_never_grants_opaque_tools() {
+        let source = builtin_markdown("feature").unwrap();
+        assert!(source.contains("## allowed_external_tools"));
+        let explicit = parse_skill(source).unwrap();
+        assert!(explicit.allows_label("mcp__files__read"));
+        let closed = parse_skill(&source.replace("- mcp__*", "")).unwrap();
+        assert!(!closed.allows_label("mcp__files__read"));
+        let review = parse_skill(builtin_markdown("code-review").unwrap()).unwrap();
+        assert!(!review.allows_label("mcp__files__read"));
+        for skill in SkillRegistry::builtin().skills() {
+            let body = builtin_markdown(&skill.name).unwrap();
+            assert!(!body.trim().is_empty());
+            assert_eq!(parse_skill(body).unwrap().name, skill.name);
+        }
     }
 }

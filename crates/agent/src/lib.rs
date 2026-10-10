@@ -22,7 +22,9 @@ pub mod plan;
 pub mod process;
 pub mod protocol;
 pub mod provider;
+mod recovery;
 pub mod repomap;
+mod repository_instructions;
 mod skill;
 #[cfg(test)]
 mod skill_flow_tests;
@@ -34,7 +36,7 @@ pub mod websearch;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use classify::classify;
+use classify::{classify, is_document_output};
 use context::ContextBudget;
 use mcp::{McpClients, McpError};
 use patch::{
@@ -50,8 +52,7 @@ use provider::{NativeToolCall, ProviderEvent, ProviderMessage, ToolSchema};
 use skill::{SkillRegistry, SkillSpec};
 use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason};
 use tools::{
-    classify_command_risk, command_run, read_text, search_files, write_project_file,
-    CommandOutcomeKind,
+    classify_command_risk, command_run, search_files, write_project_file, CommandOutcomeKind,
 };
 use verify::{FailureClass, FinalStatus, RepairDecision, VerificationPlan, VerificationRunner};
 
@@ -122,7 +123,7 @@ impl Permission {
                 Self::Full => command
                     .map(classify_command_risk)
                     .map(|risk| risk.needs_approval_in_full())
-                    .unwrap_or(false),
+                    .unwrap_or(true),
                 Self::Auto => command
                     .map(|c| classify_command_risk(c).needs_approval_in_auto())
                     .unwrap_or(true),
@@ -132,14 +133,8 @@ impl Permission {
             },
             // Writes always need a human in ask/auto; Full allows project-local writes.
             StepKind::FileChange => !matches!(self, Self::Full),
-            // External tools leave the machine for a server we don't control —
-            // risk is at least Network, so Ask and Auto both require a human
-            // (the risk of the call is opaque by construction: an arbitrary
-            // server tool). Full lets them through like other project work.
-            StepKind::ExternalTool => !matches!(self, Self::Full),
-            // Public-web search is a network egress to a third party. Same
-            // shape as ExternalTool: a leak here can leak the prompt.
-            StepKind::WebSearch => !matches!(self, Self::Full),
+            // Opaque tool effects and network egress always require consent.
+            StepKind::ExternalTool | StepKind::WebSearch => true,
             _ => false,
         }
     }
@@ -191,7 +186,7 @@ pub enum StepKind {
     /// traced as [`Step::Command`] so the session log stays closed.
     ExternalTool,
     /// Public-web search via the built-in websearch tool. Same approval shape
-    /// as `ExternalTool`: Ask + Auto always require a human, Full passes.
+    /// as `ExternalTool`: every mode requires a human.
     WebSearch,
     /// New transparency-side kinds below. They never gate approval; the
     /// `Approve` callback defaults them to Allow.
@@ -269,6 +264,12 @@ pub enum Step {
         /// Conversational answer (你是谁/你好) — the UI renders the text alone,
         /// without the conclusion card or next-step chrome (2026-09-23).
         plain: bool,
+        /// Structured failure taxonomy (`budget_exhausted` / `acceptance_unmet`
+        /// / `unrecoverable` / `provider_error` / `unknown`) when this answer
+        /// ended the run in a failed state. Empty otherwise — the UI keys the
+        /// "继续本轮" affordance off this so it surfaces on a budget-trip
+        /// even when no file was written (delivery == "failed").
+        failure_reason: String,
     },
     /// A model's private reasoning block. Persisted so the transparency UI
     /// can show what the model was thinking, separate from its public
@@ -364,7 +365,10 @@ impl Step {
                 output: String::new(),
                 exit_code: None,
             },
-            Step::FileChange { changes, file_span_ref } => Step::FileChange {
+            Step::FileChange {
+                changes,
+                file_span_ref,
+            } => Step::FileChange {
                 changes: changes.clone(),
                 file_span_ref: file_span_ref.clone(),
             },
@@ -447,15 +451,18 @@ pub enum SinkEvent {
         freed_pct: u8,
     },
     /// Phase 0 second-pass — model-initiated ask-the-user round-trip. UI is
-    /// expected to surface a dialog and feed the answer back into the
+    /// expected to surface the question and feed the answer back into the
     /// session. Emitted at most once per `ask_user` tool call; the runtime
-    /// does NOT loop waiting for a reply. Instead it returns a placeholder
-    /// ToolResult so the agent loop continues, and a future turn picks up
+    /// ends the turn as blocked, and a future turn picks up
     /// the user's answer from history. `options` is an optional list of
     /// quick-pick chips the UI can render.
     AskUser {
         question: String,
         options: Vec<String>,
+    },
+    LocalTrace {
+        kind: &'static str,
+        capture: serde_json::Value,
     },
 }
 
@@ -468,6 +475,8 @@ pub struct RunRequest {
     /// no tools run, only pinned attachments are read.
     pub project: Option<PathBuf>,
     pub message: String,
+    /// Recent public user/assistant messages, excluding prompts and tool logs.
+    pub conversation_history: Vec<(String, String)>,
     /// Project-relative paths pinned as context for this turn (not file bodies).
     /// Absolute paths are allowed for external attachments.
     pub pinned_context: Vec<String>,
@@ -477,6 +486,8 @@ pub struct RunRequest {
     pub fallback_to_local: bool,
     pub max_output_tokens: u32,
     pub extended_thinking: bool,
+    /// Opt-in local bodies; entry points persist them privately after redaction.
+    pub local_trace: bool,
     /// Session id for changeset persistence (undo/diff UI). Optional for tests.
     pub session_id: Option<String>,
     /// Directory holding user-defined `*.md` skills (`state_dir()/skills` at
@@ -496,6 +507,13 @@ pub struct RunRequest {
     /// substitutes the persona-declared template variables and emits the
     /// chain header when length > 1.
     pub personas: Vec<PersonaBlock>,
+    /// Optional budget-family override chosen by the entry point.
+    /// `None` = current default (per-intent routing in `run()`).
+    /// `Some("extended")` widens headroom while retaining task/repair policy.
+    /// Legacy `"summary"` is accepted with the same recovery semantics.
+    /// The desktop uses this after a budget failure; files are re-inspected,
+    /// not blindly overwritten or trusted as complete.
+    pub budget_family: Option<String>,
 }
 
 /// Where per-turn change sets are persisted for the diff/undo UI.
@@ -516,29 +534,31 @@ fn persist_changeset(
     if session_id.trim().is_empty() {
         return Ok(());
     }
-    let path = changeset_path(project, session_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+    let path = recovery::state_path(project, &format!("changeset-{session_id}.json"))?;
     // One file per session, folded turn over turn: a later turn must never
     // wipe the diffs and ownership flags the UI still needs for earlier ones.
-    let merged = match std::fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str::<TurnChangeSet>(&text) {
-            Ok(earlier) => earlier.merged_with(changeset.clone()),
-            Err(_) => changeset.clone(),
-        },
-        Err(_) => changeset.clone(),
+    let merged = match load_changeset(project, session_id)? {
+        Some(earlier) => earlier.merged_with(changeset.clone()),
+        None => changeset.clone(),
     };
     let json = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    if json.len() > 256 * 1024 * 1024 {
+        return Err("changeset exceeds 256 MiB".into());
+    }
+    recovery::write_state(&path, json.as_bytes())
 }
 
 /// Load a persisted turn changeset (for UI diff view / undo). `Ok(None)` means
 /// the turn recorded no changes — nothing was persisted, nothing to show.
 pub fn load_changeset(project: &Path, session_id: &str) -> Result<Option<TurnChangeSet>, String> {
-    let path = changeset_path(project, session_id);
-    if !path.is_file() {
-        return Ok(None);
+    let path = recovery::state_path(project, &format!("changeset-{session_id}.json"))?;
+    let meta = match std::fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !meta.is_file() || meta.len() > 256 * 1024 * 1024 {
+        return Err("invalid or oversized changeset".into());
     }
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     serde_json::from_str(&text)
@@ -730,12 +750,18 @@ fn external_step(
         return Ok((false, None));
     }
     let began = Instant::now();
-    let outcome = mcp.call(&call.name, call.args.clone());
+    let outcome = mcp
+        .call_interruptible(&call.name, call.args.clone(), alive)
+        .map(|mut tool| {
+            tool.text = tools::redact_secrets(&tool.text);
+            tool
+        });
     let duration_ms = began.elapsed().as_millis() as u64;
 
     let (output, exit_code, result) = match outcome {
         Ok(tool) if !tool.is_error => {
-            let result = ToolResult::success(call.id, wire.clone(), detail.clone(), tool.text.clone());
+            let result =
+                ToolResult::success(call.id, wire.clone(), detail.clone(), tool.text.clone());
             (tool.text, Some(0), result)
         }
         // Server marked the call failed (`isError: true`) — a tool-level
@@ -750,12 +776,11 @@ fn external_step(
             (tool.text, Some(1), result)
         }
         Err(error) => {
+            let message = tools::redact_secrets(&format!("{wire}: {error}"));
             let mapped = match &error {
                 // Auth failures are permission problems, not tool bugs.
-                McpError::Http(401 | 403, _) => {
-                    ToolError::permission_denied(format!("{wire}: {error}"))
-                }
-                _ => ToolError::execution(format!("{wire}: {error}")),
+                McpError::Http(401 | 403, _) => ToolError::permission_denied(message),
+                _ => ToolError::execution(message),
             };
             let output = mapped.message.clone();
             let result = ToolResult::failure(call.id, wire.clone(), detail.clone(), mapped);
@@ -778,6 +803,32 @@ fn external_step(
     Ok((keep, Some(result)))
 }
 
+fn trace_file_text(project: &Path, path: &str) -> Option<String> {
+    let full = tools::resolve_in_project(project, path).ok()?;
+    if std::fs::metadata(&full).ok()?.len() > 1024 * 1024 {
+        return None;
+    }
+    if office::is_docx(path) {
+        office::read_docx(&full, 1024 * 1024)
+            .ok()
+            .filter(|d| !d.truncated)
+            .map(|d| d.text)
+    } else {
+        std::fs::read_to_string(full).ok()
+    }
+}
+
+fn emit_file_trace(project: &Path, path: &str, before: Option<String>, id: &str, emit: &mut Emit) {
+    let after = trace_file_text(project, path);
+    if before.is_none() && after.is_none() {
+        return;
+    }
+    let _ = emit(SinkEvent::LocalTrace {
+        kind: "spans",
+        capture: serde_json::json!({ "seq": 0, "path": path, "content_before": before.unwrap_or_default(), "content_after": after, "tool_call_id": id }),
+    });
+}
+
 /// Approval + write for one file operation.
 #[allow(clippy::too_many_arguments)]
 fn write_step(
@@ -791,14 +842,9 @@ fn write_step(
     notes: &mut Vec<String>,
 ) -> StepOutcome {
     let label = format!("write {path}");
-    // `.kodo/` bookkeeping: no approval, no FileChange step — same rule as
-    // `patch_approval_step` (the session log's fileChange items are what the
-    // UI counts as "changed files").
-    let state_write = checkpoint::is_kodo_state_path(path);
-    if !state_write
-        && request
-            .permission
-            .needs_approval(StepKind::FileChange, Some(&label))
+    if request
+        .permission
+        .needs_approval(StepKind::FileChange, Some(&label))
         && !approve(StepKind::FileChange, &label)
     {
         notes.push(format!("用户拒绝写入 `{path}`"));
@@ -819,31 +865,6 @@ fn write_step(
         );
         return Ok((keep, Some(result)));
     }
-    if state_write {
-        return match write_project_file(project, path, content) {
-            Ok((rel, added, removed)) => {
-                notes.push(format!("写入 `{rel}` (+{added} -{removed})"));
-                let result = ToolResult::success(
-                    call_id,
-                    ToolName::WriteFile.label(),
-                    rel.clone(),
-                    format!("wrote {rel} (+{added} -{removed})"),
-                );
-                Ok((true, Some(result)))
-            }
-            Err(error) => {
-                notes.push(format!("写入 `{path}` 失败：{error}"));
-                let path_error = if error.contains("escape") || error.contains("absolute") {
-                    ToolError::path_escape(error.clone())
-                } else {
-                    ToolError::execution(error.clone())
-                };
-                let result =
-                    ToolResult::failure(call_id, ToolName::WriteFile.label(), path, path_error);
-                Ok((true, Some(result)))
-            }
-        };
-    }
 
     let provisional = Step::FileChange {
         changes: vec![FileDelta {
@@ -856,11 +877,15 @@ fn write_step(
     if !run_step(provisional.clone(), &|| true, emit) {
         return Ok((false, None));
     }
+    let before = request.local_trace.then(|| trace_file_text(project, path));
     let began = Instant::now();
     match write_project_file(project, path, content) {
         Ok((rel, added, removed)) => {
             let duration_ms = began.elapsed().as_millis() as u64;
             notes.push(format!("写入 `{rel}` (+{added} -{removed})"));
+            if let Some(before) = before {
+                emit_file_trace(project, path, before, &call_id.to_string(), emit);
+            }
             let result = ToolResult::success(
                 call_id,
                 ToolName::WriteFile.label(),
@@ -1004,11 +1029,7 @@ fn execute_tool_call(
                                 hit.snippet,
                             ));
                         }
-                        out.push_str(&format!(
-                            "共 {} 条结果（已截断到 {} 条）",
-                            hits.len(),
-                            cap,
-                        ));
+                        out.push_str(&format!("共 {} 条结果（已截断到 {} 条）", hits.len(), cap,));
                         out
                     }
                 }
@@ -1049,8 +1070,7 @@ fn execute_tool_call(
         }
         // Phase 0 second-pass — model asks the user a question. Surface a
         // `SinkEvent::AskUser` so the UI can pop a dialog; return a
-        // placeholder ToolResult so the agent loop continues even when no
-        // UI is wired up. The answer is intended to flow back in via the
+        // placeholder ToolResult that stops the batch. The answer flows via the
         // next user message in the same session.
         (ToolName::AskUser, ToolArgs::AskUser { question, options }) => {
             // No permission gate: ask_user is read-only on the codebase
@@ -1059,10 +1079,7 @@ fn execute_tool_call(
             let step_summary = if options.is_empty() {
                 format!("询问用户：{question}")
             } else {
-                format!(
-                    "询问用户：{question}（建议选项：{}）",
-                    options.join(" / ")
-                )
+                format!("询问用户：{question}（建议选项：{}）", options.join(" / "))
             };
             let step = Step::Reasoning {
                 summary: step_summary,
@@ -1089,14 +1106,13 @@ fn execute_tool_call(
                 emit,
             );
             notes.push(format!("询问用户 `{question}`"));
-            // Placeholder answer so the tool loop can carry on. The UI is
-            // expected to inject the real answer as the next user message;
-            // a future turn will see it in history.
+            // The real answer arrives as the next user message in history;
+            // the loop must not treat this placeholder as authorization.
             let placeholder = if options.is_empty() {
-                "(UI 尚未接线，问题已发出；等待用户在下一轮回复)".to_owned()
+                "(问题已发出；等待用户在下一轮回复)".to_owned()
             } else {
                 format!(
-                    "(UI 尚未接线，问题已发出，建议选项：{}；等待用户在下一轮回复)",
+                    "(问题已发出，建议选项：{}；等待用户在下一轮回复)",
                     options.join(" / ")
                 )
             };
@@ -1147,9 +1163,8 @@ fn execute_tool_call(
                         ),
                     )
                 }
-                Ok(full) => {
-                    let text = read_text(full, 120);
-                    (
+                Ok(full) => match tools::read_text_result(full, 120) {
+                    Ok(text) => (
                         text.clone(),
                         ToolResult::success(
                             call.id.clone(),
@@ -1157,8 +1172,17 @@ fn execute_tool_call(
                             path.clone(),
                             text,
                         ),
-                    )
-                }
+                    ),
+                    Err(error) => (
+                        error.clone(),
+                        ToolResult::failure(
+                            call.id.clone(),
+                            ToolName::ReadFile.label(),
+                            path.clone(),
+                            ToolError::execution(error),
+                        ),
+                    ),
+                },
             };
             let ok = result.ok;
             if !run_step(
@@ -1272,6 +1296,9 @@ fn execute_tool_call(
             if !alive() {
                 return Ok((false, None));
             }
+            let repeated = dedup.note_list_prefix(prefix.as_deref(), 0);
+            // Check the requested prefix, rather than blocking a new directory
+            // because the previous one was repeated.
             // Phase 0 second-pass hard block: when the model has listed the
             // same prefix ≥ 5 times in a row with no intervening read_file,
             // refuse the call instead of executing it. The screenshot showed
@@ -1284,8 +1311,7 @@ fn execute_tool_call(
                         "list:{} (blocked: duplicate prefix)",
                         prefix.as_deref().unwrap_or("*")
                     ),
-                    detail: "[blocked: 已对同一目录连续 list 5 次,请直接读取具体文件]"
-                        .to_owned(),
+                    detail: "[blocked: 已对同一目录连续 list 5 次,请直接读取具体文件]".to_owned(),
                 };
                 let began = Instant::now();
                 if !run_step(step, alive, emit) {
@@ -1294,10 +1320,7 @@ fn execute_tool_call(
                 let duration_ms = began.elapsed().as_millis() as u64;
                 let keep = finish_step(
                     Step::Search {
-                        query: format!(
-                            "list:{} (blocked)",
-                            prefix.as_deref().unwrap_or("*")
-                        ),
+                        query: format!("list:{} (blocked)", prefix.as_deref().unwrap_or("*")),
                         detail: String::new(),
                     },
                     duration_ms,
@@ -1329,31 +1352,24 @@ fn execute_tool_call(
                 return Ok((false, None));
             }
             let began = Instant::now();
-            let map = crate::repomap::repo_map_cached(project, alive).unwrap_or_default();
-            // 50 lines instead of 80 — large directories overload the model's
-            // ability to plan, and the per-turn dedup (see `TurnDedup`) makes
-            // a smaller window safe to repeat.
-            let entries = map.list_files(prefix.as_deref(), 50);
-            let mut detail = if entries.is_empty() {
-                "0 files".to_owned()
+            let mut detail = if repeated.is_some() {
+                // The previous result is already in provider history. Re-sending
+                // all 50 entries adds context without providing new information.
+                "[cached · same prefix this turn] Use the earlier listing; read a specific file or list a different subdirectory.".to_owned()
             } else {
-                entries
-                    .iter()
-                    .map(|f| format!("{} ({}, {} lines)", f.path, f.language, f.lines))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            // Dedup: same prefix within the same turn gets a brief suffix so
-            // the model knows the answer was just rebuilt, and a third repeat
-            // gets a hint to break the cycle.
-            let ts_ms = began.elapsed().as_millis() as u64;
-            let repeated = dedup.note_list_prefix(prefix.as_deref(), ts_ms);
-            if repeated.is_some() {
-                if !detail.is_empty() {
-                    detail.push('\n');
+                let map = crate::repomap::repo_map_cached(project, alive).unwrap_or_default();
+                let entries = map.list_files(prefix.as_deref(), 50);
+                notes.push(format!("list_files → {} entries", entries.len()));
+                if entries.is_empty() {
+                    "0 files".to_owned()
+                } else {
+                    entries
+                        .iter()
+                        .map(|f| format!("{} ({}, {} lines)", f.path, f.language, f.lines))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 }
-                detail.push_str("[cached · same prefix this turn]");
-            }
+            };
             if dedup.should_warn_list_repeat() {
                 if !detail.is_empty() {
                     detail.push('\n');
@@ -1372,7 +1388,6 @@ fn execute_tool_call(
                 false,
                 emit,
             );
-            notes.push(format!("list_files → {} entries", entries.len()));
             Ok((
                 keep,
                 Some(ToolResult::success(
@@ -1511,6 +1526,7 @@ fn execute_tool_call(
             if !alive() {
                 return Ok((false, None));
             }
+            dedup.note_read();
             let step = Step::FileRead {
                 path: path.clone(),
                 detail: format!("{start_line}-{end_line}"),
@@ -1594,15 +1610,9 @@ fn patch_approval_step(
         return Ok((false, None));
     }
     let label = format!("{} {path}", name.label());
-    // `.kodo/` is Kodo's own state dir: bookkeeping writes never prompt and
-    // never emit a FileChange step — the session log's fileChange items are
-    // what the reply card, archive counts, and diff panel read as "changed
-    // files", and Kodo's own bookkeeping is not one of them.
-    let state_write = checkpoint::is_kodo_state_path(path);
-    if !state_write
-        && request
-            .permission
-            .needs_approval(StepKind::FileChange, Some(&label))
+    if request
+        .permission
+        .needs_approval(StepKind::FileChange, Some(&label))
         && !approve(StepKind::FileChange, &label)
     {
         notes.push(format!("用户拒绝 `{label}`"));
@@ -1625,33 +1635,6 @@ fn patch_approval_step(
             )),
         ));
     }
-    if state_write {
-        return match run(project) {
-            Ok(outcome) => {
-                notes.push(format!(
-                    "{} (+{} -{})",
-                    outcome.summary, outcome.added, outcome.removed
-                ));
-                Ok((
-                    true,
-                    Some(ToolResult::success(
-                        call_id,
-                        name.label(),
-                        outcome.path.clone(),
-                        format!(
-                            "{}\nchanged: {} (+{} -{})",
-                            outcome.summary, outcome.path, outcome.added, outcome.removed
-                        ),
-                    )),
-                ))
-            }
-            Err(error) => {
-                notes.push(format!("`{label}` 冲突/失败：{}", error.message));
-                let result = ToolResult::failure(call_id, name.label(), path.to_owned(), error);
-                Ok((true, Some(result)))
-            }
-        };
-    }
 
     let provisional = Step::FileChange {
         changes: vec![FileDelta {
@@ -1664,9 +1647,13 @@ fn patch_approval_step(
     if !run_step(provisional.clone(), &|| true, emit) {
         return Ok((false, None));
     }
+    let before = request.local_trace.then(|| trace_file_text(project, path));
     let began = Instant::now();
     match run(project) {
         Ok(outcome) => {
+            if let Some(before) = before {
+                emit_file_trace(project, path, before, &call_id.to_string(), emit);
+            }
             let duration_ms = began.elapsed().as_millis() as u64;
             notes.push(format!(
                 "{} (+{} -{})",
@@ -1703,6 +1690,56 @@ fn patch_approval_step(
             Ok((keep, Some(result)))
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_opaque_changes(
+    project: &Path,
+    before: std::collections::BTreeMap<String, checkpoint::FileSnapshot>,
+    result: &mut ToolResult,
+    changeset: &mut TurnChangeSet,
+    alive: &Alive,
+    emit: &mut Emit,
+    local_trace: bool,
+) -> Result<(), String> {
+    result.changed_files = changeset.record_command_changes(project, &before)?;
+    for path in &result.changed_files {
+        let old = before
+            .get(path)
+            .and_then(|s| s.bytes.as_deref())
+            .unwrap_or_default();
+        let new = changeset
+            .afters
+            .get(path)
+            .and_then(|s| s.bytes.as_deref())
+            .unwrap_or_default();
+        let (added, removed) = match (std::str::from_utf8(old), std::str::from_utf8(new)) {
+            (Ok(old), Ok(new)) => patch::line_diff_counts(old, new),
+            _ => (0, 0),
+        };
+        if local_trace {
+            emit_file_trace(
+                project,
+                path,
+                std::str::from_utf8(old).ok().map(str::to_owned),
+                &result.id.to_string(),
+                emit,
+            );
+        }
+        let _ = simple_step(
+            Step::FileChange {
+                changes: vec![FileDelta {
+                    path: path.clone(),
+                    added,
+                    removed,
+                }],
+                file_span_ref: None,
+            },
+            alive,
+            emit,
+        );
+    }
+    Ok(())
 }
 
 /// Drive one model turn's invocations → results (rejections become results).
@@ -1742,9 +1779,7 @@ fn run_invocations(
                 results.push(ToolResult::from_rejection(&reject));
             }
             ToolInvocation::External(call) => {
-                // Skill allowlists narrow builtins only — `mcp__*` labels pass
-                // the gate unconditionally (see `SkillSpec::allows_label`) and
-                // rely on Permission instead.
+                // The skill allowlist and Permission both apply to external calls.
                 let args_label = call.args_label();
                 if let Some(sk) = skill {
                     if let Some(denied) = sk.gate(call.id.clone(), &call.name, &args_label) {
@@ -1756,10 +1791,32 @@ fn run_invocations(
                         continue;
                     }
                 }
-                let (keep, result) = external_step(
-                    call, project, request, mcp, alive, approve, emit, notes,
-                )?;
-                if let Some(result) = result {
+                let before = match changeset.capture_command_files(project) {
+                    Ok(before) => before,
+                    Err(error) => {
+                        results.push(ToolResult::failure(
+                            call.id,
+                            call.name,
+                            args_label,
+                            ToolError::execution(error),
+                        ));
+                        continue;
+                    }
+                };
+                let (keep, result) =
+                    external_step(call, project, request, mcp, alive, approve, emit, notes)?;
+                if let Some(mut result) = result {
+                    record_opaque_changes(
+                        project,
+                        before,
+                        &mut result,
+                        changeset,
+                        alive,
+                        emit,
+                        request.local_trace,
+                    )?;
+                    *wrote_files |= !result.changed_files.is_empty();
+                    persist_changeset(project, request.session_id.as_deref(), changeset)?;
                     results.push(result);
                 }
                 if !keep {
@@ -1780,6 +1837,19 @@ fn run_invocations(
                         continue;
                     }
                 }
+                if skill.is_some_and(|sk| sk.context_strategy == ContextStrategy::ReviewOnly)
+                    && matches!(&call.args, ToolArgs::RunCommand { command } if classify_command_risk(command) != tools::CommandRisk::ReadOnly)
+                {
+                    results.push(ToolResult::failure(
+                        call.id.clone(),
+                        call.name.label(),
+                        call.args.label(),
+                        ToolError::permission_denied(
+                            "read-only review cannot run a command with side effects",
+                        ),
+                    ));
+                    continue;
+                }
                 let is_mutation = call.name.is_mutation();
                 // Snapshot pre-mutation content so the Kodo-only diff and undo
                 // see the real before state — record_kodo_change runs after the
@@ -1790,22 +1860,52 @@ fn run_invocations(
                         changeset.snapshot_before(project, path.trim());
                     }
                 }
-                let (keep, result) = execute_tool_call(
-                    &call,
-                    project,
-                    request,
-                    alive,
-                    approve,
-                    emit,
-                    notes,
-                    dedup,
-                )?;
-                if let Some(result) = result {
+                let command_baseline = if call.name == ToolName::RunCommand {
+                    match changeset.capture_command_files(project) {
+                        Ok(before) => Some(before),
+                        Err(error) => {
+                            results.push(ToolResult::failure(
+                                call.id.clone(),
+                                call.name.label(),
+                                call.args.label(),
+                                ToolError::execution(error),
+                            ));
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let (keep, result) =
+                    execute_tool_call(&call, project, request, alive, approve, emit, notes, dedup)?;
+                if let Some(mut result) = result {
+                    if let Some(before) = command_baseline {
+                        record_opaque_changes(
+                            project,
+                            before,
+                            &mut result,
+                            changeset,
+                            alive,
+                            emit,
+                            request.local_trace,
+                        )?;
+                    }
+                    *wrote_files |= !result.changed_files.is_empty();
+                    let awaiting_user = result.ok && result.name == ToolName::AskUser.label();
                     // `.kodo/` bookkeeping is not a project-file write.
                     if result.ok && is_mutation && !checkpoint::is_kodo_state_path(&result.input) {
+                        changeset.record_kodo_change(project, &result.input);
                         *wrote_files = true;
+                        dedup.note_read();
                     }
+                    persist_changeset(project, request.session_id.as_deref(), changeset)?;
                     results.push(result);
+                    if awaiting_user {
+                        if !keep {
+                            return Ok(None);
+                        }
+                        break;
+                    }
                 }
                 if !keep {
                     return Ok(None);
@@ -1834,13 +1934,18 @@ fn tool_schemas(registry: &ToolRegistry) -> Vec<ToolSchema> {
             description: def.description.to_owned(),
             parameters: def.input_schema.clone(),
         })
-        .chain(registry.external_definitions().iter().map(|ext| ToolSchema {
-            name: ext.name.clone(),
-            description: ext.description.clone(),
-            // External schemas are the server's `inputSchema`, passed through
-            // untouched so native tool calling works with zero mapping rules.
-            parameters: ext.input_schema.clone(),
-        }))
+        .chain(
+            registry
+                .external_definitions()
+                .iter()
+                .map(|ext| ToolSchema {
+                    name: ext.name.clone(),
+                    description: ext.description.clone(),
+                    // External schemas are the server's `inputSchema`, passed through
+                    // untouched so native tool calling works with zero mapping rules.
+                    parameters: ext.input_schema.clone(),
+                }),
+        )
         .collect()
 }
 
@@ -2063,12 +2168,29 @@ fn call_model(
                 response.output_tokens
             };
             last_finish_reason = response.finish_reason.clone();
+            if request.local_trace {
+                let _ = emit(SinkEvent::LocalTrace {
+                    kind: "llm_io",
+                    capture: serde_json::json!({
+                        "seq": 0, "model": served.display_label(), "protocol": if use_native { "native" } else { "text_only" },
+                        "retry_index": failover_count, "provider_latency_ms": duration_ms, "finish_reason": last_finish_reason,
+                        "input_tokens": input, "output_tokens": output_tokens, "saw_reasoning": saw_reasoning,
+                        "at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                        "request": { "system": history.iter().filter(|m| m.role == provider::MessageRole::System).map(|m| m.text_of()).collect::<Vec<_>>().join("\n"), "messages": history, "tools": tool_list },
+                        "response": { "text": text, "reasoning_content": "", "native_tool_calls": native_calls }
+                    }),
+                });
+            }
             if !finish_step(
                 Step::ModelCall {
                     model: served.display_label(),
                     input_tokens: input,
                     output_tokens,
-                    protocol: if use_native { "native".to_owned() } else { "text_only".to_owned() },
+                    protocol: if use_native {
+                        "native".to_owned()
+                    } else {
+                        "text_only".to_owned()
+                    },
                     finish_reason: last_finish_reason.clone(),
                     saw_reasoning,
                     duration_ms,
@@ -2097,7 +2219,11 @@ fn call_model(
                     model: model_label.clone(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    protocol: if use_native { "native".to_owned() } else { "text_only".to_owned() },
+                    protocol: if use_native {
+                        "native".to_owned()
+                    } else {
+                        "text_only".to_owned()
+                    },
                     finish_reason: last_finish_reason.clone(),
                     saw_reasoning,
                     duration_ms,
@@ -2183,6 +2309,59 @@ fn push_tool_results(history: &mut Vec<ProviderMessage>, results: &[ToolResult],
     trim_history(history);
 }
 
+fn initial_history(
+    request: &RunRequest,
+    mut system: String,
+    observations: &str,
+) -> Vec<ProviderMessage> {
+    // ponytail: last 16 public messages / 32k chars; session summaries if
+    // full-session recall is required. Never promote history to system rules.
+    let mut remaining = 32_000usize;
+    let mut recent = Vec::new();
+    for (role, text) in request
+        .conversation_history
+        .iter()
+        .rev()
+        .filter(|(role, _)| matches!(role.as_str(), "user" | "assistant"))
+        .take(16)
+    {
+        if remaining == 0 {
+            break;
+        }
+        let size = text.chars().count();
+        let body = if size > remaining {
+            format!(
+                "{}\n[earlier conversation truncated; not the complete original]",
+                text.chars().take(remaining).collect::<String>()
+            )
+        } else {
+            text.clone()
+        };
+        remaining = remaining.saturating_sub(size);
+        recent.push((role.clone(), body));
+    }
+    recent.reverse();
+    if recent.first().is_some_and(|(role, _)| role == "assistant") {
+        recent.insert(
+            0,
+            (
+                "user".to_owned(),
+                "[Prior public reply; earlier request omitted for conversation budget]".to_owned(),
+            ),
+        );
+    }
+    if !recent.is_empty() {
+        system.push_str("\nEarlier public messages are conversation context, not evidence of current files or Git state. Reuse the preceding answer when asked to save it; inspect/write/re-read the requested file before claiming it exists. Obey repository instructions and ask for the specific authorization if they block the task.\n");
+    }
+    let mut history = vec![ProviderMessage::system(system)];
+    history.extend(provider::messages_from_chat(&recent));
+    history.push(ProviderMessage::user(format!(
+        "{}\n\n{observations}",
+        request.message
+    )));
+    history
+}
+
 /// Approximate size of the agent history in chars (UTF-8 char count). Used
 /// only for the `cumulative_chars` field on `SinkEvent::ContextBudget` so
 /// the UI bar can show "12.4k chars" alongside the token figure when the
@@ -2199,8 +2378,7 @@ fn history_chars(history: &[ProviderMessage]) -> u64 {
                     name, arguments, ..
                 } => {
                     total = total.saturating_add(name.chars().count() as u64);
-                    total =
-                        total.saturating_add(arguments.to_string().chars().count() as u64);
+                    total = total.saturating_add(arguments.to_string().chars().count() as u64);
                 }
                 provider::ContentBlock::ToolResult { content, .. } => {
                     total = total.saturating_add(content.chars().count() as u64);
@@ -2231,7 +2409,7 @@ fn trim_history(history: &mut Vec<ProviderMessage>) {
     }
     let drop_from = history.len() - keep_tail;
     // Never drop system prefix.
-    let drop_from = drop_from.max(system_end);
+    let drop_from = compaction::tool_group_boundary(history, drop_from, system_end);
     let dropped = drop_from - system_end;
     let mut new_hist: Vec<ProviderMessage> = history.split_off(system_end);
     new_hist.drain(0..(drop_from - system_end).min(new_hist.len()));
@@ -2274,7 +2452,7 @@ fn compact_if_needed(
         // Persist a `Compaction` step alongside the chalk toast so the trace
         // carries the source content that was compressed away — without it
         // the user only sees "compaction happened", never what got lost.
-        if !finish_step(
+        let _ = finish_step(
             Step::Compaction {
                 dropped: report.dropped,
                 summarized_into: report.summarized_into,
@@ -2285,9 +2463,77 @@ fn compact_if_needed(
             0,
             false,
             emit,
-        ) {
-            return;
+        );
+    }
+}
+
+fn budget_for_task(task_type: TaskType, project_summary: bool, family: Option<&str>) -> Budget {
+    let mut budget = if project_summary {
+        Budget::for_summary()
+    } else if task_type == TaskType::Docs {
+        Budget::for_document()
+    } else {
+        Budget::default()
+    };
+    // Recovery changes headroom, never the task's evidence or repair policy.
+    if matches!(family, Some("summary" | "extended")) {
+        budget.lift_for_pressure();
+    }
+    budget
+}
+
+fn lift_before_batch(
+    machine: &mut AgentMachine,
+    requested: usize,
+    lifted: &mut bool,
+    emit: &mut Emit,
+) {
+    let budget = machine.budget();
+    let projected_rounds = budget
+        .rounds_used
+        .saturating_add(usize::from(requested > 0));
+    let projected_tools = budget.tool_calls_used.saturating_add(requested);
+    let pressured = projected_rounds.saturating_mul(5) >= budget.max_rounds.saturating_mul(4)
+        || projected_tools.saturating_mul(5) >= budget.max_tool_calls.saturating_mul(4);
+    if !*lifted && pressured {
+        let (old_rounds, rounds, old_tools, tools) = machine.budget_mut().lift_for_pressure();
+        *lifted = true;
+        if rounds > old_rounds || tools > old_tools {
+            let _ = emit(SinkEvent::Progress {
+                phase: "budget-lift".to_owned(),
+                detail: format!(
+                    "本轮已自动扩容：轮次 {old_rounds}→{rounds} · 工具 {old_tools}→{tools}"
+                ),
+            });
         }
+    }
+}
+
+fn exploration_batch_key(calls: &[ToolInvocation]) -> Option<Vec<(String, String)>> {
+    let mut key = Vec::new();
+    for invocation in calls {
+        let ToolInvocation::Ready(call) = invocation else {
+            return None;
+        };
+        if !matches!(
+            call.name,
+            ToolName::ReadFile
+                | ToolName::ReadRange
+                | ToolName::Search
+                | ToolName::ListFiles
+                | ToolName::FindSymbol
+                | ToolName::FindReferences
+        ) {
+            return None;
+        }
+        key.push((call.name.label().to_owned(), call.args.label()));
+    }
+    key.sort_unstable();
+    key.dedup();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
     }
 }
 
@@ -2297,6 +2543,9 @@ pub fn run(
     approve: &Approve,
     emit: &mut Emit,
 ) -> Result<(), String> {
+    if !alive() {
+        return Ok(());
+    }
     let has_project = request.project.is_some();
     // No project is allowed in either mode as constrained Q&A (DESIGN.md §11):
     // the mode × project matrix hands run() an empty tool registry, verify is
@@ -2326,6 +2575,7 @@ pub fn run(
                     delivery: "ready".to_owned(),
                     verification: "not_run".to_owned(),
                     plain: true,
+                    failure_reason: String::new(),
                 },
                 alive,
                 emit,
@@ -2340,8 +2590,10 @@ pub fn run(
     // chip-stripped text, since "bug" inside 【技能：bug-fix】 used to pollute
     // keyword scoring. The provider-visible message stays untouched.
     let (chip_ids, classify_text) = split_skill_chip(&request.message);
-    let skill_registry =
-        build_skill_registry(request.user_skills_dir.as_deref(), request.project.as_deref());
+    let skill_registry = build_skill_registry(
+        request.user_skills_dir.as_deref(),
+        request.project.as_deref(),
+    );
     let chip_skill = resolve_skill(&skill_registry, &chip_ids, request.mode).cloned();
     let task_type = match request.mode {
         // Work mode always pins Work — the two spaces never mix (DESIGN §11),
@@ -2360,14 +2612,29 @@ pub fn run(
     // no skill criteria, no plan gates, no acceptance bounce; the first prose
     // answer ends the run. A pinned chip is explicit task intent and keeps
     // the full machinery.
+    let project_summary = has_project && chip_ids.is_empty() && is_summary_intent(classify_text);
+    let mut file_contract = TaskPlan::from_task(&request.message);
+    file_contract.deliverable_bar = request.mode == AgentMode::Work;
+    file_contract.set_output_contract(&request.message);
+    if !has_project && file_contract.requires_file_output {
+        let _ = simple_step(Step::AgentMessage { text: "生成或保存文件需要先选择项目目录。选定目录后，我会继续读取资料、写入文件并回读验收。".into(), checks: Vec::new(), delivery: "failed".into(), verification: "not_run".into(), plain: false, failure_reason: "unrecoverable".into() }, alive, emit);
+        return Ok(());
+    }
     let conversational = !has_project
+        || project_summary
         || (chip_ids.is_empty()
             && (is_direct_conversation(classify_text)
                 || is_conversational_question(classify_text)));
+    let conversational = conversational && !file_contract.requires_file_output;
     let skill = if conversational {
         None
     } else {
         chip_skill.or_else(|| skill_registry.select(task_type).cloned())
+    };
+    let repository_rules = if has_project {
+        repository_instructions::load(project, alive)?
+    } else {
+        String::new()
     };
     // B8: connect the configured MCP servers before the registry is assembled —
     // their tools enter it as externals under `mcp__<server>__<tool>` names.
@@ -2376,11 +2643,26 @@ pub fn run(
     // project, no connections. One broken server is a zh-CN note, never fatal;
     // `Drop` tears the transports down (stdio process trees, http best-effort
     // DELETE) on every exit path from here.
-    let mut mcp = if has_project {
-        McpClients::connect(&request.mcp_servers)
-    } else {
-        McpClients::default()
-    };
+    let mut permitted_servers = Vec::new();
+    if has_project
+        && !skill.as_ref().is_some_and(|sk| {
+            sk.allowed_external_tools.is_empty()
+                || sk.context_strategy == ContextStrategy::ReviewOnly
+        })
+    {
+        for server in request.mcp_servers.iter().filter(|s| s.enabled) {
+            if !alive() {
+                return Ok(());
+            }
+            let detail = format!("mcp__{}__connect {}", server.id, tools::redact_secrets(&serde_json::json!({ "transport": server.transport, "command": server.command, "args": server.args, "url": server.url }).to_string()));
+            if approve(StepKind::ExternalTool, &detail) {
+                permitted_servers.push(server.clone());
+            } else {
+                notes.push(format!("用户未允许 MCP 连接：{}", server.id));
+            }
+        }
+    }
+    let mut mcp = McpClients::connect_interruptible(&permitted_servers, alive);
     notes.append(&mut mcp.notes);
     // Phase 0 second-pass: emit a one-shot MCP status event so the UI
     // trace shows which servers did NOT start (without forcing the model
@@ -2397,8 +2679,8 @@ pub fn run(
     // The mode × project matrix owns the base registry (DESIGN.md §11); a skill
     // only narrows it further. Tool availability therefore never depends on
     // which skill files happen to be embedded. MCP tools join as externals and
-    // survive the skill filter (it narrows builtins only) — every call still
-    // faces Permission.
+    // enter the same skill allowlist as builtins; every call still faces
+    // Permission and separate connection consent.
     let registry = {
         let base =
             ToolRegistry::for_mode(request.mode, has_project).with_externals(external_defs(&mcp));
@@ -2407,34 +2689,35 @@ pub fn run(
             None => base,
         }
     };
+    let mut recovery_anchor = String::new();
     let mut plan = if conversational {
         TaskPlan::conversational(&request.message)
-    } else if has_project && is_summary_intent(&request.message) {
-        // Read-only summary path (Phase 0 second-pass): tasks like
-        // 「为我输出该项目架构」need 30+ tool calls but never mutate the
-        // project. Bypass the skill workflow, use the larger read-only
-        // budget, and skip verify so the loop doesn't fail-closed on a
-        // 30-tool sweep that ends in prose.
-        TaskPlan::summarize(&request.message)
     } else {
         match &skill {
             Some(sk) => TaskPlan::from_skill(sk, &request.message),
             None => TaskPlan::from_task(&request.message),
         }
     };
-    clamp_plan_verification(&mut plan, request.mode, has_project);
-    // Budget selection (Phase 0 second-pass): summary tasks get a much
-    // larger tool/round budget but zero repairs. The summary plan already
-    // sets `requires_verify = false`, so the loop will not loop through
-    // verify phases.
-    let budget = if !conversational
-        && has_project
-        && is_summary_intent(&request.message)
+    if has_project
+        && matches!(
+            request.budget_family.as_deref(),
+            Some("summary" | "extended")
+        )
     {
-        Budget::for_summary()
-    } else {
-        Budget::default()
-    };
+        if let Some(session) = request.session_id.as_deref() {
+            match recovery::RecoveryCheckpoint::load(project, session) {
+                Ok(Some(checkpoint)) => {
+                    let (restored, anchor) = checkpoint.revalidate(project);
+                    plan = restored;
+                    recovery_anchor = anchor;
+                }
+                Ok(None) => {}
+                Err(error) => notes.push(format!("恢复检查点不可用，重新检查任务：{error}")),
+            }
+        }
+    }
+    clamp_plan_verification(&mut plan, request.mode, has_project);
+    let budget = budget_for_task(task_type, project_summary, request.budget_family.as_deref());
     let mut machine = AgentMachine::with_plan(&request.message, plan, budget);
     // Anchor the planned context window to the resolved provider so the bar
     // and any auto-compaction trigger see a stable denominator all turn.
@@ -2460,7 +2743,11 @@ pub fn run(
         Step::Reasoning {
             summary: "Understanding the request".to_owned(),
             phase: "prepare",
-            diagnostics: Some(format!("{} · {}", machine.progress_summary(), classification)),
+            diagnostics: Some(format!(
+                "{} · {}",
+                machine.progress_summary(),
+                classification
+            )),
         },
         alive,
         emit,
@@ -2504,7 +2791,7 @@ pub fn run(
 
     // Repo map for orientation — injected into the system prompt (not proof).
     // Cached + incremental: refreshed when source files change mid-turn.
-    let repo_map = if has_project && !conversational {
+    let repo_map = if has_project && (!conversational || project_summary) {
         crate::repomap::repo_map_cached(project, alive).ok()
     } else {
         None
@@ -2530,7 +2817,7 @@ pub fn run(
             ));
             continue;
         }
-        match context_mgr.read_range(rel, 1, 400, "pinned by user") {
+        match context_mgr.read_pinned_range(rel, 1, 400, "pinned by user") {
             Ok(span) => {
                 notes.push(format!("钉住上下文 `{}`", span.path));
                 context_mgr.pin(span);
@@ -2540,12 +2827,8 @@ pub fn run(
                 // are still valid attachments — the composer card already showed
                 // them (2026-09-23). Soft-note and continue; only a missing or
                 // invalid path stays a real failure.
-                let path = std::path::Path::new(rel);
-                let exists = if path.is_absolute() {
-                    path.is_file()
-                } else {
-                    project.join(rel).is_file()
-                };
+                let allowed_path = tools::resolve_pinned_file(project, rel).ok();
+                let exists = allowed_path.as_ref().is_some_and(|path| path.is_file());
                 if exists {
                     notes.push(format!("已附带附件 `{rel}`（内容未内联）"));
                     // The model must see the attachment too — `notes` only
@@ -2554,7 +2837,11 @@ pub fn run(
                     // 「已附带附件（内容未内联）」); docx/pptx/pdf/images stay
                     // path-only, spreadsheets never reach this arm (extracted
                     // by `context::read_range` via office::read_spreadsheet).
-                    let bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+                    let bytes = allowed_path
+                        .as_ref()
+                        .and_then(|p| p.metadata().ok())
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     pre_observations.push(ToolResult::success(
                         ToolCallId::new(format!("pin_bin_{rel}")),
                         ToolName::ReadFile.label(),
@@ -2643,7 +2930,7 @@ pub fn run(
     // nothing to scan; the conversation relies on pinned attachments alone).
     // Conversational runs skip it too: a question is answered from the
     // request itself, plus whatever tools the model chooses to call.
-    if has_project && !conversational && alive() {
+    if has_project && (!conversational || project_summary) && alive() {
         let search = Step::Search {
             query: context_query.clone(),
             detail: String::new(),
@@ -2820,6 +3107,21 @@ pub fn run(
     let mut repair_started: Option<Instant> = None;
     let mut last_verify_plan: Option<VerificationPlan> = None;
     let mut partial_verify = false;
+    let mut stop_gathering = false;
+    let mut retried_output = false;
+    let mut truncated_output = false;
+    let mut partial_output = false;
+    let mut pending_question = false;
+    // One bounded lift; iteration and batch preflight share this flag.
+    let mut budget_lifted = false;
+    // Wrap-up hint: pushed once per turn when either cap is within 20% so
+    // the model gets one clear "land your drafts now" signal instead of a
+    // repeat-every-iter nag. After the hint the model is expected to write
+    // the file (or answer in prose) on its next call.
+    let mut wrap_up_pushed = false;
+    // Only identical exploration parameters indicate repetition; writes reset it.
+    let mut recent_exploration_batches: Vec<Vec<(String, String)>> = Vec::new();
+    let mut rejected_budget_batch = None;
 
     if provider_ready && alive() {
         let mut provider = request.provider.clone().expect("checked above");
@@ -2840,6 +3142,8 @@ pub fn run(
             &registry,
             &mcp.status_hint(),
         );
+        system.push_str(&repository_rules);
+        system.push_str(&recovery_anchor);
         if let Some(map) = &repo_map {
             system.push('\n');
             system.push_str(&map.to_prompt_block());
@@ -2866,7 +3170,12 @@ pub fn run(
         // renderer applies (no template-variable substitution — the legacy
         // shape carried nothing to substitute against).
         let effective_personas: Vec<PersonaBlock> = if request.personas.is_empty() {
-            match request.agent_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            match request
+                .agent_instructions
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 Some(body) => vec![PersonaBlock {
                     name: String::new(),
                     instructions: body.to_owned(),
@@ -2890,6 +3199,12 @@ pub fn run(
         if request.extended_thinking {
             system.push_str("\nThink step by step before answering.");
         }
+        if matches!(
+            request.budget_family.as_deref(),
+            Some("summary" | "extended")
+        ) {
+            system.push_str("\nThis is a recovery attempt for an unfinished task. Reuse prior public discussion and inspect existing target files before editing. Continue the remaining work instead of restarting a broad repository scan. Prior failed claims are not evidence; retain repository instructions, permissions and verification gates.\n");
+        }
         // Conversational runs carry no plan gates in the prompt: the empty
         // plan block plus "do not claim done without evidence" would ask the
         // model to satisfy criteria that (by design) cannot exist.
@@ -2901,19 +3216,30 @@ pub fn run(
             );
         }
         let observation_block = format_observations(&pre_observations);
-        let mut history = vec![
-            ProviderMessage::system(system),
-            ProviderMessage::user(format!("{}\n\n{}", request.message, observation_block)),
-        ];
+        let mut history = initial_history(request, system, &observation_block);
         let schemas = tool_schemas(&registry);
         let native_tools = provider.capabilities().native_tools;
 
+        history.insert(1, ProviderMessage::system("## Task checkpoint"));
         // Multi-round loop driven by the state machine budgets.
         while !machine.state().is_terminal() {
             if !alive() {
                 machine.handle(AgentEvent::Cancel);
                 break;
             }
+
+            if let Err(error) = recovery::RecoveryCheckpoint::save(
+                project,
+                request.session_id.as_deref().filter(|_| has_project),
+                machine.plan(),
+                machine.evidence(),
+                machine.state().name(),
+                &changeset,
+            ) {
+                notes.push(format!("checkpoint persist failed: {error}"));
+            }
+            history[1] = ProviderMessage::system(format!("## Task checkpoint\n{}\nChanged files: {:?}\nVerification: {:?}; denied tools: {:?}", machine.plan().to_prompt_block(), changeset.kodo_touched, machine.evidence().verify_ok, machine.evidence().denied_tools));
+            lift_before_batch(&mut machine, 0, &mut budget_lifted, emit);
 
             if machine.state() == &AgentState::Verify {
                 let _ = emit(SinkEvent::Progress {
@@ -3014,7 +3340,34 @@ pub fn run(
                     machine.handle(AgentEvent::Cancel);
                     break;
                 }
-                let evidence_list = verifier.run_plan(project, &plan, alive, true);
+                let verify_before = changeset.capture_command_files(project)?;
+                let evidence_list =
+                    verifier.run_plan_with_approval(project, &plan, alive, true, &|cmd| {
+                        !request
+                            .permission
+                            .needs_approval(StepKind::Command, Some(&cmd.command))
+                            || approve(StepKind::Command, &cmd.command)
+                    });
+                let mut effects = ToolResult::success(
+                    ToolCallId::new("verify-effects"),
+                    "verify",
+                    "verification outputs",
+                    "",
+                );
+                record_opaque_changes(
+                    project,
+                    verify_before,
+                    &mut effects,
+                    &mut changeset,
+                    alive,
+                    emit,
+                    request.local_trace,
+                )?;
+                wrote_files |= !effects.changed_files.is_empty();
+                for path in &effects.changed_files {
+                    context_mgr.invalidate(path);
+                }
+                persist_changeset(project, request.session_id.as_deref(), &changeset)?;
                 if !alive() {
                     machine.handle(AgentEvent::Cancel);
                     break;
@@ -3038,16 +3391,20 @@ pub fn run(
                             ev.output_summary
                         ));
                     }
-                    let _ = simple_step(
-                        Step::Command {
-                            command: ev.command.clone(),
-                            cwd: project.to_string_lossy().into_owned(),
-                            output: ev.output_summary.clone(),
-                            exit_code: ev.exit_code,
-                        },
-                        alive,
-                        emit,
-                    );
+                    let step = Step::Command {
+                        command: ev.command.clone(),
+                        cwd: project.to_string_lossy().into_owned(),
+                        output: ev.output_summary.clone(),
+                        exit_code: ev.exit_code,
+                    };
+                    if run_step(step.clone(), alive, emit) {
+                        let _ = finish_step(
+                            step,
+                            ev.duration_ms,
+                            ev.failure_class == Some(FailureClass::Denied),
+                            emit,
+                        );
+                    }
                 }
 
                 if all_ok {
@@ -3089,7 +3446,13 @@ pub fn run(
                         ev.mark_verify_plan(false, evidence_list.clone(), infra);
                     }
 
-                    if infra {
+                    if decision.failure_class == FailureClass::Denied {
+                        if let Some(ev) = machine.evidence_mut() {
+                            ev.denied_tools.push("verification command denied".into());
+                        }
+                        machine.handle(AgentEvent::VerifyFinished { ok: false });
+                        break;
+                    } else if infra {
                         notes.push(format!("基础设施验证失败（非产品回归）：{}", decision.hint));
                         history.push(ProviderMessage::user(format!(
                             "Infrastructure verification failure (not a product regression):\n{}",
@@ -3173,15 +3536,73 @@ pub fn run(
             // the middle of history into one block. Failure falls through to
             // the legacy `trim_history` path on a future budget-exhausted
             // signal; this hook never blocks the turn.
-            compact_if_needed(
-                &mut history,
-                machine.budget_mut(),
-                &provider,
-                &alive,
-                emit,
-            );
+            compact_if_needed(&mut history, machine.budget_mut(), &provider, &alive, emit);
 
-            match call_model(&provider, &history, &schemas, request, alive, emit) {
+            // Read-only answers reserve the last decision round for prose.
+            // Keep the hard cap; stop gathering before there is no room to answer.
+            let finalize_answer = conversational
+                && !wrote_files
+                && (stop_gathering
+                    || machine.budget().rounds_used + 1 >= machine.budget().max_rounds
+                    || machine.budget().tool_calls_used + 1 >= machine.budget().max_tool_calls);
+            if finalize_answer {
+                history.push(ProviderMessage::user(
+                    "Stop collecting context. Answer the original request now using the observations already available. \
+                     Do not call tools or output tool-call JSON. Explain the architecture, module relationships and entry points \
+                     when requested; distinguish supported facts from unknowns. Do not replace the answer with an execution log."
+                        .to_owned(),
+                ));
+                let _ = emit(SinkEvent::Progress {
+                    phase: "summarize".into(),
+                    detail: "正在整理已收集的资料".into(),
+                });
+            }
+            let in_loop = recent_exploration_batches.len() == 3
+                && recent_exploration_batches
+                    .windows(2)
+                    .all(|pair| pair[0] == pair[1]);
+            let budget = machine.budget();
+            // Reserve separate decisions for writing, re-reading and answering.
+            let closing = budget.rounds_used.saturating_add(3) >= budget.max_rounds
+                || budget.tool_calls_used.saturating_add(4) >= budget.max_tool_calls
+                || budget.tool_calls_used.saturating_mul(5)
+                    >= budget.max_tool_calls.saturating_mul(4);
+            if !wrap_up_pushed && !conversational && (in_loop || closing) {
+                let (detail, hint) = if in_loop {
+                    let names = recent_exploration_batches[0]
+                        .iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (
+                        format!("检测到 {names} 相同参数的重复探索循环，正在调整策略"),
+                        "The same exploration tool arguments have repeated across three rounds. Reuse the observations already obtained instead of repeating this batch. Continue with the next necessary action. Preserve repository instructions, permissions and verification requirements; ask_user if an unresolved decision blocks progress.",
+                    )
+                } else {
+                    (
+                        "进入交付阶段，预留写入、回读及答复预算".to_owned(),
+                        "The execution budget is near its boundary. Finish the requested deliverable using the observations already gathered. For a document task, inspect the target as needed, write the document, re-read it, then report the actual path and remaining gaps. Use small complete tool calls; avoid broad exploration. Necessary targeted reads and verification remain allowed. Respect repository instructions and permissions; use ask_user when authorization is required. Never substitute a prose claim for a requested file or claim completion without evidence.",
+                    )
+                };
+                history.push(ProviderMessage::user(format!(
+                    "{hint}\nRemaining decision rounds: {}; remaining tool calls: {}.",
+                    budget.max_rounds.saturating_sub(budget.rounds_used),
+                    budget.max_tool_calls.saturating_sub(budget.tool_calls_used),
+                )));
+                let _ = emit(SinkEvent::Progress {
+                    phase: "wrap-up".to_owned(),
+                    detail: detail.to_owned(),
+                });
+                wrap_up_pushed = true;
+            }
+            let call_schemas = if finalize_answer {
+                &[][..]
+            } else {
+                schemas.as_slice()
+            };
+            match call_model(&provider, &history, call_schemas, request, alive, emit) {
                 Ok(Some(attempt)) => {
                     // Charge the budget with the reported input tokens and
                     // surface a fresh ContextBudget tick to the UI. The bar
@@ -3242,12 +3663,65 @@ pub fn run(
                         break;
                     }
 
+                    if output_was_truncated(&attempt_finish) {
+                        truncated_output = true;
+                        machine.budget_mut().rounds_used += 1;
+                        let partial = if native_calls.is_empty()
+                            && !text.contains("\"tool_calls\"")
+                            && matches!(parse_model_turn(&text, &registry), ModelTurn::Final { .. })
+                        {
+                            strip_tool_artifacts(&text)
+                        } else {
+                            String::new()
+                        };
+                        if !partial.trim().is_empty() {
+                            answer = format!("{partial}\n\n> 输出达到上限，以上为不完整内容；截断的工具调用未执行。");
+                            partial_output = true;
+                        }
+                        // Do not execute any calls from a truncated generation,
+                        // including a complete call before a cut-off batch tail.
+                        if !retried_output && !machine.budget().rounds_exhausted() {
+                            retried_output = true;
+                            history.push(ProviderMessage::user(
+                                "The last generation hit the configured output limit. None of its tool calls were executed. Retry once without long reasoning or repetition, within the same output limit. Return a concise answer or one complete tool call; write long documents in small patches. Use the preceding conversation for a file-export follow-up, and respect repository instructions.".to_owned(),
+                            ));
+                            if !simple_step(
+                                Step::Reasoning {
+                                    summary: "模型输出被截断，正在尝试一次恢复".to_owned(),
+                                    phase: "summarize",
+                                    diagnostics: None,
+                                },
+                                alive,
+                                emit,
+                            ) {
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                        model_gap = Some(format!(
+                            "{}；截断的工具调用未执行{}",
+                            empty_answer_detail(&attempt_finish, attempt_saw_reasoning),
+                            if retried_output {
+                                "，已尝试一次恢复"
+                            } else {
+                                "，本轮剩余预算不足以恢复"
+                            }
+                        ));
+                        break;
+                    }
+                    truncated_output = false;
+                    if partial_output {
+                        answer.clear();
+                        partial_output = false;
+                    }
+
                     if machine.state() == &AgentState::Plan && !conversational {
                         if let Some(plan) = TaskPlan::parse_model_json(&text) {
-                            let plan = match &skill {
+                            let mut plan = match &skill {
                                 Some(sk) => refine_plan_with_skill(plan, sk),
                                 None => plan,
                             };
+                            plan.set_output_contract(&request.message);
                             *machine.plan_mut() = plan;
                         }
                     }
@@ -3264,12 +3738,29 @@ pub fn run(
                         ModelTurn::Final { text } => (text, Vec::new()),
                         ModelTurn::Tools { calls } => (text, calls),
                     };
+                    // Preflight the projected batch before the state machine can reject it.
+                    lift_before_batch(&mut machine, calls.len(), &mut budget_lifted, emit);
+                    let remaining = machine
+                        .budget()
+                        .max_tool_calls
+                        .saturating_sub(machine.budget().tool_calls_used);
+                    if calls.len() > remaining {
+                        rejected_budget_batch = Some((calls.len(), remaining));
+                    }
+                    if let Some(key) = exploration_batch_key(&calls) {
+                        recent_exploration_batches.push(key);
+                        if recent_exploration_batches.len() > 3 {
+                            recent_exploration_batches.remove(0);
+                        }
+                    } else {
+                        recent_exploration_batches.clear();
+                    }
                     // Provider-native assistant turn: text + tool calls preserved.
                     if native_tools {
                         let tool_calls: Vec<NativeToolCall> = calls
                             .iter()
-                            .filter_map(|inv| match inv {
-                                ToolInvocation::Ready(call) => Some(NativeToolCall {
+                            .map(|inv| match inv {
+                                ToolInvocation::Ready(call) => NativeToolCall {
                                     id: call.id.to_string(),
                                     name: call.name.label().to_owned(),
                                     arguments: match &call.args {
@@ -3334,17 +3825,19 @@ pub fn run(
                                             })
                                         }
                                     },
-                                }),
+                                },
                                 // External (MCP) calls must round-trip into
                                 // provider history under their wire name —
                                 // dropping them would corrupt multi-turn
                                 // native tool calling.
-                                ToolInvocation::External(call) => Some(NativeToolCall {
+                                ToolInvocation::External(call) => NativeToolCall {
                                     id: call.id.to_string(),
                                     name: call.name.clone(),
                                     arguments: call.args.clone(),
-                                }),
-                                _ => None,
+                                },
+                                ToolInvocation::Rejected(reject) => NativeToolCall {
+                                    id: reject.id.to_string(), name: reject.name.clone(), arguments: serde_json::json!({}),
+                                },
                             })
                             .collect();
                         history.push(ProviderMessage::assistant(
@@ -3359,7 +3852,6 @@ pub fn run(
                     }
 
                     if calls.is_empty() {
-                        machine.handle(AgentEvent::ModelClaimedDone);
                         answer = strip_tool_artifacts(&assistant_text);
                         checks = checks_from(&assistant_text);
                         if answer.trim().is_empty() {
@@ -3367,15 +3859,16 @@ pub fn run(
                                 empty_answer_detail(&attempt_finish, attempt_saw_reasoning)
                                     .to_owned(),
                             );
-                        } else {
-                            model_gap = None;
-                            if attempt_finish == "length" {
-                                notes.push(
-                                    "输出达到 max-output-tokens 上限，回答可能不完整（finish_reason=length）"
-                                        .to_owned(),
-                                );
-                            }
+                            break;
                         }
+                        model_gap = None;
+                        let errors = machine
+                            .plan()
+                            .validate_deliverables(project, &machine.evidence().files_written);
+                        if let Some(evidence) = machine.evidence_mut() {
+                            evidence.deliverable_errors = Some(errors);
+                        }
+                        machine.handle(AgentEvent::ModelClaimedDone);
                         // Conversational runs gate nothing: the prose answer
                         // IS the delivery — never the "criteria not met"
                         // bounce that starves plain Q&A into a failed run.
@@ -3392,7 +3885,31 @@ pub fn run(
                         continue;
                     }
 
+                    if finalize_answer {
+                        machine.budget_mut().rounds_used =
+                            machine.budget().rounds_used.saturating_add(1);
+                        machine.handle(AgentEvent::BudgetExceeded);
+                        break;
+                    }
+                    if conversational
+                        && !wrote_files
+                        && calls.len()
+                            >= machine
+                                .budget()
+                                .max_tool_calls
+                                .saturating_sub(machine.budget().tool_calls_used)
+                    {
+                        // No requested tool ran. Remove its assistant tool-use
+                        // message so the closing request has no orphan tool IDs.
+                        history.pop();
+                        stop_gathering = true;
+                        machine.handle(AgentEvent::ModelRequestedTools { count: 0 });
+                        continue;
+                    }
                     machine.handle(AgentEvent::ModelRequestedTools { count: calls.len() });
+                    if machine.state().is_terminal() {
+                        break;
+                    }
                     if !simple_step(
                         Step::Reasoning {
                             summary: "Running tools".to_owned(),
@@ -3431,34 +3948,49 @@ pub fn run(
                     )?
                     else {
                         machine.handle(AgentEvent::Cancel);
+                        persist_changeset(
+                            project,
+                            request.session_id.as_deref().filter(|_| has_project),
+                            &changeset,
+                        )?;
                         return Ok(());
                     };
 
-                    // Checkpoint: record Kodo-touched files after mutations.
+                    persist_changeset(
+                        project,
+                        request.session_id.as_deref().filter(|_| has_project),
+                        &changeset,
+                    )?;
+                    push_tool_results(&mut history, &results, native_tools);
                     for result in &results {
-                        if result.ok
-                            && ToolName::parse(&result.name)
-                                .map(|n| n.is_mutation())
-                                .unwrap_or(false)
-                        {
-                            changeset.record_kodo_change(project, &result.input);
-                            // Invalidate prior context observations for this path
-                            // so the model does not treat stale content as fact.
-                            context_mgr.invalidate(&result.input);
-                            history.push(ProviderMessage::user(format!(
-                                "STALE context: `{}` was modified this turn. \
-                                 Earlier reads of this file are outdated — re-read before relying on them.",
-                                result.input
-                            )));
+                        let paths = result.changed_files.iter().cloned().chain(
+                            (result.ok
+                                && ToolName::parse(&result.name).is_some_and(|n| n.is_mutation()))
+                            .then(|| result.input.clone()),
+                        );
+                        for path in paths {
+                            changeset.record_kodo_change(project, &path);
+                            context_mgr.invalidate(&path);
+                            history.push(ProviderMessage::user(format!("STALE context: `{path}` changed this turn; re-read before relying on earlier observations.")));
                         }
                     }
 
-                    push_tool_results(&mut history, &results, native_tools);
                     machine.handle(AgentEvent::ToolsFinished {
                         results: results.clone(),
                     });
                     if let Some(evidence) = machine.evidence_mut() {
                         evidence.absorb_results(&results);
+                    }
+                    if let Some(question) = results
+                        .iter()
+                        .find(|result| result.ok && result.name == ToolName::AskUser.label())
+                    {
+                        pending_question = true;
+                        answer = format!(
+                            "需要确认后继续：{}\n\n请在输入框回复；本轮已暂停等待确认后的操作。",
+                            question.input
+                        );
+                        break;
                     }
                     if let Some(result) = results.last() {
                         active_tool = result.name.clone();
@@ -3500,21 +4032,38 @@ pub fn run(
         // the reply is the record itself. Only a genuinely empty answer hit
         // this block before, and a rounds-exhausted run then delivered raw
         // model chatter as the final answer (2026-09-30).
-        let claim_rejected =
-            matches!(machine.state(), AgentState::Failed { .. } | AgentState::Cancelled);
+        let claim_rejected = !pending_question
+            && matches!(
+                machine.state(),
+                AgentState::Failed { .. } | AgentState::Cancelled
+            );
         if answer.is_empty() || claim_rejected {
             match machine.state() {
                 AgentState::Failed { reason } => {
                     answer = format!(
                         "任务未完成（{}）。\n\n{}",
                         match reason {
-                            FailReason::BudgetExhausted => "预算耗尽",
-                            FailReason::AcceptanceUnmet => "验收标准未满足",
-                            FailReason::Unrecoverable => "不可恢复错误",
+                            FailReason::BudgetExhausted => {
+                                let counters = format!(
+                                    "轮次 {}/{}，工具调用 {}/{}",
+                                    machine.budget().rounds_used,
+                                    machine.budget().max_rounds,
+                                    machine.budget().tool_calls_used,
+                                    machine.budget().max_tool_calls,
+                                );
+                                match rejected_budget_batch {
+                                    Some((requested, remaining)) => format!(
+                                        "本批工具调用超过剩余额度：申请 {requested} 次，剩余 {remaining} 次；本批未执行；{counters}"
+                                    ),
+                                    None => format!("本轮执行预算耗尽：{counters}"),
+                                }
+                            }
+                            FailReason::AcceptanceUnmet => "验收标准未满足".to_owned(),
+                            FailReason::Unrecoverable => "不可恢复错误".to_owned(),
                         },
                         offline_answer(&request.message, &notes, OfflineReason::Aborted)
                     );
-                    checks = vec!["已明确标记为失败，未伪装成功".to_owned()];
+                    checks.clear();
                 }
                 AgentState::Cancelled => {
                     answer = format!(
@@ -3528,9 +4077,7 @@ pub fn run(
                         &request.message,
                         &notes,
                         OfflineReason::NoAnswer(
-                            model_gap
-                                .as_deref()
-                                .unwrap_or("模型结束回合但未返回正文"),
+                            model_gap.as_deref().unwrap_or("模型结束回合但未返回正文"),
                         ),
                     );
                     if checks.is_empty() {
@@ -3575,6 +4122,15 @@ pub fn run(
         checks = vec![format!("{reason}，本轮基于本地扫描")];
     }
 
+    recovery::RecoveryCheckpoint::save(
+        project,
+        request.session_id.as_deref().filter(|_| has_project),
+        machine.plan(),
+        machine.evidence(),
+        machine.state().name(),
+        &changeset,
+    )?;
+
     // Persist the turn changeset so the UI can show real diffs and undo.
     // Project-only: without a root there is no `.kodo/` to write into.
     if has_project && (!changeset.kodo_touched.is_empty() || !changeset.baseline_dirty.is_empty()) {
@@ -3598,10 +4154,14 @@ pub fn run(
             AgentState::Failed { reason } => match reason {
                 FailReason::Unrecoverable => FinalStatus::Blocked,
                 FailReason::BudgetExhausted => {
-                    if partial_verify || machine.evidence().partial_verified {
+                    if verified {
+                        FinalStatus::Verified
+                    } else if partial_verify || machine.evidence().partial_verified {
                         FinalStatus::PartiallyVerified
-                    } else {
+                    } else if machine.evidence().verify_ok == Some(false) {
                         FinalStatus::VerificationFailed
+                    } else {
+                        FinalStatus::NotVerified
                     }
                 }
                 FailReason::AcceptanceUnmet => FinalStatus::NotVerified,
@@ -3631,16 +4191,19 @@ pub fn run(
                 }
             }
         };
-        // Conversational runs never grade themselves against task evidence:
-        // a Finish-without-verify or budget-exhausted exit both mean the
-        // answer landed as Q&A (ready + not_run) — not partial/failed
-        // verification (2026-09-29).
+        let status = if pending_question {
+            FinalStatus::Blocked
+        } else {
+            status
+        };
+        // Successful Q&A needs no verification. A budget failure must retain
+        // its failed delivery instead of becoming ready + not_run.
         let status = if conversational
+            && machine.state() == &AgentState::Finish
             && matches!(
                 status,
                 FinalStatus::VerificationFailed | FinalStatus::PartiallyVerified
-            )
-        {
+            ) {
             FinalStatus::NotVerified
         } else {
             status
@@ -3657,6 +4220,26 @@ pub fn run(
             FinalStatus::Cancelled => ("partial", "not_run"),
             FinalStatus::Blocked => ("blocked", "blocked"),
             FinalStatus::ProviderError => ("failed", "not_run"),
+        };
+
+        let (delivery, verification) = match machine.state() {
+            _ if pending_question => ("blocked", "blocked"),
+            AgentState::Failed {
+                reason: FailReason::BudgetExhausted | FailReason::AcceptanceUnmet,
+            } => (
+                if wrote_files { "partial" } else { "failed" },
+                if wrote_files { verification } else { "not_run" },
+            ),
+            _ if truncated_output => (
+                if partial_output || wrote_files {
+                    "partial"
+                } else {
+                    "failed"
+                },
+                "not_run",
+            ),
+            _ if provider_ready && model_gap.is_some() => ("failed", "not_run"),
+            _ => (delivery, verification),
         };
 
         if verified {
@@ -3681,6 +4264,24 @@ pub fn run(
             }
             answer.push_str(&format!("**Verification status:** {}\n", status.label()));
         }
+        // Failure taxonomy — the UI keys "继续本轮" off `failure_reason ==
+        // "budget_exhausted"` so it surfaces on a budget trip even when no
+        // file was written (delivery == "failed"). Empty for any non-failed
+        // delivery so the success path stays quiet.
+        let failure_reason: &str = match machine.state() {
+            AgentState::Failed {
+                reason: FailReason::BudgetExhausted,
+            } => "budget_exhausted",
+            AgentState::Failed {
+                reason: FailReason::AcceptanceUnmet,
+            } => "acceptance_unmet",
+            AgentState::Failed {
+                reason: FailReason::Unrecoverable,
+            } => "unrecoverable",
+            _ if provider_ready && model_gap.is_some() => "provider_error",
+            _ if delivery == "failed" => "unknown",
+            _ => "",
+        };
         simple_step(
             Step::AgentMessage {
                 text: answer,
@@ -3688,6 +4289,7 @@ pub fn run(
                 delivery: delivery.to_owned(),
                 verification: verification.to_owned(),
                 plain: conversational,
+                failure_reason: failure_reason.to_owned(),
             },
             alive,
             emit,
@@ -3703,7 +4305,7 @@ fn system_prompt(
     mcp_hint: &str,
 ) -> String {
     let protocol = protocol_instructions(registry);
-    let checks = "End with 1-3 short checks as a markdown list starting with '- '.";
+    let checks = "Keep the final answer concise and report the actual deliverable first. For a file delivery, put its exact project-relative path in inline code, summarize the main contents once, and mention only remaining gaps or actual verification results. Do not repeat the UI's status, file statistics, action buttons or a second copy of your checklist. A successful file read is a readback observation, not proof of semantic correctness or a passing test.";
     // Phase 0 second-pass: MCP init failures (placeholder template,
     // transport closed) get one-shot exposure in the system prompt. The
     // model already saw them in `mcp.notes`, but the screenshot showed
@@ -3866,7 +4468,10 @@ fn substitute_template_vars(
 /// of length 1 renders exactly like the legacy single-persona block; a
 /// longer chain prepends a "personas in order" header so the model can
 /// tell which persona authored which guideline.
-fn persona_chain_block(personas: &[PersonaBlock], vars: &std::collections::HashMap<String, String>) -> String {
+fn persona_chain_block(
+    personas: &[PersonaBlock],
+    vars: &std::collections::HashMap<String, String>,
+) -> String {
     let mut blocks: Vec<String> = Vec::new();
     for persona in personas {
         let body = persona.instructions.trim();
@@ -3957,7 +4562,10 @@ fn build_persona_template_vars(
     vars.insert("provider".to_owned(), provider.template.clone());
     vars.insert(
         "model".to_owned(),
-        provider.model_id.clone().unwrap_or_else(|| provider.model.clone()),
+        provider
+            .model_id
+            .clone()
+            .unwrap_or_else(|| provider.model.clone()),
     );
     // Branch is best-effort: read from a `KODO_BRANCH` env var first, then
     // walk a `git rev-parse --abbrev-ref HEAD` for the active project. A
@@ -4094,7 +4702,9 @@ fn attachment_kind_label(path: &str) -> &'static str {
         .to_ascii_lowercase();
     match ext.as_str() {
         "pdf" => "pdf",
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif" | "heic" => "image",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif" | "heic" => {
+            "image"
+        }
         "doc" | "docx" | "rtf" | "odt" => "doc",
         "ppt" | "pptx" | "odp" => "ppt",
         "xls" | "xlsx" | "xlsm" | "xlsb" | "ods" => "office",
@@ -4121,12 +4731,16 @@ enum OfflineReason<'a> {
 /// Honest detail for a successful call that produced no usable text: what
 /// the finish reason and reasoning stream actually tell us.
 fn empty_answer_detail(finish_reason: &str, saw_reasoning: bool) -> &'static str {
-    match (finish_reason == "length", saw_reasoning) {
+    match (output_was_truncated(finish_reason), saw_reasoning) {
         (true, true) => "模型思考耗尽输出上限（finish_reason=length），未产出正文",
         (true, false) => "输出达到 max-output-tokens 上限被截断，未产出正文",
         (false, true) => "模型输出全部为思考内容，未产出正文",
         (false, false) => "模型调用成功但未返回正文",
     }
+}
+
+fn output_was_truncated(finish_reason: &str) -> bool {
+    matches!(finish_reason, "length" | "max_tokens")
 }
 
 fn offline_answer(message: &str, notes: &[String], reason: OfflineReason<'_>) -> String {
@@ -4139,17 +4753,27 @@ fn offline_answer(message: &str, notes: &[String], reason: OfflineReason<'_>) ->
             body.push_str("模型调用未成功，以下是基于项目本地扫描的说明。\n\n");
         }
         OfflineReason::NoAnswer(_) => {
-            body.push_str("本轮模型已调用但未产出可用回答，以下是基于项目本地扫描的说明。\n\n");
+            body.push_str("本轮模型未产出可用回答，任务尚未完成。\n\n");
         }
         OfflineReason::Aborted => {
-            body.push_str("以下是基于项目本地扫描的说明。\n\n");
+            body.push_str("尚未生成完整答复。\n\n");
         }
     }
     body.push_str(&format!("**任务**：{message}\n\n"));
-    if !notes.is_empty() {
+    if !notes.is_empty() && !matches!(reason, OfflineReason::NoAnswer(_)) {
         body.push_str("**已执行**\n");
-        for note in notes {
-            body.push_str(&format!("- {note}\n"));
+        if matches!(reason, OfflineReason::Aborted) {
+            body.push_str(&format!(
+                "已记录 {} 条执行信息，完整记录可在「查看响应轨迹」中查看。\n",
+                notes.len()
+            ));
+        } else {
+            for note in notes.iter().take(6) {
+                body.push_str(&format!("- {note}\n"));
+            }
+            if notes.len() > 6 {
+                body.push_str("其余执行记录可在「查看响应轨迹」中查看。\n");
+            }
         }
         body.push('\n');
     }
@@ -4162,7 +4786,7 @@ fn offline_answer(message: &str, notes: &[String], reason: OfflineReason<'_>) ->
         }
         OfflineReason::NoAnswer(detail) => {
             body.push_str(&format!("**原因**：{detail}\n\n"));
-            body.push_str("可在 Settings → 模型中调大「最大输出 tokens」后重试。");
+            body.push_str("执行详情可在「查看响应轨迹」中查看。可缩短输出或在 Settings → 模型中调整「最大输出 tokens」后重试。");
         }
         OfflineReason::NoProvider => {
             body.push_str(
@@ -4208,45 +4832,98 @@ fn is_direct_conversation(message: &str) -> bool {
 /// True when the message looks like a read-only "summarize this project" /
 /// "describe this codebase" / "output the layout" task. Such tasks need
 /// 20-40+ tool calls to map a project, but never mutate it — so we route
-/// them to `TaskPlan::summarize()` + `Budget::for_summary()` (128 tools /
+/// them to a conversational plan + `Budget::for_summary()` (128 tools /
 /// 12 rounds / 0 repairs) instead of the code default (32 tools / 6 rounds).
 ///
 /// Three-layer detection so false positives stay rare:
 /// 1. **Mutating verb exclusion** — any of 修改/修复/创建/添加/重构/write/fix/
 ///    create/update/refactor/edit/delete → NOT summary intent, the user
 ///    wants the code budget.
-/// 2. **Direct summary verb** — 总结/介绍/列出/说明/梳理/概览/概述/
-///    summarize/overview/describe/introduce/explain/outline/走读 → summary.
+/// 2. **Concept question exclusion** — 什么是/what is/what's needs no scan.
+///    Summary verbs below must also name a project-shaped subject.
 /// 3. **Output + project noun** — "输出/给我/show me/give me/print" combined
 ///    with a project-shaped noun (项目/工程/代码/架构/仓库/代码库/目录/
 ///    project/codebase/repo/repository/architecture/layout/structure/folder)
 ///    → summary. Catches "为我输出该项目的总体架构设计".
 fn is_summary_intent(message: &str) -> bool {
+    if is_document_output(message) {
+        return false;
+    }
     let lower = message.to_ascii_lowercase();
     let mutating = [
-        "write", "edit", "fix", "create", "update", "refactor", "delete",
-        "修改", "修复", "创建", "更新", "添加", "重构", "删除",
+        "write",
+        "edit",
+        "fix",
+        "create",
+        "update",
+        "refactor",
+        "delete",
+        "修改",
+        "修复",
+        "创建",
+        "更新",
+        "添加",
+        "重构",
+        "删除",
+        "实现",
+        "解决",
+        "优化",
+        "编写",
+        "新增",
+        "移除",
+        "部署",
+        "安装",
+        "implement",
     ];
     if mutating.iter().any(|k| lower.contains(k)) {
         return false;
     }
     let summary_verbs = [
-        "总结", "介绍", "列出", "说明", "梳理", "概览", "概述",
-        "summarize", "summarise", "summary", "overview", "describe",
-        "introduce", "explain", "outline", "走读",
+        "总结",
+        "介绍",
+        "列出",
+        "说明",
+        "梳理",
+        "概览",
+        "概述",
+        "summarize",
+        "summarise",
+        "summary",
+        "overview",
+        "describe",
+        "introduce",
+        "explain",
+        "outline",
+        "走读",
     ];
-    if summary_verbs.iter().any(|k| lower.contains(k)) {
-        return true;
+    // Concept questions do not need a repository scan even with a project open.
+    if ["什么是", "what is", "what's"]
+        .iter()
+        .any(|k| lower.contains(k))
+    {
+        return false;
     }
     let output_verbs = ["输出", "给我", "show me", "give me", "print", "printout"];
     let project_nouns = [
-        "项目", "工程", "代码", "架构", "仓库", "代码库", "目录",
-        "project", "codebase", "repo", "repository",
-        "architecture", "layout", "structure", "folder",
+        "项目",
+        "工程",
+        "代码",
+        "架构",
+        "仓库",
+        "代码库",
+        "目录",
+        "project",
+        "codebase",
+        "repo",
+        "repository",
+        "architecture",
+        "layout",
+        "structure",
+        "folder",
     ];
     let has_output = output_verbs.iter().any(|k| lower.contains(k));
     let has_project = project_nouns.iter().any(|k| lower.contains(k));
-    has_output && has_project
+    has_project && (has_output || summary_verbs.iter().any(|k| lower.contains(k)))
 }
 
 /// Knowledge/explanation questions are Q&A, not tasks (2026-09-29):
@@ -4256,6 +4933,9 @@ fn is_summary_intent(message: &str) -> bool {
 /// "？" never flips the channel: a knowledge marker is required. The caller
 /// additionally requires that no skill chip is pinned.
 pub(crate) fn is_conversational_question(message: &str) -> bool {
+    if is_document_output(message) {
+        return false;
+    }
     const KNOWLEDGE: &[&str] = &[
         "什么是",
         "是什么",
@@ -4670,9 +5350,7 @@ mod tests {
 
     fn write_dir_skill(dir: &std::path::Path, name: &str, desc: &str) {
         std::fs::create_dir_all(dir).unwrap();
-        let md = DIR_SKILL_MD
-            .replace("{name}", name)
-            .replace("{desc}", desc);
+        let md = DIR_SKILL_MD.replace("{name}", name).replace("{desc}", desc);
         std::fs::write(dir.join(format!("{name}.md")), md).unwrap();
     }
 
@@ -4989,6 +5667,7 @@ mod tests {
         RunRequest {
             project: Some(dir.to_path_buf()),
             message: "test".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: Vec::new(),
             provider: None,
             permission,
@@ -4996,11 +5675,273 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
+        }
+    }
+
+    #[test]
+    fn architecture_document_survives_wide_batches_and_distinguishes_repeated_reads() {
+        for (case, batches, repeat, expect_loop) in [
+            ("screenshot", vec![10, 11, 10], false, false),
+            ("distinct", vec![1, 1, 1], false, false),
+            ("repeat", vec![1, 1, 1], true, true),
+            ("closeout", vec![15; 7], false, false),
+            ("round-closeout", vec![1; 9], false, false),
+        ] {
+            let dir =
+                std::env::temp_dir().join(format!("kodo-doc-budget-{}-{case}", std::process::id()));
+            let project = dir.join("repo");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+            let mut cursor = 0;
+            let mut responses = Vec::new();
+            for (round, count) in batches.iter().enumerate() {
+                let calls: Vec<_> = (0..*count).map(|i| {
+                    let path = if repeat { "README.md".to_owned() } else { format!("module{cursor}.rs") };
+                    std::fs::write(project.join(&path), format!("// module {cursor}\n")).unwrap();
+                    cursor += 1;
+                    serde_json::json!({"id":format!("r{round}_{i}"),"name":"read_file","arguments":{"path":path}})
+                }).collect();
+                responses.push(
+                    serde_json::json!({"text":serde_json::json!({"tool_calls":calls}).to_string()}),
+                );
+            }
+            let target = "docs/总体架构设计.md";
+            let body = "# 总体架构设计\n\n入口连接任务调度和本地工具。\n";
+            for call in [
+                serde_json::json!({"id":"write","name":"create_file","arguments":{"path":target,"content":body}}),
+                serde_json::json!({"id":"verify-doc","name":"read_file","arguments":{"path":target}}),
+            ] {
+                responses.push(serde_json::json!({"text":serde_json::json!({"tool_calls":[call]}).to_string()}));
+            }
+            responses.push(serde_json::json!({"text":"已写入并回读 docs/总体架构设计.md。"}));
+            let script = dir.join("script.jsonl");
+            std::fs::write(
+                &script,
+                responses
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            let mut request = temp_request(&project, Permission::Full);
+            request.message = "请分析该项目的总体架构设计并输出到docs/总体架构设计.md".to_owned();
+            request.provider = Some(Provider::new(
+                "fake",
+                "fake-key",
+                script.to_string_lossy(),
+                "fake-model",
+            ));
+            let mut final_answer = None;
+            let mut loops = Vec::new();
+            let mut closeout_round = None;
+            let mut model_calls = 0;
+            let mut read_target = false;
+            run(&request, &|| true, &|_, _| true, &mut |event| {
+                match event {
+                    SinkEvent::Progress { phase, detail }
+                        if phase == "wrap-up" && detail.contains("循环") =>
+                    {
+                        loops.push(detail)
+                    }
+                    SinkEvent::Progress { phase, detail }
+                        if phase == "wrap-up" && detail.contains("进入交付阶段") =>
+                    {
+                        closeout_round = Some(model_calls)
+                    }
+                    SinkEvent::Started {
+                        step: Step::ModelCall { .. },
+                    } => model_calls += 1,
+                    SinkEvent::Started {
+                        step: Step::FileRead { path, .. },
+                    } if path == target => read_target = true,
+                    SinkEvent::Started {
+                        step:
+                            Step::AgentMessage {
+                                text,
+                                delivery,
+                                failure_reason,
+                                ..
+                            },
+                    } => final_answer = Some((text, delivery, failure_reason)),
+                    _ => {}
+                }
+                true
+            })
+            .unwrap();
+            let (text, delivery, failure) = final_answer.expect("terminal answer");
+            assert_eq!(delivery, "ready", "{case}: {text}");
+            assert!(failure.is_empty(), "{case}: {failure}");
+            assert_eq!(
+                std::fs::read_to_string(project.join(target)).unwrap(),
+                body,
+                "{case}"
+            );
+            assert!(read_target, "document must be re-read: {case}");
+            assert_eq!(
+                !loops.is_empty(),
+                expect_loop,
+                "distinct parameters are progress, not a loop: {case}: {loops:?}"
+            );
+            assert!(model_calls <= batches.len() + 3, "bounded calls: {case}");
+            if case == "round-closeout" {
+                assert_eq!(
+                    closeout_round,
+                    Some(9),
+                    "reserve write, re-read and final answer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_budget_preserves_task_policy_and_preflights_projected_batches() {
+        for family in [Some("extended"), Some("summary")] {
+            let resumed = budget_for_task(TaskType::BugFix, false, family);
+            assert_eq!(resumed.max_repairs, Budget::default().max_repairs);
+            assert_eq!((resumed.max_rounds, resumed.max_tool_calls), (12, 128));
+            assert!(
+                !resumed.is_summary_family(),
+                "recovery must keep code repairs"
+            );
+        }
+        assert!(budget_for_task(TaskType::Feature, true, None).is_summary_family());
+        assert_eq!(
+            budget_for_task(TaskType::Docs, false, None).max_tool_calls,
+            128
+        );
+        assert_eq!(
+            budget_for_task(TaskType::Feature, false, Some("unknown")).max_tool_calls,
+            32
+        );
+        let budget = Budget {
+            rounds_used: 2,
+            tool_calls_used: 23,
+            ..Budget::default()
+        };
+        let mut machine =
+            AgentMachine::with_plan("code task", TaskPlan::from_task("code task"), budget);
+        machine.handle(AgentEvent::PlanReady);
+        machine.handle(AgentEvent::ContextGathered);
+        let mut lifted = false;
+        let mut signals = Vec::new();
+        lift_before_batch(&mut machine, 10, &mut lifted, &mut |event| {
+            signals.push(event);
+            true
+        });
+        assert_eq!(
+            (
+                machine.budget().rounds_used,
+                machine.budget().tool_calls_used
+            ),
+            (2, 23),
+            "preflight never charges unexecuted work"
+        );
+        machine.handle(AgentEvent::ModelRequestedTools { count: 10 });
+        assert!(
+            !machine.state().is_terminal(),
+            "projected 33/32 needs the lift before the transition"
+        );
+        assert_eq!(signals.len(), 1);
+        lift_before_batch(&mut machine, 128, &mut lifted, &mut |_| {
+            panic!("second lift");
+        });
+        assert_eq!(
+            (machine.budget().max_rounds, machine.budget().max_tool_calls),
+            (12, 128)
+        );
+    }
+
+    #[test]
+    fn document_hard_budget_remains_bounded_and_reports_unexecuted_batches() {
+        for (case, rounds, batch) in [("oversized", 1, 129), ("never-delivers", 20, 8)] {
+            let dir = std::env::temp_dir()
+                .join(format!("kodo-doc-ceiling-{}-{case}", std::process::id()));
+            let project = dir.join("repo");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+            let responses: Vec<_> = (0..rounds).map(|round| {
+                let calls: Vec<_> = (0..batch).map(|i| serde_json::json!({"id":format!("r{round}_{i}"),"name":"read_file","arguments":{"path":"README.md"}})).collect();
+                serde_json::json!({"text":serde_json::json!({"tool_calls":calls}).to_string()})
+            }).collect();
+            let script = dir.join("script.jsonl");
+            std::fs::write(
+                &script,
+                responses
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            let mut request = temp_request(&project, Permission::Full);
+            request.message = "请分析该项目的总体架构设计并输出到docs/总体架构设计.md".to_owned();
+            request.provider = Some(Provider::new(
+                "fake",
+                "fake-key",
+                script.to_string_lossy(),
+                "fake-model",
+            ));
+            let mut result = None;
+            let mut model_calls = 0;
+            let mut reads_after_model = 0;
+            run(&request, &|| true, &|_, _| true, &mut |event| {
+                match event {
+                    SinkEvent::Started {
+                        step: Step::ModelCall { .. },
+                    } => model_calls += 1,
+                    SinkEvent::Started {
+                        step: Step::FileRead { .. },
+                    } if model_calls > 0 => reads_after_model += 1,
+                    SinkEvent::Started {
+                        step:
+                            Step::AgentMessage {
+                                text,
+                                delivery,
+                                verification,
+                                failure_reason,
+                                checks,
+                                ..
+                            },
+                    } => result = Some((text, delivery, verification, failure_reason, checks)),
+                    _ => {}
+                }
+                true
+            })
+            .unwrap();
+            let (text, delivery, verification, failure, checks) = result.expect("terminal answer");
+            assert_eq!(delivery, "failed", "{case}: {text}");
+            assert_eq!(failure, "budget_exhausted", "{case}");
+            assert_eq!(
+                verification, "not_run",
+                "budget is separate from verification: {case}"
+            );
+            assert!(
+                !text.contains("Verification failed"),
+                "unrun verification must not fail: {case}"
+            );
+            assert!(
+                checks.is_empty(),
+                "budget diagnostics are not verification: {case}"
+            );
+            assert!(!project.join("docs/总体架构设计.md").exists());
+            assert!(model_calls <= 12, "hard bound survives recovery: {case}");
+            if case == "oversized" {
+                assert_eq!(reads_after_model, 0, "oversized batches execute nothing");
+                assert!(
+                    text.contains("申请 129 次") && text.contains("本批未执行"),
+                    "{text}"
+                );
+            }
         }
     }
 
@@ -5016,13 +5957,17 @@ mod tests {
         assert!(Permission::Ask.needs_approval(StepKind::FileChange, Some("write a.rs")));
         assert!(Permission::Auto.needs_approval(StepKind::FileChange, Some("write a.rs")));
         assert!(!Permission::Full.needs_approval(StepKind::FileChange, Some("write a.rs")));
-        assert!(!Permission::Auto.needs_approval(StepKind::Command, Some("cargo check")));
+        assert!(Permission::Auto.needs_approval(StepKind::Command, Some("cargo check")));
         assert!(Permission::Auto.needs_approval(StepKind::Command, Some("rm -rf x")));
         // Network + package install require approval even beyond Full catastrophic set.
         assert!(Permission::Ask.needs_approval(StepKind::Command, Some("npm install lodash")));
         assert!(Permission::Ask.needs_approval(StepKind::Command, Some("curl https://x.example")));
         assert!(Permission::Auto.needs_approval(StepKind::Command, Some("npm install lodash")));
         assert!(Permission::Auto.needs_approval(StepKind::Command, Some("curl https://x.example")));
+        assert!(Permission::Full.needs_approval(StepKind::Command, Some("curl https://x.example")));
+        assert!(Permission::Full.needs_approval(StepKind::Command, Some("npm install lodash")));
+        assert!(Permission::Full.needs_approval(StepKind::Command, None));
+        assert!(Permission::Full.needs_approval(StepKind::WebSearch, Some("query")));
         // Full keeps catastrophic + destructive git hard guard.
         assert!(Permission::Full.needs_approval(StepKind::Command, Some("rm -rf /")));
         assert!(Permission::Full.needs_approval(StepKind::Command, Some("git push --force")));
@@ -5099,10 +6044,11 @@ mod tests {
             OfflineReason::NoAnswer("输出达到 max-output-tokens 上限被截断，未产出正文"),
         );
         assert!(!no_answer.contains("未配置可用的模型服务"));
-        assert!(no_answer.contains("本轮模型已调用但未产出可用回答"));
+        assert!(no_answer.contains("本轮模型未产出可用回答，任务尚未完成"));
         assert!(no_answer.contains("**原因**：输出达到 max-output-tokens 上限被截断"));
         assert!(no_answer.contains("最大输出 tokens"));
-        assert!(no_answer.contains("- 钉住上下文 `/tmp/a.xlsx`"));
+        assert!(!no_answer.contains("- 钉住上下文 `/tmp/a.xlsx`"));
+        assert!(!no_answer.contains("**已执行**"));
 
         let failed = offline_answer("分析文档", &notes, OfflineReason::CallFailed("401"));
         assert!(failed.contains("模型调用未成功"));
@@ -5271,10 +6217,12 @@ mod tests {
         assert!(keep);
         let result = result.expect("observation");
         assert!(result.ok);
-        let saw = captured.iter().any(|e| matches!(
-            e,
-            SinkEvent::AskUser { options, .. } if options.is_empty()
-        ));
+        let saw = captured.iter().any(|e| {
+            matches!(
+                e,
+                SinkEvent::AskUser { options, .. } if options.is_empty()
+            )
+        });
         assert!(saw, "free-form question must still emit AskUser event");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5392,11 +6340,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `.kodo/` is Kodo's own state: a deny-everything approver must not block
-    /// it, and no FileChange step may reach the session log (the reply card
-    /// and archive counts read those as "changed files").
+    /// Model tools cannot write engine-owned runtime state.
     #[test]
-    fn kodo_state_write_skips_approval_and_emits_no_file_change() {
+    fn model_state_write_is_denied_without_side_effects() {
         let dir = std::env::temp_dir().join(format!("kodo-state-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let request = temp_request(&dir, Permission::Ask);
@@ -5415,7 +6361,7 @@ mod tests {
             &dir,
             &request,
             &|| true,
-            &|_, _| false, // deny everything — state writes must bypass
+            &|_, _| false, // deny everything
             &mut |event| {
                 steps.push(event);
                 true
@@ -5426,9 +6372,16 @@ mod tests {
         .expect("execute");
         assert!(keep);
         let result = result.expect("observation");
-        assert!(result.ok, "error={:?}", result.error);
-        assert!(dir.join(".kodo/identity.md").exists());
-        assert_eq!(steps.len(), 0, "state writes must not emit steps");
+        assert!(!result.ok);
+        assert!(!dir.join(".kodo/identity.md").exists());
+        assert!(steps.iter().all(|e| !matches!(
+            e,
+            SinkEvent::Finished {
+                step: Step::FileChange { .. },
+                denied: false,
+                ..
+            }
+        )));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5469,7 +6422,10 @@ mod tests {
         .expect("first list");
         let r1 = r1.expect("first obs");
         assert!(r1.ok);
-        assert!(!r1.output.contains("[cached"), "first call must not self-mark");
+        assert!(
+            !r1.output.contains("[cached"),
+            "first call must not self-mark"
+        );
 
         let call2 = ToolCall {
             id: ToolCallId::new("l2"),
@@ -5496,6 +6452,35 @@ mod tests {
             "second call must be marked cached: {r2:?}"
         );
 
+        assert!(
+            !r2.output.contains("crates/a.rs"),
+            "repeated file bodies must not inflate history"
+        );
+        dedup.note_list_prefix(Some("crates/"), 0);
+        assert!(dedup.should_warn_list_repeat());
+        let range = ToolCall {
+            id: ToolCallId::new("read-range"),
+            name: ToolName::ReadRange,
+            args: ToolArgs::ReadRange {
+                path: "crates/a.rs".into(),
+                start_line: 1,
+                end_line: 1,
+            },
+        };
+        let (_, read) = execute_tool_call(
+            &range,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |_| true,
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("range read");
+        assert!(read.expect("read observation").ok);
+        assert!(!dedup.should_warn_list_repeat());
+        assert_eq!(dedup.note_list_prefix(Some("crates/"), 0), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5538,7 +6523,8 @@ mod tests {
             assert!(r.ok);
             if i == 2 {
                 assert!(
-                    r.output.contains("[hint: you have listed this directory several times this turn"),
+                    r.output
+                        .contains("[hint: you have listed this directory several times this turn"),
                     "third call must carry the hint: {r:?}"
                 );
             } else {
@@ -5643,8 +6629,11 @@ mod tests {
     /// directly, it does not rely on provider-reported usage).
     fn write_fake_summary_script(dir: &Path, body: &str) -> std::path::PathBuf {
         let script = dir.join("compaction_script.jsonl");
-        std::fs::write(&script, format!("{}\n", serde_json::json!({ "text": body })))
-            .expect("write fake script");
+        std::fs::write(
+            &script,
+            format!("{}\n", serde_json::json!({ "text": body })),
+        )
+        .expect("write fake script");
         script
     }
 
@@ -5672,18 +6661,10 @@ mod tests {
     /// covered end-to-end (Budget state, history mutation, SinkEvent).
     #[test]
     fn compact_if_needed_replaces_middle_with_summary() {
-        let dir = std::env::temp_dir().join(format!(
-            "kodo-compact-pass-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("kodo-compact-pass-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = write_fake_summary_script(&dir, "Concise summary of earlier turns.");
-        let provider = Provider::new(
-            "fake",
-            "fake-key",
-            script.to_string_lossy(),
-            "fake-model",
-        );
+        let provider = Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
         let mut history = build_history_for_compaction(10, 6);
         let original_len = history.len();
         let mut budget = build_high_budget();
@@ -5693,13 +6674,7 @@ mod tests {
             true
         };
 
-        compact_if_needed(
-            &mut history,
-            &mut budget,
-            &provider,
-            &|| true,
-            &mut emit,
-        );
+        compact_if_needed(&mut history, &mut budget, &provider, &|| true, &mut emit);
 
         assert_eq!(
             history.len(),
@@ -5736,14 +6711,20 @@ mod tests {
         let compacted = captured
             .iter()
             .find_map(|e| match e {
-                SinkEvent::Compacted { dropped, summarized_into, freed_pct } => {
-                    Some((*dropped, *summarized_into, *freed_pct))
-                }
+                SinkEvent::Compacted {
+                    dropped,
+                    summarized_into,
+                    freed_pct,
+                } => Some((*dropped, *summarized_into, *freed_pct)),
                 _ => None,
             })
             .expect("compacted event");
         assert_eq!(compacted.1, 1, "summarized_into must be 1");
-        assert!(compacted.0 >= 4, "dropped should reflect middle size, got {}", compacted.0);
+        assert!(
+            compacted.0 >= 4,
+            "dropped should reflect middle size, got {}",
+            compacted.0
+        );
         assert!(compacted.2 <= 100);
         let _ = original_len;
         let _ = std::fs::remove_dir_all(&dir);
@@ -5756,12 +6737,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kodo-compact-skip-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = write_fake_summary_script(&dir, "should not be called");
-        let provider = Provider::new(
-            "fake",
-            "fake-key",
-            script.to_string_lossy(),
-            "fake-model",
-        );
+        let provider = Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
         let mut history = build_history_for_compaction(10, 6);
         let original_history = history.clone();
         let mut budget = Budget::default();
@@ -5772,14 +6748,11 @@ mod tests {
             captured.push(event);
             true
         };
-        compact_if_needed(
-            &mut history,
-            &mut budget,
-            &provider,
-            &|| true,
-            &mut emit,
+        compact_if_needed(&mut history, &mut budget, &provider, &|| true, &mut emit);
+        assert_eq!(
+            history, original_history,
+            "history untouched below threshold"
         );
-        assert_eq!(history, original_history, "history untouched below threshold");
         assert_eq!(budget.compacted_count, 0);
         assert!(captured.is_empty(), "no event expected");
         let _ = std::fs::remove_dir_all(&dir);
@@ -5803,14 +6776,11 @@ mod tests {
             captured.push(event);
             true
         };
-        compact_if_needed(
-            &mut history,
-            &mut budget,
-            &p,
-            &|| true,
-            &mut emit,
+        compact_if_needed(&mut history, &mut budget, &p, &|| true, &mut emit);
+        assert_eq!(
+            history, original_history,
+            "history untouched on provider error"
         );
-        assert_eq!(history, original_history, "history untouched on provider error");
         assert_eq!(budget.compacted_count, 0, "count not bumped on failure");
         assert!(captured.is_empty(), "no Compacted event on failure");
         let _ = std::fs::remove_dir_all(&dir);
@@ -5913,21 +6883,67 @@ mod tests {
     }
 
     #[test]
-    fn external_tool_needs_approval_in_ask_auto_but_not_full() {
+    fn external_tool_needs_approval_in_all_permission_modes() {
         // External risk is opaque (arbitrary server tool) — risk ≥ Network,
-        // so Ask and Auto both require a human; only Full lets them through.
+        // so every permission mode requires a human.
         // The detail never changes the decision: there is no risk classifier
         // for wire calls.
-        assert!(
-            Permission::Ask.needs_approval(StepKind::ExternalTool, Some("mcp__fake__echo {}"))
-        );
-        assert!(
-            Permission::Auto.needs_approval(StepKind::ExternalTool, Some("mcp__fake__echo {}"))
-        );
-        assert!(!Permission::Full.needs_approval(StepKind::ExternalTool, Some("mcp__fake__echo {}")));
+        assert!(Permission::Ask.needs_approval(StepKind::ExternalTool, Some("mcp__fake__echo {}")));
+        assert!(Permission::Auto.needs_approval(StepKind::ExternalTool, Some("mcp__fake__echo {}")));
+        assert!(Permission::Full.needs_approval(StepKind::ExternalTool, Some("mcp__fake__echo {}")));
         assert!(Permission::Ask.needs_approval(StepKind::ExternalTool, None));
         assert!(Permission::Auto.needs_approval(StepKind::ExternalTool, None));
-        assert!(!Permission::Full.needs_approval(StepKind::ExternalTool, None));
+        assert!(Permission::Full.needs_approval(StepKind::ExternalTool, None));
+    }
+
+    #[test]
+    fn external_outputs_are_redacted_before_observation_and_trace() {
+        for case in 0..3 {
+            let response = "pong\nAPI_KEY=synthetic-secret-value";
+            let transport = mcp::FakeTransport::new()
+                .reply("initialize", serde_json::json!({}))
+                .reply("tools/list", serde_json::json!({"tools": []}));
+            let transport = if case == 2 {
+                transport.fail("tools/call", McpError::Http(403, response.into()))
+            } else {
+                transport.reply("tools/call", serde_json::json!({"content": [{"type": "text", "text": response}], "isError": case == 1}))
+            };
+            let client = mcp::McpClient::handshake("fake", "Fake", Box::new(transport)).unwrap();
+            let mut clients = McpClients::from_clients(vec![client], Vec::new());
+            let root = Path::new("/tmp/unused-external-redaction-fixture");
+            let request = temp_request(root, Permission::Ask);
+            let mut trace = String::new();
+            let (_, result) = external_step(
+                ExternalCall {
+                    id: ToolCallId::new("ext"),
+                    name: "mcp__fake__echo".into(),
+                    args: serde_json::json!({}),
+                },
+                root,
+                &request,
+                &mut clients,
+                &|| true,
+                &|_, _| true,
+                &mut |event| {
+                    if let SinkEvent::Finished {
+                        step: Step::Command { output, .. },
+                        ..
+                    } = event
+                    {
+                        trace = output;
+                    }
+                    true
+                },
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let result = result.unwrap();
+            assert_eq!(result.ok, case == 0);
+            assert!(trace.contains("pong"));
+            assert!(!trace.contains("synthetic-secret-value"));
+            assert!(!format_observations(std::slice::from_ref(&result))
+                .contains("synthetic-secret-value"));
+        }
     }
 
     #[test]
@@ -5982,7 +6998,10 @@ mod tests {
         // Trace shape: one finished Step::Command with the wire name in the
         // label, flagged denied — no new Step variant for external work.
         assert_eq!(events.len(), 1, "events: {events:?}");
-        assert!(events[0].starts_with("mcp__fake__echo "), "events: {events:?}");
+        assert!(
+            events[0].starts_with("mcp__fake__echo "),
+            "events: {events:?}"
+        );
         assert!(events[0].ends_with(":true"), "events: {events:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6026,7 +7045,9 @@ mod tests {
             &|_, _| true,
             &mut |event| {
                 match &event {
-                    SinkEvent::Started { step } => events.push(format!("start:{}", step.preview_detail())),
+                    SinkEvent::Started { step } => {
+                        events.push(format!("start:{}", step.preview_detail()))
+                    }
                     SinkEvent::Finished { step, denied, .. } => {
                         events.push(format!("finish:{}:{denied}", step.preview_detail()))
                     }
@@ -6189,6 +7210,7 @@ mod tests {
         let request = RunRequest {
             project: Some(project),
             message: "介绍下什么是数据仓库".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: Vec::new(),
             provider: Some(provider),
             permission: Permission::Ask,
@@ -6196,6 +7218,7 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: vec![mcp::McpServerConfig {
@@ -6211,13 +7234,16 @@ mod tests {
             }],
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let approvals = std::cell::Cell::new(0);
         let mut command_outputs: Vec<(String, String)> = Vec::new();
         let mut answers: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
             if let SinkEvent::Finished {
-                step: Step::Command { command, output, .. },
+                step: Step::Command {
+                    command, output, ..
+                },
                 ..
             } = &event
             {
@@ -6236,7 +7262,10 @@ mod tests {
             &|| true,
             &|kind, detail| {
                 assert_eq!(kind, StepKind::ExternalTool);
-                assert!(detail.contains("mcp__fake__echo"), "detail: {detail}");
+                assert!(
+                    detail.contains("mcp__fake__echo") || detail.contains("mcp__fake__connect"),
+                    "detail: {detail}"
+                );
                 approvals.set(approvals.get() + 1);
                 true // allow
             },
@@ -6244,7 +7273,11 @@ mod tests {
         )
         .expect("run with a configured server");
 
-        assert_eq!(approvals.get(), 1, "exactly one Ask rendezvous");
+        assert_eq!(
+            approvals.get(),
+            2,
+            "connection and call each require consent"
+        );
         // The finished Step::Command trace carries the wire name and pong.
         assert!(
             command_outputs
@@ -6493,6 +7526,7 @@ mod tests {
         let request = RunRequest {
             project: None,
             message: "帮我写一份周报总结".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: Vec::new(),
             provider: None,
             permission: Permission::Ask,
@@ -6500,11 +7534,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut steps: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -6528,6 +7564,7 @@ mod tests {
         let request = RunRequest {
             project: None,
             message: "修复未知表路由".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: Vec::new(),
             provider: None,
             permission: Permission::Ask,
@@ -6535,11 +7572,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut steps: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -6564,6 +7603,7 @@ mod tests {
         let request = RunRequest {
             project: None,
             message: "介绍下什么是数据仓库".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: Vec::new(),
             provider: None,
             permission: Permission::Ask,
@@ -6571,11 +7611,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut messages: Vec<(String, String, String, bool)> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -6633,6 +7675,7 @@ mod tests {
         let request = RunRequest {
             project: None,
             message: "介绍下什么是缴费基数".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: vec![abs],
             provider: None,
             permission: Permission::Ask,
@@ -6640,11 +7683,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut messages: Vec<(String, bool)> = Vec::new();
@@ -6655,10 +7700,7 @@ mod tests {
                 }
             }
             if let SinkEvent::Started {
-                step:
-                    Step::AgentMessage {
-                        text, plain, ..
-                    },
+                step: Step::AgentMessage { text, plain, .. },
             } = event
             {
                 messages.push((text, plain));
@@ -6684,10 +7726,12 @@ mod tests {
         // a greeting + file used to drop the attachment entirely. With files
         // pinned the run must reach the model (here: the offline fallback,
         // which echoes the pin note) instead of the local canned sentence.
-        let (_dir, abs) = temp_attachment("deploy_note.txt", "发布步骤：先灰度再全量。\n".as_bytes());
+        let (_dir, abs) =
+            temp_attachment("deploy_note.txt", "发布步骤：先灰度再全量。\n".as_bytes());
         let request = RunRequest {
             project: None,
             message: "你好".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: vec![abs],
             provider: None,
             permission: Permission::Ask,
@@ -6695,11 +7739,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -6732,6 +7778,7 @@ mod tests {
         let request = RunRequest {
             project: None,
             message: "你好".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: Vec::new(),
             provider: None,
             permission: Permission::Ask,
@@ -6739,11 +7786,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -6756,7 +7805,10 @@ mod tests {
             true
         };
         run(&request, &|| true, &|_, _| true, &mut emit).expect("canned greeting run");
-        assert_eq!(texts, vec!["你好，我是 Kodo。有什么代码问题需要我帮你处理？".to_owned()]);
+        assert_eq!(
+            texts,
+            vec!["你好，我是 Kodo。有什么代码问题需要我帮你处理？".to_owned()]
+        );
     }
 
     #[test]
@@ -6768,6 +7820,7 @@ mod tests {
         let request = RunRequest {
             project: None,
             message: "分析并为我解释一下这个文档".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: vec![abs],
             provider: None,
             permission: Permission::Ask,
@@ -6775,11 +7828,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -6814,12 +7869,12 @@ mod tests {
         // Layer 2 × Layer 3 together: on the conversational arm a pinned
         // xlsx must extract into a real content observation (钉住上下文 pin),
         // not fall back to the binary path descriptor (已附带附件).
-        let xlsx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/qa.xlsx");
+        let xlsx = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qa.xlsx");
         let abs = xlsx.to_string_lossy().to_string();
         let request = RunRequest {
             project: None,
             message: "分析并为我解释一下这个文档".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: vec![abs],
             provider: None,
             permission: Permission::Ask,
@@ -6827,11 +7882,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -6885,7 +7942,8 @@ mod tests {
         let obs = span_observation(&span, "pin_0");
         assert!(obs.ok);
         assert!(
-            obs.output.contains("result truncated: context block capped"),
+            obs.output
+                .contains("result truncated: context block capped"),
             "capped body must say so: {}",
             &obs.output[obs.output.len().saturating_sub(120)..]
         );
@@ -6932,18 +7990,20 @@ mod tests {
         // and die as VerificationFailed → 部分完成. With the scripted fake
         // provider answering once, the run must end on that single prose
         // turn — exactly one ModelCall, plain ready+not_run, no footer.
-        let dir = std::env::temp_dir().join(format!(
-            "kodo-conv-{}-projectless",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kodo-conv-{}-projectless", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let script = dir.join("script.jsonl");
-        std::fs::write(&script, "{\"text\":\"数据仓库是集中存储分析数据的系统。\"}\n")
-            .expect("script");
+        std::fs::write(
+            &script,
+            "{\"text\":\"数据仓库是集中存储分析数据的系统。\"}\n",
+        )
+        .expect("script");
         let provider = Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
         let request = RunRequest {
             project: None,
             message: "介绍下什么是数据仓库".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: Vec::new(),
             provider: Some(provider),
             permission: Permission::Ask,
@@ -6951,11 +8011,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut kinds: Vec<String> = Vec::new();
         let mut answers: Vec<(String, String, String, bool)> = Vec::new();
@@ -6987,7 +8049,10 @@ mod tests {
         assert_eq!(delivery, "ready");
         assert_eq!(verification, "not_run");
         assert!(text.contains("数据仓库"), "scripted answer lost: {text}");
-        assert!(!text.contains("Verification status"), "no task footer: {text}");
+        assert!(
+            !text.contains("Verification status"),
+            "no task footer: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7007,6 +8072,7 @@ mod tests {
         let request = RunRequest {
             project: Some(project.clone()),
             message: "介绍下什么是数据仓库".to_owned(),
+            conversation_history: Vec::new(),
             pinned_context: Vec::new(),
             provider: Some(provider),
             permission: Permission::Ask,
@@ -7014,11 +8080,13 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 512,
             extended_thinking: false,
+            local_trace: false,
             session_id: None,
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
+            budget_family: None,
         };
         let mut kinds: Vec<String> = Vec::new();
         let mut answers: Vec<(String, String, String, bool)> = Vec::new();
@@ -7056,8 +8124,401 @@ mod tests {
         assert!(*plain, "Q&A renders plain");
         assert_eq!(delivery, "ready");
         assert_eq!(verification, "not_run");
-        assert!(!text.contains("Verification status"), "no task footer: {text}");
+        assert!(
+            !text.contains("Verification status"),
+            "no task footer: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn summary_budget_closes_with_prose_and_failures_stay_failed() {
+        // File-script provider: no network, credentials or live project data.
+        for (case, rounds, batch, final_text, expected_delivery) in [
+            (
+                "many-reads",
+                4,
+                10,
+                Some("架构：入口负责调度，模块负责业务。"),
+                "ready",
+            ),
+            (
+                "last-round",
+                11,
+                1,
+                Some("架构：已收集的入口连接核心模块。"),
+                "ready",
+            ),
+            (
+                "large-batch",
+                1,
+                128,
+                Some("架构：仅能确认已读取的项目资料。"),
+                "ready",
+            ),
+            ("no-prose", 12, 1, None, "failed"),
+            ("empty-prose", 0, 0, Some(""), "failed"),
+        ] {
+            let dir = std::env::temp_dir()
+                .join(format!("kodo-summary-budget-{}-{case}", std::process::id()));
+            let project = dir.join("repo");
+            std::fs::create_dir_all(&project).expect("temp project");
+            std::fs::write(
+                project.join("README.md"),
+                "# Demo\nA small module-based project.\n",
+            )
+            .expect("readme");
+            std::fs::write(
+                project.join("module.txt"),
+                "module handles business logic\n",
+            )
+            .expect("module");
+            let script = dir.join("script.jsonl");
+            let mut responses = Vec::new();
+            for round in 0..rounds {
+                let calls: Vec<_> = (0..batch).map(|i| serde_json::json!({
+                    "id": format!("r{round}_{i}"), "name": "read_file",
+                    "arguments": { "path": if case == "large-batch" { "must-not-dispatch.txt" } else { "module.txt" } }
+                })).collect();
+                responses.push(serde_json::json!({"text": serde_json::json!({"tool_calls": calls}).to_string()}).to_string());
+            }
+            if let Some(text) = final_text {
+                responses.push(serde_json::json!({"text": text}).to_string());
+            }
+            std::fs::write(&script, responses.join("\n") + "\n").expect("script");
+            let mut request = temp_request(&project, Permission::Auto);
+            request.message = "为我输出该项目的总体架构设计".to_owned();
+            request.provider = Some(Provider::new(
+                "fake",
+                "fake-key",
+                script.to_string_lossy(),
+                "fake-model",
+            ));
+            let mut answers = Vec::new();
+            let mut calls = 0;
+            let mut closing = 0;
+            let mut forbidden_reads = 0;
+            let mut emit = |event| {
+                match event {
+                    SinkEvent::Started {
+                        step:
+                            Step::AgentMessage {
+                                text,
+                                delivery,
+                                verification,
+                                plain,
+                                ..
+                            },
+                    } => {
+                        answers.push((text, delivery, verification, plain));
+                    }
+                    SinkEvent::Started {
+                        step: Step::ModelCall { .. },
+                    } => calls += 1,
+                    SinkEvent::Started {
+                        step: Step::FileRead { path, .. },
+                    } if path == "must-not-dispatch.txt" => forbidden_reads += 1,
+                    SinkEvent::Progress { phase, .. } if phase == "summarize" => closing += 1,
+                    _ => {}
+                }
+                true
+            };
+            run(&request, &|| true, &|_, _| true, &mut emit).expect(case);
+            assert_eq!(answers.len(), 1, "{case}");
+            let (text, delivery, verification, plain) = &answers[0];
+            assert_eq!(delivery, expected_delivery, "{case}: {text}");
+            assert_eq!(verification, "not_run", "read-only {case}");
+            assert!(*plain, "summary answer stays plain: {case}");
+            // The adaptive lift can now extend a run past the original
+            // script length (a 12-round no-prose scenario used to trip the
+            // 6-round cap and produce a brief offline note; with the lift
+            // the model gets more headroom but still fails when the script
+            // is exhausted and no prose is produced). Cap the model-call
+            // count to the script length + 1 closing round so a runaway
+            // loop is still caught, but the exact old numbers no longer hold.
+            assert!(
+                calls <= rounds + 2,
+                "bounded model calls: {case}: {calls} (script had {rounds} rounds + 1 final)"
+            );
+            assert_eq!(forbidden_reads, 0, "oversized batch cannot dispatch");
+            if expected_delivery == "ready" {
+                assert_eq!(text, final_text.unwrap(), "{case}");
+                assert!(!text.contains("已执行"));
+            }
+            if case == "many-reads" {
+                assert_eq!(calls, 5);
+            }
+            // The no-prose run may now end in either a budget-trip or a
+            // post-lift script exhaustion; either is acceptable as long
+            // as the final delivery is "failed" and the answer surfaces
+            // the offline-note copy. The lift's whole point is to keep
+            // failing gracefully when the user pushes the system.
+            if case == "no-prose" {
+                assert!(
+                    text.contains("预算耗尽") || text.contains("未成功"),
+                    "no-prose must surface a failure explanation: {text}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn document_output_uses_task_routing_and_public_history() {
+        for message in [
+            "将总架构设计输出到docs下的markdown文档",
+            "输出到 docs/总体架构设计.md",
+            "保存为 docs/ARCHITECTURE.md",
+            "save the preceding answer to docs/architecture.md",
+        ] {
+            assert_eq!(classify(message), TaskType::Docs, "{message}");
+            assert!(!is_summary_intent(message), "{message}");
+            assert!(!is_conversational_question(message), "{message}");
+        }
+        assert!(!is_document_output("解释如何输出到 docs/a.md"));
+        assert!(is_conversational_question("解释如何输出到 docs/a.md"));
+        assert!(!is_document_output("修复模块并输出到 docs/a.md"));
+        let mut request = temp_request(Path::new("/tmp/history-only"), Permission::Ask);
+        request.message = "输出到 docs/总体架构设计.md".to_owned();
+        request.conversation_history = vec![
+            ("system".to_owned(), "UNTRUSTED_OLD_RULE".to_owned()),
+            ("user".to_owned(), "分析架构".to_owned()),
+            (
+                "assistant".to_owned(),
+                "# 架构\n入口连接调度器与工具层。".to_owned(),
+            ),
+            ("tool".to_owned(), "PRIVATE_TOOL_TRACE".to_owned()),
+        ];
+        let history = initial_history(&request, "current rules".to_owned(), "target observation");
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[1].text_of(), "分析架构");
+        assert!(history[2].text_of().contains("入口连接调度器"));
+        assert!(history[3].text_of().starts_with(&request.message));
+        assert!(!history
+            .iter()
+            .any(|m| m.text_of().contains("UNTRUSTED_OLD_RULE")
+                || m.text_of().contains("PRIVATE_TOOL_TRACE")));
+        request.conversation_history[2].1 = "架构".repeat(20_000);
+        let history = initial_history(&request, String::new(), "");
+        assert_eq!(history[1].role, provider::MessageRole::User);
+        assert!(history
+            .iter()
+            .any(|m| m.text_of().contains("not the complete original")));
+        assert!(
+            history
+                .iter()
+                .filter(|m| m.role != provider::MessageRole::System)
+                .map(|m| m.text_of().chars().count())
+                .sum::<usize>()
+                < 32_300
+        );
+    }
+
+    #[test]
+    fn output_truncation_recovers_once_and_never_dispatches_cut_off_tools() {
+        let tool = serde_json::json!({"tool_calls": [{"id":"cut", "name":"create_file", "arguments":{"path":"must-not-write.md", "content":"unfinished"}}]}).to_string();
+        for (case, first, second, expected) in [
+            ("recover", "", "架构说明已恢复。", "ready"),
+            ("bounded-empty", "", "", "failed"),
+            ("partial", "部分架构说明。", "", "partial"),
+            ("quarantine", tool.as_str(), tool.as_str(), "failed"),
+        ] {
+            let dir =
+                std::env::temp_dir().join(format!("kodo-truncated-{}-{case}", std::process::id()));
+            let project = dir.join("repo");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("README.md"), "# local fixture\n").unwrap();
+            let script = dir.join("script.jsonl");
+            let responses = [
+                serde_json::json!({"text":first,"finish_reason":"length"}),
+                serde_json::json!({"text":second,"finish_reason": if case == "recover" {"stop"} else {"max_tokens"}}),
+                serde_json::json!({"text":"MUST_NOT_CALL_THIRD_TIME"}),
+            ];
+            std::fs::write(
+                &script,
+                responses
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            let mut request = temp_request(&project, Permission::Full);
+            request.message = "为我输出该项目的总体架构设计".to_owned();
+            request.provider = Some(Provider::new(
+                "fake",
+                "fake-key",
+                script.to_string_lossy(),
+                "fake-model",
+            ));
+            let mut calls = 0;
+            let mut answers = Vec::new();
+            let mut emit = |event| {
+                match event {
+                    SinkEvent::Started {
+                        step: Step::ModelCall { .. },
+                    } => calls += 1,
+                    SinkEvent::Started {
+                        step:
+                            Step::AgentMessage {
+                                text,
+                                delivery,
+                                verification,
+                                ..
+                            },
+                    } => answers.push((text, delivery, verification)),
+                    _ => {}
+                }
+                true
+            };
+            run(&request, &|| true, &|_, _| true, &mut emit).unwrap();
+            assert_eq!(calls, 2, "{case}");
+            assert_eq!(answers.len(), 1, "{case}");
+            assert_eq!(answers[0].1, expected, "{case}: {}", answers[0].0);
+            assert_eq!(answers[0].2, "not_run", "{case}");
+            assert!(!project.join("must-not-write.md").exists(), "{case}");
+            assert!(!answers[0].0.contains("**已执行**"), "{case}");
+            if case == "recover" {
+                assert_eq!(answers[0].0, second);
+            }
+            if case == "partial" {
+                assert!(answers[0].0.contains(first));
+            }
+            if expected == "failed" {
+                assert!(answers[0].0.contains("已尝试一次恢复"));
+            }
+            assert!(std::fs::read_to_string(&script)
+                .unwrap()
+                .contains("MUST_NOT_CALL_THIRD_TIME"));
+        }
+    }
+
+    #[test]
+    fn document_followup_writes_re_reads_or_waits_for_confirmation() {
+        let body = "# 总体架构设计\n\n入口 → 调度器 → 本地工具。\n";
+        for case in ["write", "ask", "deny"] {
+            let dir = std::env::temp_dir()
+                .join(format!("kodo-doc-followup-{}-{case}", std::process::id()));
+            let project = dir.join("repo");
+            std::fs::create_dir_all(project.join("docs")).unwrap();
+            std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+            let path = "docs/总体架构设计.md";
+            let write = serde_json::json!({"id":"write", "name":"create_file", "arguments":{"path":path,"content":body}});
+            let first = if case == "ask" {
+                serde_json::json!({"tool_calls": [
+                    {"id":"ask", "name":"ask_user", "arguments":{"question":"AGENTS.md 要求确认现有改动归属，请确认是否继续当前文档任务。","options":[]}},
+                    write.clone()
+                ]})
+            } else {
+                serde_json::json!({"tool_calls":[
+                    {"id":"inspect", "name":"read_file", "arguments":{"path":"README.md"}},
+                    write.clone()
+                ]})
+            };
+            let next = if case == "deny" {
+                serde_json::json!({"tool_calls":[write.clone()]})
+            } else {
+                serde_json::json!({"tool_calls":[{"id":"read", "name":"read_file", "arguments":{"path":path}}]})
+            };
+            let end = if case == "deny" {
+                serde_json::json!({"text":serde_json::json!({"tool_calls":[write]}).to_string()})
+            } else {
+                serde_json::json!({"text":"已保存并回读文档。"})
+            };
+            let script = dir.join("script.jsonl");
+            let responses = [
+                serde_json::json!({"text":first.to_string()}),
+                serde_json::json!({"text":next.to_string()}),
+                end,
+            ];
+            std::fs::write(
+                &script,
+                responses
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            let mut request = temp_request(
+                &project,
+                if case == "deny" {
+                    Permission::Ask
+                } else {
+                    Permission::Full
+                },
+            );
+            request.message = format!("输出到 {path}");
+            request.conversation_history = vec![
+                ("user".to_owned(), "分析架构".to_owned()),
+                ("assistant".to_owned(), body.to_owned()),
+            ];
+            request.provider = Some(Provider::new(
+                "fake",
+                "fake-key",
+                script.to_string_lossy(),
+                "fake-model",
+            ));
+            let mut answers = Vec::new();
+            let mut calls = 0;
+            let mut read_target = false;
+            let mut commands = Vec::new();
+            let mut emit = |event| {
+                match event {
+                    SinkEvent::Started {
+                        step: Step::ModelCall { .. },
+                    } => calls += 1,
+                    SinkEvent::Started {
+                        step: Step::FileRead { path: read, .. },
+                    } if read == path => read_target = true,
+                    SinkEvent::Started {
+                        step: Step::Command { command, .. },
+                    } => commands.push(command),
+                    SinkEvent::Started {
+                        step:
+                            Step::AgentMessage {
+                                text,
+                                delivery,
+                                verification,
+                                plain,
+                                ..
+                            },
+                    } => answers.push((text, delivery, verification, plain)),
+                    _ => {}
+                }
+                true
+            };
+            run(&request, &|| true, &|_, _| case != "deny", &mut emit).unwrap();
+            assert!(
+                commands
+                    .iter()
+                    .all(|command| command == "git status --short"),
+                "docs must not run build/test commands: {case}: {commands:?}"
+            );
+            assert_eq!(answers.len(), 1, "{case}");
+            assert!(!answers[0].3, "file output is a task: {case}");
+            if case == "write" {
+                assert_eq!(std::fs::read_to_string(project.join(path)).unwrap(), body);
+                assert!(read_target);
+                assert_eq!(answers[0].1, "ready", "{}", answers[0].0);
+                assert_eq!(answers[0].2, "not_run");
+                assert_eq!(calls, 3);
+            } else {
+                assert!(
+                    !project.join(path).exists(),
+                    "no write before authorization: {case}"
+                );
+                assert_ne!(answers[0].1, "ready", "{case}: {}", answers[0].0);
+                if case == "ask" {
+                    assert_eq!(answers[0].1, "blocked");
+                    assert_eq!(answers[0].2, "blocked");
+                    assert!(answers[0].0.contains("AGENTS.md"));
+                    assert_eq!(calls, 1, "must not keep generating before a reply");
+                }
+            }
+        }
     }
 
     #[test]
@@ -7080,6 +8541,9 @@ mod tests {
         assert!(is_summary_intent("describe the architecture"));
         assert!(is_summary_intent("give me an overview of the folder"));
         assert!(is_summary_intent("print the structure"));
+        assert!(!is_summary_intent("介绍下什么是数据仓库"));
+        assert!(!is_summary_intent("explain what is software architecture"));
+        assert!(!is_summary_intent("总结下这次设计的取舍"));
     }
 
     #[test]
@@ -7091,5 +8555,493 @@ mod tests {
         assert!(!is_summary_intent("write a README"));
         assert!(!is_summary_intent("delete the obsolete file"));
         assert!(!is_summary_intent("update the config"));
+        assert!(!is_summary_intent("给我优化这个项目"));
+        assert!(!is_summary_intent("输出架构说明并实现代码"));
+        assert!(!is_summary_intent(
+            "give me an overview and implement the module"
+        ));
+    }
+
+    /// When a batch exceeds even the bounded extended budget,
+    /// the terminal `AgentMessage` MUST carry
+    /// `failure_reason: "budget_exhausted"`. The desktop keys the
+    /// "继续任务" affordance off this field, so a regression here would
+    /// hide the recovery button for the exact case the affordance exists
+    /// for.
+    #[test]
+    fn budget_trip_tags_terminal_agent_message_with_budget_exhausted() {
+        let dir = std::env::temp_dir().join(format!("kodo-budget-trip-tag-{}", std::process::id()));
+        let project = dir.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+
+        // A single batch exceeds the extended hard cap (128 calls).
+        // Preflight can widen the default budget, but cannot execute
+        // this oversized batch or hide the recoverable failure code.
+        let mut responses: Vec<serde_json::Value> = Vec::new();
+        let calls: Vec<_> = (0..129)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("t{i}"),
+                    "name": "read_file",
+                    "arguments": {"path": "README.md"}
+                })
+            })
+            .collect();
+        responses.push(serde_json::json!({
+            "text": serde_json::json!({"tool_calls": calls}).to_string()
+        }));
+        let script = dir.join("script.jsonl");
+        std::fs::write(
+            &script,
+            responses
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let mut request = temp_request(&project, Permission::Full);
+        request.message = "任务".to_owned();
+        request.provider = Some(Provider::new(
+            "fake",
+            "fake-key",
+            script.to_string_lossy(),
+            "fake-model",
+        ));
+
+        let mut final_answer: Option<(String, String, String, String, bool)> = None;
+        let mut emit = |event: SinkEvent| {
+            if let SinkEvent::Started {
+                step:
+                    Step::AgentMessage {
+                        text,
+                        delivery,
+                        verification,
+                        plain,
+                        failure_reason,
+                        ..
+                    },
+            } = &event
+            {
+                final_answer = Some((
+                    text.clone(),
+                    delivery.clone(),
+                    verification.clone(),
+                    failure_reason.clone(),
+                    *plain,
+                ));
+            }
+            true
+        };
+        let _ = run(&request, &|| true, &|_, _| true, &mut emit);
+
+        let (text, delivery, _verification, failure_reason, _plain) =
+            final_answer.expect("run should emit a terminal AgentMessage");
+        assert_eq!(delivery, "failed", "no file was written: {text}");
+        assert_eq!(
+            failure_reason, "budget_exhausted",
+            "the desktop relies on this exact code to surface 继续任务"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for the doc-writing explore loop the user hit on
+    /// 2026-10-09: 10 rounds, 126 tool calls, zero files written. The
+    /// adaptive lift gave the model more headroom but didn't tell it to
+    /// stop reading — the model happily burned the new budget on more
+    /// reads. This test pins the loop detector: after 3 consecutive
+    /// rounds calling the same tool, the run must push a
+    /// `SinkEvent::Progress { phase: "wrap-up", .. }` so the model
+    /// gets a clear "stop exploring, write the file" signal before
+    /// the budget exhausts.
+    #[test]
+    fn loop_detector_pushes_wrap_up_after_three_same_tool_rounds() {
+        let dir = std::env::temp_dir().join(format!("kodo-loop-detector-{}", std::process::id()));
+        let project = dir.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+
+        // 5 rounds of 1 read_file each, then a final plain answer — by
+        // round 3 the loop detector should fire, and the final round
+        // would ideally land a write_file, but the fake script is
+        // deterministic: we only assert the detector fires within the
+        // first 3 rounds (before the lift would widen the cap).
+        let mut responses: Vec<serde_json::Value> = (0..5)
+            .map(|i| {
+                serde_json::json!({
+                    "text": serde_json::json!({
+                        "tool_calls": [{
+                            "id": format!("r{i}"),
+                            "name": "read_file",
+                            "arguments": {"path": "README.md"}
+                        }]
+                    }).to_string()
+                })
+            })
+            .collect();
+        responses.push(serde_json::json!({"text": "已读完，给出最终答案。"}));
+
+        let script = dir.join("script.jsonl");
+        std::fs::write(
+            &script,
+            responses
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let mut request = temp_request(&project, Permission::Full);
+        request.message = "读 README 然后回答".to_owned();
+        request.provider = Some(Provider::new(
+            "fake",
+            "fake-key",
+            script.to_string_lossy(),
+            "fake-model",
+        ));
+
+        let mut wrap_ups: Vec<String> = Vec::new();
+        let mut emit = |event: SinkEvent| {
+            if let SinkEvent::Progress { phase, detail } = &event {
+                if phase == "wrap-up" {
+                    wrap_ups.push(detail.clone());
+                }
+            }
+            true
+        };
+        let _ = run(&request, &|| true, &|_, _| true, &mut emit);
+
+        assert!(
+            wrap_ups
+                .iter()
+                .any(|d| d.contains("read_file") && d.contains("循环")),
+            "loop detector must fire within the first 3 same-tool rounds \
+             and surface the tool name + a 'loop' hint: {wrap_ups:?}"
+        );
+        // The wrap-up is pushed exactly once per turn (idempotent flag).
+        assert_eq!(wrap_ups.len(), 1, "wrap-up must not re-push: {wrap_ups:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for the bug that the adaptive lift check used to live
+    /// AFTER `call_model` and was therefore racing the `ModelRequestedTools`
+    /// auto-trip in `state.rs`: by the time the check ran, `rounds_used` was
+    /// the count BEFORE the upcoming increment, so the 80% gate was never
+    /// met on the iteration where the cap actually fired. The user's
+    /// "分析总体架构" task tripped on round 6 with tools 32/32 and never
+    /// saw a `budget-lift` toast, and the lift never widened the cap.
+    ///
+    /// This test pins the new placement: the lift MUST fire while the
+    /// `SinkEvent::Progress { phase: "budget-lift", .. }` is still in scope,
+    /// and it must be observed before the state machine trips to
+    /// `Failed { BudgetExhausted }`. The script below keeps the model
+    /// requesting exactly one tool per round so the round counter advances
+    /// predictably until the lift triggers.
+    #[test]
+    fn adaptive_lift_fires_before_state_machine_auto_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "kodo-budget-lift-regression-{}",
+            std::process::id()
+        ));
+        let project = dir.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+
+        // Eight rounds of "request five read_file tool calls" + a final
+        // plain answer so the round counter advances quickly enough to hit
+        // the 80% round gate while the tool counter simultaneously crosses
+        // 80% (with the default 6/32 caps that needs ~5 tools per round).
+        let mut responses: Vec<serde_json::Value> = (0..8)
+            .map(|round| {
+                let calls: Vec<_> = (0..5)
+                    .map(|i| {
+                        serde_json::json!({
+                            "id": format!("r{round}t{i}"),
+                            "name": "read_file",
+                            "arguments": {"path": "README.md"}
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "text": serde_json::json!({
+                        "tool_calls": calls
+                    }).to_string()
+                })
+            })
+            .collect();
+        responses.push(serde_json::json!({"text": "完成。"}));
+        let script = dir.join("script.jsonl");
+        std::fs::write(
+            &script,
+            responses
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let mut request = temp_request(&project, Permission::Full);
+        request.message = "分析总体架构".to_owned();
+        request.provider = Some(Provider::new(
+            "fake",
+            "fake-key",
+            script.to_string_lossy(),
+            "fake-model",
+        ));
+
+        let mut lifts: Vec<String> = Vec::new();
+        let mut final_answer: Option<(String, String, String, String, bool)> = None;
+        let mut emit = |event: SinkEvent| {
+            if let SinkEvent::Progress { phase, detail } = &event {
+                if phase == "budget-lift" {
+                    lifts.push(detail.clone());
+                }
+            }
+            if let SinkEvent::Started {
+                step:
+                    Step::AgentMessage {
+                        text,
+                        delivery,
+                        verification,
+                        plain,
+                        failure_reason,
+                        ..
+                    },
+            } = &event
+            {
+                final_answer = Some((
+                    text.clone(),
+                    delivery.clone(),
+                    verification.clone(),
+                    failure_reason.clone(),
+                    *plain,
+                ));
+            }
+            true
+        };
+        let _ = run(&request, &|| true, &|_, _| true, &mut emit);
+
+        // Lift MUST have fired (8 rounds exceeds the 6-round default cap, so
+        // the gate has to be met and the cap widened mid-run).
+        assert!(
+            !lifts.is_empty(),
+            "budget-lift never fired — the state machine would have tripped \
+             to BudgetExhausted on the 6th round. Without a lift the user's \
+             doc-writing task dies at 6/32 every time."
+        );
+        // The lift event must include the cap delta so the desktop can
+        // surface it in the toast — that detail string is the UI contract.
+        assert!(
+            lifts.iter().any(|d| d.contains("→") && d.contains("轮次")),
+            "lift detail missing cap delta: {lifts:?}"
+        );
+        // And the final answer must not carry `budget_exhausted` as its
+        // failure_reason: the lift gave the model enough headroom to land
+        // a closing answer instead of being hard-capped.
+        let (text, _delivery, _verification, failure_reason, _plain) =
+            final_answer.expect("run should emit a final AgentMessage");
+        assert!(
+            failure_reason != "budget_exhausted",
+            "lift fired ({lifts:?}) but the run still ended in BudgetExhausted: \
+             {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn projectless_file_delivery_is_blocked_before_any_model_or_file_access() {
+        let mut request = temp_request(Path::new("/tmp/no-implicit-root"), Permission::Full);
+        request.project = None;
+        request.mode = AgentMode::Work;
+        request.message = "保存报告到 report.docx".into();
+        let mut events = Vec::new();
+        run(&request, &|| true, &|_, _| true, &mut |e| {
+            events.push(e);
+            true
+        })
+        .unwrap();
+        assert!(events.iter().any(|e| matches!(e, SinkEvent::Finished { step: Step::AgentMessage { delivery, .. }, .. } if delivery == "failed")));
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            SinkEvent::Started {
+                step: Step::ModelCall { .. } | Step::FileChange { .. },
+                ..
+            }
+        )));
+    }
+    #[test]
+    fn automatic_verify_in_a_real_run_requires_approval_before_script_side_effects() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-run-verify-denial-{}", std::process::id()));
+        let project = root.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("app.js"), "export const x = 1;\n").unwrap();
+        std::fs::write(project.join("package.json"), r#"{"name":"fixture","scripts":{"test":"echo spawned > marker.txt","typecheck":"echo spawned > marker.txt","build":"echo spawned > marker.txt","lint":"echo spawned > marker.txt"}}"#).unwrap();
+        let mut replies = vec![
+            serde_json::json!({"text": serde_json::json!({"tool_calls": [{"name":"read_file","args":{"path":"app.js"}}]}).to_string()}),
+            serde_json::json!({"text": serde_json::json!({"tool_calls": [{"name":"write_file","args":{"path":"app.js","content":"export const x = 2;\n"}}]}).to_string()}),
+        ];
+        replies.extend((0..16).map(|_| serde_json::json!({"text":"实现完成，请运行验证。"})));
+        let script = root.join("response.jsonl");
+        std::fs::write(
+            &script,
+            replies
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let mut request = temp_request(&project, Permission::Ask);
+        request.message = "【技能：feature】\n实现 app.js 的功能，将 x 改为 2 并运行测试".into();
+        request.provider = Some(Provider::new(
+            "fake",
+            "synthetic",
+            script.to_string_lossy(),
+            "fixture",
+        ));
+        request.fallback_to_local = false;
+        let approvals = std::cell::Cell::new(0);
+        let mut entered_verify = false;
+        let mut diagnostics = Vec::new();
+        let mut denied_commands = 0;
+        let mut claimed_passed = false;
+        // Permit preparation; deny only the automatically planned npm scripts.
+        run(
+            &request,
+            &|| true,
+            &|kind, label| {
+                if kind == StepKind::Command && label.starts_with("npm ") {
+                    approvals.set(approvals.get() + 1);
+                    false
+                } else {
+                    true
+                }
+            },
+            &mut |event| {
+                match event {
+                    SinkEvent::Started {
+                        step:
+                            Step::Reasoning {
+                                summary,
+                                diagnostics: detail,
+                                ..
+                            },
+                    } => {
+                        entered_verify |= summary == "Running verification";
+                        diagnostics.push(format!("{summary}: {detail:?}"));
+                    }
+                    SinkEvent::Finished {
+                        step: Step::Command { .. },
+                        denied: true,
+                        ..
+                    } => denied_commands += 1,
+                    SinkEvent::Finished {
+                        step: Step::AgentMessage { verification, .. },
+                        ..
+                    } => claimed_passed |= verification == "passed",
+                    _ => {}
+                }
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.join("app.js")).unwrap(),
+            "export const x = 2;\n"
+        );
+        assert!(entered_verify, "test must enter automatic Verify, not stop at an earlier acceptance gate: {diagnostics:?}");
+        assert!(approvals.get() > 0);
+        assert_eq!(denied_commands, approvals.get());
+        assert!(!project.join("marker.txt").exists());
+        assert!(!claimed_passed);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn damaged_changeset_is_preserved_and_mcp_connection_requires_consent() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-state-integrity-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".kodo")).unwrap();
+        let path = root.join(".kodo/changeset-s.json");
+        std::fs::write(&path, "damaged original").unwrap();
+        assert!(persist_changeset(&root, Some("s"), &TurnChangeSet::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "damaged original");
+        #[cfg(unix)]
+        {
+            let marker = root.join("should-not-start.txt");
+            let config = mcp::McpServerConfig {
+                id: "guarded".into(),
+                name: "Guarded".into(),
+                enabled: true,
+                transport: mcp::McpTransportKind::Stdio,
+                command: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    format!("echo forbidden > '{}'", marker.display()),
+                ],
+                env: Default::default(),
+                url: String::new(),
+                headers: Default::default(),
+            };
+            for review in [false, true] {
+                let mut request = temp_request(&root, Permission::Full);
+                request.message = if review {
+                    "【技能：code-review】\n审查本地代码"
+                } else {
+                    "实现一个本地功能"
+                }
+                .into();
+                request.mcp_servers = vec![config.clone()];
+                let approvals = std::cell::Cell::new(0);
+                run(
+                    &request,
+                    &|| true,
+                    &|kind, _| {
+                        if kind == StepKind::ExternalTool {
+                            approvals.set(approvals.get() + 1);
+                            false
+                        } else {
+                            true
+                        }
+                    },
+                    &mut |_| true,
+                )
+                .unwrap();
+                assert!(!marker.exists());
+                assert_eq!(approvals.get(), usize::from(!review));
+            }
+            std::fs::write(root.join("AGENTS.md"), "x".repeat(64 * 1024 + 1)).unwrap();
+            let mut request = temp_request(&root, Permission::Full);
+            request.message = "实现一个本地功能".into();
+            request.mcp_servers = vec![config];
+            let connections = std::cell::Cell::new(0);
+            assert!(run(
+                &request,
+                &|| true,
+                &|kind, _| {
+                    if kind == StepKind::ExternalTool {
+                        connections.set(connections.get() + 1);
+                    }
+                    true
+                },
+                &mut |_| true
+            )
+            .is_err());
+            assert_eq!(
+                connections.get(),
+                0,
+                "invalid repository rules must fail before any MCP connection"
+            );
+            assert!(!marker.exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

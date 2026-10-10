@@ -21,6 +21,9 @@ work-focused
 - run_command
 - websearch
 
+## allowed_external_tools
+- mcp__*
+
 ## verification_policy
 none
 

@@ -9,9 +9,9 @@
  * balanced `<span class="hljs-…">` tags. `highlightLines` re-balances each
  * line so every emitted string is standalone-safe.
  */
-import hljs from "highlight.js";
+import hljs from "highlight.js/lib/common";
 
-/** Extension → hljs language id (full grammar set registers every id below). */
+/** Extension → hljs language id (only the common grammar set is bundled). */
 const EXT_LANG: Record<string, string> = {
   ts: "typescript",
   tsx: "typescript",

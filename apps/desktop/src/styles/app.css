@@ -108,6 +108,7 @@ p {
 }
 
 .main {
+  container: workspace / inline-size;
   /* Positioning context for the ⌘F find overlay pinned to this column. */
   position: relative;
   flex: 1;
@@ -658,6 +659,7 @@ p {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .topbar-actions {
@@ -709,6 +711,37 @@ p {
   min-width: 0;
 }
 
+.topbar-project-context { position: relative; flex: none; }
+.topbar-project-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 100px;
+  max-width: 220px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: var(--kodo-radius-sm);
+  color: var(--kodo-text-secondary);
+}
+.topbar-project-picker:hover { background: var(--kodo-hover); color: var(--kodo-text); }
+.topbar-project-picker span { min-width: 0; }
+.topbar-project-picker svg { flex: none; }
+.topbar-project-context .menu { max-height: min(360px, calc(100vh - 80px)); overflow-y: auto; }
+.topbar-project-error {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 50;
+  width: 260px;
+  max-width: calc(100vw - 32px);
+  padding: 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-canvas);
+  color: var(--kodo-error);
+  overflow-wrap: anywhere;
+}
+
 .topbar-crumbs span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -750,6 +783,10 @@ p {
   font-size: var(--kodo-font-title);
   font-weight: 600;
 }
+
+.page-head-text { flex: 1; min-width: 0; }
+.page-head > .spacer { display: none; }
+.page-head > .btn { flex: none; }
 
 .page-head-text p {
   margin-top: 2px;
@@ -796,6 +833,25 @@ p {
 
 .search-field--inline {
   width: 250px;
+  flex: 0 1 250px;
+  min-width: 120px;
+}
+
+@container workspace (max-width: 480px) {
+  .page-head {
+    height: auto;
+    min-height: 71px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .page-head > .search-field--inline { flex-basis: 100%; }
+}
+
+/* Filled controls need inverse ink when the dark palette lightens the fill. */
+[data-theme="dark"] .btn--primary,
+[data-theme="dark"] .status-mark {
+  color: var(--kodo-canvas);
 }
 
 .search-field kbd {
@@ -1204,13 +1260,44 @@ button.code-chip--link:focus-visible {
   gap: 20px;
   /* Optical center: a little low of true middle, matching mainstream agents. */
   padding: 32px 0 56px;
-  min-height: 100%;
 }
 
 .welcome-copy {
   text-align: center;
-  max-width: 620px;
+  width: min(620px, 100%);
   margin: 0 auto;
+}
+
+/* Space identity (DESIGN §11) — sits above the title and names the active
+   agent space. Smaller than the brand chip in the sidebar (the sidebar is
+   the primary identity surface; the welcome stage echoes it once). */
+.welcome-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 auto 14px;
+  padding: 4px 10px 4px 6px;
+  border: 1px solid var(--kodo-border);
+  border-radius: 999px;
+  background: var(--kodo-canvas);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.welcome-identity-mark {
+  flex: none;
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  object-fit: cover;
+}
+
+.welcome-identity-name {
+  letter-spacing: 0.005em;
 }
 
 /* Welcome title — kept at the project title token size per LAYOUT §1
@@ -1250,17 +1337,13 @@ button.code-chip--link:focus-visible {
 }
 
 .main--welcome .composer-input {
-  min-height: 28px;
+  min-height: 40px;
   font-size: 15px;
-}
-
-.main--welcome .composer-controls {
-  padding: 6px 10px 10px;
 }
 
 /* Inline chip row. The first two are real buttons (welcome-hint--btn) that
    focus the composer and seed the draft; the third is a passive hint; the
-   last (when present) is the "continue last conversation" primary CTA. */
+   last (when present) is the "continue last conversation" secondary action. */
 .welcome-hints {
   margin-top: 14px;
   gap: 8px;
@@ -1300,12 +1383,75 @@ button.code-chip--link:focus-visible {
 .welcome-hint--static {
   border-color: transparent;
   background: transparent;
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
-/* Inline primary CTA on the same row as the hints. */
+/* Continue the previous conversation as a secondary action. */
 .welcome-continue {
   margin-left: 4px;
+}
+
+/* ── Quick-task row (four compact Code Agent actions) ─────────────────────
+   Each button is a lightweight chip: a left semantic icon, a single-word
+   label, no card chrome. Click seeds the composer with a starter draft
+   the user can edit before sending (DESIGN: no oversized quick-action
+   tile grids on the welcome stage). */
+.welcome-tasks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 20px;
+}
+
+.welcome-task {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.1s,
+    border-color 0.1s,
+    color 0.1s,
+    box-shadow 0.1s;
+}
+
+.welcome-task:hover {
+  background: var(--kodo-hover);
+  border-color: var(--kodo-border-strong);
+  color: var(--kodo-text);
+}
+
+.welcome-task:active {
+  background: var(--kodo-selected);
+  border-color: var(--kodo-accent);
+}
+
+.welcome-task:focus-visible {
+  outline: var(--kodo-focus-width) solid var(--kodo-focus-ring);
+  outline-offset: var(--kodo-focus-offset);
+}
+
+.welcome-task-icon {
+  color: var(--kodo-text-secondary);
+  flex: none;
+}
+
+.welcome-task:hover .welcome-task-icon {
+  color: var(--kodo-accent);
+}
+
+.welcome-task-label {
+  line-height: 1;
 }
 
 /* ── First-run auto onboarding (Dia-style), 2026-09-23 ─────────────────────
@@ -1633,6 +1779,8 @@ button.code-chip--link:focus-visible {
 /* ── Provider list (Settings) ────────────────────────────────────────────── */
 
 .provider-row {
+  min-width: 0;
+  gap: 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1643,6 +1791,8 @@ button.code-chip--link:focus-visible {
 }
 
 .provider-row-info {
+  flex: 1;
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1650,23 +1800,30 @@ button.code-chip--link:focus-visible {
 }
 
 .provider-row-name {
+  min-width: 0;
   font-weight: 600;
   font-size: var(--kodo-font-sm);
   color: var(--kodo-text);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
+.settings-detail .provider-row-name { flex-basis: 100%; font-size: var(--kodo-font-md); }
+
 .provider-row-model {
+  min-width: 0;
   font-size: var(--kodo-font-xs);
   color: var(--kodo-text-secondary);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .provider-row-actions {
+  align-items: center;
   display: flex;
   gap: 2px;
   flex-shrink: 0;
 }
+
+.icon-btn--armed { width: auto; padding: 0 8px; }
 
 .icon-btn--danger {
   color: var(--kodo-error);
@@ -1679,6 +1836,7 @@ button.code-chip--link:focus-visible {
 /* ── Provider editor (inline form) ──────────────────────────────────────── */
 
 .provider-editor {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   /* Same 15px row rhythm as .settings-card-body — the editor sits in one
@@ -1690,11 +1848,25 @@ button.code-chip--link:focus-visible {
   margin-bottom: 8px;
 }
 
+.provider-editor .setting-text { flex: 0 0 112px; }
+.provider-editor .setting-row--stacked .setting-text { flex: none; }
+.provider-editor .setting-control { flex: 1; min-width: 0; }
+.provider-editor .setting-control--wide { width: auto; }
+.provider-editor .setting-hint { font-size: var(--kodo-font-xs); line-height: 1.5; }
+
+@container (max-width: 480px) {
+  .provider-editor .setting-row { flex-direction: column; gap: 6px; }
+  .provider-editor .setting-text { flex: none; }
+  .provider-editor .setting-control { width: 100%; }
+}
+
 .provider-editor-actions {
   display: flex;
   gap: 8px;
-  margin-top: 12px;
 }
+
+.provider-add { align-self: flex-start; }
+.settings-detail[data-category="provider"] { min-height: 0; }
 
 .btn--ghost {
   background: none;
@@ -1733,7 +1905,10 @@ button.code-chip--link:focus-visible {
 
 .model-chip--active {
   border-color: var(--kodo-accent);
+  background: var(--kodo-selected);
 }
+
+.model-chip--active .model-chip-id { color: var(--kodo-accent); }
 
 .model-chip--active .model-chip-label {
   font-weight: 600;
@@ -1859,6 +2034,7 @@ button.code-chip--link:focus-visible {
    COMPONENTS §14): compact IDE tiles, 1px borders, no shadows. Hover only
    touches border/background. */
 .mcp-section-head {
+  flex-wrap: wrap;
   display: flex;
   align-items: baseline;
   gap: 10px;
@@ -1875,6 +2051,9 @@ button.code-chip--link:focus-visible {
   font-size: var(--kodo-font-xs);
   color: var(--kodo-text-secondary);
 }
+
+.mcp-servers { margin-bottom: 24px; }
+.mcp-catalog-search { width: min(280px, 100%); margin: 0 0 0 auto; }
 
 .mcp-catalog {
   display: grid;

@@ -149,8 +149,7 @@ fn parse_results(html: &str, max: u32) -> Result<Vec<SearchHit>, String> {
     let mut cursor = 0usize;
     while let Some((href, open_end, close)) = find_result_a(html, cursor) {
         let title = extract_anchor_text(&html[open_end..close]);
-        let snippet =
-            find_next_snippet(&html[close..]).unwrap_or_default();
+        let snippet = find_next_snippet(&html[close..]).unwrap_or_default();
         hits.push(SearchHit {
             title: collapse_ws(&title),
             url: canonicalize_url(&href),
@@ -282,14 +281,16 @@ mod tests {
             canonicalize_url("//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath&kl=us"),
             "https%3A%2F%2Fexample.com%2Fpath"
         );
-        assert_eq!(canonicalize_url("https://example.com/"), "https://example.com/");
+        assert_eq!(
+            canonicalize_url("https://example.com/"),
+            "https://example.com/"
+        );
     }
 
     #[test]
     fn parse_results_extracts_three_rows_from_fixture() {
         let html = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/ddg_sample.html"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ddg_sample.html"),
         )
         .expect("ddg_sample.html fixture must exist");
         let hits = parse_results(&html, 8).expect("parser must not error");
@@ -311,8 +312,7 @@ mod tests {
     #[test]
     fn parse_results_respects_max_results_cap() {
         let html = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/ddg_sample.html"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ddg_sample.html"),
         )
         .expect("ddg_sample.html fixture must exist");
         assert_eq!(parse_results(&html, 1).unwrap().len(), 1);

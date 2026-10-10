@@ -82,6 +82,31 @@ pub fn should_compact(budget: &Budget, cfg: &CompactConfig, history_len: usize) 
     budget.percent_used() >= cfg.trigger_percent
 }
 
+/// Move a cut before every assistant call whose results remain in the tail.
+pub(crate) fn tool_group_boundary(
+    history: &[ProviderMessage],
+    desired: usize,
+    floor: usize,
+) -> usize {
+    let mut cut = desired.max(floor).min(history.len());
+    loop {
+        let mut earliest = cut;
+        for message in &history[cut..] {
+            for block in &message.content {
+                if let provider::ContentBlock::ToolResult { call_id, .. } = block {
+                    for (index, candidate) in history[floor..cut].iter().enumerate() {
+                        if candidate.content.iter().any(|b| matches!(b, provider::ContentBlock::ToolCall { id, .. } if id == call_id)) { earliest = earliest.min(floor + index); }
+                    }
+                }
+            }
+        }
+        if earliest == cut {
+            return cut;
+        }
+        cut = earliest;
+    }
+}
+
 /// Compact the middle of `history` into one summary message.
 ///
 /// `None` return means compaction could not happen (provider error, empty
@@ -108,7 +133,7 @@ pub fn compact_history(
     if total <= system_end + cfg.keep_tail + 1 {
         return None;
     }
-    let keep_tail_start = total - cfg.keep_tail;
+    let keep_tail_start = tool_group_boundary(history, total - cfg.keep_tail, system_end);
     if keep_tail_start <= system_end {
         return None;
     }
@@ -157,7 +182,10 @@ pub fn compact_history(
     }
     // Cap to the configured ceiling regardless of what the model produced.
     let summary = if summary.chars().count() > cfg.max_summary_chars {
-        summary.chars().take(cfg.max_summary_chars).collect::<String>()
+        summary
+            .chars()
+            .take(cfg.max_summary_chars)
+            .collect::<String>()
     } else {
         summary
     };
@@ -168,7 +196,7 @@ pub fn compact_history(
     let mut new_history: Vec<ProviderMessage> = history.drain(..system_end).collect();
     // Step 2: drop the middle; `history` ends up holding only the trailing
     // `keep_tail` messages.
-    let mid_to_drop = history.len().saturating_sub(cfg.keep_tail);
+    let mid_to_drop = middle_count;
     let _: Vec<ProviderMessage> = history.drain(..mid_to_drop).collect();
     // Step 3: assemble [system...] + summary + tail.
     new_history.push(ProviderMessage::user(format!(
@@ -210,10 +238,14 @@ fn render_middle(messages: &[ProviderMessage]) -> String {
                     out.push_str(text);
                     out.push('\n');
                 }
-                provider::ContentBlock::ToolCall { name, arguments, .. } => {
+                provider::ContentBlock::ToolCall {
+                    name, arguments, ..
+                } => {
                     out.push_str(&format!("→ tool_call {name}({arguments})\n"));
                 }
-                provider::ContentBlock::ToolResult { content, is_error, .. } => {
+                provider::ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
                     let tag = if *is_error { "[error]" } else { "[ok]" };
                     out.push_str(&format!("{tag} {content}\n"));
                 }
@@ -236,13 +268,36 @@ mod tests {
     }
 
     #[test]
+    fn boundary_preserves_seven_call_group_and_intervening_annotations() {
+        let calls = (0..7)
+            .map(|i| provider::NativeToolCall {
+                id: format!("c{i}"),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path":"a.rs"}),
+            })
+            .collect();
+        let mut history = vec![
+            ProviderMessage::system("rules + original task"),
+            ProviderMessage::user("older"),
+            ProviderMessage::assistant("", calls),
+        ];
+        for i in 0..7 {
+            history.push(ProviderMessage::tool_result(format!("c{i}"), "body", false));
+            if i == 2 {
+                history.push(ProviderMessage::user("stale annotation"));
+            }
+        }
+        assert_eq!(tool_group_boundary(&history, history.len() - 6, 1), 2);
+    }
+
+    #[test]
     fn should_compact_skips_small_history() {
         let mut b = Budget::default();
         b.set_window(200_000);
         b.charge_tokens(190_000); // 95%
         let cfg = CompactConfig::default();
         // 1 message (system) → too few to bother.
-        let tiny = vec![msg(provider::MessageRole::System, "s")];
+        let tiny = [msg(provider::MessageRole::System, "s")];
         assert!(!should_compact(&b, &cfg, tiny.len()));
     }
 
@@ -284,7 +339,7 @@ mod tests {
 
     #[test]
     fn render_middle_skips_system_block() {
-        let messages = vec![
+        let messages = [
             msg(provider::MessageRole::System, "you are Kodo"),
             msg(provider::MessageRole::User, "find the bug"),
             msg(provider::MessageRole::Assistant, "I'll search"),

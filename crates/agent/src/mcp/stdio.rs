@@ -4,7 +4,7 @@
 //! command to completion. This child lives for the whole run.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -55,7 +55,9 @@ impl StdioTransport {
 
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args);
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         isolate_process_group(&mut cmd);
         apply_env(&mut cmd, &child_env_policy(&config.env));
         let mut child = cmd
@@ -75,6 +77,21 @@ impl StdioTransport {
             .take()
             .ok_or_else(|| McpError::Transport("no stdin pipe".to_owned()))?;
 
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let flags = unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_GETFL) };
+            if flags < 0
+                || unsafe {
+                    libc::fcntl(stdin.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
+                } < 0
+            {
+                kill_process_tree(&mut child);
+                return Err(McpError::Transport(
+                    "cannot make stdin interruptible".into(),
+                ));
+            }
+        }
         let alive = Arc::new(AtomicBool::new(true));
         let stderr_tail = Arc::new(Mutex::new(String::new()));
 
@@ -83,15 +100,21 @@ impl StdioTransport {
         {
             let stderr_tail = Arc::clone(&stderr_tail);
             std::thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    let mut tail = stderr_tail.lock().expect("stderr tail lock");
-                    if !tail.is_empty() {
-                        tail.push('\n');
+                let mut reader = stderr;
+                let mut bytes = [0u8; 4096];
+                while let Ok(n) = reader.read(&mut bytes) {
+                    if n == 0 {
+                        break;
                     }
-                    tail.push_str(&line);
+                    let mut tail = stderr_tail.lock().expect("stderr tail lock");
+                    tail.push_str(&String::from_utf8_lossy(&bytes[..n]));
                     let len = tail.len();
                     if len > STDERR_TAIL_LIMIT {
-                        tail.drain(..len - STDERR_TAIL_LIMIT);
+                        let mut start = len - STDERR_TAIL_LIMIT;
+                        while !tail.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        tail.drain(..start);
                     }
                 }
             });
@@ -100,21 +123,30 @@ impl StdioTransport {
         // The stdout reader owns message correlation's half: decode each line
         // and hand it to `request` over the channel. Junk lines are skipped —
         // some wrappers print banners — and EOF marks the transport dead.
-        let (tx, rx) = mpsc::channel::<Message>();
+        let (tx, rx) = mpsc::sync_channel::<Message>(64);
         let reader = {
             let alive = Arc::clone(&alive);
             std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let line = match line {
-                        Ok(line) => line,
-                        Err(_) => break,
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let mut bytes = Vec::new();
+                    match (&mut reader)
+                        .take(8 * 1024 * 1024 + 1)
+                        .read_until(b'\n', &mut bytes)
+                    {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if bytes.len() > 8 * 1024 * 1024 => break,
+                        Ok(_) => {}
+                    }
+                    let Ok(line) = String::from_utf8(bytes) else {
+                        continue;
                     };
                     if line.trim().is_empty() {
                         continue;
                     }
                     match jsonrpc::decode_message(&line) {
                         Ok(message) => {
-                            if tx.send(message).is_err() {
+                            if tx.try_send(message).is_err() {
                                 break;
                             }
                         }
@@ -157,18 +189,46 @@ impl StdioTransport {
     }
 
     fn send_line(&mut self, line: &str) -> Result<(), McpError> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| McpError::Transport("stdin closed".to_owned()))?;
-        stdin
-            .write_all(line.as_bytes())
-            .and_then(|_| stdin.write_all(b"\n"))
-            .and_then(|_| stdin.flush())
-            .map_err(|error| {
+        self.send_line_interruptible(line, &|| true)
+    }
+
+    fn send_line_interruptible(
+        &mut self,
+        line: &str,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<(), McpError> {
+        if line.len() > 8 * 1024 * 1024 {
+            return Err(McpError::Transport("request exceeds 8 MiB".into()));
+        }
+        let deadline = Instant::now() + self.request_timeout;
+        let bytes = format!("{line}\n").into_bytes();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if !alive() || Instant::now() >= deadline {
                 self.alive.store(false, Ordering::SeqCst);
-                McpError::Transport(format!("write failed: {error}"))
-            })
+                kill_process_tree(&mut self.child);
+                return Err(McpError::Transport(
+                    "request cancelled or write timed out".into(),
+                ));
+            }
+            let stdin = self
+                .stdin
+                .as_mut()
+                .ok_or_else(|| McpError::Transport("stdin closed".into()))?;
+            match stdin.write(&bytes[offset..]) {
+                Ok(0) => return Err(McpError::Transport("stdin closed".into())),
+                Ok(n) => offset += n,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    self.alive.store(false, Ordering::SeqCst);
+                    return Err(McpError::Transport(format!("write failed: {error}")));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -178,16 +238,33 @@ impl McpTransport for StdioTransport {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, McpError> {
+        self.request_interruptible(method, params, &|| true)
+    }
+
+    fn request_interruptible(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<serde_json::Value, McpError> {
+        if !alive() {
+            return Err(McpError::Transport("request cancelled".into()));
+        }
         if !self.alive.load(Ordering::SeqCst) {
             return Err(McpError::Transport("server is gone".to_owned()));
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.send_line(&jsonrpc::encode_request(id, method, params))?;
+        self.send_line_interruptible(&jsonrpc::encode_request(id, method, params), alive)?;
 
         let deadline = Instant::now() + self.request_timeout;
         let mut spillover = std::mem::take(&mut self.spillover);
         let result = loop {
+            if !alive() {
+                self.alive.store(false, Ordering::SeqCst);
+                kill_process_tree(&mut self.child);
+                break Err(McpError::Transport("request cancelled".into()));
+            }
             if let Some(response) = jsonrpc::take_response(&mut spillover, id) {
                 break jsonrpc::into_result(response);
             }
@@ -195,17 +272,27 @@ impl McpTransport for StdioTransport {
             if now >= deadline {
                 break Err(McpError::Transport(format!("request timed out: {method}")));
             }
-            match self.rx.recv_timeout(deadline - now) {
-                Ok(Message::Response(response)) => spillover.push(response),
+            match self
+                .rx
+                .recv_timeout((deadline - now).min(Duration::from_millis(50)))
+            {
+                Ok(Message::Response(response)) => {
+                    if spillover.len() >= 64 {
+                        break Err(McpError::Protocol(
+                            "too many unrelated MCP responses".into(),
+                        ));
+                    }
+                    spillover.push(response);
+                }
                 // Server-initiated requests and logging all land here; both
                 // are non-goals, so they are dropped.
                 Ok(Message::Notification(_)) => continue,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    break Err(McpError::Transport(format!("request timed out: {method}")));
-                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.alive.store(false, Ordering::SeqCst);
-                    break Err(McpError::Transport("server closed the connection".to_owned()));
+                    break Err(McpError::Transport(
+                        "server closed the connection".to_owned(),
+                    ));
                 }
             }
         };
@@ -218,6 +305,15 @@ impl McpTransport for StdioTransport {
             return Err(McpError::Transport("server is gone".to_owned()));
         }
         self.send_line(&jsonrpc::encode_notification(method, params))
+    }
+
+    fn notify_interruptible(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<(), McpError> {
+        self.send_line_interruptible(&jsonrpc::encode_notification(method, params), alive)
     }
 
     fn alive(&self) -> bool {
@@ -372,6 +468,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn cancellation_interrupts_waiting_and_a_full_stdin_pipe() {
+        for payload in [String::new(), "x".repeat(2 * 1024 * 1024)] {
+            let mut transport =
+                StdioTransport::spawn(&config("/bin/sh", &["-c", "sleep 10"])).unwrap();
+            let started = Instant::now();
+            let error = transport
+                .request_interruptible("tools/call", serde_json::json!({"text": payload}), &|| {
+                    started.elapsed() < Duration::from_millis(100)
+                })
+                .unwrap_err();
+            assert!(error.to_string().contains("cancelled"));
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(!transport.alive());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_dead_server_is_reported_not_hung() {
         let mut transport = StdioTransport::spawn(&config("/bin/sh", &["-c", "exit 0"]))
             .expect("spawn instant exit");
@@ -385,8 +499,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn drop_kills_the_child_process_tree() {
-        let transport = StdioTransport::spawn(&config("/bin/sh", &["-c", "while :; do sleep 1; done"]))
-            .expect("spawn sleeper");
+        let transport =
+            StdioTransport::spawn(&config("/bin/sh", &["-c", "while :; do sleep 1; done"]))
+                .expect("spawn sleeper");
         let pid = transport.pid() as i32;
         assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "child should be alive");
         drop(transport);
@@ -422,7 +537,8 @@ mod tests {
             EnvPolicy::Inherit => panic!("expected a scrubbed env"),
         };
         assert!(
-            vars.iter().any(|(key, value)| key == "TOKEN" && value == "t-1"),
+            vars.iter()
+                .any(|(key, value)| key == "TOKEN" && value == "t-1"),
             "server env must be applied: {vars:?}"
         );
         // The allowlist guarantees a PATH even when the parent had none.

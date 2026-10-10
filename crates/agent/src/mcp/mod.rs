@@ -61,7 +61,34 @@ pub trait McpTransport {
     ) -> Result<serde_json::Value, McpError>;
 
     /// Fire-and-forget notification (`notifications/initialized`, …).
+    fn request_interruptible(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<serde_json::Value, McpError> {
+        if !alive() {
+            return Err(McpError::Transport("request cancelled".into()));
+        }
+        let result = self.request(method, params);
+        if !alive() {
+            return Err(McpError::Transport("request cancelled".into()));
+        }
+        result
+    }
+
     fn notify(&mut self, method: &str, params: serde_json::Value) -> Result<(), McpError>;
+    fn notify_interruptible(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<(), McpError> {
+        if !alive() {
+            return Err(McpError::Transport("request cancelled".into()));
+        }
+        self.notify(method, params)
+    }
 
     /// False once the connection is gone; the client stops using it.
     fn alive(&self) -> bool;
@@ -230,11 +257,21 @@ impl McpClient {
     /// Spawns the configured transport and performs the full handshake:
     /// `initialize` → `notifications/initialized` → `tools/list` (all pages).
     pub fn connect(config: &McpServerConfig) -> Result<Self, McpError> {
+        Self::connect_interruptible(config, &|| true)
+    }
+
+    pub fn connect_interruptible(
+        config: &McpServerConfig,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<Self, McpError> {
+        if !alive() {
+            return Err(McpError::Transport("request cancelled".into()));
+        }
         let transport: Box<dyn McpTransport> = match config.transport {
             McpTransportKind::Stdio => Box::new(stdio::StdioTransport::spawn(config)?),
             McpTransportKind::Http => Box::new(http::HttpTransport::spawn(config)?),
         };
-        Self::handshake(&config.id, &config.name, transport)
+        Self::handshake_interruptible(&config.id, &config.name, transport, alive)
     }
 
     /// The handshake over an already-built transport — the test seam (and the
@@ -242,20 +279,34 @@ impl McpClient {
     pub fn handshake(
         server_id: &str,
         name: &str,
-        mut transport: Box<dyn McpTransport>,
+        transport: Box<dyn McpTransport>,
     ) -> Result<Self, McpError> {
-        transport.request(
+        Self::handshake_interruptible(server_id, name, transport, &|| true)
+    }
+
+    pub fn handshake_interruptible(
+        server_id: &str,
+        name: &str,
+        mut transport: Box<dyn McpTransport>,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<Self, McpError> {
+        transport.request_interruptible(
             "initialize",
             serde_json::json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {"name": "kodo", "version": env!("CARGO_PKG_VERSION")},
             }),
+            alive,
         )?;
         // The server's echo of `protocolVersion` is accepted as-is: we pin
         // one revision and treat compatible servers as interchangeable.
-        transport.notify("notifications/initialized", serde_json::json!({}))?;
-        let tools = fetch_tools(transport.as_mut())?;
+        transport.notify_interruptible(
+            "notifications/initialized",
+            serde_json::json!({}),
+            alive,
+        )?;
+        let tools = fetch_tools(transport.as_mut(), alive)?;
         Ok(Self {
             server_id: server_id.to_owned(),
             name: name.to_owned(),
@@ -280,9 +331,19 @@ impl McpClient {
         tool: &str,
         arguments: serde_json::Value,
     ) -> Result<McpToolResult, McpError> {
-        let result = self.transport.request(
+        self.call_tool_interruptible(tool, arguments, &|| true)
+    }
+
+    pub fn call_tool_interruptible(
+        &mut self,
+        tool: &str,
+        arguments: serde_json::Value,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<McpToolResult, McpError> {
+        let result = self.transport.request_interruptible(
             "tools/call",
             serde_json::json!({"name": tool, "arguments": arguments}),
+            alive,
         )?;
         Ok(flatten_content(&result))
     }
@@ -290,7 +351,10 @@ impl McpClient {
 
 /// Walks `tools/list` with `nextCursor` until exhausted. A server that pages
 /// forever is cut off with a protocol error rather than looping.
-fn fetch_tools(transport: &mut dyn McpTransport) -> Result<Vec<McpTool>, McpError> {
+fn fetch_tools(
+    transport: &mut dyn McpTransport,
+    alive: &dyn Fn() -> bool,
+) -> Result<Vec<McpTool>, McpError> {
     const MAX_PAGES: usize = 32;
     let mut tools = Vec::new();
     let mut cursor: Option<String> = None;
@@ -299,14 +363,14 @@ fn fetch_tools(transport: &mut dyn McpTransport) -> Result<Vec<McpTool>, McpErro
             Some(cursor) => serde_json::json!({"cursor": cursor}),
             None => serde_json::json!({}),
         };
-        let page = transport.request("tools/list", params)?;
-        let items = page.get("tools").and_then(serde_json::Value::as_array).ok_or_else(|| {
-            McpError::Protocol("tools/list result has no tools array".to_owned())
-        })?;
+        let page = transport.request_interruptible("tools/list", params, alive)?;
+        let items = page
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| McpError::Protocol("tools/list result has no tools array".to_owned()))?;
         for item in items {
-            let tool: McpTool = serde_json::from_value(item.clone()).map_err(|error| {
-                McpError::Protocol(format!("unusable tool entry: {error}"))
-            })?;
+            let tool: McpTool = serde_json::from_value(item.clone())
+                .map_err(|error| McpError::Protocol(format!("unusable tool entry: {error}")))?;
             tools.push(tool);
         }
         cursor = page
@@ -317,7 +381,9 @@ fn fetch_tools(transport: &mut dyn McpTransport) -> Result<Vec<McpTool>, McpErro
             return Ok(tools);
         }
     }
-    Err(McpError::Protocol("tools/list paginates forever".to_owned()))
+    Err(McpError::Protocol(
+        "tools/list paginates forever".to_owned(),
+    ))
 }
 
 /// Flattens a `tools/call` result: `content[]` text blocks joined by newline,
@@ -329,7 +395,9 @@ fn flatten_content(result: &serde_json::Value) -> McpToolResult {
         .map(|blocks| {
             blocks
                 .iter()
-                .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+                .filter(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                })
                 .filter_map(|block| {
                     block
                         .get("text")
@@ -371,8 +439,15 @@ fn placeholder_arg(config: &McpServerConfig) -> Option<&str> {
 impl McpClients {
     /// Connects each **enabled** server in configuration order.
     pub fn connect(configs: &[McpServerConfig]) -> Self {
+        Self::connect_interruptible(configs, &|| true)
+    }
+
+    pub fn connect_interruptible(configs: &[McpServerConfig], alive: &dyn Fn() -> bool) -> Self {
         let mut out = Self::default();
         for config in configs.iter().filter(|config| config.enabled) {
+            if !alive() {
+                break;
+            }
             if let Some(placeholder) = placeholder_arg(config) {
                 // The connector catalog ships `/path/to/…` argv the user must
                 // replace; spawning it only yields a server that exits on the
@@ -384,7 +459,7 @@ impl McpClients {
                 ));
                 continue;
             }
-            match McpClient::connect(config) {
+            match McpClient::connect_interruptible(config, alive) {
                 Ok(client) => out.clients.push(client),
                 Err(error) => out.push_note(&config.name, &error),
             }
@@ -433,9 +508,10 @@ impl McpClients {
         self.clients
             .iter()
             .flat_map(|client| {
-                client.tools.iter().map(|tool| {
-                    (wire_name(&client.server_id, &tool.name), tool.clone())
-                })
+                client
+                    .tools
+                    .iter()
+                    .map(|tool| (wire_name(&client.server_id, &tool.name), tool.clone()))
             })
             .collect()
     }
@@ -446,6 +522,15 @@ impl McpClients {
         wire: &str,
         arguments: serde_json::Value,
     ) -> Result<McpToolResult, McpError> {
+        self.call_interruptible(wire, arguments, &|| true)
+    }
+
+    pub fn call_interruptible(
+        &mut self,
+        wire: &str,
+        arguments: serde_json::Value,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<McpToolResult, McpError> {
         let (server_id, tool) = split_wire_name(wire)
             .ok_or_else(|| McpError::Protocol(format!("bad wire name {wire}")))?;
         let client = self
@@ -453,7 +538,7 @@ impl McpClients {
             .iter_mut()
             .find(|client| client.server_id == server_id)
             .ok_or_else(|| McpError::Transport(format!("no MCP server {server_id}")))?;
-        client.call_tool(tool, arguments)
+        client.call_tool_interruptible(tool, arguments, alive)
     }
 }
 
@@ -561,7 +646,10 @@ mod tests {
             enabled: true,
             transport: McpTransportKind::Stdio,
             command: "npx".to_owned(),
-            args: vec!["-y".to_owned(), "@modelcontextprotocol/server-filesystem".to_owned()],
+            args: vec![
+                "-y".to_owned(),
+                "@modelcontextprotocol/server-filesystem".to_owned(),
+            ],
             env: BTreeMap::from([("TOKEN".to_owned(), "t-1234".to_owned())]),
             url: String::new(),
             headers: BTreeMap::new(),
@@ -608,7 +696,9 @@ mod tests {
 
         // A key the blob knows nothing about ends up empty, not stale.
         let mut with_extra = settings_copy.clone();
-        with_extra.env.insert("EXTRA".to_owned(), "••••34".to_owned());
+        with_extra
+            .env
+            .insert("EXTRA".to_owned(), "••••34".to_owned());
         let merged = merge_secrets(&with_extra, &secrets);
         assert_eq!(merged.env.get("EXTRA").map(String::as_str), Some(""));
         assert_eq!(merged.env.get("TOKEN").map(String::as_str), Some("t-1234"));
@@ -644,7 +734,9 @@ mod tests {
             serde_json::json!({"tools": ["second"]})
         );
         // The queue is not sticky: a third call fails loudly.
-        assert!(transport.request("tools/list", serde_json::json!({})).is_err());
+        assert!(transport
+            .request("tools/list", serde_json::json!({}))
+            .is_err());
 
         let error = transport
             .request("initialize", serde_json::json!({}))
@@ -658,10 +750,7 @@ mod tests {
             transport.requests,
             vec![
                 ("tools/list".to_owned(), serde_json::json!({})),
-                (
-                    "tools/list".to_owned(),
-                    serde_json::json!({"cursor": "1"})
-                ),
+                ("tools/list".to_owned(), serde_json::json!({"cursor": "1"})),
                 ("tools/list".to_owned(), serde_json::json!({})),
                 ("initialize".to_owned(), serde_json::json!({})),
             ]
@@ -730,11 +819,14 @@ mod tests {
             .reply("tools/call", serde_json::json!({"content": []}));
         let log = transport.log.clone();
 
-        let mut client =
-            McpClient::handshake("fs", "FS", Box::new(transport)).expect("handshake");
+        let mut client = McpClient::handshake("fs", "FS", Box::new(transport)).expect("handshake");
         // The cache holds both pages — no third tools/list sneak-fetch.
         assert_eq!(
-            client.tools().iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            client
+                .tools()
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["echo", "store"]
         );
         assert_eq!(client.tools()[0].description, "echo");
@@ -814,7 +906,10 @@ mod tests {
             split_wire_name(&wire_name("fs", "read_file")),
             Some(("fs", "read_file"))
         );
-        assert_eq!(split_wire_name("mcp__fs__deep__tool"), Some(("fs", "deep__tool")));
+        assert_eq!(
+            split_wire_name("mcp__fs__deep__tool"),
+            Some(("fs", "deep__tool"))
+        );
         assert_eq!(split_wire_name("mcp____tool"), None);
         assert_eq!(split_wire_name("builtin__grep"), None);
     }
@@ -827,7 +922,10 @@ mod tests {
             Box::new(
                 FakeTransport::new()
                     .reply("initialize", serde_json::json!({}))
-                    .reply("tools/list", serde_json::json!({"tools": [{"name": "echo"}]}))
+                    .reply(
+                        "tools/list",
+                        serde_json::json!({"tools": [{"name": "echo"}]}),
+                    )
                     .reply(
                         "tools/call",
                         serde_json::json!({"content": [{"type": "text", "text": "from-a"}]}),
@@ -841,7 +939,10 @@ mod tests {
             Box::new(
                 FakeTransport::new()
                     .reply("initialize", serde_json::json!({}))
-                    .reply("tools/list", serde_json::json!({"tools": [{"name": "store"}]}))
+                    .reply(
+                        "tools/list",
+                        serde_json::json!({"tools": [{"name": "store"}]}),
+                    )
                     .reply(
                         "tools/call",
                         serde_json::json!({"content": [{"type": "text", "text": "from-b"}]}),
@@ -916,9 +1017,7 @@ mod tests {
         // The catalog's filesystem template saved as-is: spawning it would
         // only produce `transport: server closed the connection` on every run.
         let mut config = sample();
-        config
-            .args
-            .push("/path/to/allowed".to_owned());
+        config.args.push("/path/to/allowed".to_owned());
         let clients = McpClients::connect(&[config]);
         assert!(clients.is_empty(), "no server should be spawned");
         assert_eq!(clients.notes.len(), 1);

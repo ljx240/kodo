@@ -256,63 +256,68 @@ export function ArchivePage({
           </div>
 
           {visibleRows.length === 0 ? (
-            <p className="empty-note">{live ? (query ? F.emptyFiltered : F.emptyNone) : F.demoNote}</p>
+            <p className="empty-note">{query || projectFilter !== "all" || modelFilter !== "all" || timeRange !== "all" ? F.emptyFiltered : F.emptyNone}</p>
           ) : (
-            <table className="archive-table">
-              <thead>
-                <tr>
-                  <th>{F.columns.conversation}</th>
-                  <th>{F.columns.summary}</th>
-                  <th>{F.columns.archivedAt}{archivedArrow}</th>
-                  <th>{F.columns.model}</th>
-                  <th>{F.columns.files}</th>
-                  <th>{F.columns.status}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleRows.map((item) => (
-                  <tr
-                    key={item.id}
-                    className={selectedId === item.id ? "row--selected" : undefined}
-                    onClick={() =>
-                      onSelect({
-                        id: item.id,
-                        title: item.title,
-                        projectName: item.projectName,
-                        model: item.model,
-                        at: item.archivedAt,
-                        summary: item.summary,
-                      })
-                    }
-                  >
-                    <td>
-                      <span className="arc-title">
-                        <MessageCircle size={14} strokeWidth={1.8} />
-                        <span className="arc-title-text">{item.title}</span>
-                      </span>
-                    </td>
-                    <td className="arc-summary">{item.summary}</td>
-                    <td>{item.archivedAt}</td>
-                    <td>
-                      <span className="model-pill">{item.model}</span>
-                    </td>
-                    <td>
-                      {item.added + item.removed > 0 ? (
-                        <>
-                          <span className="delta-add">+{item.added}</span>{" "}
-                          <span className="delta-del">-{item.removed}</span>
-                        </>
-                      ) : (
-                        <span className="setting-hint">—</span>
-                      )}
-                    </td>
-                    <td>
-                      <span className="archived-pill">{F.statusArchived}</span>
-                    </td>
+            <div className="table-scroll" role="region" aria-label="归档会话列表" tabIndex={0}>
+              <table className="archive-table">
+                <thead>
+                  <tr>
+                    <th>{F.columns.conversation}</th>
+                    <th>{F.columns.summary}</th>
+                    <th>{F.columns.archivedAt}{archivedArrow}</th>
+                    <th>{F.columns.model}</th>
+                    <th>{F.columns.files}</th>
+                    <th>{F.columns.status}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {visibleRows.map((item) => (
+                    <tr
+                      key={item.id}
+                      className={selectedId === item.id ? "row--selected" : undefined}
+                      onClick={() =>
+                        onSelect({
+                          id: item.id,
+                          title: item.title,
+                          projectName: item.projectName,
+                          model: item.model,
+                          at: item.archivedAt,
+                          summary: item.summary,
+                        })
+                      }
+                    >
+                      <td>
+                        <button type="button" className="arc-title" title={item.title} onClick={(event) => {
+                          event.stopPropagation();
+                          onSelect({ id: item.id, title: item.title, projectName: item.projectName, model: item.model, at: item.archivedAt, summary: item.summary });
+                        }}>
+                          <MessageCircle size={14} strokeWidth={1.8} />
+                          <span className="arc-title-text">{item.title}</span>
+                        </button>
+                      </td>
+                      <td className="arc-summary" title={item.summary}>{item.summary}</td>
+                      <td>{item.archivedAt}</td>
+                      <td>
+                        <span className="model-pill" title={item.model}>{item.model}</span>
+                      </td>
+                      <td>
+                        {item.added + item.removed > 0 ? (
+                          <>
+                            <span className="delta-add">+{item.added}</span>{" "}
+                            <span className="delta-del">-{item.removed}</span>
+                          </>
+                        ) : (
+                          <span className="setting-hint">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <span className="archived-pill">{F.statusArchived}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
 
           <footer className="table-foot">

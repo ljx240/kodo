@@ -690,7 +690,7 @@ test("a new conversation's first answer lands live — even when the run finishe
   await page.goto("/");
   await page.locator('button[aria-label="alpha 的操作"]').click();
   await page.getByRole("menuitem", { name: "新建任务" }).click();
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("alpha");
+  await expect(page.locator(".topbar-crumbs")).toContainText("alpha");
 
   await page.locator('[data-testid="composer-input"]').fill("你是谁");
   await page.locator('[data-testid="composer-input"]').press("Enter");
@@ -707,6 +707,8 @@ test("a new conversation's first answer lands live — even when the run finishe
   await expect(page.locator('[data-testid="composer-send"]')).toBeVisible();
   // The first ask also titles the session.
   await expect(page.locator(".crumb-current")).toHaveText("你是谁");
+  const sent = await page.evaluate(() => (window as unknown as { __sendLog: Array<{ project?: string }> }).__sendLog);
+  expect(sent.at(-1)?.project).toBe("/tmp/ws/alpha");
 });
 
 test("a conversational answer renders as the sentence alone, without report chrome", async ({ page }) => {
@@ -827,7 +829,8 @@ test("zh-CN copy: step labels and actions come from the central map", async ({ p
 
   // The fixture holds three turns; scope every per-reply assertion to turn 1.
   const first = page.locator(".reply").first();
-  await expect(first.locator('[data-testid="next-review"]')).toHaveText("查看修改");
+  await expect(first.locator('[data-testid="review-files"]')).toHaveText("查看修改");
+  await expect(first.locator('[data-testid="next-review"]')).toHaveCount(0);
   // The reply actions are icon-only — the label moves to the tooltip (2026-09-30).
   await expect(first.locator('[data-testid="reply-trace"]')).toHaveAttribute(
     "title",
@@ -840,4 +843,283 @@ test("zh-CN copy: step labels and actions come from the central map", async ({ p
     "回答：已生成 · 验证：已通过",
   );
   await expect(page.locator('[data-testid="topbar-files"]')).toHaveAttribute("aria-label", "查看项目文件");
+});
+
+
+test("a budget-limited plain answer stays failed and long Inspector cards never overlap", async ({ page }, testInfo) => {
+  const items = [
+    ...Array.from({ length: 25 }, (_, i) => ({
+      id: i + 1, at: 1_700_000_000, status: "done", duration: 1,
+      kind: "fileRead", path: `src/module-${i}.rs`, detail: "module source",
+    })),
+    ...Array.from({ length: 12 }, (_, i) => ({
+      id: i + 26, at: 1_700_000_000, status: "done", duration: 1200,
+      kind: "modelCall", model: "Demo Flash", inputTokens: 1000 + i * 100, outputTokens: 100,
+    })),
+    answerItem(38, "任务未完成（本轮执行预算耗尽：轮次 12/12）。\n\n尚未生成完整答复。完整记录可在「查看响应轨迹」中查看。", {
+      plain: true, delivery: "failed", verification: "not_run",
+    }),
+  ];
+  await stubShell(page, liveCore({
+    id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false,
+    turns: [turn("为我输出该项目的总体架构设计", items)],
+  }));
+  await openLive(page);
+  await expect(page.getByTestId("final-outcome-pill")).toHaveText("失败");
+  await expect(page.getByTestId("ins-status-pill")).toHaveText("失败");
+  await expect(page.locator(".ins-content")).toContainText("未生成");
+  await expect(page.getByTestId("ins-undo")).toHaveCount(0);
+  await expect(page.locator(".reply .final")).toHaveCount(1);
+  await expect(page.locator(".reply .trace-row")).toHaveCount(0);
+
+  const buttons = await page.locator(".reply-actions button").evaluateAll((nodes) => nodes.map((el) => el.getBoundingClientRect().top));
+  expect(buttons).toHaveLength(3);
+  expect(Math.max(...buttons) - Math.min(...buttons)).toBeLessThanOrEqual(1);
+  for (const width of [1920, 1280, 900]) {
+    await page.setViewportSize({ width, height: 700 });
+    if (await page.locator(".ins-panel").count() === 0) await page.getByTestId("rail-summary").click();
+    const layout = await page.locator(".ins-content").evaluate((el) => ({
+      overflowing: el.scrollHeight > el.clientHeight,
+      cards: [...el.querySelectorAll(".ins-section")].map((card) => ({
+        top: card.getBoundingClientRect().top,
+        bottom: card.getBoundingClientRect().bottom,
+        contentBottom: Math.max(...[...card.querySelectorAll(".ins-body")].map((body) => body.getBoundingClientRect().bottom)),
+      })),
+    }));
+    expect(layout.cards).toHaveLength(5);
+    expect(layout.overflowing).toBe(true);
+    for (const [i, card] of layout.cards.entries()) {
+      expect(card.contentBottom).toBeLessThanOrEqual(card.bottom);
+      if (i) expect(card.top).toBeGreaterThanOrEqual(layout.cards[i - 1].bottom);
+    }
+  }
+  await page.setViewportSize({ width: 1586, height: 992 });
+  await page.screenshot({ path: testInfo.outputPath("qa-budget.png") });
+  await page.getByTestId("reply-regenerate").click();
+  await expect(page.locator(".composer-send--stop")).toBeVisible();
+  const sent = await page.evaluate(() => (window as unknown as { __sendLog: Array<{ text: string }> }).__sendLog);
+  expect(sent.at(-1)?.text).toBe("为我输出该项目的总体架构设计");
+});
+
+test("a document follow-up waiting for confirmation shows a result without claiming completion", async ({ page }, testInfo) => {
+  const question = "需要确认后继续：AGENTS.md 要求确认现有改动归属，请确认是否继续当前文档任务。\n\n请在输入框回复；本轮已暂停等待确认后的操作。";
+  await stubShell(page, liveCore({
+    id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false,
+    turns: [turn("输出到 docs/总体架构设计.md", [
+      { id: 1, at: 1_700_000_000, status: "done", duration: 1, kind: "reasoning", summary: "已询问用户", phase: "ask", diagnostics: "ask_user · AGENTS.md 要求确认现有改动归属" },
+      answerItem(2, question, { delivery: "blocked", verification: "blocked", plain: false }),
+    ])],
+  }));
+  await openLive(page);
+  await expect(page.getByTestId("final-outcome-pill")).toHaveText("待确认");
+  await expect(page.getByTestId("answer-body").locator(".answer-section-head")).toHaveText("本轮结果");
+  await expect(page.getByTestId("answer-body")).toContainText("请在输入框回复");
+  await expect(page.getByTestId("ins-undo")).toHaveCount(0);
+  await expect(page.getByTestId("next-retry-env")).toHaveCount(0);
+  await expect(page.getByTestId("reply-regenerate")).toHaveCount(0);
+  await expect(page.getByTestId("ins-status-pill")).toContainText("待确认");
+  await expect(page.getByTestId("ins-regenerate")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("document-confirmation.png") });
+});
+
+test("a budget failure offers task recovery without false environment or verification actions", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const ask = "请分析该项目的总体架构设计并输出到docs/总体架构设计.md";
+  await stubShell(page, liveCore({
+    id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false,
+    turns: [turn(ask, [answerItem(1, "任务未完成。本批工具调用超过剩余额度：申请 10 次，剩余 9 次；本批未执行。", {
+      delivery: "failed", verification: "not_run", failureReason: "budget_exhausted", plain: false,
+      checks: ["已明确标记为失败，未伪装成功"],
+    })])],
+  }, {
+    providers: [{
+      id: "p1", template: "openai", name: "OpenAI", apiKey: "••••1234", endpoint: "",
+      model: "gpt-4o", modelId: "gpt-4o", displayName: "GPT-4o",
+      models: [{ modelId: "gpt-4o", displayName: "GPT-4o" }],
+    }],
+    settings: { "active-provider": "0" },
+  }));
+  await openLive(page);
+  await expect(page.getByTestId("final-outcome-pill")).toHaveText("失败");
+  await expect(page.getByTestId("answer-axes")).toHaveText("回答：未生成 · 验证：未验证");
+  await expect(page.getByTestId("verify-card")).toHaveCount(0);
+  await expect(page.getByTestId("next-review")).toHaveCount(0);
+  await expect(page.getByTestId("next-retry-env")).toHaveCount(0);
+  const recover = page.getByTestId("next-continue");
+  await expect(recover).toHaveText("继续任务");
+  await page.screenshot({ path: testInfo.outputPath("budget-recovery.png") });
+  await recover.click();
+  await expect(page.locator(".composer-send--stop")).toBeVisible();
+  const sent = await page.evaluate(() => (window as unknown as { __sendLog: Array<{ text: string; budgetFamily: string }> }).__sendLog);
+  expect(sent.at(-1)).toMatchObject({ text: ask, budgetFamily: "extended" });
+  expect(errors).toEqual([]);
+});
+
+test("a budget failure retains real changed files and failed verification evidence", async ({ page }) => {
+  await stubShell(page, liveCore({
+    id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false,
+    turns: [turn("完成文档", [
+      { id: 1, at: 1_700_000_000, status: "done", duration: 1, kind: "fileChange", changes: [{ path: "docs/a.md", added: 3, removed: 0 }] },
+      runItem(2, { command: "verify-doc", output: "mismatch", exitCode: 1, failureClass: "test_failure" }),
+      answerItem(3, "已保存草稿，回读发现仍需修正，预算达到边界。", { delivery: "partial", verification: "failed", failureReason: "budget_exhausted", plain: false }),
+    ])],
+  }));
+  await openLive(page);
+  await expect(page.getByTestId("review-files")).toBeVisible();
+  await expect(page.getByTestId("next-review")).toHaveCount(0);
+  await expect(page.getByTestId("verify-card")).toBeVisible();
+  await expect(page.getByTestId("verify-pill")).toHaveText("未通过");
+  await expect(page.getByTestId("next-continue")).toBeVisible();
+  await expect(page.getByTestId("next-retry-env")).toHaveCount(0);
+});
+
+test("a long project tree keeps one row per project while scrolling", async ({ page }) => {
+  const paths = Array.from({ length: 16 }, (_, i) => `/tmp/ws/project-${i}`);
+  await stubShell(page, {
+    workspace: {
+      projects: paths.map((path, i) => project(path, `project-${i}`)),
+      sessions: paths.map((path, i) => sessionRef(`s${i}`, path, `会话-${i}`)),
+    },
+    session: { id: "s0", project: paths[0], title: "会话-0", at: 1_700_000_000, archived: false, turns: [] },
+  });
+  await page.setViewportSize({ width: 1280, height: 700 });
+  await page.goto("/");
+  for (const row of await page.locator(".tree-project-main").all()) await row.click();
+  await expect(page.locator(".tree-project-main")).toHaveCount(16);
+  await expect(page.locator(".tree-conversation")).toHaveCount(16);
+  const layout = await page.locator(".tree").evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+    return { overflowing: el.scrollHeight > el.clientHeight, groups: [...el.children].map((child) => {
+      const box = child.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom };
+    }) };
+  });
+  expect(layout.overflowing).toBe(true);
+  for (let i = 1; i < layout.groups.length; i++) expect(layout.groups[i].top).toBeGreaterThanOrEqual(layout.groups[i - 1].bottom);
+  await expect(page.locator(".tree-conversation-title").last()).toHaveText("会话-15");
+});
+
+test("a delivered document has one compact review card and no invented verification", async ({ page }, testInfo) => {
+  const path = "docs/总体架构设计.md";
+  const text = `已输出至 \`${path}\`。\n\n文档涵盖模块分层、任务流程、权限与数据存储、测试体系及后续演进方向。\n\n- 已确认目标文档位于项目 \`docs\` 目录内\n- 已重读文档\n- 本次仅写入该文档`;
+  await stubShell(page, liveCore({
+    id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false,
+    turns: [turn("分析项目并输出架构文档", [
+      { id: 1, at: 1_700_000_000, status: "done", duration: 1, kind: "fileChange", fileSpanRef: "span1", changes: [{ path, added: 415, removed: 0 }] },
+      { id: 2, at: 1_700_000_000, status: "done", duration: 1, kind: "fileRead", path, detail: "# 总体架构设计\n## 模块分层" },
+      answerItem(3, text, { delivery: "ready", verification: "not_run", plain: false, checks: ["已确认目标文档位于项目 `docs` 目录内", "已重读文档", "本次仅写入该文档"] }),
+    ])],
+  }, { files: [path], fileBodies: { [path]: "# 总体架构设计\n\n模块分层" }, turnChanges: [{ path, diff: "@@ -0,0 +1,2 @@\n+# 总体架构设计\n+模块分层" }] }));
+  await openLive(page);
+  await expect(page.getByTestId("final-outcome-pill")).toHaveText("已完成");
+  await expect(page.getByTestId("ins-status-pill")).toHaveText("已完成");
+  await expect(page.getByTestId("answer-axes")).toHaveText("文档：已保存 · 验证：未运行命令验证");
+  await expect(page.getByTestId("answer-body").locator(".answer-section-head")).toHaveText("交付结果");
+  await expect(page.getByTestId(`document-state-${path}`)).toHaveText("回读已记录");
+  await expect(page.getByTestId("verify-card")).toHaveCount(0);
+  await expect(page.getByTestId("next-review")).toHaveCount(0);
+  await expect(page.getByTestId("next-retry-env")).toHaveCount(0);
+  await expect(page.getByTestId("answer-next")).toHaveCount(0);
+  await expect(page.getByTestId("review-files")).toHaveCount(1);
+  await expect(page.locator(".changed-summary .delta-del")).toHaveCount(0);
+  await expect(page.getByTestId(`changed-open-${path}`)).toHaveCSS("text-align", "left");
+
+  const details = page.getByTestId("changed-net");
+  await expect(details).not.toHaveAttribute("open", "");
+  await expect(details.locator("p").first()).not.toBeVisible();
+  await details.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await expect(details.locator("p").last()).toBeVisible();
+  await details.locator("summary").click();
+  if (await page.getByTestId("inspector-close").isVisible()) await page.getByTestId("inspector-close").click();
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+    await page.screenshot({ path: testInfo.outputPath(`document-result-${theme}.png`) });
+  }
+  await page.setViewportSize({ width: 640, height: 800 });
+  const geometry = await page.getByTestId("changed-summary").evaluate((card) => {
+    const box = card.getBoundingClientRect();
+    return { left: box.left, right: box.right, width: window.innerWidth, overflow: card.scrollWidth - card.clientWidth };
+  });
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.width);
+  expect(geometry.overflow).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: testInfo.outputPath("document-result-narrow.png") });
+  await page.setViewportSize({ width: 1586, height: 992 });
+  await page.getByTestId(`changed-open-${path}`).click();
+  await expect(page.getByTestId("file-viewer")).toContainText("总体架构设计");
+});
+
+test("document readback badges follow the last write rather than the answer's claims", async ({ page }) => {
+  const path = "docs/a.md";
+  const change = (id: number) => ({ id, at: 1_700_000_000, status: "done", duration: 1, kind: "fileChange", changes: [{ path, added: 3, removed: 0 }] });
+  const read = (id: number, status = "done") => ({ id, at: 1_700_000_000, status, duration: 1, kind: "fileRead", path, detail: "content" });
+  const answer = answerItem(9, "已重读并确认文档完整。", { delivery: "ready", verification: "not_run", plain: false });
+  await stubShell(page, liveCore({
+    id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false,
+    turns: [
+      turn("已读取", [change(1), read(2), answer]),
+      turn("读取早于写入", [read(1), change(2), answer]),
+      turn("旧回读后再次写入", [change(1), read(2), change(3), answer]),
+      turn("回读失败", [change(1), read(2, "failed"), answer]),
+    ],
+  }));
+  await openLive(page);
+  await expect(page.getByTestId(`document-state-${path}`)).toHaveText(["回读已记录", "已写入", "已写入", "已写入"]);
+  await expect(page.getByTestId("verify-card")).toHaveCount(0);
+});
+
+test("explicit document status preserves failed checks and ignores exploratory command success", async ({ page }) => {
+  const path = "docs/a.md";
+  const change = { id: 2, at: 1_700_000_000, status: "done", duration: 1, kind: "fileChange", changes: [{ path, added: 3, removed: 0 }] };
+  await stubShell(page, liveCore({
+    id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false,
+    turns: [
+      turn("完成文档", [
+        { id: 1, at: 1_700_000_000, status: "done", duration: 1, kind: "reasoning", phase: "execute", summary: "检查工作区" },
+        runItem(2, { command: "git status --short" }),
+        { ...change, id: 3 },
+        answerItem(4, "已交付文档", { delivery: "ready", verification: "not_run", plain: false }),
+        answerItem(5, "后续说明", { plain: false }),
+      ]),
+      turn("未交付", [change, answerItem(3, "已交付文档", { delivery: "failed", verification: "not_run", plain: false })]),
+      turn("实际验证失败", [
+        change, runItem(3, { command: "verify-doc", exitCode: 1, output: "bad link", failureClass: "test_failure" }),
+        answerItem(4, "已交付文档。\n\n- 已检查 `docs/a.md`\n\n文档尚未通过验证。", {
+          delivery: "ready", verification: "failed", plain: false,
+          checks: ["已检查 `docs/a.md`", "需修复链接"],
+        }),
+      ]),
+    ],
+  }));
+  await openLive(page);
+  await expect(page.getByTestId("final-outcome-pill")).toHaveText(["已完成", "失败", "部分完成"]);
+  const replies = page.locator(".reply");
+  await expect(replies.nth(0).getByTestId("answer-axes")).toHaveText("文档：已保存 · 验证：未运行命令验证");
+  await expect(replies.nth(0).getByTestId("verify-card")).toHaveCount(0);
+  await expect(replies.nth(2).getByTestId("verify-pill")).toHaveText("未通过");
+  await expect(replies.nth(2).getByTestId("verify-summary")).toHaveText("通过 0 · 失败 1 · 阻塞 0");
+  await expect(replies.nth(2).getByTestId("checks-list").locator("li")).toHaveText(["需修复链接"]);
+  await expect(page.getByTestId("next-retry-env")).toHaveCount(0);
+});
+
+
+test("stale run events and approvals cannot alter the current turn", async ({ page }) => {
+  await stubShell(page, liveCore({ id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false, turns: [] }));
+  await openLive(page);
+  await page.locator('[data-testid="composer-input"]').fill("继续执行");
+  await page.locator('[data-testid="composer-input"]').press("Enter");
+  await emit(page, { type: "turnStarted", session: "s1", runId: 22 });
+  await emit(page, { type: "approvalRequest", session: "s1", runId: 21, step: 1, kind: "run command", detail: "stale approval" });
+  await expect(page.locator(".approval-bar")).toHaveCount(0);
+  await emit(page, { type: "approvalRequest", session: "s1", runId: 22, step: 2, kind: "run command", detail: "current approval" });
+  await expect(page.locator(".approval-bar")).toContainText("current approval");
+  await page.locator('.approval-bar [data-testid="approval-deny"]').click();
+  const reply = await page.evaluate(() => (window as unknown as { __approvalLog: Array<{ runId?: number; step: number }> }).__approvalLog.at(-1));
+  expect(reply?.runId).toBe(22); expect(reply?.step).toBe(2);
+  await emit(page, { type: "itemCompleted", session: "s1", runId: 21, item: answerItem(1, "stale answer") });
+  await expect(page.getByText("stale answer", { exact: true })).toHaveCount(0);
+  await emit(page, { type: "itemCompleted", session: "s1", runId: 22, item: answerItem(1, "当前运行的答案。") });
+  await expect(page.locator('[data-testid="answer-body"]')).toContainText("当前运行的答案。");
 });

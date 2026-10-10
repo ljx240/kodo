@@ -2004,9 +2004,11 @@ version = "0.0.1"
 dependencies = [
  "calamine",
  "libc",
+ "quick-xml 0.42.0",
  "serde",
  "serde_json",
  "ureq",
+ "zip",
 ]
 
 [[package]]

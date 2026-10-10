@@ -148,9 +148,9 @@ pub fn into_result(response: Response) -> Result<serde_json::Value, McpError> {
     if let Some(error) = response.error {
         return Err(McpError::Rpc(error));
     }
-    response.result.ok_or_else(|| {
-        McpError::Protocol("response has neither result nor error".to_owned())
-    })
+    response
+        .result
+        .ok_or_else(|| McpError::Protocol("response has neither result nor error".to_owned()))
 }
 
 #[cfg(test)]
@@ -181,7 +181,8 @@ mod tests {
 
     #[test]
     fn decode_result_response() {
-        let message = decode_message(r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}"#).expect("decode");
+        let message =
+            decode_message(r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}"#).expect("decode");
         match message {
             Message::Response(response) => {
                 assert_eq!(response.id, Some(3));
@@ -212,9 +213,10 @@ mod tests {
 
     #[test]
     fn decode_notification_message() {
-        let message =
-            decode_message(r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}"#)
-                .expect("decode");
+        let message = decode_message(
+            r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}"#,
+        )
+        .expect("decode");
         match message {
             Message::Notification(notification) => {
                 assert_eq!(notification.method, "notifications/message");

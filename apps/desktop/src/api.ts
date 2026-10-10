@@ -136,6 +136,10 @@ export type ItemDto = {
       verification?: string;
       /** Conversational answer — the UI renders the text alone, no report chrome. */
       plain?: boolean;
+      /** Structured failure taxonomy (`budget_exhausted` / `acceptance_unmet` /
+       *  `unrecoverable` / `provider_error` / `unknown`) when this answer
+       *  ended the run in a failed state. Empty for ready/partial answers. */
+      failureReason?: string | null;
     }
 );
 
@@ -194,7 +198,7 @@ export type ArchivedItemDto = {
   removed: number;
 };
 
-export type RunEventDto =
+type RunEventPayload =
   | { type: "turnStarted"; session: string }
   | { type: "itemStarted"; session: string; item: ItemDto }
   | { type: "itemCompleted"; session: string; item: ItemDto }
@@ -253,6 +257,8 @@ export type RunEventDto =
       freedPct: number;
     };
 
+export type RunEventDto = RunEventPayload & { runId?: number };
+
 export const RUN_EVENT = "run:event";
 
 function read<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
@@ -272,7 +278,9 @@ function write<T>(command: string, args?: Record<string, unknown>): Promise<T | 
  * Send a user turn to the core. `agents` is the persona **chain** in
  * application order — a single element is the common case, shift-click on
  * the composer appends to grow the chain. The backend's `resolve_chain`
- * walks project → user → builtin for each name.
+ * walks project → user → builtin for each name. `budgetFamily` lets the
+ * desktop pass `"summary"` to lift the next run into read-only-summary
+ * caps (used by the "继续本轮" affordance).
  */
 export function sendMessage(
   id: string,
@@ -280,8 +288,16 @@ export function sendMessage(
   context: string[] = [],
   project?: string,
   agents: string[] = [],
+  budgetFamily?: string | null,
 ): Promise<string> {
-  return invoke<string>("send_message", { id, text, context, project, agents });
+  return invoke<string>("send_message", {
+    id,
+    text,
+    context,
+    project,
+    agents,
+    budgetFamily,
+  });
 }
 
 export function stopRun(id: string): Promise<void | null> {
@@ -293,8 +309,9 @@ export function respondApproval(
   step: number,
   approved: boolean,
   sessionWide = false,
+  runId?: number,
 ): Promise<void> {
-  return invoke<void>("respond_approval", { id, step, approved, sessionWide });
+  return invoke<void>("respond_approval", { id, step, approved, sessionWide, runId });
 }
 
 export type TurnChangeDto = {
@@ -351,6 +368,7 @@ export type LlmMessageDto = {
 export type LlmIoRequestDto = {
   system: string;
   messages: unknown;
+  tools?: unknown;
 };
 
 export type LlmIoResponseDto = {

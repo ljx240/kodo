@@ -207,6 +207,12 @@ pub enum ItemKind {
         verification: String,
         /// Conversational answer — the UI renders the text alone, no report chrome.
         plain: bool,
+        /// Structured failure taxonomy (`budget_exhausted` / `acceptance_unmet` /
+        /// `unrecoverable` / `provider_error` / `unknown`) when this answer
+        /// ended the run in a failed state. Empty for `ready`/`partial` answers
+        /// — the UI uses this to surface a "继续本轮" affordance when the
+        /// failure is one the user can resume from.
+        failure_reason: String,
     },
     /// A model's private reasoning block. Kept alongside the public `Reasoning`
     /// summary, so the transparency UI can show both: the model said it was
@@ -295,6 +301,7 @@ impl ItemKind {
             delivery: String::new(),
             verification: String::new(),
             plain: false,
+            failure_reason: String::new(),
         }
     }
 }
@@ -820,7 +827,10 @@ fn encode_item(item: &Item) -> Vec<String> {
             fields.push(retry_index.to_string());
             fields.push(llm_io_ref.clone().unwrap_or_default());
         }
-        ItemKind::FileChange { changes, file_span_ref } => {
+        ItemKind::FileChange {
+            changes,
+            file_span_ref,
+        } => {
             for change in changes {
                 fields.push(change.path.clone());
                 fields.push(change.added.to_string());
@@ -836,6 +846,7 @@ fn encode_item(item: &Item) -> Vec<String> {
             delivery,
             verification,
             plain,
+            failure_reason,
         } => {
             fields.push(text.clone());
             // Newlines are escaped by the codec, so one field can hold the list.
@@ -847,6 +858,7 @@ fn encode_item(item: &Item) -> Vec<String> {
             } else {
                 "0".to_owned()
             });
+            fields.push(failure_reason.clone());
         }
         ItemKind::Thinking {
             content,
@@ -995,7 +1007,10 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
             retry_index: 0,
             llm_io_ref: None,
         },
-        ("modelCall", [model, input, output, protocol, finish_reason, saw_reasoning, duration_ms, provider_latency_ms, retry_index, llm_io_ref]) => ItemKind::ModelCall {
+        (
+            "modelCall",
+            [model, input, output, protocol, finish_reason, saw_reasoning, duration_ms, provider_latency_ms, retry_index, llm_io_ref],
+        ) => ItemKind::ModelCall {
             model: model.clone(),
             input_tokens: input.parse().ok()?,
             output_tokens: output.parse().ok()?,
@@ -1026,7 +1041,7 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
         },
         // Modern rows carry a trailing `file_span_ref` field; older rows
         // without it decode as `None` above — same shape either way.
-        ("fileChange", all) if all.len() >= 1 && (all.len() - 1) % 3 == 0 => {
+        ("fileChange", all) if !all.is_empty() && (all.len() - 1) % 3 == 0 => {
             let body = &all[..all.len() - 1];
             let file_span_ref = all.last().cloned().unwrap_or_default();
             ItemKind::FileChange {
@@ -1065,6 +1080,7 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
             delivery: delivery.clone(),
             verification: verification.clone(),
             plain: false,
+            failure_reason: String::new(),
         },
         ("agentMessage", [text, checks, delivery, verification, plain]) => ItemKind::AgentMessage {
             text: text.clone(),
@@ -1076,7 +1092,22 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
             delivery: delivery.clone(),
             verification: verification.clone(),
             plain: plain == "1",
+            failure_reason: String::new(),
         },
+        ("agentMessage", [text, checks, delivery, verification, plain, failure_reason]) => {
+            ItemKind::AgentMessage {
+                text: text.clone(),
+                checks: if checks.is_empty() {
+                    Vec::new()
+                } else {
+                    checks.split('\n').map(str::to_owned).collect()
+                },
+                delivery: delivery.clone(),
+                verification: verification.clone(),
+                plain: plain == "1",
+                failure_reason: failure_reason.clone(),
+            }
+        }
         ("thinking", [content, phase, source]) => ItemKind::Thinking {
             content: content.clone(),
             phase: phase.clone(),
@@ -1091,52 +1122,56 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
                 covered_messages: covered_messages.parse().unwrap_or(0),
             }
         }
-        ("failover", [from_provider, from_model, error_class, error, to_provider, to_model, retry_index]) => {
-            ItemKind::Failover {
-                from_provider: from_provider.clone(),
-                from_model: from_model.clone(),
-                error_class: error_class.clone(),
-                error: error.clone(),
-                to_provider: to_provider.clone(),
-                to_model: to_model.clone(),
-                retry_index: retry_index.parse().unwrap_or(0),
+        (
+            "failover",
+            [from_provider, from_model, error_class, error, to_provider, to_model, retry_index],
+        ) => ItemKind::Failover {
+            from_provider: from_provider.clone(),
+            from_model: from_model.clone(),
+            error_class: error_class.clone(),
+            error: error.clone(),
+            to_provider: to_provider.clone(),
+            to_model: to_model.clone(),
+            retry_index: retry_index.parse().unwrap_or(0),
+        },
+        ("planStep", [step_id, title, kind, status, triggered_by, evidence]) => {
+            ItemKind::PlanStep {
+                step_id: step_id.clone(),
+                title: title.clone(),
+                kind: kind.clone(),
+                status: status.clone(),
+                triggered_by: if triggered_by.is_empty() {
+                    Vec::new()
+                } else {
+                    triggered_by
+                        .split('\n')
+                        .filter_map(|raw| raw.parse::<u32>().ok())
+                        .collect()
+                },
+                evidence: if evidence.is_empty() {
+                    Vec::new()
+                } else {
+                    evidence.split('\n').map(str::to_owned).collect()
+                },
             }
         }
-        ("planStep", [step_id, title, kind, status, triggered_by, evidence]) => ItemKind::PlanStep {
-            step_id: step_id.clone(),
-            title: title.clone(),
-            kind: kind.clone(),
-            status: status.clone(),
-            triggered_by: if triggered_by.is_empty() {
-                Vec::new()
-            } else {
-                triggered_by
-                    .split('\n')
-                    .filter_map(|raw| raw.parse::<u32>().ok())
-                    .collect()
-            },
-            evidence: if evidence.is_empty() {
-                Vec::new()
-            } else {
-                evidence.split('\n').map(str::to_owned).collect()
-            },
-        },
         ("permission", [kind, detail, decision, context]) => ItemKind::Permission {
             kind: kind.clone(),
             detail: detail.clone(),
             decision: decision.clone(),
             context: context.clone(),
         },
-        ("contextBudget", [used, window, percent, cumulative_chars, compacted_count, last_model]) => {
-            ItemKind::ContextBudget {
-                used: used.parse().unwrap_or(0),
-                window: window.parse().unwrap_or(0),
-                percent: percent.parse().unwrap_or(0),
-                cumulative_chars: cumulative_chars.parse().unwrap_or(0),
-                compacted_count: compacted_count.parse().unwrap_or(0),
-                last_model: last_model.clone(),
-            }
-        }
+        (
+            "contextBudget",
+            [used, window, percent, cumulative_chars, compacted_count, last_model],
+        ) => ItemKind::ContextBudget {
+            used: used.parse().unwrap_or(0),
+            window: window.parse().unwrap_or(0),
+            percent: percent.parse().unwrap_or(0),
+            cumulative_chars: cumulative_chars.parse().unwrap_or(0),
+            compacted_count: compacted_count.parse().unwrap_or(0),
+            last_model: last_model.clone(),
+        },
         _ => return None,
     };
 
@@ -1276,7 +1311,10 @@ mod tests {
         assert!(dir.join(format!("{kept}.log")).is_file());
 
         let listed = list(&dir).expect("list");
-        assert!(listed.iter().all(|item| item.id != gone), "deleted id still listed");
+        assert!(
+            listed.iter().all(|item| item.id != gone),
+            "deleted id still listed"
+        );
         assert!(listed.iter().any(|item| item.id == kept), "sibling lost");
     }
 
@@ -1967,6 +2005,7 @@ mod tests {
                     delivery: "ready".to_owned(),
                     verification: "passed".to_owned(),
                     plain: true,
+                    failure_reason: String::new(),
                 },
             ),
             Phase::Completed,
@@ -2127,7 +2166,11 @@ mod tests {
             },
         );
         match decoded.kind {
-            ItemKind::Thinking { content, phase, source } => {
+            ItemKind::Thinking {
+                content,
+                phase,
+                source,
+            } => {
                 assert_eq!(content, "I should grep first\nthen read src/foo.rs");
                 assert_eq!(phase, "analyze");
                 assert_eq!(source, "anthropic_reasoning");
@@ -2289,5 +2332,39 @@ mod tests {
             }
             other => panic!("unexpected kind: {other:?}"),
         }
+    }
+    #[test]
+    fn long_append_only_turn_replays_each_item_and_final_status() {
+        let root = TempDir::new("session-stress");
+        let id = open(
+            root.path(),
+            Path::new("/tmp/fixture"),
+            "stress",
+            1,
+            Mode::Code,
+        )
+        .unwrap();
+        record_ask(root.path(), &id, 2, "task").unwrap();
+        for index in 1..=1000 {
+            let item = Item {
+                id: index,
+                at: 3,
+                status: Status::Done,
+                duration_ms: Some(1),
+                kind: ItemKind::reasoning(format!("step {index}")),
+            };
+            record_item(root.path(), &id, &item, Phase::Started).unwrap();
+            record_item(root.path(), &id, &item, Phase::Completed).unwrap();
+        }
+        record_turn_complete(root.path(), &id, 4).unwrap();
+        let replay = load(root.path(), &id).unwrap();
+        assert_eq!(replay.turns.len(), 1);
+        assert!(replay.turns[0].done);
+        assert_eq!(replay.turns[0].items.len(), 1000);
+        assert_eq!(replay.turns[0].items[999].id, 1000);
+        assert!(replay.turns[0]
+            .items
+            .iter()
+            .all(|i| i.status == Status::Done));
     }
 }

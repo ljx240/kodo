@@ -107,6 +107,7 @@ fn outcome_for(
     delivery: &'static str,
     verification: &'static str,
     wrote_files: bool,
+    explicit_ready: bool,
 ) -> &'static str {
     match lifecycle {
         "stopped" => "stopped",
@@ -117,8 +118,11 @@ fn outcome_for(
             _ => match delivery {
                 "failed" => "failed",
                 "ready" if verification == "passed" => "completed",
-                // Pure Q&A that never needed acceptance checks reads complete.
-                "ready" if verification == "not_run" && !wrote_files => "completed",
+                // An explicit ready delivery already passed its task's gates.
+                // A document may complete without a command verification run.
+                "ready" if verification == "not_run" && (!wrote_files || explicit_ready) => {
+                    "completed"
+                }
                 _ => "partially_completed",
             },
         },
@@ -147,8 +151,7 @@ fn turn_status(turn: &session::Turn) -> TurnStatusView {
     let wrote_files = turn
         .items
         .iter()
-        .any(|item| matches!(item.kind, session::ItemKind::FileChange {
-                    file_span_ref: None, .. }));
+        .any(|item| matches!(item.kind, session::ItemKind::FileChange { .. }));
 
     let mut delivery = "";
     let mut verification = "";
@@ -168,6 +171,7 @@ fn turn_status(turn: &session::Turn) -> TurnStatusView {
         }
     }
 
+    let explicit_ready = delivery == "ready";
     // Fallbacks for legacy turns whose answer predates the outcome fields.
     let mut failed_commands = 0usize;
     let mut blocked_commands = 0usize;
@@ -240,7 +244,13 @@ fn turn_status(turn: &session::Turn) -> TurnStatusView {
         lifecycle,
         delivery,
         verification,
-        outcome: outcome_for(lifecycle, delivery, verification, wrote_files),
+        outcome: outcome_for(
+            lifecycle,
+            delivery,
+            verification,
+            wrote_files,
+            explicit_ready,
+        ),
     }
 }
 
@@ -337,6 +347,15 @@ pub enum ItemDetail {
         verification: String,
         /// Conversational answer — the UI renders the text alone.
         plain: bool,
+        /// Structured failure taxonomy code (`budget_exhausted` /
+        /// `acceptance_unmet` / `unrecoverable` / `provider_error` /
+        /// `unknown`) when this answer ended the run in a failed state.
+        /// Empty for ready/partial answers. Camel-cased to `failureReason`
+        /// on the JS side; the desktop reads it to surface the
+        /// "继续本轮" affordance on a budget trip even when no file
+        /// landed (delivery == "failed").
+        #[serde(rename = "failureReason")]
+        failure_reason: String,
     },
     /// Model's private reasoning block. Carries the full `<think>` content
     /// so the transparency UI can show what the model was thinking, separate
@@ -522,8 +541,7 @@ impl From<session::Item> for ItemView {
                 retry_index,
                 llm_io_ref,
             },
-            session::ItemKind::FileChange {
-                    changes, .. } => ItemDetail::FileChange {
+            session::ItemKind::FileChange { changes, .. } => ItemDetail::FileChange {
                 changes: changes
                     .into_iter()
                     .map(|change| ChangeView {
@@ -543,12 +561,14 @@ impl From<session::Item> for ItemView {
                 delivery,
                 verification,
                 plain,
+                failure_reason,
             } => ItemDetail::AgentMessage {
                 text,
                 checks,
                 delivery,
                 verification,
                 plain,
+                failure_reason,
             },
             session::ItemKind::Thinking {
                 content,
@@ -874,6 +894,7 @@ pub struct LlmIoView {
 pub struct LlmIoRequestView {
     pub system: String,
     pub messages: serde_json::Value,
+    pub tools: serde_json::Value,
 }
 
 #[derive(serde::Serialize)]
@@ -902,6 +923,7 @@ impl From<traces::LlmIoCapture> for LlmIoView {
             request: LlmIoRequestView {
                 system: value.request.system,
                 messages: value.request.messages,
+                tools: value.request.tools,
             },
             response: LlmIoResponseView {
                 text: value.response.text,
@@ -1429,6 +1451,7 @@ mod tests {
                     delivery: "ready".to_owned(),
                     verification: "passed".to_owned(),
                     plain: false,
+                    failure_reason: String::new(),
                 }),
             ],
             true,
@@ -1442,6 +1465,83 @@ mod tests {
     }
 
     #[test]
+    fn file_delivery_respects_explicit_outcome_without_inventing_verification() {
+        for file_span_ref in [None, Some("span".to_owned())] {
+            for (delivery, verification, expected) in [
+                ("ready", "not_run", "completed"),
+                ("partial", "not_run", "partially_completed"),
+                ("failed", "not_run", "failed"),
+                ("ready", "failed", "partially_completed"),
+                ("ready", "blocked", "blocked_by_environment"),
+                ("", "", "partially_completed"),
+            ] {
+                let turn = turn_with(
+                    vec![
+                        item(ItemKind::FileChange {
+                            changes: vec![session::Change {
+                                path: "docs/architecture.md".to_owned(),
+                                added: 415,
+                                removed: 0,
+                            }],
+                            file_span_ref: file_span_ref.clone(),
+                        }),
+                        item(ItemKind::AgentMessage {
+                            text: "文档已写入".to_owned(),
+                            checks: vec!["已回读文件".to_owned()],
+                            delivery: delivery.to_owned(),
+                            verification: verification.to_owned(),
+                            plain: false,
+                            failure_reason: String::new(),
+                        }),
+                    ],
+                    true,
+                );
+                let status = turn_status(&turn);
+                assert_eq!(
+                    status.outcome, expected,
+                    "delivery={delivery}, span={file_span_ref:?}"
+                );
+                assert_eq!(
+                    status.verification,
+                    if verification.is_empty() {
+                        "not_run"
+                    } else {
+                        verification
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_not_run_is_preserved_after_exploration_and_legacy_answer() {
+        let turn = turn_with(
+            vec![
+                item(ItemKind::CommandExecution {
+                    command: "git status --short".to_owned(),
+                    cwd: "/p".to_owned(),
+                    output: "ok".to_owned(),
+                    exit_code: Some(0),
+                    denied: false,
+                }),
+                item(ItemKind::AgentMessage {
+                    text: "文档已交付".to_owned(),
+                    checks: Vec::new(),
+                    delivery: "ready".to_owned(),
+                    verification: "not_run".to_owned(),
+                    plain: false,
+                    failure_reason: String::new(),
+                }),
+                item(ItemKind::agent_message("后续说明", Vec::new())),
+            ],
+            true,
+        );
+        let status = turn_status(&turn);
+        assert_eq!(status.outcome, "completed");
+        assert_eq!(status.verification, "not_run");
+    }
+
+    #[test]
     fn an_answer_with_failed_verification_is_partially_completed() {
         let turn = turn_with(
             vec![item(ItemKind::AgentMessage {
@@ -1450,6 +1550,7 @@ mod tests {
                 delivery: "ready".to_owned(),
                 verification: "failed".to_owned(),
                 plain: false,
+                failure_reason: String::new(),
             })],
             true,
         );
@@ -1466,6 +1567,7 @@ mod tests {
                 delivery: "blocked".to_owned(),
                 verification: "blocked".to_owned(),
                 plain: false,
+                failure_reason: String::new(),
             })],
             true,
         );

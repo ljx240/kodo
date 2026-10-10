@@ -36,13 +36,16 @@ import {
 export type OpenPath = (path: string) => void;
 
 export function Markdown({ text, onOpenPath = null }: { text: string; onOpenPath?: OpenPath | null }) {
+  const scope = useId().replace(/:/g, "");
   const blocks = useMemo(() => parseBlocks(text), [text]);
   const headings = useMemo(
     () =>
       blocks.flatMap((block, index) =>
-        block.kind === "heading" ? [{ index, text: block.text, id: headingId(index) }] : [],
+        block.kind === "heading"
+          ? [{ index, text: block.text, level: block.level, id: headingId(index, scope) }]
+          : [],
       ),
-    [blocks],
+    [blocks, scope],
   );
   // Footnote refs resolve against this instance's definitions; `fnIds` is
   // threaded through rendering so a ref without a definition stays literal.
@@ -93,23 +96,25 @@ export function Markdown({ text, onOpenPath = null }: { text: string; onOpenPath
     <div className="md">
       {showToc && (
         <nav className="md-toc" aria-label={T.reply.toc} data-testid="md-toc">
-          <span className="md-toc-title">{T.reply.toc}</span>
-          <ol className="md-toc-list">
-            {headings.map((heading) => (
-              <li key={heading.id}>
-                <a
-                  href={`#${heading.id}`}
-                  className={heading.id === activeHeading ? "md-toc-active" : undefined}
-                  onClick={(event) => jump(event, heading.id)}
-                >
-                  {heading.text}
-                </a>
-              </li>
-            ))}
-          </ol>
+          <details open>
+            <summary className="md-toc-title">{T.reply.toc}</summary>
+            <ol className="md-toc-list">
+              {headings.map((heading) => (
+                <li key={heading.id} data-level={heading.level}>
+                  <a
+                    href={`#${heading.id}`}
+                    className={heading.id === activeHeading ? "md-toc-active" : undefined}
+                    onClick={(event) => jump(event, heading.id)}
+                  >
+                    {heading.text}
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </details>
         </nav>
       )}
-      {blocks.map((block, index) => renderBlock(block, index, headingId(index), fnIds, onOpenPath))}
+      {blocks.map((block, index) => renderBlock(block, index, headingId(index, scope), fnIds, onOpenPath))}
       {footnotes.length > 0 && (
         <div className="md-footnotes" data-testid="md-footnotes">
           <div className="md-footnotes-title">{T.reply.footnotes}</div>
@@ -133,8 +138,8 @@ export function Markdown({ text, onOpenPath = null }: { text: string; onOpenPath
   );
 }
 
-function headingId(index: number): string {
-  return `md-h-${index}`;
+function headingId(index: number, scope: string): string {
+  return `md-h-${scope}-${index}`;
 }
 
 const CODE_FOLD_LINES = 10;

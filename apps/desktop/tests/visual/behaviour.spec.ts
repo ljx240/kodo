@@ -227,7 +227,7 @@ test("the composer sends on Enter, clears, and stops claiming to be working", as
   await expect(page.locator(".crumb-current")).toHaveText("修复路由");
 
   await expect(page.locator('[data-testid="welcome"]')).toBeVisible();
-  await expect(page.locator(".welcome-title")).toHaveText("今天想做什么？");
+  await expect(page.locator(".welcome-title")).toHaveText("今天想构建什么？");
 
   // Empty stage: welcome + composer sit in the middle of the pane, not stuck at the bottom.
   const stage = await page.evaluate(() => {
@@ -557,11 +557,11 @@ test("choosing a project in a new task does not open an existing conversation", 
   });
   await page.goto("/");
   await page.getByRole("link", { name: "新建任务" }).click();
-  await page.locator('[data-testid="composer-project-picker"]').click();
+  await page.locator('[data-testid="topbar-project-picker"]').click();
   await page.getByRole("menuitem", { name: "beta" }).click();
   await expect(page.locator(".crumb-current")).toHaveText("新对话");
   await expect(page.locator(".tree-conversation--active")).toHaveCount(0);
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("beta");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("beta");
 });
 
 test("a project row's + starts a new task under that project in one click", async ({ page }) => {
@@ -594,7 +594,7 @@ test("a project row's + starts a new task under that project in one click", asyn
   await add.click();
   await expect(page.locator('[data-testid="welcome"]')).toBeVisible();
   await expect(page.locator(".tree-conversation--active")).toHaveCount(0);
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("alpha");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("alpha");
 });
 
 test("final replies hide internal tool protocol notes", async ({ page }) => {
@@ -1698,8 +1698,8 @@ test("the sidebar lists 插件 and navigates to its MCP tab", async ({ page }) =
 
   await page.getByTestId("plugins-tab-mcp").click();
   await expect(page).toHaveURL(/type=mcp/);
-  await expect(page.locator(".page-head p")).toContainText("mcp__服务器__工具名");
-  await expect(page.locator(".page-head p")).toContainText("credentials.log");
+  await expect(page.locator(".page-head p")).toHaveText("连接外部工具与数据源，管理可用的 MCP 服务器。");
+  await expect(page.locator(".page-head p")).not.toContainText("credentials.log");
 });
 
 test("MCP servers list shows transport chips, targets and enable toggles", async ({ page }) => {
@@ -2342,7 +2342,7 @@ test("the composer context ring mirrors the latest ContextBudget event and clear
   await expect(ring).toHaveCount(0);
 });
 
-test("hovering the composer context ring shows the three-line Codex-style tooltip", async ({ page }) => {
+test("hovering the composer context ring shows the three-line Codex-style tooltip", async ({ page }, testInfo) => {
   await stubShell(page, {
     providers: [providerFixture],
     settings: { "active-provider": "0" },
@@ -2382,9 +2382,15 @@ test("hovering the composer context ring shows the three-line Codex-style toolti
 
   const ring = page.locator('[data-testid="composer-context-ring"]');
   const tooltip = page.locator('[data-testid="composer-context-ring-tooltip"]');
-  // Tooltip is in the tree even when not displayed (data-opened is the toggle).
+  // Hidden text must never wrap into a stray character beside the model.
   await expect(tooltip).toHaveCount(1);
   await expect(tooltip).toBeHidden();
+  await expect(ring).toHaveAttribute("role", "progressbar");
+  await expect(ring).toHaveAttribute("aria-valuenow", "44");
+  for (const circle of [".composer-context-ring-bg", ".composer-context-ring-fg"]) {
+    expect(await ring.locator(circle).evaluate((el) => getComputedStyle(el).stroke)).not.toBe("none");
+  }
+  await page.locator(".composer-box").screenshot({ path: testInfo.outputPath("context-ring.png") });
   await ring.hover();
   await expect(tooltip).toBeVisible();
   await expect(tooltip).toContainText("背景信息窗口");
@@ -2392,4 +2398,41 @@ test("hovering the composer context ring shows the three-line Codex-style toolti
   await expect(tooltip).toContainText("剩余 56%");
   await expect(tooltip).toContainText("114.0k");
   await expect(tooltip).toContainText("258.0k");
+  const control = (await page.locator(".composer-box").boundingBox())!;
+  const tip = (await tooltip.boundingBox())!;
+  await page.screenshot({
+    path: testInfo.outputPath("context-tooltip.png"),
+    clip: { x: control.x, y: tip.y - 8, width: control.width, height: control.y + control.height - tip.y + 16 },
+  });
+
+  // The popover is readable in either theme, even when the controls wrap.
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    for (const width of [1586, 900, 640]) {
+      await page.setViewportSize({ width, height: 992 });
+      await page.mouse.move(0, 0);
+      await page.getByTestId("composer-input").focus();
+      await expect(tooltip).toBeHidden();
+      const before = (await page.locator(".composer-box").boundingBox())!;
+      await ring.focus();
+      await expect(tooltip).toBeVisible();
+      await expect(page.locator(".composer-box")).toHaveCSS("overflow", "visible");
+      const after = (await page.locator(".composer-box").boundingBox())!;
+      expect(after.height).toBe(before.height);
+      const ringBox = (await ring.boundingBox())!;
+      const modelBox = (await page.getByTestId("composer-model").boundingBox())!;
+      const tooltipBox = (await tooltip.boundingBox())!;
+      expect(ringBox.x + ringBox.width).toBeLessThanOrEqual(modelBox.x);
+      expect(Math.abs(ringBox.y + ringBox.height / 2 - modelBox.y - modelBox.height / 2)).toBeLessThan(1);
+      expect(tooltipBox.y + tooltipBox.height).toBeLessThan(ringBox.y);
+      expect(tooltipBox.x).toBeGreaterThanOrEqual(0);
+      expect(tooltipBox.x + tooltipBox.width).toBeLessThanOrEqual(width);
+      const lines = await tooltip.locator(".composer-context-ring-tooltip-line").evaluateAll((nodes) =>
+        nodes.map((node) => node.getBoundingClientRect().y),
+      );
+      expect(lines).toHaveLength(3);
+      expect(lines[0]).toBeLessThan(lines[1]);
+      expect(lines[1]).toBeLessThan(lines[2]);
+    }
+  }
 });

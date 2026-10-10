@@ -20,7 +20,7 @@ export function Field({
   children: ReactNode;
 }) {
   return (
-    <div className={`setting-row${block ? " setting-row--stacked" : ""}`}>
+    <div className={`setting-row setting-row--field${block ? " setting-row--stacked" : ""}`}>
       {icon && <span className="setting-icon">{icon}</span>}
       <div className="setting-text">
         <span className="setting-label">{label}</span>

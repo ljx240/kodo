@@ -8,13 +8,12 @@ import type { ContextBudget } from "./trace";
  * Rendered next to the model picker in the composer so the user sees the
  * window fill up while a turn is in flight. Three stacked layers:
  *
- * - background arc (`--kodo-hover`): full circle, fixed
+ * - background arc (`--kodo-border-strong`): full circle, fixed
  * - foreground arc: length proportional to `percent`, color band:
  *   muted < 60% < warn < 80% < danger (matches `reply-context-bar` palette)
  * - hover popover (role=tooltip): three lines, see `T.budget.ringTooltipBody`.
- *   Follows the same popover recipe as `.turn-rail-preview` (DESIGN §12):
- *   `pointer-events: none`, `--kodo-canvas` on `--kodo-border`, popover
- *   radius, find-bar shadow.
+ *   The dark popover sits above the control and stays out of the composer
+ *   layout until hover or keyboard focus.
  *
  * `null` when `budget` is missing so the ring doesn't hold stale state
  * across turns.
@@ -52,7 +51,12 @@ export function ContextRing({
       data-tone={tone}
       style={containerStyle}
       tabIndex={0}
-      aria-label={tooltipBody.replace(/\n/g, " · ")}
+      role="progressbar"
+      aria-label={T.budget.ringTitle}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percent}
+      aria-valuetext={tooltipBody.replace(/\n/g, " · ")}
     >
       <svg
         width={size}
@@ -75,7 +79,6 @@ export function ContextRing({
           r={r}
           strokeWidth={stroke}
           strokeDasharray={`${dash} ${circumference - dash}`}
-          strokeDashoffset={circumference / 4}
           strokeLinecap="round"
           fill="none"
           transform={`rotate(-90 ${size / 2} ${size / 2})`}

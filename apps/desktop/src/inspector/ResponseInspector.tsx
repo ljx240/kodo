@@ -5,7 +5,7 @@ import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
 import { changesFromReply, commandsFromTurn, llmFromTurn, toolsFromTurn } from "../data/liveContext";
 import { DiffRows } from "../conversation/diff";
-import { formatDuration, type OutcomeStatus, type Reply, type RunStatus } from "../conversation/trace";
+import { formatDuration, isWaitingForReply, type OutcomeStatus, type Reply, type RunStatus } from "../conversation/trace";
 import { T } from "../i18n";
 import { FileRow, MetaRow, Section, ToolRow } from "./Section";
 
@@ -14,6 +14,7 @@ export type InspectorData = {
   demo: boolean;
   demoState?: DemoState | null;
   live: LiveSnapshot | null;
+  project?: { name: string; path: string } | null;
 };
 
 function EmptyBody({ note }: { note: string }) {
@@ -28,9 +29,9 @@ function EmptyBody({ note }: { note: string }) {
  * The single high-level status. The word carries the state — color is only a
  * reinforcement, never the signal itself.
  */
-function StatusPill({ outcome }: { outcome: OutcomeStatus }) {
+function StatusPill({ outcome, pendingQuestion = false }: { outcome: OutcomeStatus; pendingQuestion?: boolean }) {
   const mark =
-    outcome === "completed" ? (
+    pendingQuestion ? "…" : outcome === "completed" ? (
       <Check size={9} strokeWidth={4} />
     ) : outcome === "working" || outcome === "queued" || outcome === "awaiting_approval" ? (
       "…"
@@ -45,7 +46,7 @@ function StatusPill({ outcome }: { outcome: OutcomeStatus }) {
   return (
     <span className={`status-pill status-pill--${outcome}`} data-testid="ins-status-pill">
       <span className="status-mark">{mark}</span>
-      <span>{T.outcome[outcome]}</span>
+      <span>{pendingQuestion ? T.reply.pendingQuestion : T.outcome[outcome]}</span>
     </span>
   );
 }
@@ -266,6 +267,7 @@ export function SummarySection({
       outcome: live.running ? "working" : "interrupted",
     };
     const axes = axisText(status);
+    const pendingQuestion = isWaitingForReply(reply);
     const failures = reply?.failureGroups ?? [];
     return (
       <Section
@@ -275,7 +277,7 @@ export function SummarySection({
       >
         <div className="ins-body">
           <MetaRow label={T.inspector.currentResult}>
-            <StatusPill outcome={status.outcome} />
+            <StatusPill outcome={status.outcome} pendingQuestion={pendingQuestion} />
           </MetaRow>
           <MetaRow label={T.inspector.answerState}>{axes.answer}</MetaRow>
           <MetaRow label={T.inspector.filesState}>{filesText(reply)}</MetaRow>
@@ -306,7 +308,7 @@ export function SummarySection({
               {T.action.review}
             </button>
           )}
-          {live.onUndo && !live.running && (
+          {live.onUndo && !live.running && (reply?.files ?? 0) > 0 && (
             <button
               type="button"
               className="btn btn--sm"
@@ -319,7 +321,7 @@ export function SummarySection({
               <span>{live.undoing ? T.action.undoing : T.action.undo}</span>
             </button>
           )}
-          {live.onRetry && !live.running && (
+          {live.onRetry && !live.running && !pendingQuestion && (
             <button
               type="button"
               className="btn btn--sm"
@@ -458,8 +460,8 @@ export function LlmSection({ demo, demoState, live, detailed = false }: Inspecto
         {calls.length === 0 ? (
           <p className="ins-note">{T.reply.statsPending}</p>
         ) : (
-          calls.map((call) => (
-            <div key={`${call.model}-${call.input_tokens}`} className="llm-call">
+          calls.map((call, index) => (
+            <div key={index} className="llm-call">
               <div className="llm-head">
                 <Sparkles size={14} strokeWidth={1.7} className="llm-icon" />
                 <span className="llm-model">{call.model}</span>
@@ -477,9 +479,14 @@ export function LlmSection({ demo, demoState, live, detailed = false }: Inspecto
   );
 }
 
-export function CurrentProjectSection({ demo, demoState, live }: InspectorData) {
-  const name = !demo ? live?.projectName || "未选择项目" : demoState?.project.name ?? "未选择项目";
-  const path = !demo ? live?.projectPath || "—" : demoState?.project.path ?? "—";
+export function CurrentProjectSection({ demo, demoState, live, project }: InspectorData) {
+  const current = demo
+    ? demoState?.project
+    : project !== undefined
+      ? project
+      : live && { name: live.projectName, path: live.projectPath };
+  const name = current?.name || "未选择项目";
+  const path = current?.path || "—";
   return (
     <Section icon={<Folder size={14} strokeWidth={1.7} />} title={T.inspector.currentProject}>
       <div className="ins-body">
@@ -502,8 +509,8 @@ export function TerminalSection({ demo, demoState, live }: InspectorData) {
         {runs.length === 0 ? (
           <p className="ins-note">{T.inspector.stepsPending}</p>
         ) : (
-          runs.map((run) => (
-            <div key={run.command} className="terminal-run">
+          runs.map((run, index) => (
+            <div key={`${index}-${run.command}`} className="terminal-run">
               <div className="terminal-cmd">
                 <code className="code-chip">{run.command}</code>
               </div>

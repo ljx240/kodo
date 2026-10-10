@@ -1,7 +1,8 @@
-import { AlertTriangle, FilePlus2, Undo2, User } from "lucide-react";
+import { AlertTriangle, Check, FilePlus2, Undo2, User } from "lucide-react";
 import { useState } from "react";
 import type { ChangeDto } from "../api";
 import { T } from "../i18n";
+import { isDocumentPath } from "./trace";
 
 type Props = {
   files: number;
@@ -9,6 +10,8 @@ type Props = {
   removed: number;
   /** Unique paths for this turn, already merged by `mergeChanges`. */
   changes: ChangeDto[];
+  /** Successful reads after the latest document write; not semantic verification. */
+  readBackPaths?: string[];
   /** Paths the user had already modified before Kodo ran. */
   preExisting?: string[];
   /** Paths whose working tree diverged from Kodo's after-hash (undo risk). */
@@ -36,6 +39,7 @@ export function ChangedFilesSummary({
   added,
   removed,
   changes,
+  readBackPaths = [],
   preExisting = [],
   conflicts = [],
   onView,
@@ -68,7 +72,7 @@ export function ChangedFilesSummary({
           <span className="changed-summary-title">{T.files.title(files)}</span>
           <span className="changed-summary-delta">
             <span className="delta-add">+{added}</span>{" "}
-            <span className="delta-del">-{removed}</span>
+            {removed > 0 && <span className="delta-del">-{removed}</span>}
           </span>
         </div>
         {preExisting.length > 0 && (
@@ -123,10 +127,19 @@ export function ChangedFilesSummary({
               >
                 {change.path}
               </button>
+              {isDocumentPath(change.path) && (
+                <span
+                  className={`changed-file-state${readBackPaths.includes(change.path) ? " changed-file-state--read" : ""}`}
+                  data-testid={`document-state-${change.path}`}
+                >
+                  {readBackPaths.includes(change.path) && <Check size={12} aria-hidden />}
+                  {readBackPaths.includes(change.path) ? T.files.readBack : change.added > 0 ? T.files.written : T.files.recorded}
+                </span>
+              )}
               <span className="changed-file-edits">{T.files.edits(change.edits ?? 1)}</span>
               <span className="changed-file-delta">
                 <span className="delta-add">+{change.added}</span>{" "}
-                <span className="delta-del">-{change.removed}</span>
+                {change.removed > 0 && <span className="delta-del">-{change.removed}</span>}
               </span>
             </li>
           ))}
@@ -176,11 +189,11 @@ export function ChangedFilesSummary({
         </div>
       )}
 
-      <div className="changed-group" data-testid="changed-net">
-        <h4 className="changed-group-head">{T.files.net}</h4>
+      <details className="changed-details" data-testid="changed-net">
+        <summary>{T.files.net}</summary>
         <p className="changed-note">{netNote}</p>
         <p className="changed-note">{T.files.cumulativeNote}</p>
-      </div>
+      </details>
     </section>
   );
 }

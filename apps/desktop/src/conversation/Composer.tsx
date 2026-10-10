@@ -404,6 +404,12 @@ export function Composer({
     fileInput.current?.click();
   };
 
+  useEffect(() => {
+    const onAttach = () => void openAttachFiles();
+    window.addEventListener("kodo:attach-files", onAttach);
+    return () => window.removeEventListener("kodo:attach-files", onAttach);
+  }, [openAttachFiles]);
+
   const onFileInput = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
@@ -604,6 +610,48 @@ export function Composer({
             })}
           </div>
         )}
+
+        <textarea
+          ref={input}
+          className="composer-input"
+          rows={1}
+          aria-label={T.composer.inputPlaceholder}
+          placeholder={T.composer.inputPlaceholder}
+          value={draft}
+          data-testid="composer-input"
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+          }}
+          onChange={(event) => updateDraft(event.target.value)}
+          onPaste={(event) => void onComposerPaste(event)}
+          onKeyDown={(event) => {
+            // IME guard: the Enter that confirms a zh/ja composition must not
+            // send. WebKit reports it as keyCode 229 (isComposing can read
+            // false), Chrome as isComposing true — check both, plus the ref
+            // for engines that end composition before the keydown lands.
+            const native = event.nativeEvent as KeyboardEvent;
+            const composing =
+              native.isComposing || native.keyCode === 229 || composingRef.current;
+            if (slashOpen && (event.key === "Enter" || event.key === "Tab") && !composing) {
+              event.preventDefault();
+              applySkillFromSlash(slashMatches[0].id);
+              return;
+            }
+            if (slashOpen && event.key === "Escape") {
+              event.preventDefault();
+              setDraft("");
+              return;
+            }
+            // Enter sends, Shift+Enter breaks the line.
+            if (event.key === "Enter" && !event.shiftKey && !composing) {
+              event.preventDefault();
+              send();
+            }
+          }}
+        />
 
         {/* Draft first, then the bottom control line: attach/permission left,
             model/send right (2026-09-23: controls sink to the bottom of the
@@ -1038,47 +1086,6 @@ export function Composer({
               }}
             </Menu>
           </div>
-
-          <textarea
-            ref={input}
-            className="composer-input"
-            rows={1}
-            placeholder={T.composer.inputPlaceholder}
-            value={draft}
-            data-testid="composer-input"
-            onCompositionStart={() => {
-              composingRef.current = true;
-            }}
-            onCompositionEnd={() => {
-              composingRef.current = false;
-            }}
-            onChange={(event) => updateDraft(event.target.value)}
-            onPaste={(event) => void onComposerPaste(event)}
-            onKeyDown={(event) => {
-              // IME guard: the Enter that confirms a zh/ja composition must not
-              // send. WebKit reports it as keyCode 229 (isComposing can read
-              // false), Chrome as isComposing true — check both, plus the ref
-              // for engines that end composition before the keydown lands.
-              const native = event.nativeEvent as KeyboardEvent;
-              const composing =
-                native.isComposing || native.keyCode === 229 || composingRef.current;
-              if (slashOpen && (event.key === "Enter" || event.key === "Tab") && !composing) {
-                event.preventDefault();
-                applySkillFromSlash(slashMatches[0].id);
-                return;
-              }
-              if (slashOpen && event.key === "Escape") {
-                event.preventDefault();
-                setDraft("");
-                return;
-              }
-              // Enter sends, Shift+Enter breaks the line.
-              if (event.key === "Enter" && !event.shiftKey && !composing) {
-                event.preventDefault();
-                send();
-              }
-            }}
-          />
 
           {/* Right: model picker + send */}
           <div className="composer-right">

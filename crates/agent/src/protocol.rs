@@ -243,12 +243,7 @@ impl ToolArgs {
                 max_results: optional_u32(args, "max_results")?,
             }),
             ToolName::AskUser => Ok(Self::AskUser {
-                question: require_string_with_schema(
-                    args,
-                    "question",
-                    "ask_user",
-                    &["question"],
-                )?,
+                question: require_string_with_schema(args, "question", "ask_user", &["question"])?,
                 options: optional_string_array(args, "options")?,
             }),
         }
@@ -631,6 +626,7 @@ impl ToolInvocation {
                 output: String::new(),
                 ok: true,
                 error: None,
+                changed_files: Vec::new(),
             },
             Self::Rejected(reject) => ToolResult::from_rejection(&reject),
             Self::External(call) => {
@@ -653,6 +649,7 @@ pub struct ToolResult {
     pub output: String,
     pub ok: bool,
     pub error: Option<ToolError>,
+    pub changed_files: Vec<String>,
 }
 
 impl ToolResult {
@@ -672,6 +669,7 @@ impl ToolResult {
             output,
             ok: true,
             error: None,
+            changed_files: Vec::new(),
         }
     }
 
@@ -690,6 +688,7 @@ impl ToolResult {
             output,
             ok: false,
             error: Some(error),
+            changed_files: Vec::new(),
         }
     }
 
@@ -705,6 +704,7 @@ impl ToolResult {
             output: reject.error.message.clone(),
             ok: false,
             error: Some(reject.error.clone()),
+            changed_files: Vec::new(),
         }
     }
 
@@ -747,7 +747,7 @@ impl ToolRegistry {
                 },
                 ToolDefinition {
                     name: "read_file",
-                    description: "Read a UTF-8 file inside the project. Paths are relative to the project root.",
+                    description: "Read UTF-8, DOCX body/table text, or spreadsheet cells inside the project. Paths are relative to the project root.",
                     input_schema: serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -759,7 +759,7 @@ impl ToolRegistry {
                 },
                 ToolDefinition {
                     name: "write_file",
-                    description: "Write a UTF-8 file inside the project. Creates parent directories as needed.",
+                    description: "Write a UTF-8 file, or generate a DOCX from text/Markdown headings and pipe tables. Creates parent directories; DOCX is validated by readback.",
                     input_schema: serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -887,6 +887,19 @@ impl ToolRegistry {
                     }),
                 },
                 ToolDefinition {
+                    name: "ask_user",
+                    description: "Ask for missing information or required authorization. Pauses the turn; wait for the user's next message before proceeding.",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string" },
+                            "options": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["question"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolDefinition {
                     name: "websearch",
                     description: "Search the public web via DuckDuckGo HTML (free, no API key). Returns up to N results with title, URL, and snippet. Use for fresh facts, library docs, or anything not in the project tree.",
                     input_schema: serde_json::json!({
@@ -919,8 +932,7 @@ impl ToolRegistry {
     /// skill files happen to be embedded.
     pub fn for_mode(mode: crate::AgentMode, has_project: bool) -> Self {
         if !has_project {
-            return Self::standard()
-                .filtered(|name| matches!(name, "websearch"));
+            return Self::standard().filtered(|name| matches!(name, "websearch"));
         }
         match mode {
             crate::AgentMode::Code => Self::standard(),
@@ -943,14 +955,16 @@ impl ToolRegistry {
         self
     }
 
-    /// Keep only **builtin** definitions whose name passes `keep` (skill
-    /// allowlists). External tools always survive: a skill allowlist narrows
-    /// builtins only — `mcp__*` labels pass the skill gate unconditionally and
-    /// rely on Permission instead (see `SkillSpec::allows_label`).
+    /// Filter advertised builtin and external tools using the same skill policy.
     pub fn filtered<F: Fn(&str) -> bool>(&self, keep: F) -> Self {
         Self {
             defs: self.defs.iter().filter(|d| keep(d.name)).cloned().collect(),
-            externals: self.externals.clone(),
+            externals: self
+                .externals
+                .iter()
+                .filter(|d| keep(&d.name))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -1321,7 +1335,10 @@ fn partial_tag_tail(buf: &str, tags: &[&str]) -> usize {
             continue;
         }
         let suffix = &buf[cut..];
-        if tags.iter().any(|t| suffix.len() < t.len() && t.starts_with(suffix)) {
+        if tags
+            .iter()
+            .any(|t| suffix.len() < t.len() && t.starts_with(suffix))
+        {
             return n;
         }
     }
@@ -1629,7 +1646,12 @@ pub fn protocol_instructions(registry: &ToolRegistry) -> String {
         .definitions()
         .iter()
         .map(|d| d.name)
-        .chain(registry.external_definitions().iter().map(|e| e.name.as_str()))
+        .chain(
+            registry
+                .external_definitions()
+                .iter()
+                .map(|e| e.name.as_str()),
+        )
         .collect();
     // No tools → no protocol (2026-09-29). An "Available tools: ." line
     // teaches a JSON tool habit with nothing behind it and contradicts the
@@ -2068,7 +2090,11 @@ mod tests {
     #[test]
     fn accept_still_rejects_unknown_wire_names() {
         let reg = registry_with_external();
-        let inv = reg.accept(ToolCallId::new("2"), "mcp__other__tool", &serde_json::json!({}));
+        let inv = reg.accept(
+            ToolCallId::new("2"),
+            "mcp__other__tool",
+            &serde_json::json!({}),
+        );
         match inv {
             ToolInvocation::Rejected(reject) => {
                 assert_eq!(reject.error.code, ToolErrorCode::UnknownTool);
@@ -2077,17 +2103,20 @@ mod tests {
             other => panic!("expected rejection, got {other:?}"),
         }
         // And with no externals registered at all.
-        let inv = registry().accept(ToolCallId::new("3"), "mcp__fake__echo", &serde_json::json!({}));
+        let inv = registry().accept(
+            ToolCallId::new("3"),
+            "mcp__fake__echo",
+            &serde_json::json!({}),
+        );
         assert!(matches!(inv, ToolInvocation::Rejected(_)));
     }
 
     #[test]
-    fn filtered_keeps_externals_when_narrowing_builtins() {
-        // Skill allowlists narrow builtins only: externals survive filtering.
+    fn filtered_removes_disallowed_externals() {
         let reg = registry_with_external().filtered(|name| name == "read_file");
         assert_eq!(reg.definitions().len(), 1);
-        assert_eq!(reg.external_definitions().len(), 1);
-        assert!(reg.contains_name("mcp__fake__echo"));
+        assert_eq!(reg.external_definitions().len(), 0);
+        assert!(!reg.contains_name("mcp__fake__echo"));
     }
 
     #[test]
@@ -2102,7 +2131,10 @@ mod tests {
         // Projectless constrained Q&A: no tools means no protocol — the
         // "Available tools: ." line must never reach the model.
         let text = protocol_instructions(&ToolRegistry::default());
-        assert!(text.is_empty(), "empty registry must render no protocol: {text:?}");
+        assert!(
+            text.is_empty(),
+            "empty registry must render no protocol: {text:?}"
+        );
         assert!(!text.contains("Available tools"));
     }
 
@@ -2200,7 +2232,9 @@ mod tests {
         match parse_model_turn(text, &registry()) {
             ModelTurn::Tools { calls } => {
                 assert_eq!(calls.len(), 1);
-                assert!(matches!(&calls[0], ToolInvocation::Ready(c) if c.name.label() == "list_files"));
+                assert!(
+                    matches!(&calls[0], ToolInvocation::Ready(c) if c.name.label() == "list_files")
+                );
             }
             other => panic!("expected tools, got {other:?}"),
         }
@@ -2253,8 +2287,7 @@ mod tests {
     #[test]
     fn search_rejection_message_lists_required_fields() {
         let v = serde_json::json!({});
-        let err = ToolArgs::from_json(ToolName::Search, &v)
-            .expect_err("missing query must reject");
+        let err = ToolArgs::from_json(ToolName::Search, &v).expect_err("missing query must reject");
         assert!(
             err.message.contains("`query`"),
             "schema hint must name the missing field: {}",
@@ -2290,8 +2323,8 @@ mod tests {
     #[test]
     fn parse_ask_user_rejects_missing_question_with_schema_hint() {
         let v = serde_json::json!({});
-        let err = ToolArgs::from_json(ToolName::AskUser, &v)
-            .expect_err("missing question must reject");
+        let err =
+            ToolArgs::from_json(ToolName::AskUser, &v).expect_err("missing question must reject");
         assert!(err.message.contains("`question`"), "got: {}", err.message);
         assert!(
             err.message.contains("ask_user requires"),

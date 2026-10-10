@@ -33,9 +33,15 @@ pub(crate) const BUILTIN_AGENTS: [(&str, &str); 12] = [
     ),
     ("documenter", include_str!("../../../agents/documenter.md")),
     ("planner", include_str!("../../../agents/planner.md")),
-    ("api-designer", include_str!("../../../agents/api-designer.md")),
+    (
+        "api-designer",
+        include_str!("../../../agents/api-designer.md"),
+    ),
     ("translator", include_str!("../../../agents/translator.md")),
-    ("ui-designer", include_str!("../../../agents/ui-designer.md")),
+    (
+        "ui-designer",
+        include_str!("../../../agents/ui-designer.md"),
+    ),
 ];
 
 /// One built-in persona's raw markdown — read-only preview source.
@@ -263,10 +269,11 @@ fn parse_examples(body: &[&str]) -> Vec<PersonaExample> {
 fn valid_variable_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 32
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
 // ---------------------------------------------------------------------------
@@ -469,7 +476,10 @@ mod tests {
         let spec = parse_agent(AGENT_MD).expect("parse");
         assert_eq!(spec.name, "reviewer");
         assert_eq!(spec.description, "Strict code reviewer.");
-        assert_eq!(spec.instructions, "Challenge every assumption.\nPoint at real risks.");
+        assert_eq!(
+            spec.instructions,
+            "Challenge every assumption.\nPoint at real risks."
+        );
     }
 
     #[test]
@@ -605,12 +615,9 @@ mod tests {
     #[test]
     fn save_user_agent_rejects_builtin_name() {
         let dir = temp_store("save_builtin");
-        let err = save_user_agent(&dir, "reviewer", AGENT_MD)
-            .expect_err("builtin name must reject");
-        assert!(
-            err.contains("内置"),
-            "error must mention 内置, got: {err}"
-        );
+        let err =
+            save_user_agent(&dir, "reviewer", AGENT_MD).expect_err("builtin name must reject");
+        assert!(err.contains("内置"), "error must mention 内置, got: {err}");
         assert!(!dir.join("reviewer.md").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -620,12 +627,8 @@ mod tests {
         let dir = temp_store("delete_builtin");
         // Even if the user manages to drop a file named after a builtin,
         // delete rejects — the file shouldn't be there in the first place.
-        let err = delete_user_agent(&dir, "explainer")
-            .expect_err("builtin name must reject");
-        assert!(
-            err.contains("内置"),
-            "error must mention 内置, got: {err}"
-        );
+        let err = delete_user_agent(&dir, "explainer").expect_err("builtin name must reject");
+        assert!(err.contains("内置"), "error must mention 内置, got: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -644,8 +647,8 @@ mod tests {
     // --- Optional sections: defaults / variables / examples (§2.1-2.5) ---
 
     /// Full-shape fixture — every optional section populated. Raw string to
-/// preserve the two-space indent in front of `output:` (Rust's `\` line
-/// continuation would strip leading whitespace).
+    /// preserve the two-space indent in front of `output:` (Rust's `\` line
+    /// continuation would strip leading whitespace).
     const ADVANCED_AGENT_MD: &str = r#"# Agent: advanced
 ## description
 A persona that exercises defaults/variables/examples.
@@ -727,7 +730,8 @@ skills: code-review, security-audit
 
     /// Build a temp project root with `.kodo/agents/<name>.md`.
     fn temp_project(tag: &str, agents: &[(&str, &str)]) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("kodo_project_agents_{tag}_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("kodo_project_agents_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join(".kodo").join("agents");
         std::fs::create_dir_all(&dir).expect("project dir");
@@ -754,17 +758,19 @@ skills: code-review, security-audit
         )
         .expect("project reviewer");
         // Builtin must lose because project shadows it.
-        let spec = resolve_spec(&user_dir, Some(&project_root), "reviewer")
-            .expect("resolve");
+        let spec = resolve_spec(&user_dir, Some(&project_root), "reviewer").expect("resolve");
         assert_eq!(spec.instructions, "PROJECT-INSTANCE.");
         // Without a project root the user copy is also blocked by the
         // builtin name protection (load_user_agents skips it).
         let spec = resolve_spec(&user_dir, None, "reviewer").expect("resolve");
-        assert_eq!(spec.instructions, builtin_agents()
-            .into_iter()
-            .find(|a| a.name == "reviewer")
-            .unwrap()
-            .instructions);
+        assert_eq!(
+            spec.instructions,
+            builtin_agents()
+                .into_iter()
+                .find(|a| a.name == "reviewer")
+                .unwrap()
+                .instructions
+        );
         let _ = std::fs::remove_dir_all(&user_dir);
         let _ = std::fs::remove_dir_all(&project_root);
     }

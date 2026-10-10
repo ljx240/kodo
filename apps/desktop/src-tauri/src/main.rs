@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use tauri::{AppHandle, LogicalSize, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, LogicalSize, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -205,9 +207,8 @@ fn open_project_file(app: AppHandle, project: String, path: String) -> Result<()
 #[tauri::command]
 fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     let url = url.trim();
-    let allowed = url.starts_with("https://")
-        || url.starts_with("http://")
-        || url.starts_with("mailto:");
+    let allowed =
+        url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:");
     if !allowed {
         return Err(format!("refused url scheme: {url}"));
     }
@@ -221,11 +222,7 @@ fn open_url(app: AppHandle, url: String) -> Result<(), String> {
 /// `addChildWindow:`; on Win/Linux the owned window is `skip_taskbar(true)`
 /// so it never appears as a separate OS window.
 #[tauri::command]
-fn browse_open(
-    app: AppHandle,
-    state: State<'_, BrowseWebview>,
-    url: String,
-) -> Result<(), String> {
+fn browse_open(app: AppHandle, state: State<'_, BrowseWebview>, url: String) -> Result<(), String> {
     let parsed = parse_safe_external_url(&url)?;
     let mut guard = state.0.lock().map_err(|error| error.to_string())?;
     if let Some(existing) = guard.as_ref() {
@@ -237,19 +234,16 @@ fn browse_open(
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "main window missing".to_string())?;
-    let webview = WebviewWindowBuilder::new(
-        &app,
-        BROWSE_WEBVIEW_LABEL,
-        WebviewUrl::External(parsed),
-    )
-    .parent(&main)
-    .map_err(|error| error.to_string())?
-    .skip_taskbar(true)
-    .title("Browse")
-    .inner_size(1.0, 1.0)
-    .position(0.0, 0.0)
-    .build()
-    .map_err(|error| error.to_string())?;
+    let webview =
+        WebviewWindowBuilder::new(&app, BROWSE_WEBVIEW_LABEL, WebviewUrl::External(parsed))
+            .parent(&main)
+            .map_err(|error| error.to_string())?
+            .skip_taskbar(true)
+            .title("Browse")
+            .inner_size(1.0, 1.0)
+            .position(0.0, 0.0)
+            .build()
+            .map_err(|error| error.to_string())?;
     *guard = Some(webview);
     Ok(())
 }
@@ -262,9 +256,7 @@ fn browse_set_url(state: State<'_, BrowseWebview>, url: String) -> Result<(), St
     let parsed = parse_safe_external_url(&url)?;
     let guard = state.0.lock().map_err(|error| error.to_string())?;
     match guard.as_ref() {
-        Some(webview) => webview
-            .navigate(parsed)
-            .map_err(|error| error.to_string()),
+        Some(webview) => webview.navigate(parsed).map_err(|error| error.to_string()),
         None => Ok(()),
     }
 }
@@ -314,7 +306,9 @@ fn task_feedback(window: tauri::WebviewWindow) -> Result<(), String> {
     if !window.is_focused().unwrap_or(false) {
         let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
     }
-    window.set_title("Kodo — 任务完成").map_err(|error| error.to_string())
+    window
+        .set_title("Kodo — 任务完成")
+        .map_err(|error| error.to_string())
 }
 
 /// Reveal a project file in the system file manager — same path guards as
@@ -361,7 +355,7 @@ fn load_session(runs: State<'_, Runs>, id: String) -> Result<SessionView, String
     let dir = sessions()?;
     // A killed run must not read as Running forever (and never as Completed).
     // Recovery only stamps `interrupted` — items, changes, and verification stay.
-    if !runs.is_live(&id) {
+    if !runs.has_run(&id) {
         let _ = session::recover_interrupted_session(&dir, &id, session::now());
     }
     load(&dir, &id)
@@ -391,7 +385,7 @@ fn restore_session(id: String) -> Result<Workspace, String> {
 #[tauri::command]
 fn delete_session(runs: State<'_, Runs>, id: String) -> Result<Workspace, String> {
     // A live run still owns the file — deleting under it would orphan the writer.
-    if runs.is_live(&id) {
+    if runs.has_run(&id) {
         return Err("session is running".to_string());
     }
     let dir = sessions()?;
@@ -579,8 +573,7 @@ fn save_providers(providers: Vec<ProviderView>) -> Result<Vec<ProviderView>, Str
 
 /// One server's secret values from `credentials.log`, if stored and parsable.
 fn read_mcp_secrets(creds_path: &Path, id: &str) -> Option<McpSecrets> {
-    settings::read_secret(creds_path, "mcp", id)
-        .and_then(|raw| serde_json::from_str(&raw).ok())
+    settings::read_secret(creds_path, "mcp", id).and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
 /// Per-value mask of every secret half (env / header values).
@@ -651,7 +644,10 @@ fn save_mcp_servers(servers: Vec<McpServerConfig>) -> Result<Vec<McpServerConfig
             }
         }
         if has_secrets(&resolved) {
-            keep.push((config.id.clone(), serde_json::to_string(&resolved).map_err(|e| e.to_string())?));
+            keep.push((
+                config.id.clone(),
+                serde_json::to_string(&resolved).map_err(|e| e.to_string())?,
+            ));
         }
         // The settings copy keeps the keys but drops every secret value.
         metadata.push(with_secret_values(&config, ""));
@@ -752,10 +748,7 @@ fn skill_store(
 ) -> Result<(PathBuf, &'static str), String> {
     match scope {
         None | Some("user") => Ok((skills_dir()?, "user")),
-        Some("project") => Ok((
-            project_skills_dir(project.unwrap_or_default())?,
-            "project",
-        )),
+        Some("project") => Ok((project_skills_dir(project.unwrap_or_default())?, "project")),
         Some(other) => Err(format!("未知技能来源 `{other}`")),
     }
 }
@@ -1006,6 +999,11 @@ fn send_message(
     context: Option<Vec<String>>,
     project: Option<String>,
     agents: Option<Vec<String>>,
+    // Optional budget-family override. `None` or `Some("")` = per-intent
+    // default routing; `Some("summary")` lifts the run to read-only summary
+    // caps. The desktop passes `Some("summary")` only from the "继续本轮"
+    // affordance after a budget-exhausted partial delivery.
+    budget_family: Option<String>,
 ) -> Result<String, String> {
     let dir = sessions()?;
 
@@ -1059,45 +1057,40 @@ fn send_message(
         id
     };
 
-    let found = session::load(&dir, &id).map_err(|error| error.to_string())?;
-    // Empty session project = no project (project-less conversations in both
-    // modes). The session's own mode tag is the source of truth: it was
-    // stamped at creation and never changes, unlike the global setting.
-    let effective_project: Option<std::path::PathBuf> = if found.project.as_os_str().is_empty() {
-        None
-    } else {
-        Some(found.project.clone())
-    };
+    let token = runs
+        .begin(&id)
+        .ok_or("this session already has a run in flight")?;
+    let prepared = (|| -> Result<StartArgs, String> {
+        let found = session::load(&dir, &id).map_err(|error| error.to_string())?;
+        // Empty session project = no project (project-less conversations in both
+        // modes). The session's own mode tag is the source of truth: it was
+        // stamped at creation and never changes, unlike the global setting.
+        let effective_project: Option<std::path::PathBuf> = if found.project.as_os_str().is_empty()
+        {
+            None
+        } else {
+            Some(found.project.clone())
+        };
 
-    let context_paths: Vec<String> = context.unwrap_or_default();
-    // Reject path traversal; absolute paths outside the project are allowed
-    // (e.g. ~/Downloads) when they resolve to an existing regular file.
-    // Without a project only absolute attachment paths are accepted.
-    for path in &context_paths {
-        if path.trim().is_empty() || path.contains("..") {
-            return Err(format!("invalid context path: {path}"));
-        }
-        let candidate = std::path::Path::new(path);
-        if candidate.is_absolute() {
-            if !candidate.is_file() {
-                return Err(format!("context file not found: {path}"));
+        let context_paths: Vec<String> = context.unwrap_or_default();
+        for path in &context_paths {
+            if effective_project.is_none() && !Path::new(path).is_absolute() {
+                return Err("no project: context path must be absolute".into());
             }
-        } else if effective_project.is_none() {
-            return Err(format!("no project: context path must be absolute: {path}"));
+            agent::tools::resolve_pinned_file(
+                effective_project.as_deref().unwrap_or(Path::new(".")),
+                path,
+            )?;
         }
-    }
-    session::record_ask_with_context(&dir, &id, session::now(), &text, &context_paths)
-        .map_err(|error| error.to_string())?;
+        session::record_ask_with_context(&dir, &id, session::now(), &text, &context_paths)
+            .map_err(|error| error.to_string())?;
 
-    run::start(
-        &app,
-        runs.inner(),
-        approvals.inner(),
-        StartArgs {
+        Ok(StartArgs {
             dir,
             id: id.clone(),
             project: effective_project,
             message: text,
+            conversation_history: kodo_shell::turn::conversation_history(&found),
             context: context_paths,
             provider: config.provider,
             permission: config.permission,
@@ -1105,13 +1098,23 @@ fn send_message(
             fallback_to_local: config.fallback_to_local,
             max_output_tokens: config.max_output_tokens,
             extended_thinking: config.extended_thinking,
+            local_trace: config.local_trace,
             mcp_servers: config.mcp_servers,
             // Legacy field: superseded by the chain in `personas`. Kept as
             // `None` so any older log replays still match the struct.
             agent_instructions: None,
             personas,
-        },
-    )?;
+            budget_family,
+        })
+    })();
+    let args = match prepared {
+        Ok(args) => args,
+        Err(error) => {
+            runs.release(&id, &token);
+            return Err(error);
+        }
+    };
+    run::start(&app, runs.inner(), approvals.inner(), args, token)?;
 
     Ok(id)
 }
@@ -1166,20 +1169,8 @@ fn read_context_file(project: String, path: String) -> Result<String, String> {
     if path.trim().is_empty() || path.contains("..") {
         return Err(format!("invalid path: {path}"));
     }
-    let candidate = std::path::Path::new(&path);
-    if candidate.is_absolute() {
-        if !candidate.is_file() {
-            return Err(format!("file not found: {path}"));
-        }
-        let text = std::fs::read_to_string(candidate).map_err(|e| format!("read failed: {e}"))?;
-        if text.bytes().take(2048).any(|b| b == 0) {
-            return Err(format!("binary file refused: {path}"));
-        }
-        return Ok(text.lines().take(40).collect::<Vec<_>>().join("\n"));
-    }
-
     let root = std::path::Path::new(&project);
-    if !root.is_dir() {
+    if !Path::new(&path).is_absolute() && !root.is_dir() {
         return Err(format!("project is not a directory: {project}"));
     }
     let mut manager = kodo_agent::ContextManager::new(
@@ -1188,7 +1179,7 @@ fn read_context_file(project: String, path: String) -> Result<String, String> {
     );
     // Range-read a small preview; agent pins the fuller range later.
     manager
-        .read_range(&path, 1, 40, "context preview")
+        .read_pinned_range(&path, 1, 40, "context preview")
         .map(|span| span.snippet)
 }
 
@@ -1296,7 +1287,7 @@ fn read_project_file(project: String, path: String) -> Result<String, String> {
     if !root.is_dir() {
         return Err(format!("project is not a directory: {project}"));
     }
-    let full = root.join(candidate);
+    let full = kodo_agent::tools::resolve_in_project(root, &path)?;
     if !full.is_file() {
         return Err(format!("file not found: {path}"));
     }
@@ -1325,16 +1316,7 @@ fn probe_context_file(project: String, path: String) -> Result<ContextProbe, Str
     if path.trim().is_empty() || path.contains("..") {
         return Err(format!("invalid path: {path}"));
     }
-    let candidate = Path::new(&path);
-    let full: PathBuf = if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        let root = Path::new(&project);
-        if !root.is_dir() {
-            return Err(format!("project is not a directory: {project}"));
-        }
-        root.join(candidate)
-    };
+    let full = kodo_agent::tools::resolve_pinned_file(Path::new(&project), &path)?;
     if !full.is_file() {
         return Err(format!("file not found: {path}"));
     }
@@ -1387,11 +1369,16 @@ fn respond_approval(
     approvals: State<'_, Approvals>,
     id: String,
     step: u32,
+    run_id: Option<u64>,
     approved: bool,
     session_wide: Option<bool>,
-) {
+) -> Result<(), String> {
     let choice = ApprovalChoice::from_parts(approved, session_wide.unwrap_or(false));
-    approvals.resolve(&id, step, choice);
+    let generation = run_id.ok_or("approval run id is missing or expired")?;
+    if !approvals.resolve(&id, generation, step, choice) {
+        return Err("approval has expired".into());
+    }
+    Ok(())
 }
 
 /// Per-file unified diffs for the turn's Kodo changes (empty when none).

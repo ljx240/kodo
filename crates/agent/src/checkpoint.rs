@@ -88,7 +88,7 @@ pub enum UndoFileState {
 /// Kodo's own state directory under the project root (`.kodo/`).
 ///
 /// Runtime data (changesets, checkpoints, notes) — never user code. Excluded
-/// from git baselines, change tracking, and write approval so it never shows
+/// from git baselines, change tracking, so it never shows
 /// up as a "changed file" or prompts the user for its own bookkeeping.
 pub fn is_kodo_state_path(path: &str) -> bool {
     let path = path.trim();
@@ -123,6 +123,105 @@ impl TurnChangeSet {
         }
     }
 
+    /// Bounded before/after capture for shell and opaque external mutations.
+    pub fn capture_command_files(
+        &self,
+        project: &Path,
+    ) -> Result<BTreeMap<String, FileSnapshot>, String> {
+        fn visit(
+            project: &Path,
+            dir: &Path,
+            out: &mut BTreeMap<String, FileSnapshot>,
+            total: &mut u64,
+        ) -> Result<(), String> {
+            for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let kind = entry.file_type().map_err(|e| e.to_string())?;
+                if kind.is_symlink() {
+                    continue;
+                }
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(project)
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if crate::tools::resolve_in_project(project, &relative).is_err() {
+                    continue;
+                }
+                if kind.is_dir() {
+                    if matches!(
+                        entry.file_name().to_str(),
+                        Some(
+                            "node_modules"
+                                | "target"
+                                | "dist"
+                                | "build"
+                                | ".venv"
+                                | "venv"
+                                | "__pycache__"
+                                | ".cache"
+                        )
+                    ) {
+                        continue;
+                    }
+                    visit(project, &path, out, total)?;
+                } else if kind.is_file() {
+                    let size = entry.metadata().map_err(|e| e.to_string())?.len();
+                    *total += size;
+                    if size > 8 * 1024 * 1024 || *total > 128 * 1024 * 1024 || out.len() >= 20_000 {
+                        return Err(
+                            "command snapshot limit exceeded; use targeted file tools".into()
+                        );
+                    }
+                    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+                    out.insert(
+                        relative.clone(),
+                        FileSnapshot {
+                            path: relative,
+                            content_hash: hash_bytes(&bytes),
+                            existed: true,
+                            bytes: Some(bytes),
+                            pre_existing_git: String::new(),
+                        },
+                    );
+                }
+            }
+            Ok(())
+        }
+        let mut out = BTreeMap::new();
+        visit(project, project, &mut out, &mut 0)?;
+        Ok(out)
+    }
+
+    pub fn record_command_changes(
+        &mut self,
+        project: &Path,
+        before: &BTreeMap<String, FileSnapshot>,
+    ) -> Result<Vec<String>, String> {
+        let after = self.capture_command_files(project)?;
+        let paths: BTreeSet<String> = before.keys().chain(after.keys()).cloned().collect();
+        let mut changed = Vec::new();
+        for path in paths {
+            if before.get(&path).map(|s| &s.content_hash)
+                == after.get(&path).map(|s| &s.content_hash)
+            {
+                continue;
+            }
+            let baseline = before.get(&path).cloned().unwrap_or_else(|| FileSnapshot {
+                path: path.clone(),
+                content_hash: "missing".into(),
+                existed: false,
+                bytes: None,
+                pre_existing_git: String::new(),
+            });
+            self.baselines.entry(path.clone()).or_insert(baseline);
+            self.record_kodo_change(project, &path);
+            changed.push(path);
+        }
+        Ok(changed)
+    }
+
     /// Was this path already dirty before Kodo started?
     pub fn was_pre_existing(&self, path: &str) -> bool {
         self.baseline_dirty.contains(path)
@@ -137,7 +236,9 @@ impl TurnChangeSet {
         if is_kodo_state_path(relative) || self.baselines.contains_key(relative) {
             return;
         }
-        let full = project.join(relative);
+        let Ok(full) = crate::tools::resolve_in_project(project, relative) else {
+            return;
+        };
         let existed = full.is_file();
         let bytes = if existed { fs::read(&full).ok() } else { None };
         let content_hash = bytes
@@ -164,9 +265,9 @@ impl TurnChangeSet {
     /// Writes under `.kodo/` are Kodo's own state and are never tracked as
     /// turn changes (no diff, no undo target, no changed-file row).
     pub fn record_kodo_change(&mut self, project: &Path, relative: &str) {
-        if is_kodo_state_path(relative) {
+        let Ok(full) = crate::tools::resolve_in_project(project, relative) else {
             return;
-        }
+        };
         if !self.baselines.contains_key(relative) {
             self.snapshot_before(project, relative);
         }
@@ -177,7 +278,7 @@ impl TurnChangeSet {
             .and_then(|s| s.bytes.clone())
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default();
-        let after_bytes = fs::read(project.join(relative)).ok();
+        let after_bytes = fs::read(full).ok();
         let after = after_bytes
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -285,7 +386,9 @@ impl TurnChangeSet {
         let Some(after) = self.afters.get(path) else {
             return UndoFileState::Missing;
         };
-        let full = project.join(path);
+        let Ok(full) = crate::tools::resolve_in_project(project, path) else {
+            return UndoFileState::Diverged;
+        };
         let Ok(current) = fs::read(&full) else {
             if !after.existed {
                 return UndoFileState::AlreadyBaseline;
@@ -335,7 +438,8 @@ impl TurnChangeSet {
                 format!("missing after snapshot for {path}"),
             ));
         };
-        let full = project.join(path);
+        let full = crate::tools::resolve_in_project(project, path)
+            .map_err(|e| conflict(UndoConflictReason::IoError, e))?;
         match self.undo_file_state(project, path) {
             UndoFileState::AlreadyBaseline => Ok(()),
             UndoFileState::Missing if !baseline.existed => Ok(()),
@@ -1241,5 +1345,34 @@ mod tests {
         );
         assert!(merged.kodo_touched.is_empty());
         assert!(merged.baselines.is_empty());
+    }
+    #[test]
+    fn opaque_changes_preserve_user_baseline_and_refuse_undo_after_concurrent_edit() {
+        let root = std::env::temp_dir().join(format!("kodo-command-delta-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("user.txt"), "user baseline\n").unwrap();
+        fs::write(root.join("untouched.txt"), "user-only").unwrap();
+        let mut changes = TurnChangeSet::default();
+        changes.baseline_dirty.insert("user.txt".into());
+        let before = changes.capture_command_files(&root).unwrap();
+        fs::write(root.join("user.txt"), "kodo result\n").unwrap();
+        fs::write(root.join("created.txt"), "created").unwrap();
+        let changed = changes.record_command_changes(&root, &before).unwrap();
+        assert_eq!(changed, ["created.txt", "user.txt"]);
+        assert!(changes.was_pre_existing("user.txt"));
+        assert!(!changes.kodo_touched.contains("untouched.txt"));
+        fs::write(root.join("user.txt"), "later user edit\n").unwrap();
+        let report = changes.undo_kodo_changes(&root).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("user.txt")).unwrap(),
+            "later user edit\n"
+        );
+        assert!(!report.conflicts.is_empty());
+        assert!(!root.join("created.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("untouched.txt")).unwrap(),
+            "user-only"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

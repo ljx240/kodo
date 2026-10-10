@@ -843,7 +843,11 @@ fn fake_text(provider: &Provider, model_id: &str) -> Result<ChatResponse, Provid
         output_tokens: 0,
         native_tool_calls: Vec::new(),
         model_id: model_id.to_owned(),
-        finish_reason: "stop".to_owned(),
+        finish_reason: payload
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("stop")
+            .to_owned(),
     })
 }
 
@@ -1578,12 +1582,7 @@ impl OpenAiStreamState {
         let tail = self.think.finish();
         if !tail.is_empty() {
             self.text.push_str(&tail);
-            emit_or_cancel(
-                on_event,
-                ProviderEvent::TextDelta {
-                    text: tail,
-                },
-            )?;
+            emit_or_cancel(on_event, ProviderEvent::TextDelta { text: tail })?;
         }
         if self.think.saw_think() {
             self.saw_reasoning = true;
@@ -1677,12 +1676,7 @@ fn process_openai_sse_data(
         let visible = state.think.push(delta);
         if !visible.is_empty() {
             state.text.push_str(&visible);
-            emit_or_cancel(
-                on_event,
-                ProviderEvent::TextDelta {
-                    text: visible,
-                },
-            )?;
+            emit_or_cancel(on_event, ProviderEvent::TextDelta { text: visible })?;
         }
     }
     // Reasoning deltas (DeepSeek/MiMo-style `reasoning_content`) are tracked
@@ -2144,12 +2138,7 @@ impl AnthropicStreamState {
         let tail = self.think.finish();
         if !tail.is_empty() {
             self.text.push_str(&tail);
-            emit_or_cancel(
-                on_event,
-                ProviderEvent::TextDelta {
-                    text: tail,
-                },
-            )?;
+            emit_or_cancel(on_event, ProviderEvent::TextDelta { text: tail })?;
         }
         if let Some(tool) = self.pending_tool.take() {
             emit_or_cancel(
@@ -2244,12 +2233,7 @@ fn process_anthropic_sse_data(
                 let visible = state.think.push(delta);
                 if !visible.is_empty() {
                     state.text.push_str(&visible);
-                    emit_or_cancel(
-                        on_event,
-                        ProviderEvent::TextDelta {
-                            text: visible,
-                        },
-                    )?;
+                    emit_or_cancel(on_event, ProviderEvent::TextDelta { text: visible })?;
                 }
             }
             if let Some(partial) = value
@@ -3719,11 +3703,15 @@ mod tests {
             "data: [DONE]\n\n",
         );
         let mut events = Vec::new();
-        let result =
-            drive_openai_sse_chunks(&[chunk.as_bytes()], "mimo-v2.6-flash", &|| true, &mut |ev| {
+        let result = drive_openai_sse_chunks(
+            &[chunk.as_bytes()],
+            "mimo-v2.6-flash",
+            &|| true,
+            &mut |ev| {
                 events.push(ev);
                 true
-            });
+            },
+        );
         assert!(result.is_ok(), "{result:?}");
         let response = result.unwrap();
         assert_eq!(response.text, "final answer");
@@ -3753,21 +3741,23 @@ mod tests {
             "data: [DONE]\n\n",
         );
         let mut events = Vec::new();
-        let result =
-            drive_openai_sse_chunks(&[chunk.as_bytes()], "mimo-v2.6-flash", &|| true, &mut |ev| {
+        let result = drive_openai_sse_chunks(
+            &[chunk.as_bytes()],
+            "mimo-v2.6-flash",
+            &|| true,
+            &mut |ev| {
                 events.push(ev);
                 true
-            });
+            },
+        );
         assert!(result.is_ok(), "{result:?}");
         let response = result.unwrap();
         assert_eq!(response.text, "", "no content ever streamed");
         assert_eq!(response.finish_reason, "length");
         assert_eq!(collect_text(&events), "");
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, ProviderEvent::ReasoningSeen))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::ReasoningSeen)));
     }
 
     #[test]

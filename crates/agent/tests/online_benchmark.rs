@@ -32,6 +32,7 @@ fn online_read_only_smoke() {
     let request = RunRequest {
         project: Some(project.clone()),
         message: "What is this repository? One sentence.".into(),
+        conversation_history: Vec::new(),
         pinned_context: vec![],
         provider: Some(provider),
         permission: Permission::Auto,
@@ -39,11 +40,13 @@ fn online_read_only_smoke() {
         fallback_to_local: true,
         max_output_tokens: 256,
         extended_thinking: false,
+        local_trace: false,
         session_id: None,
         user_skills_dir: None,
         mcp_servers: Vec::new(),
         agent_instructions: None,
         personas: Vec::new(),
+        budget_family: None,
     };
 
     let mut answer = String::new();
@@ -85,7 +88,10 @@ fn websearch_live_returns_hits() {
         !first.url.is_empty(),
         "first hit url must be non-empty (after the uddg unwrap)"
     );
-    assert!(!first.snippet.is_empty(), "first hit snippet must be non-empty");
+    assert!(
+        !first.snippet.is_empty(),
+        "first hit snippet must be non-empty"
+    );
     eprintln!(
         "live websearch returned {} hit(s); first title = {:?}",
         hits.len(),

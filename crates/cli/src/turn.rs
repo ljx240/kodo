@@ -116,8 +116,14 @@ impl TurnContext {
             return Ok(id.clone());
         }
         let title = session_title(message);
-        let id = session::open(&self.session_dir, &self.project, &title, session::now(), session::Mode::Code)
-            .map_err(|error| format!("创建会话失败：{error}"))?;
+        let id = session::open(
+            &self.session_dir,
+            &self.project,
+            &title,
+            session::now(),
+            session::Mode::Code,
+        )
+        .map_err(|error| format!("创建会话失败：{error}"))?;
         self.session_id = Some(id.clone());
         Ok(id)
     }
@@ -129,6 +135,8 @@ impl TurnContext {
         self.renderer.reset_turn();
 
         let session_id = self.ensure_session(message)?;
+        let prior_session = session::load(&self.session_dir, &session_id)
+            .map_err(|error| format!("读取会话失败：{error}"))?;
         session::record_ask_with_context(
             &self.session_dir,
             &session_id,
@@ -141,6 +149,7 @@ impl TurnContext {
         let request = RunRequest {
             project: Some(self.project.clone()),
             message: message.to_owned(),
+            conversation_history: kodo_shell::turn::conversation_history(&prior_session),
             pinned_context: Vec::new(),
             provider: self.config.provider.clone(),
             permission: self.permission,
@@ -148,14 +157,17 @@ impl TurnContext {
             fallback_to_local: self.config.fallback_to_local,
             max_output_tokens: self.config.max_output_tokens,
             extended_thinking: self.config.extended_thinking,
+            local_trace: self.config.local_trace,
             session_id: Some(session_id.clone()),
             user_skills_dir: None,
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: Vec::new(),
+            budget_family: None,
         };
 
-        let mut logger = TurnLogger::new(self.session_dir.clone(), session_id);
+        let mut logger = TurnLogger::new(self.session_dir.clone(), session_id)
+            .with_capture(self.config.local_trace);
         let result = {
             let logger_ref = &mut logger;
             let renderer = &mut self.renderer;
@@ -219,6 +231,7 @@ mod tests {
             fallback_to_local: true,
             max_output_tokens: 4096,
             extended_thinking: false,
+            local_trace: false,
             mode: kodo_agent::AgentMode::Code,
             mcp_servers: Vec::new(),
         };
@@ -263,10 +276,14 @@ mod tests {
         fs::create_dir_all(&proj_a).expect("proj-a");
         fs::create_dir_all(&proj_b).expect("proj-b");
 
-        let id_old = session::open(&sessions, &proj_a, "old", 100, session::Mode::Code).expect("old");
-        let id_new = session::open(&sessions, &proj_a, "new", 200, session::Mode::Code).expect("new");
-        let id_other = session::open(&sessions, &proj_b, "other", 300, session::Mode::Code).expect("other");
-        let id_arch = session::open(&sessions, &proj_a, "arch", 400, session::Mode::Code).expect("arch");
+        let id_old =
+            session::open(&sessions, &proj_a, "old", 100, session::Mode::Code).expect("old");
+        let id_new =
+            session::open(&sessions, &proj_a, "new", 200, session::Mode::Code).expect("new");
+        let id_other =
+            session::open(&sessions, &proj_b, "other", 300, session::Mode::Code).expect("other");
+        let id_arch =
+            session::open(&sessions, &proj_a, "arch", 400, session::Mode::Code).expect("arch");
         session::archive(&sessions, &id_arch).expect("archive");
 
         let mut ctx = temp_ctx(proj_a.clone(), sessions.clone());

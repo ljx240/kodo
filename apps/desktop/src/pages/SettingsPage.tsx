@@ -40,9 +40,9 @@ import { useSetting, useSettingBool } from "../data/useSetting";
 /** The shared switch markup: `Toggle` binds it to a settings key; `Field` and
  *  `Switch` live in `shell/controls` because the MCP page's editor uses the
  *  same settings-row geometry. */
-function Toggle({ settingKey, fallback = true }: { settingKey: string; fallback?: boolean }) {
+function Toggle({ settingKey, label, fallback = true }: { settingKey: string; label: string; fallback?: boolean }) {
   const [on, setOn] = useSettingBool(settingKey, fallback);
-  return <Switch checked={on} onChange={() => setOn(!on)} />;
+  return <Switch checked={on} label={label} onChange={() => setOn(!on)} />;
 }
 
 function SwitchRow({ label, hint, trailing, settingKey }: { label: string; hint: string; trailing?: boolean; settingKey: string }) {
@@ -56,12 +56,12 @@ function SwitchRow({ label, hint, trailing, settingKey }: { label: string; hint:
     <div className="setting-row">
       {text}
       <div className="setting-control">
-        <Toggle settingKey={settingKey} />
+        <Toggle settingKey={settingKey} label={label} />
       </div>
     </div>
   ) : (
     <div className="setting-row">
-      <Toggle settingKey={settingKey} />
+      <Toggle settingKey={settingKey} label={label} />
       {text}
     </div>
   );
@@ -207,11 +207,11 @@ export function SettingsPage({ model, onSelectModel, onProvidersSaved, onOpenArc
         <div className="scroll">
           <div className="page-inner page-inner--wide">
             {noMatch ? (
-              <section className="settings-detail">
+              <section className="settings-detail" data-category={active}>
                 <p className="empty-note">{T.page.settings.noMatchesHint(query.trim())}</p>
               </section>
             ) : (
-              <section className="settings-detail">
+              <section className="settings-detail" data-category={active}>
                 <header className="settings-section-head">
                   <span className="settings-card-icon">{section.icon}</span>
                   <div>
@@ -238,6 +238,7 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [edit, setEdit] = useState<ProviderEditMode>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   /** Row-level connectivity verdict — which row it belongs to, and the text. */
   const [probe, setProbe] = useState<{
     id: string;
@@ -334,22 +335,39 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
               )}
             </div>
             <div className="provider-row-actions">
-              <button type="button" className="icon-btn icon-btn--sm" aria-label={T.page.settings.rows.edit} onClick={() => setEdit({ mode: "edit", index })}>
+              <button
+                type="button"
+                className="icon-btn icon-btn--sm"
+                aria-label={`${p.name} ${T.page.settings.rows.edit}`}
+                title={`${p.name} ${T.page.settings.rows.edit}`}
+                onClick={() => {
+                  setConfirmDelete(null);
+                  setEdit({ mode: "edit", index });
+                }}
+              >
                 <Pencil size={14} strokeWidth={1.8} />
               </button>
               <button
                 type="button"
-                className="icon-btn icon-btn--sm icon-btn--danger"
-                aria-label={T.page.settings.rows.delete}
-                onClick={() => void update(providers.filter((_, i) => i !== index))}
+                className={`icon-btn icon-btn--sm icon-btn--danger${confirmDelete === p.id ? " icon-btn--armed" : ""}`}
+                aria-label={`${p.name} ${confirmDelete === p.id ? T.skill.deleteConfirm : T.page.settings.rows.delete}`}
+                title={`${p.name} ${confirmDelete === p.id ? T.skill.deleteConfirm : T.page.settings.rows.delete}`}
+                onClick={() => {
+                  if (confirmDelete !== p.id) {
+                    setConfirmDelete(p.id);
+                    return;
+                  }
+                  setConfirmDelete(null);
+                  void update(providers.filter((_, i) => i !== index));
+                }}
               >
-                <Trash2 size={14} strokeWidth={1.8} />
+                {confirmDelete === p.id ? T.skill.deleteConfirm : <Trash2 size={14} strokeWidth={1.8} />}
               </button>
               <button
                 type="button"
                 className="icon-btn icon-btn--sm"
-                aria-label={T.page.settings.provider.test}
-                title={T.page.settings.provider.test}
+                aria-label={`${p.name} ${T.page.settings.provider.test}`}
+                title={`${p.name} ${T.page.settings.provider.test}`}
                 data-testid="provider-test"
                 disabled={probe?.id === p.id && probe.status === "loading"}
                 onClick={() => runTest(p)}
@@ -361,7 +379,7 @@ function ProviderListSection({ onSaved }: { onSaved?: (providers: ProviderConfig
         );
       })}
 
-      <button type="button" className="btn" style={{ marginTop: 8 }} onClick={() => setEdit({ mode: "add" })}>
+      <button type="button" className="btn provider-add" onClick={() => { setConfirmDelete(null); setEdit({ mode: "add" }); }}>
         <Plus size={15} strokeWidth={1.9} />
         <span>{T.page.settings.rows.addProvider}</span>
       </button>
@@ -515,7 +533,7 @@ function ProviderEditor({
   return (
     <div className="provider-editor">
       <Field label={T.page.settings.rows.template} hintBelow wide>
-        <select className="select" value={templateId} onChange={(e) => onTemplateChange(e.target.value)}>
+        <select className="select" aria-label={T.page.settings.rows.template} value={templateId} onChange={(e) => onTemplateChange(e.target.value)}>
           {PROVIDER_TEMPLATES.map((t) => (
             <option key={t.id} value={t.id}>
               {t.name}
@@ -524,7 +542,7 @@ function ProviderEditor({
         </select>
       </Field>
       <Field label={T.page.settings.rows.displayName} wide>
-        <input className="input" placeholder={tmpl.name} value={name} onChange={(e) => setName(e.target.value)} />
+        <input className="input" aria-label={T.page.settings.rows.displayName} placeholder={tmpl.name} value={name} onChange={(e) => setName(e.target.value)} />
       </Field>
       <Field
         label={T.page.settings.rows.apiKey}
@@ -535,6 +553,8 @@ function ProviderEditor({
         <input
           className="input"
           type="password"
+          aria-label={T.page.settings.rows.apiKey}
+          autoComplete="new-password"
           placeholder={initial?.apiKey || tmpl.keyPlaceholder}
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
@@ -542,7 +562,7 @@ function ProviderEditor({
       </Field>
       {tmpl.customEndpoint && (
         <Field label={T.page.settings.rows.baseUrl} wide>
-          <input className="input" placeholder="https://api.example.com/v1" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
+          <input className="input" aria-label={T.page.settings.rows.baseUrl} spellCheck={false} placeholder="https://api.example.com/v1" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
         </Field>
       )}
       {/* Stacked like the storage rows: a fetched list needs the full pane
@@ -555,7 +575,7 @@ function ProviderEditor({
                 key={m.model_id}
                 className={`model-chip${m.model_id.toLowerCase() === modelId.toLowerCase() ? " model-chip--active" : ""}`}
               >
-                <button type="button" className="model-chip-label" onClick={() => selectModel(m)}>
+                <button type="button" className="model-chip-label" aria-pressed={m.model_id.toLowerCase() === modelId.toLowerCase()} title={`${m.display_name} · ${m.model_id}`} onClick={() => selectModel(m)}>
                   {/* Fetched lists usually repeat the id as the name — render one span. */}
                   {m.display_name.toLowerCase() === m.model_id.toLowerCase() ? (
                     <span className="model-chip-id">{m.model_id}</span>
@@ -598,6 +618,7 @@ function ProviderEditor({
             <input
               className="input"
               placeholder={T.page.settings.provider.addPlaceholder}
+              aria-label={T.page.settings.provider.addPlaceholder}
               value={pending}
               onChange={(e) => setPending(e.target.value)}
               onKeyDown={(e) => {
@@ -610,6 +631,7 @@ function ProviderEditor({
             <button
               type="button"
               className="btn"
+              disabled={!pending.trim()}
               onClick={() => {
                 addModel({ display_name: pending, model_id: pending });
                 setPending("");
@@ -636,7 +658,7 @@ function ProviderEditor({
         </div>
       </Field>
       {/* No extra margin: the editor's column gap already spaces this row. */}
-      <div className="provider-row-actions">
+      <div className="provider-editor-actions">
         <button type="button" className="btn" onClick={onCancel}>
           {T.page.settings.rows.cancel}
         </button>
@@ -715,11 +737,12 @@ function AppearanceBody() {
       >
         <select className="select" value={theme} onChange={(e) => setTheme(e.target.value)} aria-label={T.page.settings.rows.theme}>
           <option value="light">{T.page.settings.options.light}</option>
+          <option value="dark">深色</option>
           <option value="system">{T.page.settings.options.system}</option>
         </select>
       </Field>
       <Field label={T.page.settings.rows.density} hint={T.page.settings.rows.densityHint} hintBelow wide>
-        <select className="select" value={density} onChange={(e) => setDensity(e.target.value)}>
+        <select className="select" value={density} onChange={(e) => setDensity(e.target.value)} aria-label={T.page.settings.rows.density}>
           <option value="compact">{T.page.settings.options.compact}</option>
           <option value="comfortable">{T.page.settings.options.comfortable}</option>
         </select>
@@ -800,6 +823,12 @@ function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m
         trailing
         settingKey="extended-thinking"
       />
+      <SwitchRow
+        label="本地详细轨迹"
+        hint="默认关闭。启用后，提示词、工具参数及文件正文经脱敏仅保存到本机；不保存私有思考正文。每轮上限 64 MiB / 200 个文件。"
+        trailing
+        settingKey="local-detailed-traces"
+      />
       <Field label={T.page.settings.rows.maxOutputTokens} hint={T.page.settings.rows.maxTokensHint} hintBelow wide>
         <MaxTokens />
       </Field>
@@ -810,7 +839,7 @@ function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m
 function FallbackSelect() {
   const [value, setValue] = useSetting("fallback-behavior", "next");
   return (
-    <select className="select" value={value} onChange={(e) => setValue(e.target.value)}>
+    <select className="select" value={value} onChange={(e) => setValue(e.target.value)} aria-label={T.page.settings.rows.fallback}>
       <option value="next">{T.page.settings.options.tryNext}</option>
       <option value="fail">{T.page.settings.options.stopError}</option>
     </select>
@@ -819,7 +848,7 @@ function FallbackSelect() {
 
 function MaxTokens() {
   const [value, setValue] = useSetting("max-output-tokens", "4096");
-  return <input className="input" value={value} onChange={(e) => setValue(e.target.value)} />;
+  return <input className="input" inputMode="numeric" aria-label={T.page.settings.rows.maxOutputTokens} value={value} onChange={(e) => setValue(e.target.value)} />;
 }
 
 function GeneralBody({ model, onSelectModel }: { model: string; onSelectModel: (m: string) => void }) {

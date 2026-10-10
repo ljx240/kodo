@@ -158,6 +158,8 @@ export type Reply = {
   final: string | null;
   checks: string[];
   changes: ChangeDto[];
+  /** Successful document reads after the latest write; not semantic verification. */
+  documentReadbacks: string[];
   /** The change totals after path-merge. */
   files: number;
   added: number;
@@ -180,7 +182,38 @@ export type Reply = {
   verify: VerifyCounts;
   /** Consecutive same-root-cause failures merged into one card. */
   failureGroups: FailureGroup[];
+  /** Backend-tagged failure cause on the final answer (`budget_exhausted` /
+   *  `acceptance_unmet` / `unrecoverable` / `provider_error` / `unknown`).
+   *  Null while the run is live or when the answer didn't end in a failure
+   *  — the UI keys the "继续本轮" affordance off this so a budget trip
+   *  lights the button even when no file was written (delivery == "failed"). */
+  failureReason: string | null;
 };
+
+/** A completed ask_user step pauses the task until the next user reply. */
+export function isWaitingForReply(reply: Reply | null): boolean {
+  return reply?.status.delivery === "blocked" && reply.steps.some(
+    (step) => step.type === "thinking" && step.status === "done" && step.diagnostics?.startsWith("ask_user · "),
+  );
+}
+
+export function isDocumentPath(path: string): boolean {
+  return /\.(?:md|mdx|rst|txt|adoc)$/i.test(path) || /(?:^|\/)(?:README|CHANGELOG)$/i.test(path);
+}
+
+function documentReadbacks(items: ItemDto[]): string[] {
+  const readAfterWrite = new Map<string, boolean>();
+  for (const item of items) {
+    if (item.kind === "fileChange" && item.status === "done") {
+      for (const change of item.changes) {
+        if (isDocumentPath(change.path)) readAfterWrite.set(change.path, false);
+      }
+    } else if (item.kind === "fileRead" && readAfterWrite.has(item.path)) {
+      readAfterWrite.set(item.path, item.status === "done");
+    }
+  }
+  return [...readAfterWrite].filter(([, read]) => read).map(([path]) => path);
+}
 
 /**
  * Folds a turn into the pieces the reply renders.
@@ -229,12 +262,14 @@ export function toReply(turn: TurnDto, running: boolean, awaitingApproval = fals
   return {
     steps,
     plain: answer?.kind === "agentMessage" ? Boolean(answer.plain) : false,
+    failureReason: answer?.kind === "agentMessage" ? (answer.failureReason ?? null) : null,
     phases: groupPhases(steps),
     status,
     final: answer?.kind === "agentMessage" ? sanitizeAssistantText(answer.text) : null,
     checks: answer?.kind === "agentMessage" ? answer.checks : [],
     ...totals(changes),
     changes,
+    documentReadbacks: documentReadbacks(turn.items),
     interrupted:
       !running &&
       !turn.done &&
@@ -283,10 +318,18 @@ export function runStatus(
 
   let delivery: DeliveryStatus | null = null;
   let verification: VerificationStatus = "not_run";
+  let explicitReady = false;
+  let verificationReported = false;
   for (const item of items) {
     if (item.kind === "agentMessage") {
-      if (item.delivery) delivery = item.delivery as DeliveryStatus;
-      if (item.verification) verification = item.verification as VerificationStatus;
+      if (item.delivery) {
+        delivery = item.delivery as DeliveryStatus;
+        explicitReady = item.delivery === "ready";
+      }
+      if (item.verification) {
+        verification = item.verification as VerificationStatus;
+        verificationReported = true;
+      }
       // A legacy answer carries no delivery code; its existence is the delivery.
       if (!delivery && !turn.error) delivery = "ready";
     }
@@ -294,13 +337,13 @@ export function runStatus(
   if (!delivery) delivery = turn.error ? "failed" : wroteFiles ? "partial" : "failed";
 
   const counts = verifyCounts(items.map(toStep));
-  if (verification === "not_run") {
+  if (verification === "not_run" && !verificationReported) {
     if (counts.blocked > 0) verification = "blocked";
     else if (counts.failed > 0) verification = "failed";
     else if (counts.passed > 0) verification = "passed";
   }
 
-  return { lifecycle, delivery, verification, outcome: outcomeFor(lifecycle, delivery, verification, wroteFiles) };
+  return { lifecycle, delivery, verification, outcome: outcomeFor(lifecycle, delivery, verification, wroteFiles, explicitReady) };
 }
 
 export function outcomeFor(
@@ -308,6 +351,7 @@ export function outcomeFor(
   delivery: DeliveryStatus,
   verification: VerificationStatus,
   wroteFiles: boolean,
+  explicitReady = false,
 ): OutcomeStatus {
   if (lifecycle === "stopped") return "stopped";
   if (lifecycle === "interrupted") return "interrupted";
@@ -318,7 +362,7 @@ export function outcomeFor(
   if (verification === "blocked") return "blocked_by_environment";
   if (delivery === "failed") return "failed";
   if (delivery === "ready" && verification === "passed") return "completed";
-  if (delivery === "ready" && verification === "not_run" && !wroteFiles) return "completed";
+  if (delivery === "ready" && verification === "not_run" && (!wroteFiles || explicitReady)) return "completed";
   return "partially_completed";
 }
 

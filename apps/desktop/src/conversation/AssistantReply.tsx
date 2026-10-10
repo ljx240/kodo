@@ -6,7 +6,7 @@ import { AgentTrace } from "./AgentTrace";
 import { ChangedFilesSummary } from "./ChangedFilesSummary";
 import { Markdown } from "./Markdown";
 import type { FailureGroup, Reply } from "./trace";
-import { formatCompactToast } from "./trace";
+import { formatCompactToast, isDocumentPath, isWaitingForReply } from "./trace";
 
 type Props = {
   reply: Reply;
@@ -24,6 +24,9 @@ type Props = {
   waitingApproval?: boolean;
   /** One-shot toast for a compaction pass; auto-clears after the call. */
   compactToast?: { dropped: number; freedPct: number } | null;
+  /** One-shot toast for an adaptive budget lift (mid-turn cap raise).
+   *  Cleared by the agent after the lift event has been shown. */
+  budgetLiftToast?: { detail: string } | null;
   /** One line per provider switch observed on the streaming path. */
   failovers?: string[];
   onViewFiles: () => void;
@@ -31,6 +34,9 @@ type Props = {
   onRegenerate?: (() => void) | null;
   /** Re-run after fixing the environment (missing tools, permissions). */
   onRetryEnvironment?: (() => void) | null;
+  /** Start a recovery run with extended budget and the same ask, retaining
+   *  existing files and conversation history after budget exhaustion. */
+  onContinueTurn?: (() => void) | null;
   /** Open the Response Trace page for this run (查看响应轨迹). */
   onOpenLogs?: (() => void) | null;
   /** Unified diffs for file-change steps. */
@@ -66,10 +72,12 @@ export function AssistantReply({
   elapsed = null,
   waitingApproval = false,
   compactToast = null,
+  budgetLiftToast = null,
   failovers = [],
   onViewFiles,
   onRegenerate = null,
   onRetryEnvironment = null,
+  onContinueTurn = null,
   onOpenLogs = null,
   fileDiffs = null,
   onUndoChanges = null,
@@ -120,16 +128,23 @@ export function AssistantReply({
   const { summary, rest } = summarizeAnswer(finalText);
   const answerBody = answerExpanded ? finalText : summary;
 
-  const retry = onRetryEnvironment ?? onRegenerate;
-  const outcomeWord = T.outcome[reply.status.outcome];
-  const axesLine = `${T.reply.answerState(T.delivery[reply.status.delivery])} · ${T.reply.verifyState(
-    T.verification[reply.status.verification],
+  const budgetFailure = reply.failureReason === "budget_exhausted";
+  const environmentBlocked = reply.status.verification === "blocked" || reply.failureGroups.some(
+    (group) => ["command_not_found", "permission_denied", "timeout"].includes(group.cls),
+  );
+  const retry = !budgetFailure && environmentBlocked ? (onRetryEnvironment ?? onRegenerate) : null;
+  const documentsOnly = reply.changes.length > 0 && reply.changes.every((change) => isDocumentPath(change.path));
+  const pendingQuestion = isWaitingForReply(reply);
+  const outcomeWord = pendingQuestion ? T.reply.pendingQuestion : T.outcome[reply.status.outcome];
+  const axesLine = `${documentsOnly ? T.reply.documentState[reply.status.delivery] : T.reply.answerState(T.delivery[reply.status.delivery])} · ${T.reply.verifyState(
+    documentsOnly && reply.status.verification === "not_run" ? T.reply.commandVerificationNotRun : T.verification[reply.status.verification],
   )}`;
   // No speaker header (2026-09-30): left/right alignment carries who spoke.
   // Copy/regenerate/trace live in a quiet row at the reply's bottom instead.
   const canCopy = !running && Boolean(reply.final);
   const canRegenerate =
     !running &&
+    !pendingQuestion &&
     Boolean(onRegenerate) &&
     Boolean(reply.final || reply.stopped || reply.error || reply.interrupted);
 
@@ -154,6 +169,12 @@ export function AssistantReply({
       {compactToast ? (
         <p className="reply-compact-toast" data-testid="compact-toast" aria-live="polite">
           {formatCompactToast(compactToast.dropped, compactToast.freedPct)}
+        </p>
+      ) : null}
+
+      {budgetLiftToast ? (
+        <p className="reply-compact-toast reply-budget-lift-toast" data-testid="budget-lift-toast" aria-live="polite">
+          {budgetLiftToast.detail}
         </p>
       ) : null}
 
@@ -193,6 +214,13 @@ export function AssistantReply({
           no conclusion card, no axes line, no next-step chrome. */}
       {showFinal && reply.plain && (
         <div className="final" data-testid="answer-plain">
+          {!running && reply.status.outcome !== "completed" && (
+            <div className="reply-outcome">
+              <span className={`status-pill status-pill--${reply.status.outcome}`} data-testid="final-outcome-pill">
+                {outcomeWord}
+              </span>
+            </div>
+          )}
           <Markdown text={finalText} onOpenPath={onOpenPath} />
         </div>
       )}
@@ -201,7 +229,7 @@ export function AssistantReply({
         <div className="final">
           {/* 1. 结论 — the high-level result and the two independent axes. */}
           <section className="answer-conclusion" data-testid="answer-conclusion">
-            <h3 className="answer-section-head">{T.reply.conclusion}</h3>
+            {!(documentsOnly && reply.status.outcome === "completed") && <h3 className="answer-section-head">{T.reply.conclusion}</h3>}
             <div className="answer-conclusion-row">
               <span
                 className={`status-pill status-pill--${reply.status.outcome}`}
@@ -215,9 +243,9 @@ export function AssistantReply({
             </div>
           </section>
 
-          {/* 2. 本次完成 — long answers read as a summary first. */}
+          {/* 2. Result — failures and pending questions never claim completion. */}
           <section className="answer-body" data-testid="answer-body">
-            <h3 className="answer-section-head">{T.reply.doneThisTurn}</h3>
+            <h3 className="answer-section-head">{documentsOnly && reply.status.outcome === "completed" ? T.reply.documentResult : reply.status.outcome === "completed" ? T.reply.doneThisTurn : T.reply.resultThisTurn}</h3>
             <Markdown text={answerBody} onOpenPath={onOpenPath} />
             {rest && (
               <button
@@ -248,6 +276,7 @@ export function AssistantReply({
               added={reply.added}
               removed={reply.removed}
               changes={reply.changes}
+              readBackPaths={reply.documentReadbacks}
               preExisting={preExisting}
               conflicts={conflicts}
               onView={onViewFiles}
@@ -259,12 +288,20 @@ export function AssistantReply({
           )}
 
           {/* 5. 下一步 */}
-          <section className="answer-next" data-testid="answer-next">
+          {!pendingQuestion && (onContinueTurn || retry) && <section className="answer-next" data-testid="answer-next">
             <h3 className="answer-section-head">{T.reply.nextSteps}</h3>
             <div className="answer-next-actions">
-              <button type="button" className="btn btn--sm" data-testid="next-review" onClick={onViewFiles}>
-                {T.action.review}
-              </button>
+              {onContinueTurn && (
+                <button
+                  type="button"
+                  className="btn btn--sm btn--primary"
+                  data-testid="next-continue"
+                  title={T.action.continueTurnHint}
+                  onClick={() => onContinueTurn?.()}
+                >
+                  {T.action.continueTurn}
+                </button>
+              )}
               {retry && (
                 <button
                   type="button"
@@ -276,7 +313,7 @@ export function AssistantReply({
                 </button>
               )}
             </div>
-          </section>
+          </section>}
         </div>
       )}
 
@@ -357,8 +394,12 @@ function VerifyCard({
   onRegenerate: (() => void) | null;
 }) {
   const { verify, checks, failureGroups, status } = reply;
-  const hasContent = checks.length > 0 || failureGroups.length > 0 || verify.passed > 0 || verify.failed > 0 || verify.blocked > 0;
+  // Model checklist prose does not establish that verification ran.
+  const hasContent = failureGroups.length > 0 || verify.passed > 0 || verify.failed > 0 || verify.blocked > 0;
   if (!hasContent) return null;
+  const normalize = (text: string) => text.replace(/[`*_]/g, "").replace(/\s+/g, " ").trim();
+  const answerLines = new Set((reply.final ?? "").split("\n").map((line) => normalize(line.replace(/^\s*[-*+]\s+(?:\[[xX ]\]\s*)?/, ""))));
+  const visibleChecks = [...new Set(checks)].filter((check) => normalize(check) && !answerLines.has(normalize(check)));
 
   return (
     <section className="verify-card" data-testid="verify-card" aria-label={T.reply.verificationCard}>
@@ -376,10 +417,10 @@ function VerifyCard({
         {T.verify.summary(verify.passed, verify.failed, verify.blocked)}
       </p>
 
-      {checks.length > 0 && (
+      {visibleChecks.length > 0 && (
         <ul className="checks-list" data-testid="checks-list">
-          {checks.map((check) => (
-            <li key={check}>{check}</li>
+          {visibleChecks.map((check) => (
+            <li key={check}><Markdown text={check} /></li>
           ))}
         </ul>
       )}

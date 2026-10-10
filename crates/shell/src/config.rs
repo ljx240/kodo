@@ -22,6 +22,7 @@ pub struct ShellConfig {
     pub fallback_to_local: bool,
     pub max_output_tokens: u32,
     pub extended_thinking: bool,
+    pub local_trace: bool,
     /// Enabled and disabled servers alike; `run()` connects only the enabled
     /// ones. Secret values are merged in from `credentials.log`.
     pub mcp_servers: Vec<McpServerConfig>,
@@ -54,6 +55,18 @@ impl ShellConfig {
                 .and_then(|path| settings::read(path, key))
         };
 
+        Self::from_sources(
+            overrides,
+            &read_setting,
+            settings::credentials_path().as_deref(),
+        )
+    }
+
+    fn from_sources(
+        overrides: Overrides,
+        read_setting: &dyn Fn(&str) -> Option<String>,
+        creds: Option<&std::path::Path>,
+    ) -> Self {
         let permission = overrides
             .permission
             .unwrap_or_else(|| permission_from_settings(read_setting("permission")));
@@ -62,7 +75,7 @@ impl ShellConfig {
             .mode
             .unwrap_or_else(|| mode_from_settings(read_setting("agent-mode")));
 
-        let provider = load_provider(&read_setting, overrides.model.as_deref());
+        let provider = load_provider(read_setting, overrides.model.as_deref(), creds);
 
         let max_output_tokens = read_setting("max-output-tokens")
             .and_then(|raw| raw.parse::<u32>().ok())
@@ -71,7 +84,7 @@ impl ShellConfig {
         // fallback-behavior=fail means no silent offline answers when a key exists.
         let fallback_to_local = read_setting("fallback-behavior").as_deref() != Some("fail");
 
-        let mcp_servers = load_mcp_servers(&read_setting, settings::credentials_path().as_deref());
+        let mcp_servers = load_mcp_servers(read_setting, creds);
 
         Self {
             provider,
@@ -80,6 +93,7 @@ impl ShellConfig {
             fallback_to_local,
             max_output_tokens,
             extended_thinking,
+            local_trace: read_setting("local-detailed-traces").as_deref() == Some("true"),
             mcp_servers,
         }
     }
@@ -128,6 +142,7 @@ pub fn mode_from_settings(value: Option<String>) -> AgentMode {
 fn load_provider(
     read_setting: &dyn Fn(&str) -> Option<String>,
     model_override: Option<&str>,
+    creds: Option<&std::path::Path>,
 ) -> Option<Provider> {
     let raw = read_setting("providers")?;
     if raw.trim().is_empty() {
@@ -138,9 +153,9 @@ fn load_provider(
         return None;
     }
 
-    let creds = settings::credentials_path()?;
+    let creds = creds?;
     let build = |p: &ProviderJson| -> Option<Provider> {
-        let api_key = settings::read_credential(&creds, &p.id).unwrap_or_default();
+        let api_key = settings::read_credential(creds, &p.id).unwrap_or_default();
         if api_key.is_empty() {
             return None;
         }
@@ -235,6 +250,64 @@ mod tests {
     }
 
     #[test]
+    fn stored_settings_reach_runtime() {
+        let dir =
+            std::env::temp_dir().join(format!("kodo-settings-consumer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let creds = dir.join("credentials.log");
+        settings::write_credential(&creds, "a", "synthetic-a").unwrap();
+        settings::write_credential(&creds, "b", "synthetic-b").unwrap();
+        let values = std::collections::BTreeMap::from([
+            (
+                "providers",
+                r#"[{"id":"a","name":"A","template":"openai","endpoint":"","model":"original"},{"id":"b","name":"B","template":"openai","endpoint":"","model":"backup"}]"#,
+            ),
+            ("permission", "auto"),
+            ("agent-mode", "work"),
+            ("default-model", "configured"),
+            ("fallback-behavior", "fail"),
+            ("max-output-tokens", "8192"),
+            ("extended-thinking", "true"),
+            ("local-detailed-traces", "true"),
+        ]);
+        let read = |k: &str| values.get(k).map(|v| v.to_string());
+        let config = ShellConfig::from_sources(Overrides::default(), &read, Some(&creds));
+        assert_eq!(config.permission, Permission::Auto);
+        assert_eq!(config.mode, AgentMode::Work);
+        assert_eq!(config.max_output_tokens, 8192);
+        assert!(config.extended_thinking && config.local_trace);
+        assert!(!config.fallback_to_local);
+        let provider = config.provider.unwrap();
+        assert_eq!(provider.resolved_model_id(), "configured");
+        assert!(provider.fallbacks.is_empty());
+        let next = |k: &str| {
+            if k == "fallback-behavior" {
+                Some("next".into())
+            } else {
+                read(k)
+            }
+        };
+        let config = ShellConfig::from_sources(
+            Overrides {
+                permission: Some(Permission::Ask),
+                mode: Some(AgentMode::Code),
+                model: Some("override".into()),
+            },
+            &next,
+            Some(&creds),
+        );
+        assert_eq!(config.permission, Permission::Ask);
+        assert_eq!(config.mode, AgentMode::Code);
+        let provider = config.provider.unwrap();
+        assert_eq!(provider.resolved_model_id(), "override");
+        assert_eq!(provider.fallbacks.len(), 1);
+        let defaults = ShellConfig::from_sources(Overrides::default(), &|_| None, None);
+        assert!(!defaults.local_trace);
+        assert_eq!(defaults.max_output_tokens, 4096);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn mcp_servers_merge_secret_values_from_the_credentials_log() {
         let dir = std::env::temp_dir().join(format!("kodo-shell-mcp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
@@ -249,7 +322,8 @@ mod tests {
 
         // A server whose blob is missing keeps empty values; no key or junk
         // settings degrade to "no servers", matching ShellConfig's contract.
-        let orphan = r#"[{"id":"gone","name":"Gone","transport":"http","url":"http://127.0.0.1:1/mcp"}]"#;
+        let orphan =
+            r#"[{"id":"gone","name":"Gone","transport":"http","url":"http://127.0.0.1:1/mcp"}]"#;
         let read_orphan = |key: &str| (key == "mcp-servers").then(|| orphan.to_owned());
         let list = load_mcp_servers(&read_orphan, Some(&creds));
         assert_eq!(list.len(), 1);

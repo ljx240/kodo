@@ -20,23 +20,27 @@ test("a live shell renders the projects the core listed", async ({ page }) => {
   // The shell navigates the live routes, so every screen it reaches stays real.
   await expect(page.locator(".nav-item").first()).toHaveAttribute("href", "/conversation");
   // With no remembered project, a fresh task starts bare; the branch becomes
-  // available after the user chooses one in the composer context row.
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("未选择项目");
-  await expect(page.locator('[data-testid="composer-branch"]')).toHaveText("无分支");
+  // available after the user chooses one in the top-bar project menu.
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("未选择项目");
+  await expect(page.locator('[data-testid="topbar-branch"]')).toHaveCount(0);
 });
 
-test("the project picker reserves enough width for its label", async ({ page }) => {
+test("the project picker displays the selected long label without clipping", async ({ page }) => {
   await stubShell(page, {
     workspace: { projects: [project("/tmp/ws/realtime-lakehouse", "realtime-lakehouse")], sessions: [] },
     branch: "main",
   });
 
   await page.goto("/");
-  const picker = page.locator('[data-testid="composer-project-picker"]');
+  const picker = page.locator('[data-testid="topbar-project-picker"]');
+  await picker.click();
+  await page.getByRole("menuitem", { name: "realtime-lakehouse", exact: true }).click();
   const box = await picker.boundingBox();
 
   expect(box).not.toBeNull();
-  expect(box!.width).toBeGreaterThanOrEqual(160);
+  expect(box!.width).toBeGreaterThan(100);
+  await expect(picker).toHaveAttribute("title", "/tmp/ws/realtime-lakehouse");
+  expect(await picker.locator("span").evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
 });
 
 test("a fresh New Task revives the remembered project when it is still registered", async ({ page }) => {
@@ -50,8 +54,8 @@ test("a fresh New Task revives the remembered project when it is still registere
 
   await page.goto("/");
 
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("alpha");
-  await expect(page.locator('[data-testid="composer-branch"]')).toHaveText("main");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("alpha");
+  await expect(page.locator('[data-testid="topbar-branch"]')).toHaveText("main");
 });
 
 test("a remembered project outside the workspace is ignored", async ({ page }) => {
@@ -65,8 +69,8 @@ test("a remembered project outside the workspace is ignored", async ({ page }) =
 
   await page.goto("/");
 
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("未选择项目");
-  await expect(page.locator('[data-testid="composer-branch"]')).toHaveText("无分支");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("未选择项目");
+  await expect(page.locator('[data-testid="topbar-branch"]')).toHaveCount(0);
 });
 
 test("sessions hang under the project they belong to", async ({ page }) => {
@@ -149,39 +153,35 @@ test("New Task opens an empty composer without selecting an existing task", asyn
   await page.locator(".tree-project-main").first().click();
   await page.locator(".tree-conversation").click();
   await expect(page.locator(".crumb-current")).toHaveText("已有任务");
-  await expect(page.locator('[data-testid="composer-project-context"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="topbar-project-context"]')).toHaveCount(0);
   await page.getByRole("link", { name: "新建任务" }).click();
   await expect(page.locator('[data-testid="welcome"]')).toBeVisible();
   await expect(page.locator(".crumb-current")).toHaveText("新对话");
   await expect(page.locator(".tree-conversation--active")).toHaveCount(0);
 
-  await expect(page.locator('[data-testid="composer-project-context"]')).toBeVisible();
+  await expect(page.locator('[data-testid="topbar-project-context"]')).toBeVisible();
   // The remembered project (written when 已有任务 was open) is revived — the
   // task starts with the project, but with no existing conversation selected.
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("alpha");
-  await expect(page.locator('[data-testid="composer-branch"]')).toHaveText("main");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("alpha");
+  await expect(page.locator('[data-testid="topbar-branch"]')).toHaveText("main");
   const contextPlacement = await page.evaluate(() => {
     const input = document.querySelector(".composer-input")?.getBoundingClientRect();
-    const context = document.querySelector('[data-testid="composer-project-context"]')?.getBoundingClientRect();
-    const box = document.querySelector(".composer-box")?.getBoundingClientRect();
-    return input && context && box
-      ? { inputBottom: input.bottom, contextTop: context.top, boxBottom: box.bottom }
-      : null;
+    const context = document.querySelector('[data-testid="topbar-project-context"]')?.getBoundingClientRect();
+    return input && context ? { inputTop: input.top, contextBottom: context.bottom } : null;
   });
   expect(contextPlacement).not.toBeNull();
-  expect(contextPlacement!.contextTop).toBeGreaterThanOrEqual(contextPlacement!.inputBottom);
-  expect(contextPlacement!.contextTop).toBeGreaterThanOrEqual(contextPlacement!.boxBottom);
-  expect(contextPlacement!.contextTop - contextPlacement!.boxBottom).toBeLessThanOrEqual(8);
+  expect(contextPlacement!.contextBottom).toBeLessThan(contextPlacement!.inputTop);
+  await expect(page.locator('.composer [data-testid="topbar-project-context"]')).toHaveCount(0);
 
-  await page.locator('[data-testid="composer-project-picker"]').click();
+  await page.locator('[data-testid="topbar-project-picker"]').click();
   await page.getByRole("menuitem", { name: "alpha" }).click();
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("alpha");
-  await expect(page.locator('[data-testid="composer-branch"]')).toHaveText("main");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("alpha");
+  await expect(page.locator('[data-testid="topbar-branch"]')).toHaveText("main");
 
   await page.locator(".composer-input").fill("开始任务");
   await page.locator(".composer-input").press("Enter");
   await expect(page.locator(".msg-bubble")).toHaveText("开始任务");
-  await expect(page.locator('[data-testid="composer-project-context"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="topbar-project-context"]')).toHaveCount(0);
   const log = await page.evaluate(
     () => (window as unknown as { __sendLog?: Array<{ id: string; text: string }> }).__sendLog ?? [],
   );
@@ -223,9 +223,9 @@ test("a project's new task action keeps that project selected", async ({ page })
   await page.locator('button[aria-label="alpha 的操作"]').click();
   await page.getByRole("menuitem", { name: "新建任务" }).click();
 
-  await expect(page.locator('[data-testid="composer-project-context"]')).toBeVisible();
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("alpha");
-  await expect(page.locator('[data-testid="composer-branch"]')).toHaveText("main");
+  await expect(page.locator('[data-testid="topbar-project-context"]')).toBeVisible();
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("alpha");
+  await expect(page.locator('[data-testid="topbar-branch"]')).toHaveText("main");
 });
 
 test("the project picker adds a project and 清除项目选择 deselects only", async ({ page }) => {
@@ -236,30 +236,30 @@ test("the project picker adds a project and 清除项目选择 deselects only", 
   });
 
   await page.goto("/");
-  await page.locator('[data-testid="composer-project-picker"]').click();
+  await page.locator('[data-testid="topbar-project-picker"]').click();
   await expect(page.getByRole("menuitem", { name: "添加新项目", exact: true })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "清除项目选择", exact: true })).toHaveCount(0);
 
   await page.getByRole("menuitem", { name: "添加新项目", exact: true }).click();
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("gamma");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("gamma");
   await expect(page.locator(".tree-project-name")).toHaveText(["alpha", "beta", "gamma"]);
 
-  await page.locator('[data-testid="composer-project-picker"]').click();
+  await page.locator('[data-testid="topbar-project-picker"]').click();
   await expect(page.getByRole("menuitem", { name: "清除项目选择", exact: true })).toBeVisible();
   await page.getByRole("menuitem", { name: "清除项目选择", exact: true }).click();
 
   // Deselects the session's project only — the project itself stays listed.
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("未选择项目");
-  await expect(page.locator('[data-testid="composer-branch"]')).toHaveText("无分支");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("未选择项目");
+  await expect(page.locator('[data-testid="topbar-branch"]')).toHaveCount(0);
   await expect(page.locator(".tree-project-name")).toHaveText(["alpha", "beta", "gamma"]);
-  await page.locator('[data-testid="composer-project-picker"]').click();
+  await page.locator('[data-testid="topbar-project-picker"]').click();
   await expect(page.getByRole("menuitem", { name: "清除项目选择", exact: true })).toHaveCount(0);
   await page.keyboard.press("Escape");
 
   // Clearing the selection never forgets the remembered project: the next
   // fresh task revives it again.
   await page.getByRole("link", { name: "新建任务" }).click();
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("gamma");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("gamma");
 });
 
 test("sessions without a project group under 未选择项目", async ({ page }) => {
@@ -380,7 +380,7 @@ test("removing the active conversation's project returns to the new task", async
   await expect(page.locator('[data-testid="welcome"]')).toBeVisible();
   await expect(page.locator(".crumb-current")).toHaveText("新对话");
   await expect(page.locator(".tree-project-name")).toHaveText(["beta"]);
-  await expect(page.locator('[data-testid="composer-project-name"]')).toHaveText("未选择项目");
+  await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("未选择项目");
 });
 
 test("the demo routes keep the deterministic fixture", async ({ page }) => {

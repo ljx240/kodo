@@ -1,0 +1,284 @@
+[
+  {
+    "id": "md-minutes",
+    "split": "development",
+    "source": "会议决定：周三完成验收；负责人：小李。",
+    "path": "out/minutes.md",
+    "body": "# 资料结果\n会议决定：周三完成验收；负责人：小李。",
+    "contains": "会议决定：周三完成验收；负责人：小李。",
+    "accept": true
+  },
+  {
+    "id": "md-email",
+    "split": "development",
+    "source": "致客户：项目将在10月15日交付。",
+    "path": "out/email.md",
+    "body": "# 资料结果\n致客户：项目将在10月15日交付。",
+    "contains": "致客户：项目将在10月15日交付。",
+    "accept": true
+  },
+  {
+    "id": "md-brief",
+    "split": "development",
+    "source": "产品简报：本周新增 DOCX 正文读写。",
+    "path": "out/brief.md",
+    "body": "# 资料结果\n产品简报：本周新增 DOCX 正文读写。",
+    "contains": "产品简报：本周新增 DOCX 正文读写。",
+    "accept": true
+  },
+  {
+    "id": "md-report",
+    "split": "development",
+    "source": "中文分析：A组收入 120，B组收入 180，总计 300。",
+    "path": "out/report.md",
+    "body": "# 资料结果\n中文分析：A组收入 120，B组收入 180，总计 300。",
+    "contains": "中文分析：A组收入 120，B组收入 180，总计 300。",
+    "accept": true
+  },
+  {
+    "id": "md-checklist",
+    "split": "development",
+    "source": "交付清单：读取资料、生成文件、回读验收。",
+    "path": "out/checklist.md",
+    "body": "# 资料结果\n交付清单：读取资料、生成文件、回读验收。",
+    "contains": "交付清单：读取资料、生成文件、回读验收。",
+    "accept": true
+  },
+  {
+    "id": "md-handoff",
+    "split": "development",
+    "source": "交接说明：保留用户已有内容并重新运行验证。",
+    "path": "out/handoff.md",
+    "body": "# 资料结果\n交接说明：保留用户已有内容并重新运行验证。",
+    "contains": "交接说明：保留用户已有内容并重新运行验证。",
+    "accept": true
+  },
+  {
+    "id": "md-risks",
+    "split": "development",
+    "source": "风险清单：网络未授权；真实模型质量待评估。",
+    "path": "out/risks.md",
+    "body": "# 资料结果\n风险清单：网络未授权；真实模型质量待评估。",
+    "contains": "风险清单：网络未授权；真实模型质量待评估。",
+    "accept": true
+  },
+  {
+    "id": "md-summary",
+    "split": "development",
+    "source": "结论：保留成本口径；金额总计 300。",
+    "path": "out/summary.md",
+    "body": "# 资料结果\n结论：保留成本口径；金额总计 300。",
+    "contains": "结论：保留成本口径；金额总计 300。",
+    "accept": true
+  },
+  {
+    "id": "docx-minutes",
+    "split": "development",
+    "source": "会议决定：周三完成验收；负责人：小李。 & <保留>",
+    "path": "out/minutes.docx",
+    "body": "# 正文报告\n会议决定：周三完成验收；负责人：小李。 & <保留>\n|项目|金额|\n|---|---|\n|A|120|\n|B|180|",
+    "contains": "会议决定：周三完成验收；负责人：小李。 & <保留>",
+    "accept": true
+  },
+  {
+    "id": "docx-email",
+    "split": "development",
+    "source": "致客户：项目将在10月15日交付。 & <保留>",
+    "path": "out/email.docx",
+    "body": "# 正文报告\n致客户：项目将在10月15日交付。 & <保留>\n|项目|金额|\n|---|---|\n|A|120|\n|B|180|",
+    "contains": "致客户：项目将在10月15日交付。 & <保留>",
+    "accept": true
+  },
+  {
+    "id": "docx-brief",
+    "split": "development",
+    "source": "产品简报：本周新增 DOCX 正文读写。 & <保留>",
+    "path": "out/brief.docx",
+    "body": "# 正文报告\n产品简报：本周新增 DOCX 正文读写。 & <保留>\n|项目|金额|\n|---|---|\n|A|120|\n|B|180|",
+    "contains": "产品简报：本周新增 DOCX 正文读写。 & <保留>",
+    "accept": true
+  },
+  {
+    "id": "docx-report",
+    "split": "holdout",
+    "source": "中文分析：A组收入 120，B组收入 180，总计 300。 & <保留>",
+    "path": "out/report.docx",
+    "body": "# 正文报告\n中文分析：A组收入 120，B组收入 180，总计 300。 & <保留>\n|项目|金额|\n|---|---|\n|A|120|\n|B|180|",
+    "contains": "中文分析：A组收入 120，B组收入 180，总计 300。 & <保留>",
+    "accept": true
+  },
+  {
+    "id": "docx-checklist",
+    "split": "holdout",
+    "source": "交付清单：读取资料、生成文件、回读验收。 & <保留>",
+    "path": "out/checklist.docx",
+    "body": "# 正文报告\n交付清单：读取资料、生成文件、回读验收。 & <保留>\n|项目|金额|\n|---|---|\n|A|120|\n|B|180|",
+    "contains": "交付清单：读取资料、生成文件、回读验收。 & <保留>",
+    "accept": true
+  },
+  {
+    "id": "docx-handoff",
+    "split": "holdout",
+    "source": "交接说明：保留用户已有内容并重新运行验证。 & <保留>",
+    "path": "out/handoff.docx",
+    "body": "# 正文报告\n交接说明：保留用户已有内容并重新运行验证。 & <保留>\n|项目|金额|\n|---|---|\n|A|120|\n|B|180|",
+    "contains": "交接说明：保留用户已有内容并重新运行验证。 & <保留>",
+    "accept": true
+  },
+  {
+    "id": "json-totals",
+    "split": "holdout",
+    "source": "A,120\nB,180",
+    "path": "out/totals.json",
+    "body": "{\"A\":120,\"B\":180,\"total\":300}",
+    "contains": "\"total\":300",
+    "accept": true
+  },
+  {
+    "id": "csv-totals",
+    "split": "holdout",
+    "source": "A,120\nB,180",
+    "path": "out/totals.csv",
+    "body": "项目,金额\nA,120\nB,180\n总计,300",
+    "contains": "总计,300",
+    "accept": true
+  },
+  {
+    "id": "md-analysis",
+    "split": "holdout",
+    "source": "A,120\nB,180",
+    "path": "out/analysis.md",
+    "body": "# 分析\n来源：A=120，B=180。总计 300。",
+    "contains": "总计 300",
+    "accept": true
+  },
+  {
+    "id": "txt-next-steps",
+    "split": "holdout",
+    "source": "A,120\nB,180",
+    "path": "out/next-steps.txt",
+    "body": "下一步：校验结果，再提交文件。",
+    "contains": "校验结果",
+    "accept": true
+  },
+  {
+    "id": "revise-md",
+    "split": "development",
+    "source": "原有标题和用户备注应保留；补充总计 300。",
+    "path": "draft.md",
+    "existing": "原有标题\n用户备注：保留",
+    "body": "原有标题\n用户备注：保留\n总计 300",
+    "contains": "用户备注：保留",
+    "accept": true
+  },
+  {
+    "id": "revise-docx",
+    "split": "development",
+    "source": "原有标题和用户备注应保留；补充总计 300。",
+    "path": "draft.docx",
+    "existing": "原有标题\n用户备注：保留",
+    "body": "原有标题\n用户备注：保留\n总计 300",
+    "contains": "用户备注：保留",
+    "accept": true
+  },
+  {
+    "id": "reject-missing",
+    "split": "development",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": "missing.md",
+    "body": null,
+    "contains": "",
+    "corrupt": false,
+    "accept": false
+  },
+  {
+    "id": "reject-blank",
+    "split": "development",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": "blank.md",
+    "body": "   ",
+    "contains": "",
+    "corrupt": false,
+    "accept": false
+  },
+  {
+    "id": "reject-invalid-json",
+    "split": "development",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": "broken.json",
+    "body": "{",
+    "contains": "",
+    "corrupt": false,
+    "accept": false
+  },
+  {
+    "id": "reject-corrupt-docx",
+    "split": "development",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": "broken.docx",
+    "body": null,
+    "contains": "",
+    "corrupt": true,
+    "accept": false
+  },
+  {
+    "id": "reject-fake-xlsx",
+    "split": "development",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": "bad.xlsx",
+    "body": "not a workbook",
+    "contains": "",
+    "corrupt": false,
+    "accept": false
+  },
+  {
+    "id": "reject-unsupported-pdf",
+    "split": "development",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": "result.pdf",
+    "body": "PDF result",
+    "contains": "",
+    "corrupt": false,
+    "accept": false
+  },
+  {
+    "id": "reject-unsupported-pptx",
+    "split": "development",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": "result.pptx",
+    "body": "slides result",
+    "contains": "",
+    "corrupt": false,
+    "accept": false
+  },
+  {
+    "id": "reject-traversal",
+    "split": "holdout",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": "../escape.md",
+    "body": "outside",
+    "contains": "",
+    "corrupt": false,
+    "accept": false
+  },
+  {
+    "id": "reject-absolute",
+    "split": "holdout",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": "/tmp/kodo-unapproved-output.md",
+    "body": "outside",
+    "contains": "",
+    "corrupt": false,
+    "accept": false
+  },
+  {
+    "id": "reject-runtime-state",
+    "split": "holdout",
+    "source": "测试资料：不允许用成功文字替代实际文件。",
+    "path": ".kodo/model-output.md",
+    "body": "state",
+    "contains": "",
+    "corrupt": false,
+    "accept": false
+  }
+]

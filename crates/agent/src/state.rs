@@ -153,6 +153,18 @@ impl Budget {
         self.compacted_count = self.compacted_count.saturating_add(1);
     }
 
+    /// Lift to bounded extended-work caps without discarding repair capacity.
+    /// Repeated calls are idempotent; an already larger configured cap stays.
+    /// Returns old/new caps for the progress event.
+    pub fn lift_for_pressure(&mut self) -> (usize, usize, usize, usize) {
+        let old_round = self.max_rounds;
+        let old_tool = self.max_tool_calls;
+        self.max_rounds = self.max_rounds.max(12);
+        self.max_tool_calls = self.max_tool_calls.max(128);
+        self.max_context_chars = self.max_context_chars.max(160_000);
+        (old_round, self.max_rounds, old_tool, self.max_tool_calls)
+    }
+
     /// Refresh the planned context window (provider preset or user override).
     /// Called once at the start of every turn before any model call.
     pub fn set_window(&mut self, window: u32) {
@@ -205,6 +217,17 @@ impl Budget {
             self.last_input_tokens,
             self.window_tokens,
         )
+    }
+
+    /// Documentation needs room to inspect, write and re-read its deliverable.
+    /// Keep the task's evidence gates and repair allowance intact.
+    pub fn for_document() -> Self {
+        Self {
+            max_rounds: 12,
+            max_tool_calls: 128,
+            max_context_chars: 160_000,
+            ..Self::default()
+        }
     }
 
     /// Read-only summary family budget: many tool calls, no repairs.
@@ -432,17 +455,32 @@ impl AgentMachine {
             // Allow direct jump if context was gathered before plan locked in.
             (S::Plan, PlanReady) => Ok(S::Plan),
 
-            // --- GatherContext ---
-            (S::GatherContext, ModelRequestedTools { count }) => {
-                if self.budget.tools_exhausted() {
+            // All tool-request phases share the same budget protection.
+            (
+                S::GatherContext | S::Execute | S::Verify | S::Repair,
+                ModelRequestedTools { count },
+            ) => {
+                if self.budget.tools_exhausted()
+                    || count
+                        > self
+                            .budget
+                            .max_tool_calls
+                            .saturating_sub(self.budget.tool_calls_used)
+                {
                     return Ok(S::Failed {
                         reason: FailReason::BudgetExhausted,
                     });
                 }
+                self.budget.rounds_used = self.budget.rounds_used.saturating_add(1);
                 self.pending_tool_count = count;
                 self.plan.mark_current_running();
-                Ok(S::Execute)
+                Ok(if self.state == S::Verify {
+                    S::Verify
+                } else {
+                    S::Execute
+                })
             }
+            // --- GatherContext ---
             (S::GatherContext, ModelClaimedDone) => {
                 // Read-only path: context alone may satisfy acceptance.
                 self.evidence.model_claimed_done = true;
@@ -454,16 +492,6 @@ impl AgentMachine {
             }
 
             // --- Execute ---
-            (S::Execute, ModelRequestedTools { count }) => {
-                if self.budget.tools_exhausted() {
-                    return Ok(S::Failed {
-                        reason: FailReason::BudgetExhausted,
-                    });
-                }
-                self.pending_tool_count = count;
-                self.plan.mark_current_running();
-                Ok(S::Execute)
-            }
             (S::Execute, ToolsFinished { results }) => {
                 self.absorb(results);
                 self.after_tools(S::Execute)
@@ -506,11 +534,6 @@ impl AgentMachine {
                     self.begin_repair(S::Verify)
                 }
             }
-            (S::Verify, ModelRequestedTools { .. }) => {
-                // Unexpected mid-verify tools — allow but stay.
-                self.plan.mark_current_running();
-                Ok(S::Verify)
-            }
             (S::Verify, ToolsFinished { results }) => {
                 self.absorb(results);
                 Ok(S::Verify)
@@ -523,11 +546,6 @@ impl AgentMachine {
 
             // --- Repair ---
             (S::Repair, RepairApplied) => Ok(S::Execute),
-            (S::Repair, ModelRequestedTools { count }) => {
-                self.pending_tool_count = count;
-                self.plan.mark_current_running();
-                Ok(S::Execute)
-            }
             (S::Repair, ToolsFinished { results }) => {
                 self.absorb(results);
                 Ok(S::Repair)
@@ -1399,6 +1417,62 @@ mod tests {
     }
 
     #[test]
+    fn tool_requests_share_round_and_batch_caps_in_every_phase() {
+        for phase in [
+            AgentState::GatherContext,
+            AgentState::Execute,
+            AgentState::Verify,
+            AgentState::Repair,
+        ] {
+            let mut m = AgentMachine::new(
+                "read only",
+                Budget {
+                    max_rounds: 2,
+                    max_tool_calls: 1,
+                    ..Budget::default()
+                },
+            );
+            m.state = phase.clone();
+            m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+            assert_eq!(m.budget().rounds_used, 1, "{phase:?}");
+            assert_eq!(
+                m.state(),
+                if phase == AgentState::Verify {
+                    &AgentState::Verify
+                } else {
+                    &AgentState::Execute
+                }
+            );
+            m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+            assert_eq!(
+                m.state(),
+                &AgentState::Failed {
+                    reason: FailReason::BudgetExhausted
+                },
+                "{phase:?}"
+            );
+
+            let mut oversized = AgentMachine::new(
+                "read only",
+                Budget {
+                    max_tool_calls: 1,
+                    ..Budget::default()
+                },
+            );
+            oversized.state = phase.clone();
+            oversized.handle(AgentEvent::ModelRequestedTools { count: 2 });
+            assert_eq!(
+                oversized.state(),
+                &AgentState::Failed {
+                    reason: FailReason::BudgetExhausted
+                },
+                "{phase:?}"
+            );
+            assert_eq!(oversized.budget().tool_calls_used, 0);
+        }
+    }
+
+    #[test]
     fn illegal_transition_is_rejected_not_panicking() {
         let mut m = AgentMachine::new("t", Budget::default());
         // Cannot ContextGathered from Understand
@@ -1541,8 +1615,10 @@ mod tests {
 
     #[test]
     fn budget_context_summary_empty_when_no_window() {
-        let mut b = Budget::default();
-        b.window_tokens = 0;
+        let mut b = Budget {
+            window_tokens: 0,
+            ..Budget::default()
+        };
         b.charge_tokens(12_400);
         assert_eq!(b.context_summary(), "");
     }
@@ -1553,7 +1629,10 @@ mod tests {
     fn budget_for_summary_has_zero_repairs_and_at_least_64_tools() {
         let b = Budget::for_summary();
         assert_eq!(b.max_repairs, 0, "summary tasks never trigger repairs");
-        assert_eq!(b.max_repair_wall_ms, 0, "summary tasks fail fast on denials");
+        assert_eq!(
+            b.max_repair_wall_ms, 0,
+            "summary tasks fail fast on denials"
+        );
         assert!(
             b.max_tool_calls >= 64,
             "summary tasks need ≥ 64 tool calls to map a real project: {}",
@@ -1566,9 +1645,70 @@ mod tests {
     #[test]
     fn budget_is_summary_family_predicate_works() {
         let code = Budget::default();
-        assert!(!code.is_summary_family(), "default code budget must NOT be summary family");
+        assert!(
+            !code.is_summary_family(),
+            "default code budget must NOT be summary family"
+        );
 
         let summary = Budget::for_summary();
-        assert!(summary.is_summary_family(), "for_summary() must be summary family");
+        assert!(
+            summary.is_summary_family(),
+            "for_summary() must be summary family"
+        );
+    }
+
+    #[test]
+    fn budget_lift_for_pressure_is_bounded_and_preserves_repairs() {
+        let mut b = Budget::default();
+        let before_max_rounds = b.max_rounds;
+        let before_max_tools = b.max_tool_calls;
+        let before_repairs = b.max_repairs;
+        assert!(before_repairs > 0, "fixture must start with repairs > 0");
+
+        let (or, nr, ot, nt) = b.lift_for_pressure();
+
+        assert_eq!(or, before_max_rounds);
+        assert_eq!(ot, before_max_tools);
+        assert!(nr >= before_max_rounds + 6, "+6 rounds minimum, got {nr}");
+        assert!(nt >= before_max_tools + 96, "+96 tools minimum, got {nt}");
+        assert_eq!(
+            b.max_repairs, before_repairs,
+            "verification repairs must survive a lift"
+        );
+        assert!(
+            b.max_context_chars >= 80_000 + 40_000,
+            "context cap must lift, got {}",
+            b.max_context_chars
+        );
+    }
+
+    #[test]
+    fn budget_lift_for_pressure_is_idempotent() {
+        let mut b = Budget::default();
+        let _ = b.lift_for_pressure();
+        let lifted = b.clone();
+        let (_or, _nr, _ot, _nt) = b.lift_for_pressure();
+        assert_eq!(
+            b, lifted,
+            "a forgotten caller guard must not enable runaway work"
+        );
+        assert!(!Budget::for_document().is_summary_family());
+    }
+
+    /// Saturating math: even with caps already at usize::MAX the lift must
+    /// not wrap or panic. This protects against misconfigured test budgets.
+    #[test]
+    fn budget_lift_for_pressure_handles_overflow_safely() {
+        let mut b = Budget {
+            max_rounds: usize::MAX,
+            max_tool_calls: usize::MAX,
+            max_repairs: 3,
+            max_context_chars: usize::MAX,
+            ..Budget::default()
+        };
+        let (_or, nr, _ot, nt) = b.lift_for_pressure();
+        assert_eq!(nr, usize::MAX, "must saturate, not wrap");
+        assert_eq!(nt, usize::MAX, "must saturate, not wrap");
+        assert_eq!(b.max_repairs, 3);
     }
 }

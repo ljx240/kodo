@@ -23,6 +23,7 @@ import {
   Plus,
   Pencil,
   Shield,
+  Search,
   SquareKanban,
   Table2,
   Trash2,
@@ -346,14 +347,29 @@ function McpCatalog({
   servers: McpServerDto[];
   onPick: (templateId: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const templates = MCP_TEMPLATES.filter((template) =>
+    `${template.name} ${T.page.mcp.catalogDesc[template.id] ?? ""}`.toLowerCase().includes(needle),
+  );
   return (
-    <section>
+    <section aria-label={T.page.mcp.catalogTitle}>
       <header className="mcp-section-head">
         <h2 className="mcp-section-title">{T.page.mcp.catalogTitle}</h2>
         <p className="mcp-section-hint">{T.page.mcp.catalogHint}</p>
+        <div className="search-field mcp-catalog-search">
+          <Search size={14} strokeWidth={1.7} />
+          <input
+            type="search"
+            aria-label={T.page.mcp.search}
+            placeholder={T.page.mcp.search}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
       </header>
       <div className="mcp-catalog">
-        {MCP_TEMPLATES.map((template) => {
+        {templates.map((template) => {
           const Icon = MCP_ICONS[template.icon] ?? Plug;
           const added = templateConfigured(template, servers);
           return (
@@ -392,6 +408,7 @@ function McpCatalog({
           );
         })}
       </div>
+      {templates.length === 0 && <p className="skills-empty" role="status">{T.page.mcp.noMatches}</p>}
     </section>
   );
 }
@@ -414,7 +431,7 @@ function McpServerListSection({
   const [expanded, setExpanded] = useState<string | null>(null);
 
   return (
-    <section>
+    <section id="mcp-servers" className="mcp-servers" aria-label={T.page.mcp.serversTitle}>
       <header className="mcp-section-head">
         <h2 className="mcp-section-title">{T.page.mcp.serversTitle}</h2>
         <button type="button" className="btn" onClick={() => setEdit({ mode: "add" })}>
@@ -538,16 +555,19 @@ export function McpTab() {
 
   return (
     <>
-      <McpCatalog
-        servers={servers}
-        onPick={(templateId) => setEdit({ mode: "add", templateId })}
-      />
       <McpServerListSection
         servers={servers}
         loaded={loaded}
         update={update}
         edit={edit}
         setEdit={setEdit}
+      />
+      <McpCatalog
+        servers={servers}
+        onPick={(templateId) => {
+          setEdit({ mode: "add", templateId });
+          document.getElementById("mcp-servers")?.scrollIntoView({ block: "start" });
+        }}
       />
     </>
   );

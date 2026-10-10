@@ -22,6 +22,9 @@ minimal-change
 - replace_range
 - create_file
 
+## allowed_external_tools
+- mcp__*
+
 ## verification_policy
 full
 

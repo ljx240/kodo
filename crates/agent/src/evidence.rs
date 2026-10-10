@@ -1152,7 +1152,7 @@ pub fn context_observation(path: impl Into<String>, id: impl Into<String>) -> Ev
 }
 
 /// Accumulator for a turn's evidence bag.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceBag {
     pub items: Vec<EvidenceItem>,
     pub verify_ok: Option<bool>,
@@ -1189,6 +1189,15 @@ impl EvidenceBag {
         expectation: Option<&CommandExpectation>,
     ) {
         let is_run = ToolName::parse(&result.name) == Some(ToolName::RunCommand);
+        for (index, path) in result.changed_files.iter().enumerate() {
+            self.files_written.push(path.clone());
+            self.push(EvidenceItem::new(
+                format!("ev_{}_file_{index}", result.id),
+                &result.name,
+                EvidenceKind::FileChanged { path: path.clone() },
+            ));
+        }
+
         if result.ok {
             if ToolName::parse(&result.name)
                 .map(|n| n.is_mutation())
@@ -2161,6 +2170,9 @@ mod tests {
         );
         let desc = item.describe();
         assert!(desc.contains("请补充复现步骤"), "got: {desc}");
-        assert!(!desc.contains('['), "no-chip describe must not add []: {desc}");
+        assert!(
+            !desc.contains('['),
+            "no-chip describe must not add []: {desc}"
+        );
     }
 }

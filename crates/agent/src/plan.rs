@@ -5,6 +5,8 @@
 //! Acceptance criteria are structured objects; free-text model claims never
 //! complete them.
 
+use serde::{Deserialize, Serialize};
+
 use crate::evidence::{
     evidence_from_tool_result, AcceptanceCriterion, CommandExpectation, EvidenceBag, EvidenceItem,
     EvidenceKind, EvidenceRequirement, FailureExpectation, SemanticTarget, SubtaskRequirement,
@@ -13,7 +15,7 @@ use crate::protocol::{ToolErrorCode, ToolName, ToolResult};
 use crate::skill::SkillSpec;
 
 /// Kind of work a subtask represents — drives how evidence marks it done.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubtaskKind {
     /// Search / read / inspect.
     Read,
@@ -26,7 +28,7 @@ pub enum SubtaskKind {
 }
 
 /// Lifecycle of one subtask. `Done` requires non-empty evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubtaskStatus {
     Pending,
     Running,
@@ -54,7 +56,7 @@ impl SubtaskStatus {
 }
 
 /// Structural proof attached to a subtask. Never model prose.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Evidence {
     /// A successful (or gating) tool result id.
     ToolResultId { id: String, tool: String },
@@ -77,7 +79,7 @@ impl Evidence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subtask {
     pub id: String,
     pub title: String,
@@ -147,7 +149,7 @@ impl Subtask {
 }
 
 /// Plan handed to the model and used for acceptance evaluation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskPlan {
     pub goal: String,
     pub constraints: Vec<String>,
@@ -179,9 +181,141 @@ pub struct TaskPlan {
     /// and permissions at execution time. Code mode keeps the fail-closed
     /// evidence bar (`false`).
     pub deliverable_bar: bool,
+    pub expected_outputs: Vec<String>,
+    pub requires_file_output: bool,
 }
 
 impl TaskPlan {
+    pub fn set_output_contract(&mut self, message: &str) {
+        let lower = message.to_ascii_lowercase();
+        let markers = [
+            "write", "create", "save", "export", "generate", "update", "输出", "保存", "生成",
+            "写入", "创建", "导出", "更新",
+        ];
+        let start = markers
+            .iter()
+            .filter_map(|m| lower.rfind(m).map(|i| i + m.len()))
+            .max();
+        let Some(start) = start else {
+            return;
+        };
+        let tail = &message[start..];
+        let tail = tail.split(" from ").next().unwrap_or(tail);
+        self.expected_outputs = tail
+            .split(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '`' | '\''
+                            | '"'
+                            | '，'
+                            | ','
+                            | '。'
+                            | ';'
+                            | '；'
+                            | '('
+                            | ')'
+                            | '（'
+                            | '）'
+                            | ':'
+                            | '：'
+                    )
+            })
+            .filter_map(|word| {
+                let word = word
+                    .trim_matches(['.', '!', '?'])
+                    .trim_start_matches("到")
+                    .trim_start_matches("为");
+                let ext = std::path::Path::new(word)
+                    .extension()?
+                    .to_str()?
+                    .to_lowercase();
+                if [
+                    "md", "txt", "csv", "tsv", "json", "html", "docx", "xlsx", "pdf", "pptx",
+                ]
+                .contains(&ext.as_str())
+                    && !word.contains("://")
+                {
+                    Some(word.to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.expected_outputs.sort();
+        self.expected_outputs.dedup();
+        self.requires_file_output = self.deliverable_bar
+            && (!self.expected_outputs.is_empty()
+                || [
+                    "文件", "保存", "导出", "file", "docx", "xlsx", "pdf", "pptx",
+                ]
+                .iter()
+                .any(|k| lower.contains(k)));
+    }
+
+    pub fn validate_deliverables(
+        &self,
+        project: &std::path::Path,
+        written: &[String],
+    ) -> Vec<String> {
+        if !self.requires_file_output {
+            return Vec::new();
+        }
+        let paths = if self.expected_outputs.is_empty() {
+            written
+        } else {
+            &self.expected_outputs
+        };
+        if paths.is_empty() {
+            return vec!["no output file was produced".into()];
+        }
+        paths
+            .iter()
+            .filter_map(|path| {
+                let result = (|| -> Result<(), String> {
+                    let full = crate::tools::resolve_in_project(project, path)?;
+                    let size = std::fs::metadata(&full).map_err(|e| e.to_string())?.len();
+                    if size == 0 {
+                        return Err("output is empty".into());
+                    }
+                    if crate::office::is_docx(path) {
+                        let doc = crate::office::read_docx(&full, 2 * 1024 * 1024)?;
+                        if doc.text.trim().is_empty() || doc.truncated {
+                            return Err(
+                                "DOCX readback is empty or exceeds the acceptance limit".into()
+                            );
+                        }
+                    } else if crate::office::is_spreadsheet(path) {
+                        let sheet = crate::office::read_spreadsheet(&full, 2 * 1024 * 1024)?;
+                        if sheet.sheets == 0 || sheet.non_empty_cells == 0 || sheet.truncated {
+                            return Err("spreadsheet has no readable cells".into());
+                        }
+                    } else {
+                        if size > 8 * 1024 * 1024 {
+                            return Err("output exceeds the readback limit".into());
+                        }
+                        let content = std::fs::read_to_string(&full)
+                            .map_err(|e| format!("unsupported or unreadable output: {e}"))?;
+                        if content.trim().is_empty() {
+                            return Err("output is blank".into());
+                        }
+                        if path.to_lowercase().ends_with(".json") {
+                            serde_json::from_str::<serde_json::Value>(&content)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        if path.to_lowercase().ends_with(".pdf")
+                            || path.to_lowercase().ends_with(".pptx")
+                        {
+                            return Err("this document format has no readback validator".into());
+                        }
+                    }
+                    Ok(())
+                })();
+                result.err().map(|e| format!("deliverable `{path}`: {e}"))
+            })
+            .collect()
+    }
+
     /// Conversational Q&A plan (2026-09-29): no subtasks, no acceptance
     /// criteria, no verify. The conversational channel — projectless
     /// constrained Q&A, knowledge questions — must never gate the answer
@@ -206,7 +340,9 @@ impl TaskPlan {
             verify_commands: Vec::new(),
             verify_target_ids: Vec::new(),
             verify_bindings: Vec::new(),
-            deliverable_bar: false,
+            deliverable_bar: true,
+            expected_outputs: Vec::new(),
+            requires_file_output: false,
         }
     }
 
@@ -335,6 +471,8 @@ impl TaskPlan {
             verify_target_ids: Vec::new(),
             verify_bindings: Vec::new(),
             deliverable_bar: false,
+            expected_outputs: Vec::new(),
+            requires_file_output: false,
         }
     }
 
@@ -370,14 +508,10 @@ impl TaskPlan {
             .with_requirement(SubtaskRequirement::contextual(
                 EvidenceRequirement::AnyToolSuccess,
             )),
-            Subtask::new(
-                "s3",
-                "Read the wiring between modules",
-                SubtaskKind::Read,
-            )
-            .with_requirement(SubtaskRequirement::contextual(
-                EvidenceRequirement::AnyToolSuccess,
-            )),
+            Subtask::new("s3", "Read the wiring between modules", SubtaskKind::Read)
+                .with_requirement(SubtaskRequirement::contextual(
+                    EvidenceRequirement::AnyToolSuccess,
+                )),
         ];
         Self {
             goal,
@@ -395,6 +529,8 @@ impl TaskPlan {
             verify_target_ids: Vec::new(),
             verify_bindings: Vec::new(),
             deliverable_bar: true,
+            expected_outputs: Vec::new(),
+            requires_file_output: false,
         }
     }
 
@@ -437,6 +573,7 @@ impl TaskPlan {
         plan.deliverable_bar = skill
             .applicable_task_types
             .contains(&crate::classify::TaskType::Work);
+        plan.set_output_contract(message);
         plan.constraints = vec![
             "Paths stay inside the project".to_owned(),
             "No hidden chain-of-thought is stored".to_owned(),
@@ -529,12 +666,18 @@ impl TaskPlan {
             verify_target_ids: Vec::new(),
             verify_bindings: Vec::new(),
             deliverable_bar: false,
+            expected_outputs: Vec::new(),
+            requires_file_output: false,
         })
     }
 
     /// Prompt fragment: structured plan for the model (no hidden reasoning).
     pub fn to_prompt_block(&self) -> String {
         let mut out = String::from("## Current plan\n");
+        if self.requires_file_output {
+            out.push_str(&format!("- File delivery requires nonempty, valid files and readback; expected outputs: {:?}\n", self.expected_outputs));
+        }
+
         out.push_str(&format!("- goal: {}\n", self.goal));
         for c in &self.constraints {
             out.push_str(&format!("- constraint: {c}\n"));
@@ -923,11 +1066,17 @@ impl TaskPlan {
         // tools already enforced path/permission constraints at execution.
         // Integrity failures above still fail closed.
         if self.deliverable_bar && evidence.model_claimed_done {
+            if self.requires_file_output {
+                match &evidence.deliverable_errors {
+                    None => failures.push("file deliverables have not been read back".into()),
+                    Some(errors) => failures.extend(errors.iter().cloned()),
+                }
+            }
             for criterion in &self.criteria {
                 passed.push(criterion.description.clone());
             }
             return AcceptanceReport {
-                ok: failures.is_empty() && !self.acceptance_criteria.is_empty(),
+                ok: failures.is_empty(),
                 passed,
                 failures,
             };
@@ -1262,7 +1411,7 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 }
 
 /// Inputs for acceptance evaluation (from tools, never from prose alone).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptanceEvidence {
     pub had_tool_success: bool,
     pub files_written: Vec<String>,
@@ -1277,11 +1426,13 @@ pub struct AcceptanceEvidence {
     pub verify_infra_failure: bool,
     /// True when at least one targeted verification command passed this turn.
     pub partial_verified: bool,
+    pub deliverable_errors: Option<Vec<String>>,
 }
 
 impl AcceptanceEvidence {
     pub fn absorb_results(&mut self, results: &[ToolResult]) {
         for r in results {
+            self.files_written.extend(r.changed_files.iter().cloned());
             if r.ok {
                 self.had_tool_success = true;
                 if ToolName::parse(&r.name)
@@ -1303,6 +1454,7 @@ impl AcceptanceEvidence {
         expectation: Option<&CommandExpectation>,
     ) {
         for r in results {
+            self.files_written.extend(r.changed_files.iter().cloned());
             if r.ok {
                 self.had_tool_success = true;
                 if ToolName::parse(&r.name)
@@ -1409,7 +1561,16 @@ mod tests {
         assert!(plan.acceptance_criteria.is_empty());
         assert!(plan.criteria.is_empty());
         assert!(!plan.requires_verify);
-        assert!(!plan.deliverable_bar);
+        assert!(plan.deliverable_bar);
+        assert!(!plan.evaluate_acceptance(&AcceptanceEvidence::default()).ok);
+        assert!(
+            plan.evaluate_acceptance(&AcceptanceEvidence {
+                model_claimed_done: true,
+                ..Default::default()
+            })
+            .ok,
+            "a prose answer needs no code acceptance evidence"
+        );
     }
 
     #[test]

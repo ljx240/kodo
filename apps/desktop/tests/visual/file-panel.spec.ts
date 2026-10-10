@@ -328,14 +328,8 @@ test("below 1200px there is no handle — the overlay keeps its own clamp", asyn
   expect(await panelWidth(page)).toBeLessThanOrEqual(340);
 });
 
-test("浏览 loads an http(s) site in the widened sandboxed frame", async ({ page }) => {
+test("浏览 opens a native webview and sizes it to the widened panel", async ({ page }) => {
   await stubShell(page, filePanelShell());
-  await page.route("https://example.com/**", (route) =>
-    route.fulfill({
-      contentType: "text/html",
-      body: "<html><body><h1>hello-embed</h1></body></html>",
-    }),
-  );
   await page.goto("/");
   await page.locator(".tree-project-main").click();
   await page.locator(".tree-conversation").click();
@@ -352,10 +346,15 @@ test("浏览 loads an http(s) site in the widened sandboxed frame", async ({ pag
   await page.locator('[data-testid="browse-go"]').click();
 
   const frame = page.locator('[data-testid="browse-frame"]');
-  await expect(frame).toHaveAttribute("src", "https://example.com/page");
-  await expect(
-    page.frameLocator('[data-testid="browse-frame"]').locator("h1"),
-  ).toHaveText("hello-embed");
+  await expect(frame).toBeVisible();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __browseLog: Array<{ command: string; args?: Record<string, unknown> }> }).__browseLog
+      .find((call) => call.command === "browse_open")?.args?.url,
+  )).toBe("https://example.com/page");
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __browseLog: Array<{ command: string; args?: Record<string, unknown> }> }).__browseLog
+      .some((call) => call.command === "browse_set_position" && Number(call.args?.width) > 600 && Number(call.args?.height) > 0),
+  )).toBe(true);
   await expect(page.locator('[data-testid="browse-external"]')).toBeVisible();
 
   // Escape demotes to Inspector — the panel stays open (文件 contract).
@@ -385,7 +384,7 @@ test("browse refuses unsafe schemes and banners a hanging embed", async ({ page 
   await page.locator('[data-testid="browse-url"]').fill("https://slow.example/x");
   await page.locator('[data-testid="browse-go"]').click();
   await expect(page.locator('[data-testid="browse-frame"]')).toBeVisible();
-  await page.clock.fastForward(6001);
+  await page.clock.fastForward(10001);
   await expect(page.locator('[data-testid="browse-blocked"]')).toBeVisible();
   await expect(page.locator('[data-testid="browse-external"]')).toBeVisible();
   await expect(page.locator('[data-testid="browse-retry"]')).toBeVisible();

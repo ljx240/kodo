@@ -26,7 +26,8 @@ pub struct HttpTransport {
     url: String,
     headers: Vec<(String, String)>,
     session_id: Option<String>,
-    alive: AtomicBool,
+    alive: std::sync::Arc<AtomicBool>,
+    close_session_on_drop: bool,
     next_id: u64,
     request_timeout: Duration,
 }
@@ -43,12 +44,12 @@ impl HttpTransport {
         if config.url.trim().is_empty() {
             return Err(McpError::Transport("empty server url".to_owned()));
         }
-        // Short read timeout so a mute socket surfaces as retryable reads the
-        // deadline loop can give up on, instead of pinning a blocking call.
+        // A bounded worker owns blocking HTTP I/O; cancellation never waits
+        // for response headers or drops a legitimate slow JSON tool call.
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_millis(1500))
-            .timeout_read(Duration::from_millis(200))
-            .timeout_write(Duration::from_secs(30))
+            .timeout_read(DEFAULT_REQUEST_TIMEOUT)
+            .timeout_write(Duration::from_secs(5))
             .build();
         Ok(Self {
             agent,
@@ -59,10 +60,106 @@ impl HttpTransport {
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
             session_id: None,
-            alive: AtomicBool::new(true),
+            alive: std::sync::Arc::new(AtomicBool::new(true)),
+            close_session_on_drop: true,
             next_id: 1,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
         })
+    }
+
+    fn dispatch(
+        &mut self,
+        body: String,
+        id: Option<u64>,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<serde_json::Value, McpError> {
+        if !alive() || !self.alive.load(Ordering::SeqCst) {
+            return Err(McpError::Transport(
+                "request cancelled or server gone".into(),
+            ));
+        }
+        if body.len() > 8 * 1024 * 1024 {
+            return Err(McpError::Protocol("request exceeds 8 MiB".into()));
+        }
+        static WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        WORKERS
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < 16).then_some(n + 1)
+            })
+            .map_err(|_| McpError::Transport("too many outstanding HTTP requests".into()))?;
+        let mut worker = Self {
+            agent: self.agent.clone(),
+            url: self.url.clone(),
+            headers: self.headers.clone(),
+            session_id: self.session_id.clone(),
+            alive: self.alive.clone(),
+            close_session_on_drop: false,
+            next_id: self.next_id,
+            request_timeout: self.request_timeout,
+        };
+        let deadline = Instant::now() + self.request_timeout;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawn = std::thread::Builder::new()
+            .name("kodo-mcp-http".into())
+            .spawn(move || {
+                struct Count;
+                impl Drop for Count {
+                    fn drop(&mut self) {
+                        WORKERS.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                let _count = Count;
+                let result = (|| {
+                    let response = worker.post(&body)?;
+                    worker.capture_session(&response);
+                    let Some(id) = id else {
+                        return Ok(serde_json::Value::Null);
+                    };
+                    let sse = response
+                        .header("content-type")
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .starts_with("text/event-stream");
+                    let mut reader = response.into_reader();
+                    let active = || worker.alive.load(Ordering::SeqCst);
+                    if sse {
+                        worker.read_sse_response(&mut reader, id, deadline, &active)
+                    } else {
+                        worker.read_json_response(&mut reader, id, deadline, &active)
+                    }
+                })();
+                let _ = tx.send((result, worker.session_id.clone()));
+            });
+        if let Err(error) = spawn {
+            WORKERS.fetch_sub(1, Ordering::SeqCst);
+            return Err(McpError::Transport(error.to_string()));
+        }
+        loop {
+            if !alive() || Instant::now() >= deadline {
+                self.alive.store(false, Ordering::SeqCst);
+                // The in-flight remote operation may finish; its late result
+                // is discarded and its worker ends within the request timeout.
+                return Err(McpError::Transport(
+                    if !alive() {
+                        "request cancelled"
+                    } else {
+                        "request timed out"
+                    }
+                    .into(),
+                ));
+            }
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok((result, session)) => {
+                    self.session_id = session;
+                    return result;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => {
+                    self.alive.store(false, Ordering::SeqCst);
+                    return Err(McpError::Transport("HTTP worker exited".into()));
+                }
+            }
+        }
     }
 
     /// Shortens the per-request wait (tests only — real tool calls may be slow).
@@ -94,8 +191,13 @@ impl HttpTransport {
         }
         request.send_string(body).map_err(|error| match error {
             ureq::Error::Status(status, response) => {
-                let body = response.into_string().unwrap_or_default();
-                let body = body.chars().take(ERROR_BODY_LIMIT).collect();
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                let _ = response
+                    .into_reader()
+                    .take(ERROR_BODY_LIMIT as u64)
+                    .read_to_end(&mut bytes);
+                let body = String::from_utf8_lossy(&bytes).into_owned();
                 McpError::Http(status, body)
             }
             ureq::Error::Transport(error) => {
@@ -117,12 +219,15 @@ impl HttpTransport {
         reader: &mut dyn std::io::Read,
         id: u64,
         deadline: Instant,
+        alive: &dyn Fn() -> bool,
     ) -> Result<serde_json::Value, McpError> {
-        let bytes = read_all(reader, deadline)?;
+        let bytes = read_all(reader, deadline, alive)?;
         let body = std::str::from_utf8(&bytes)
             .map_err(|error| McpError::Protocol(format!("non-utf8 response body: {error}")))?;
         match jsonrpc::decode_message(body)? {
-            Message::Response(response) if response.id == Some(id) => jsonrpc::into_result(response),
+            Message::Response(response) if response.id == Some(id) => {
+                jsonrpc::into_result(response)
+            }
             Message::Response(response) => Err(McpError::Protocol(format!(
                 "response id {:?} does not match request id {id}",
                 response.id
@@ -140,17 +245,26 @@ impl HttpTransport {
         reader: &mut dyn std::io::Read,
         id: u64,
         deadline: Instant,
+        alive: &dyn Fn() -> bool,
     ) -> Result<serde_json::Value, McpError> {
         let mut decoder = Utf8LineDecoder::new();
         let mut assembler = SseEventAssembler::new();
         let mut buf = [0u8; 4096];
+        let mut received = 0usize;
         loop {
+            if !alive() {
+                return Err(McpError::Transport("request cancelled".into()));
+            }
             if Instant::now() >= deadline {
                 return Err(McpError::Transport("request timed out".to_owned()));
             }
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    received += n;
+                    if received > 8 * 1024 * 1024 {
+                        return Err(McpError::Protocol("MCP response exceeds 8 MiB".into()));
+                    }
                     for line in decoder.push(&buf[..n]) {
                         if let Some(event) = assembler.push_line(&line) {
                             if let Some(result) = take_sse_message(&event, id) {
@@ -188,35 +302,32 @@ impl McpTransport for HttpTransport {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, McpError> {
-        if !self.alive.load(Ordering::SeqCst) {
-            return Err(McpError::Transport("server is gone".to_owned()));
-        }
+        self.request_interruptible(method, params, &|| true)
+    }
+
+    fn request_interruptible(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<serde_json::Value, McpError> {
         let id = self.next_id;
         self.next_id += 1;
-        let response = self.post(&jsonrpc::encode_request(id, method, params))?;
-        self.capture_session(&response);
-        let deadline = Instant::now() + self.request_timeout;
-        let content_type = response
-            .header("content-type")
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let mut reader = response.into_reader();
-        if content_type.starts_with("text/event-stream") {
-            self.read_sse_response(&mut reader, id, deadline)
-        } else {
-            self.read_json_response(&mut reader, id, deadline)
-        }
+        self.dispatch(jsonrpc::encode_request(id, method, params), Some(id), alive)
     }
 
     fn notify(&mut self, method: &str, params: serde_json::Value) -> Result<(), McpError> {
-        if !self.alive.load(Ordering::SeqCst) {
-            return Err(McpError::Transport("server is gone".to_owned()));
-        }
-        // Streamable HTTP servers acknowledge notifications with 202 and an
-        // empty body; any 2xx is success and the body is ignored.
-        let response = self.post(&jsonrpc::encode_notification(method, params))?;
-        self.capture_session(&response);
-        Ok(())
+        self.notify_interruptible(method, params, &|| true)
+    }
+
+    fn notify_interruptible(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<(), McpError> {
+        self.dispatch(jsonrpc::encode_notification(method, params), None, alive)
+            .map(|_| ())
     }
 
     fn alive(&self) -> bool {
@@ -228,23 +339,22 @@ impl Drop for HttpTransport {
     /// Best-effort session teardown (`DELETE` per Streamable HTTP). A dead or
     /// silent server must not hang or panic on the way out.
     fn drop(&mut self) {
-        if let Some(session) = self.session_id.take() {
-            let _ = self
-                .agent
-                .delete(&self.url)
-                .timeout(Duration::from_secs(2))
-                .set("Mcp-Session-Id", &session)
-                .call();
+        if self.close_session_on_drop && self.alive.load(Ordering::SeqCst) {
+            if let Some(session) = self.session_id.take() {
+                let _ = self
+                    .agent
+                    .delete(&self.url)
+                    .timeout(Duration::from_secs(2))
+                    .set("Mcp-Session-Id", &session)
+                    .call();
+            }
         }
     }
 }
 
 /// One SSE event → the answer for `id`, if it is that answer. Notifications
 /// and events that fail to decode are skipped noise.
-fn take_sse_message(
-    event: &str,
-    id: u64,
-) -> Option<Result<serde_json::Value, McpError>> {
+fn take_sse_message(event: &str, id: u64) -> Option<Result<serde_json::Value, McpError>> {
     let message = jsonrpc::decode_message(event).ok()?;
     match message {
         Message::Response(response) if response.id == Some(id) => {
@@ -256,16 +366,28 @@ fn take_sse_message(
 
 /// Reads to EOF, treating short read timeouts as "keep waiting" until the
 /// deadline (the agent's read timeout is deliberately short).
-fn read_all(reader: &mut dyn std::io::Read, deadline: Instant) -> Result<Vec<u8>, McpError> {
+fn read_all(
+    reader: &mut dyn std::io::Read,
+    deadline: Instant,
+    alive: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, McpError> {
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
+        if !alive() {
+            return Err(McpError::Transport("request cancelled".into()));
+        }
         if Instant::now() >= deadline {
             return Err(McpError::Transport("request timed out".to_owned()));
         }
         match reader.read(&mut buf) {
             Ok(0) => return Ok(out),
-            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                if out.len() + n > 8 * 1024 * 1024 {
+                    return Err(McpError::Protocol("MCP response exceeds 8 MiB".into()));
+                }
+                out.extend_from_slice(&buf[..n]);
+            }
             Err(error) if is_read_timeout(&error) => continue,
             Err(error) => return Err(McpError::Transport(error.to_string())),
         }
@@ -315,8 +437,7 @@ mod tests {
 
     /// The `id` field of a JSON-RPC request body.
     fn request_id(body: &str) -> u64 {
-        serde_json::from_str::<serde_json::Value>(body)
-            .expect("json body")["id"]
+        serde_json::from_str::<serde_json::Value>(body).expect("json body")["id"]
             .as_u64()
             .expect("numeric id")
     }
@@ -459,7 +580,11 @@ mod tests {
             .expect("tools/list");
         let log = log.lock().expect("log");
         assert_eq!(log.len(), 2);
-        assert_eq!(log[0].header("Mcp-Session-Id"), None, "first request: no session yet");
+        assert_eq!(
+            log[0].header("Mcp-Session-Id"),
+            None,
+            "first request: no session yet"
+        );
         assert_eq!(
             log[1].header("Mcp-Session-Id"),
             Some("sess-1"),
@@ -569,5 +694,40 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, McpError::Transport(_)), "got {error:?}");
+    }
+    #[test]
+    fn slow_headers_are_supported_and_cancellation_does_not_wait_for_them() {
+        for cancel in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_request(&mut stream);
+                std::thread::sleep(Duration::from_millis(400));
+                write_response(
+                    &mut stream,
+                    200,
+                    &[("Content-Type".into(), "application/json".into())],
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#,
+                );
+            });
+            let mut server = config(&format!("http://{address}/mcp"));
+            server.headers.clear();
+            let mut transport = HttpTransport::spawn(&server)
+                .unwrap()
+                .with_request_timeout(Duration::from_secs(2));
+            let start = Instant::now();
+            let result =
+                transport.request_interruptible("tools/call", serde_json::json!({}), &|| {
+                    !cancel || start.elapsed() < Duration::from_millis(100)
+                });
+            if cancel {
+                assert!(result.unwrap_err().to_string().contains("cancelled"));
+                assert!(start.elapsed() < Duration::from_millis(350));
+                assert!(!transport.alive());
+            } else {
+                assert_eq!(result.unwrap()["ok"], true);
+            }
+        }
     }
 }

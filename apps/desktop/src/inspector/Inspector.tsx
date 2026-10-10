@@ -1,7 +1,7 @@
 import { BarChart3, FileText, Info, Wrench, X } from "lucide-react";
 import { useEffect, useRef, type ReactNode } from "react";
 import type { ChangeDto } from "../api";
-import type { RouteName } from "../routes";
+import type { PluginType, RouteName } from "../routes";
 import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
 import { T } from "../i18n";
@@ -13,6 +13,7 @@ import {
   ResponseOverview,
   TerminalSection,
   ToolsSection,
+  type InspectorData,
 } from "./ResponseInspector";
 import { TraceOverview } from "./TraceInspector";
 
@@ -108,8 +109,10 @@ function contentFor(
   onArchiveRestore: () => void,
   onOpenTrace: () => void,
   onSelectTab: (tab: InspectorTab) => void,
+  project: InspectorData["project"],
+  pluginType: PluginType,
 ) {
-  const data = { demo, demoState, live };
+  const data = { demo, demoState, live, project };
   if (route === "conversation") {
     // Terminal is a panel of its own — never a rail section beside itself.
     if (tab === "terminal") return <TerminalSection {...data} />;
@@ -132,7 +135,7 @@ function contentFor(
       />
     );
   }
-  return <HelpOverview />;
+  return <HelpOverview pluginType={route === "plugins" ? pluginType : undefined} />;
 }
 
 type Props = {
@@ -145,6 +148,8 @@ type Props = {
   demo: boolean;
   demoState?: DemoState | null;
   live: LiveSnapshot | null;
+  project?: InspectorData["project"];
+  pluginType?: PluginType;
   archiveSelection?: ArchiveSelection;
   onArchiveRestore?: () => void;
   onOpenTrace?: () => void;
@@ -166,6 +171,8 @@ export function Inspector({
   demo,
   demoState = null,
   live,
+  project,
+  pluginType = "skills",
   archiveSelection = null,
   onArchiveRestore = () => {},
   onOpenTrace = () => {},
@@ -311,6 +318,8 @@ export function Inspector({
                 onArchiveRestore,
                 onOpenTrace,
                 onSelectTab,
+                project,
+                pluginType,
               )
             )}
           </div>

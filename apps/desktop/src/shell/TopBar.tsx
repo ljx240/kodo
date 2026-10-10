@@ -1,7 +1,10 @@
 import { useState } from "react";
 import {
   Archive,
+  Check,
+  ChevronDown,
   Folder,
+  FolderPlus,
   GitBranch,
   MessageCircle,
   MoreVertical,
@@ -10,11 +13,13 @@ import {
   Pencil,
   Puzzle,
   Settings,
+  X,
 } from "lucide-react";
 import { T } from "../i18n";
 import type { RouteName } from "../routes";
 import { hrefTo, navigate } from "../routes";
 import { Menu, MenuItem } from "./Menu";
+import type { Project } from "../data/types";
 
 /**
  * Conversation-level controls, owned by ConversationPage — it keeps the
@@ -42,6 +47,11 @@ type Props = {
   crumbTitle?: string | null;
   /** Git branch of the active project, shown only when detected. */
   branch?: string | null;
+  /** A new task can choose its project without opening an existing session. */
+  projectOptions?: Project[];
+  projectPath?: string;
+  onSelectProject?: (path: string | null) => void;
+  onAddProject?: () => Promise<void>;
   /** Present only while a live conversation is open — gates rename/archive. */
   convActions?: ConvActions | null;
 };
@@ -58,12 +68,17 @@ export function TopBar({
   crumbProject,
   crumbTitle,
   branch,
+  projectOptions = [],
+  projectPath = "",
+  onSelectProject,
+  onAddProject,
   convActions = null,
 }: Props) {
   // Inline title edit in the crumb — the pencil and the ⋯ menu below are its
   // triggers (the content area lost its 64px title header on 2026-09-30).
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
+  const [projectError, setProjectError] = useState<string | null>(null);
 
   const startRename = () => {
     setRenameDraft(crumbTitle ?? "");
@@ -137,7 +152,66 @@ export function TopBar({
             on the composer only; the top bar does not repeat it (2026-09-23). */}
         {route === "conversation" && (crumbProject || crumbTitle) && (
           <nav className="crumbs topbar-crumbs">
-            {crumbProject && <span>{crumbProject}</span>}
+            {onSelectProject ? (
+              <div className="topbar-project-context" data-testid="topbar-project-context">
+                <Menu
+                  trigger={({ toggle }) => (
+                    <button
+                      type="button"
+                      className="topbar-project-picker"
+                      data-testid="topbar-project-picker"
+                      aria-label={T.nav.selectProject}
+                      title={projectPath || T.nav.selectProject}
+                      onClick={toggle}
+                    >
+                      <span data-testid="topbar-project-name">{crumbProject || T.nav.noProject}</span>
+                      <ChevronDown size={12} strokeWidth={1.8} />
+                    </button>
+                  )}
+                >
+                  {(close) => (
+                    <>
+                      {projectOptions.map((project) => (
+                        <MenuItem
+                          key={project.id}
+                          icon={project.path === projectPath ? <Check size={14} /> : <Folder size={14} />}
+                          label={project.name}
+                          selected={project.path === projectPath}
+                          onSelect={() => {
+                            close();
+                            setProjectError(null);
+                            onSelectProject(project.path ?? project.id);
+                          }}
+                        />
+                      ))}
+                      {onAddProject && (
+                        <MenuItem
+                          icon={<FolderPlus size={14} />}
+                          label={T.nav.addProject}
+                          onSelect={() => {
+                            close();
+                            setProjectError(null);
+                            void onAddProject().catch((error) => setProjectError(String(error)));
+                          }}
+                        />
+                      )}
+                      {projectPath && (
+                        <MenuItem
+                          icon={<X size={14} />}
+                          label={T.nav.clearProject}
+                          onSelect={() => {
+                            close();
+                            setProjectError(null);
+                            onSelectProject(null);
+                          }}
+                        />
+                      )}
+                    </>
+                  )}
+                </Menu>
+                {projectError && <p className="topbar-project-error" role="alert">{projectError}</p>}
+              </div>
+            ) : crumbProject && <span data-testid="topbar-project-name" title={projectPath}>{crumbProject}</span>}
             {crumbProject && crumbTitle && <span className="crumb-sep">/</span>}
             {renaming ? (
               <input
@@ -158,7 +232,7 @@ export function TopBar({
           </nav>
         )}
         {route === "conversation" && branch && (
-          <span className="chip topbar-chip" title={branch}>
+          <span className="chip topbar-chip" title={branch} data-testid="topbar-branch">
             <GitBranch size={12} strokeWidth={1.8} className="chip-icon" />
             <span>{branch}</span>
           </span>

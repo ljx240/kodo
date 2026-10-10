@@ -127,7 +127,7 @@ test("work mode with a project sends with that project and shows the work voice"
 
   // Code + project keeps the classic coding copy; work + project switches it.
   await expect(page.locator('[data-testid="welcome-sub"]')).toHaveText(
-    "描述任务或粘贴报错，我会在当前项目里读代码、改代码。",
+    "在当前项目中理解代码、实现功能、修复问题或执行开发任务。",
   );
   await switchMode(page, "work");
   await expect(page.locator('[data-testid="welcome-sub"]')).toHaveText(
