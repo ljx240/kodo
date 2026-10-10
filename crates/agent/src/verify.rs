@@ -5,6 +5,7 @@
 //! broad, each command carries the `criterion_ids` it may prove, and a pass
 //! is never auto-applied to every criterion.
 
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
@@ -54,7 +55,7 @@ impl VerifyCommand {
 }
 
 /// Why a verification command failed — product vs environment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureClass {
     /// Real product/test/assertion failure the agent should repair.
     Product,
@@ -62,6 +63,7 @@ pub enum FailureClass {
     Infrastructure,
     Timeout,
     Cancelled,
+    Denied,
 }
 
 impl FailureClass {
@@ -71,12 +73,100 @@ impl FailureClass {
             Self::Infrastructure => "infrastructure",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
+            Self::Denied => "denied",
         }
     }
 
     /// Infra failures must not drive a product-regression repair loop.
     pub fn is_infrastructure(self) -> bool {
         matches!(self, Self::Infrastructure)
+    }
+}
+
+/// User-facing failure taxonomy. Classified once in Rust from structured
+/// signals (exit code, denial flag, well-known error shapes) so the UI never
+/// has to guess from display strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandFailureKind {
+    /// The binary itself is missing (exit 127 / "command not found").
+    CommandNotFound,
+    /// The binary exists but cannot be executed (exit 126 / EACCES).
+    PermissionDenied,
+    /// The command ran and returned a non-zero exit code.
+    NonZeroExit,
+    /// The command was killed by its deadline.
+    Timeout,
+    /// The user refused to run this command.
+    Denied,
+    /// Provider/model-level failure surfaced on a command-shaped step.
+    ProviderError,
+    /// The working tree diverged (undo/diff conflict).
+    WorkspaceConflict,
+}
+
+impl CommandFailureKind {
+    /// Stable wire code. The UI maps this to localized copy.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::CommandNotFound => "command_not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::NonZeroExit => "non_zero_exit",
+            Self::Timeout => "timeout",
+            Self::Denied => "denied",
+            Self::ProviderError => "provider_error",
+            Self::WorkspaceConflict => "workspace_conflict",
+        }
+    }
+
+    /// Classify one failed command execution. `None` when nothing failed.
+    pub fn classify(exit_code: Option<i32>, output: &str, denied: bool) -> Option<Self> {
+        if denied {
+            return Some(Self::Denied);
+        }
+        let lower = output.to_ascii_lowercase();
+        if lower.contains("timed out") || lower.contains("timeout after") {
+            return Some(Self::Timeout);
+        }
+        if lower.contains("command not found")
+            || lower.contains(": not found")
+            || lower.contains("is not recognized as an internal or external command")
+            || exit_code == Some(127)
+        {
+            return Some(Self::CommandNotFound);
+        }
+        if exit_code == Some(126)
+            || lower.contains("permission denied")
+            || lower.contains("not executable")
+            || lower.contains("operation not permitted")
+        {
+            return Some(Self::PermissionDenied);
+        }
+        if lower.contains("would be overwritten") || lower.contains("merge conflict") {
+            return Some(Self::WorkspaceConflict);
+        }
+        if exit_code.map(|code| code != 0).unwrap_or(false) {
+            return Some(Self::NonZeroExit);
+        }
+        None
+    }
+
+    /// The missing binary named by a `command not found` style failure, e.g.
+    /// `/bin/sh: cargo: command not found` → `cargo`.
+    pub fn missing_tool(output: &str) -> Option<String> {
+        for marker in [": command not found", ": not found"] {
+            if let Some(index) = output.find(marker) {
+                let before = &output[..index];
+                let tool = before
+                    .rsplit([' ', '\n', '\t', '/', '\\', ':'])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !tool.is_empty() {
+                    return Some(tool.to_owned());
+                }
+            }
+        }
+        None
     }
 }
 
@@ -161,7 +251,7 @@ impl VerificationPlan {
 }
 
 /// One observed verification run, bound to the criteria it targeted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationEvidence {
     pub command: String,
     pub cwd: String,
@@ -311,6 +401,11 @@ impl RepairDecision {
                 });
         let class = if failed
             .iter()
+            .any(|e| e.failure_class == Some(FailureClass::Denied))
+        {
+            FailureClass::Denied
+        } else if failed
+            .iter()
             .any(|e| e.failure_class == Some(FailureClass::Product))
         {
             FailureClass::Product
@@ -343,7 +438,7 @@ impl RepairDecision {
             .join("\n---\n");
 
         match class {
-            FailureClass::Infrastructure => Self {
+            FailureClass::Infrastructure | FailureClass::Denied | FailureClass::Cancelled => Self {
                 can_repair: false,
                 failure_class: class,
                 failed_evidence: failed.into_iter().cloned().collect(),
@@ -492,15 +587,18 @@ impl VerificationRunner {
         for path in changed_files {
             if let Some(rest) = path.strip_prefix("crates/") {
                 if let Some(pkg) = rest.split('/').next() {
-                    let name =
-                        std::fs::read_to_string(project.join(format!("crates/{pkg}/Cargo.toml")))
-                            .ok()
-                            .and_then(|text| {
-                                text.lines()
-                                    .find_map(|l| l.trim().strip_prefix("name = "))
-                                    .map(|n| n.trim_matches('"').to_owned())
-                            })
-                            .unwrap_or_else(|| pkg.to_owned());
+                    let name = crate::tools::resolve_in_project(
+                        project,
+                        &format!("crates/{pkg}/Cargo.toml"),
+                    )
+                    .ok()
+                    .and_then(|path| fs::read_to_string(path).ok())
+                    .and_then(|text| {
+                        text.lines()
+                            .find_map(|l| l.trim().strip_prefix("name = "))
+                            .map(|n| n.trim_matches('"').to_owned())
+                    })
+                    .unwrap_or_else(|| pkg.to_owned());
                     if !crates_changed.contains(&name) {
                         crates_changed.push(name);
                     }
@@ -511,7 +609,7 @@ impl VerificationRunner {
             }
         }
 
-        if project.join("Cargo.toml").is_file() {
+        if crate::tools::resolve_in_project(project, "Cargo.toml").is_ok_and(|p| p.is_file()) {
             if !crates_changed.is_empty() {
                 for pkg in crates_changed.iter().take(3) {
                     push(
@@ -534,12 +632,12 @@ impl VerificationRunner {
         let web_manifest = if web_changed {
             ["apps/desktop/package.json", "package.json"]
                 .iter()
-                .map(|p| project.join(p))
+                .filter_map(|p| crate::tools::resolve_in_project(project, p).ok())
                 .find(|p| p.is_file())
-        } else if project.join("package.json").is_file() {
-            Some(project.join("package.json"))
         } else {
-            None
+            crate::tools::resolve_in_project(project, "package.json")
+                .ok()
+                .filter(|p| p.is_file())
         };
         if let Some(manifest) = web_manifest {
             let text = fs::read_to_string(&manifest).unwrap_or_default();
@@ -572,7 +670,10 @@ impl VerificationRunner {
             }
         }
 
-        if project.join("pyproject.toml").is_file() || project.join("pytest.ini").is_file() {
+        if ["pyproject.toml", "pytest.ini"]
+            .iter()
+            .any(|name| crate::tools::resolve_in_project(project, name).is_ok_and(|p| p.is_file()))
+        {
             push(&mut cmds, VerifyKind::Test, "python -m pytest -q".into());
         }
 
@@ -618,19 +719,21 @@ impl VerificationRunner {
 
         let mut package = None;
         let mut crates_changed: Vec<String> = Vec::new();
-        let mut web_changed = false;
         for path in changed_files {
             if let Some(rest) = path.strip_prefix("crates/") {
                 if let Some(pkg) = rest.split('/').next() {
-                    let name =
-                        std::fs::read_to_string(project.join(format!("crates/{pkg}/Cargo.toml")))
-                            .ok()
-                            .and_then(|text| {
-                                text.lines()
-                                    .find_map(|l| l.trim().strip_prefix("name = "))
-                                    .map(|n| n.trim_matches('"').to_owned())
-                            })
-                            .unwrap_or_else(|| pkg.to_owned());
+                    let name = crate::tools::resolve_in_project(
+                        project,
+                        &format!("crates/{pkg}/Cargo.toml"),
+                    )
+                    .ok()
+                    .and_then(|path| fs::read_to_string(path).ok())
+                    .and_then(|text| {
+                        text.lines()
+                            .find_map(|l| l.trim().strip_prefix("name = "))
+                            .map(|n| n.trim_matches('"').to_owned())
+                    })
+                    .unwrap_or_else(|| pkg.to_owned());
                     if !crates_changed.contains(&name) {
                         crates_changed.push(name.clone());
                     }
@@ -638,9 +741,6 @@ impl VerificationRunner {
                         package = Some(name);
                     }
                 }
-            }
-            if path.starts_with("apps/desktop/") {
-                web_changed = true;
             }
         }
 
@@ -717,11 +817,34 @@ impl VerificationRunner {
                             generic_for_package.clone(),
                         );
                     }
-                } else if project.join("Cargo.toml").is_file() {
+                } else if crate::tools::resolve_in_project(project, "Cargo.toml")
+                    .is_ok_and(|p| p.is_file())
+                {
                     ctx.push(
                         VerifyKind::Test,
                         "cargo test --quiet".to_owned(),
                         VerifyTier::Package,
+                        generic_for_package.clone(),
+                    );
+                }
+            }
+
+            // Reuse manifest inference for npm/Python instead of a Rust-only plan.
+            if !generic_for_package.is_empty() {
+                for command in Self::default()
+                    .infer_targeted(project, changed_files)
+                    .into_iter()
+                    .filter(|c| !c.command.starts_with("cargo "))
+                {
+                    let tier = match command.kind {
+                        VerifyKind::Test => VerifyTier::Package,
+                        VerifyKind::Typecheck => VerifyTier::Typecheck,
+                        _ => VerifyTier::Broad,
+                    };
+                    ctx.push(
+                        command.kind,
+                        command.command,
+                        tier,
                         generic_for_package.clone(),
                     );
                 }
@@ -734,30 +857,26 @@ impl VerificationRunner {
                 } else {
                     generic_ids.clone()
                 };
-                if !typecheck_ids.is_empty() {
-                    if project.join("Cargo.toml").is_file() {
-                        ctx.push(
-                            VerifyKind::Build,
-                            "cargo check --quiet".to_owned(),
-                            VerifyTier::Typecheck,
-                            typecheck_ids.clone(),
-                        );
-                    }
-                    if web_changed {
-                        ctx.push(
-                            VerifyKind::Typecheck,
-                            "npm --prefix apps/desktop run typecheck".to_owned(),
-                            VerifyTier::Typecheck,
-                            typecheck_ids.clone(),
-                        );
-                    }
+                if !typecheck_ids.is_empty()
+                    && crate::tools::resolve_in_project(project, "Cargo.toml")
+                        .is_ok_and(|p| p.is_file())
+                {
+                    ctx.push(
+                        VerifyKind::Build,
+                        "cargo check --quiet".to_owned(),
+                        VerifyTier::Typecheck,
+                        typecheck_ids.clone(),
+                    );
                 }
             }
         }
 
         // 4) Broader suite last — only when no package-level test was planned.
         let has_package_cmd = commands.iter().any(|c| c.tier == VerifyTier::Package);
-        if !generic_ids.is_empty() && project.join("Cargo.toml").is_file() && !has_package_cmd {
+        if !generic_ids.is_empty()
+            && crate::tools::resolve_in_project(project, "Cargo.toml").is_ok_and(|p| p.is_file())
+            && !has_package_cmd
+        {
             commands.push(PlannedVerifyCommand {
                 command: VerifyCommand {
                     kind: VerifyKind::Test,
@@ -783,7 +902,8 @@ impl VerificationRunner {
 
     /// Run a verification plan in tier order. Stops after the first product
     /// failure at ExactRegression (targeted repair) unless `stop_on_fail=false`.
-    /// Infra failures also stop (no point continuing the suite).
+    /// A missing tool blocks every later command that needs the same binary
+    /// (recorded without spawning), and never drives a product-repair loop.
     pub fn run_plan(
         &self,
         project: &Path,
@@ -791,11 +911,56 @@ impl VerificationRunner {
         alive: &dyn Fn() -> bool,
         stop_on_fail: bool,
     ) -> Vec<VerificationEvidence> {
+        self.run_plan_with_approval(project, plan, alive, stop_on_fail, &|_| true)
+    }
+
+    pub fn run_plan_with_approval(
+        &self,
+        project: &Path,
+        plan: &VerificationPlan,
+        alive: &dyn Fn() -> bool,
+        stop_on_fail: bool,
+        approve: &dyn Fn(&VerifyCommand) -> bool,
+    ) -> Vec<VerificationEvidence> {
         let mut out = Vec::new();
         let cwd = project.display().to_string();
+        let mut missing_tools: Vec<String> = Vec::new();
         for planned in &plan.commands {
             if !alive() {
                 break;
+            }
+            if !approve(&planned.command) {
+                let outcome = blocked_outcome(&planned.command, &cwd, "用户拒绝了验证命令");
+                let mut ev = VerificationEvidence::from_outcome(
+                    &outcome,
+                    &cwd,
+                    planned.criterion_ids.clone(),
+                    500,
+                );
+                ev.failure_class = Some(FailureClass::Denied);
+                out.push(ev);
+                break;
+            }
+            if !alive() {
+                break;
+            }
+            let binary = first_token(&planned.command.command);
+            if missing_tools.contains(&binary) {
+                // Same missing tool: running it again cannot succeed. Record
+                // the block without spawning so the trace shows every doomed
+                // step and the summary can say "N steps blocked".
+                let outcome = blocked_outcome(
+                    &planned.command,
+                    &cwd,
+                    &format!("{binary}: command not found (tool unavailable)"),
+                );
+                out.push(VerificationEvidence::from_outcome(
+                    &outcome,
+                    &cwd,
+                    planned.criterion_ids.clone(),
+                    500,
+                ));
+                continue;
             }
             let outcome = self.run_one(project, &planned.command, alive);
             let ev = VerificationEvidence::from_outcome(
@@ -805,6 +970,15 @@ impl VerificationRunner {
                 500,
             );
             let failed = !ev.ok;
+            if failed {
+                if let Some(tool) = CommandFailureKind::missing_tool(&outcome.output_tail) {
+                    missing_tools.push(tool);
+                    out.push(ev);
+                    // Other tools' commands may still run; same-tool ones are
+                    // skipped above. No point stopping the whole plan.
+                    continue;
+                }
+            }
             out.push(ev);
             if failed && stop_on_fail {
                 // Stop so repair can re-run this targeted command first.
@@ -860,6 +1034,7 @@ impl VerificationRunner {
     }
 
     /// Run an explicit command list (already filtered by skill policy).
+    /// Same missing-tool skip rules as [`Self::run_plan`].
     pub fn run_commands(
         &self,
         project: &Path,
@@ -868,12 +1043,30 @@ impl VerificationRunner {
         stop_on_fail: bool,
     ) -> Vec<VerifyOutcome> {
         let mut out = Vec::new();
+        let cwd = project.display().to_string();
+        let mut missing_tools: Vec<String> = Vec::new();
         for cmd in cmds {
             if !alive() {
                 break;
             }
+            let binary = first_token(&cmd.command);
+            if missing_tools.contains(&binary) {
+                out.push(blocked_outcome(
+                    cmd,
+                    &cwd,
+                    &format!("{binary}: command not found (tool unavailable)"),
+                ));
+                continue;
+            }
             let outcome = self.run_one(project, cmd, alive);
             let failed = !outcome.ok;
+            if failed {
+                if let Some(tool) = CommandFailureKind::missing_tool(&outcome.output_tail) {
+                    missing_tools.push(tool);
+                    out.push(outcome);
+                    continue;
+                }
+            }
             out.push(outcome);
             if failed && stop_on_fail {
                 break;
@@ -896,6 +1089,35 @@ impl VerificationRunner {
         } else {
             FinalStatus::VerificationFailed
         }
+    }
+}
+
+/// Leading binary of a shell command (`cargo test --lib` → `cargo`).
+fn first_token(command: &str) -> String {
+    command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// A command that was never spawned because its tool is already known missing.
+fn blocked_outcome(cmd: &VerifyCommand, cwd: &str, reason: &str) -> VerifyOutcome {
+    VerifyOutcome {
+        command: cmd.clone(),
+        exit_code: None,
+        ok: false,
+        timed_out: false,
+        cancelled: false,
+        cwd: cwd.to_owned(),
+        duration_ms: 0,
+        output_tail: reason.to_owned(),
+        failure: Some(FailureReport {
+            command: cmd.command.clone(),
+            exit_code: None,
+            primary_error: reason.to_owned(),
+            relevant_files: Vec::new(),
+        }),
     }
 }
 
@@ -1619,5 +1841,155 @@ error[E0308]: mismatched types
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+    #[test]
+    fn failure_kind_classifies_structured_signals() {
+        use CommandFailureKind::*;
+        assert_eq!(
+            CommandFailureKind::classify(Some(127), "/bin/sh: cargo: command not found", false),
+            Some(CommandNotFound)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(
+                Some(127),
+                "/bin/sh: cargo: command not found",
+                true // denial wins: the user never let it run
+            ),
+            Some(Denied)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(Some(126), "permission denied", false),
+            Some(PermissionDenied)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(Some(2), "error: test failed", false),
+            Some(NonZeroExit)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(None, "timed out after 90s", false),
+            Some(Timeout)
+        );
+        assert_eq!(
+            CommandFailureKind::classify(Some(1), "would be overwritten by merge", false),
+            Some(WorkspaceConflict)
+        );
+        assert_eq!(CommandFailureKind::classify(Some(0), "ok", false), None);
+    }
+
+    #[test]
+    fn missing_tool_reads_the_binary_name() {
+        assert_eq!(
+            CommandFailureKind::missing_tool("/bin/sh: cargo: command not found"),
+            Some("cargo".to_owned())
+        );
+        assert_eq!(
+            CommandFailureKind::missing_tool("bash: flub: command not found"),
+            Some("flub".to_owned())
+        );
+        assert_eq!(CommandFailureKind::missing_tool("error: test failed"), None);
+    }
+
+    #[test]
+    fn a_missing_tool_blocks_same_binary_and_skips_the_doomed_chain() {
+        let dir = fixture_with_failing_test();
+        let runner = VerificationRunner::new(10_000);
+        let cmds = vec![
+            VerifyCommand::build("kodo_no_such_tool_xyz build"),
+            VerifyCommand::test("kodo_no_such_tool_xyz test"),
+            VerifyCommand::test("node -e \"process.exit(0)\""),
+        ];
+        let out = runner.run_commands(&dir, &cmds, &|| true, true);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(out.len(), 3, "every planned command gets a row");
+        assert!(!out[0].ok, "first attempt runs and fails");
+        assert!(!out[1].ok, "second is blocked");
+        assert_eq!(out[1].duration_ms, 0, "blocked rows never spawned");
+        assert!(
+            out[1].output_tail.contains("tool unavailable"),
+            "blocked rows say why: {}",
+            out[1].output_tail
+        );
+        assert!(out[2].ok, "a different tool still runs after a missing one");
+    }
+    #[test]
+    fn plan_reuses_npm_python_inference_and_rejects_manifest_aliases() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-verify-manifests-{}", std::process::id()));
+        let project = root.join("repo");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"scripts":{"test":"echo test","typecheck":"echo check"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = 'fixture'\n",
+        )
+        .unwrap();
+        let plan = VerificationRunner::build_plan(
+            &project,
+            &[("c1".into(), "Verification commands pass".into())],
+            &["app.js".into()],
+            "feature",
+        );
+        for command in ["npm run test", "npm run typecheck", "python -m pytest -q"] {
+            assert!(
+                plan.commands
+                    .iter()
+                    .any(|c| c.command.command == command && c.criterion_ids == ["c1"]),
+                "missing bound command {command}: {plan:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let outside = root.join("outside.json");
+            fs::write(&outside, r#"{"scripts":{"test":"echo unapproved"}}"#).unwrap();
+            fs::remove_file(project.join("package.json")).unwrap();
+            std::os::unix::fs::symlink(&outside, project.join("package.json")).unwrap();
+            assert!(!VerificationRunner::default()
+                .infer(&project)
+                .iter()
+                .any(|c| c.command.starts_with("npm ")));
+            fs::remove_file(project.join("package.json")).unwrap();
+            fs::write(
+                project.join(".env"),
+                r#"{"scripts":{"test":"echo synthetic"}}"#,
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(project.join(".env"), project.join("package.json")).unwrap();
+            assert!(!VerificationRunner::default()
+                .infer(&project)
+                .iter()
+                .any(|c| c.command.starts_with("npm ")));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verifier_denial_keeps_bindings_and_never_spawns_the_denied_command() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-verify-approval-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let plan = VerificationPlan {
+            commands: vec![PlannedVerifyCommand {
+                command: VerifyCommand::test("echo started > marker.txt"),
+                criterion_ids: vec!["c1".into()],
+                tier: VerifyTier::ExactRegression,
+            }],
+            ..Default::default()
+        };
+        let runner = VerificationRunner::new(5000);
+        let denied = runner.run_plan_with_approval(&root, &plan, &|| true, false, &|_| false);
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].failure_class, Some(FailureClass::Denied));
+        assert_eq!(denied[0].criterion_ids, ["c1"]);
+        assert!(!root.join("marker.txt").exists());
+        assert!(!RepairDecision::from_evidence(&denied, &plan, true).can_repair);
+        let allowed = runner.run_plan_with_approval(&root, &plan, &|| true, false, &|_| true);
+        assert!(allowed[0].ok);
+        assert!(root.join("marker.txt").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

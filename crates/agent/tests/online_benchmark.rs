@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use kodo_agent::{Permission, Provider, RunRequest, SinkEvent, Step, StepKind};
+use kodo_agent::{AgentMode, Permission, Provider, RunRequest, SinkEvent, Step, StepKind};
 
 /// Minimal online smoke: one read-only question against a real endpoint.
 /// Skips cleanly when the key env var is missing.
@@ -30,15 +30,23 @@ fn online_read_only_smoke() {
 
     let provider = Provider::new("openai", key, endpoint, model);
     let request = RunRequest {
-        project: project.clone(),
+        project: Some(project.clone()),
         message: "What is this repository? One sentence.".into(),
+        conversation_history: Vec::new(),
         pinned_context: vec![],
         provider: Some(provider),
         permission: Permission::Auto,
+        mode: AgentMode::Code,
         fallback_to_local: true,
         max_output_tokens: 256,
         extended_thinking: false,
+        local_trace: false,
         session_id: None,
+        user_skills_dir: None,
+        mcp_servers: Vec::new(),
+        agent_instructions: None,
+        personas: Vec::new(),
+        budget_family: None,
     };
 
     let mut answer = String::new();
@@ -60,5 +68,33 @@ fn online_read_only_smoke() {
     eprintln!(
         "online answer head: {}",
         answer.chars().take(200).collect::<String>()
+    );
+}
+
+/// Live websearch smoke — confirms DDG is reachable and `parse_results` is
+/// still aligned with the real HTML. PR CI skips this; run on demand:
+/// ```bash
+/// cargo test -p kodo-agent --test online_benchmark -- --ignored websearch_live_returns_hits --nocapture
+/// ```
+#[test]
+#[ignore = "requires network; never run on PR CI"]
+fn websearch_live_returns_hits() {
+    let hits = kodo_agent::websearch::search("tauri webview window", 5)
+        .expect("live websearch must succeed when DDG is reachable");
+    assert!(!hits.is_empty(), "live query must produce at least one hit");
+    let first = &hits[0];
+    assert!(!first.title.is_empty(), "first hit title must be non-empty");
+    assert!(
+        !first.url.is_empty(),
+        "first hit url must be non-empty (after the uddg unwrap)"
+    );
+    assert!(
+        !first.snippet.is_empty(),
+        "first hit snippet must be non-empty"
+    );
+    eprintln!(
+        "live websearch returned {} hit(s); first title = {:?}",
+        hits.len(),
+        first.title,
     );
 }

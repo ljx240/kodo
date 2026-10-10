@@ -5,6 +5,8 @@
 //! Acceptance criteria are structured objects; free-text model claims never
 //! complete them.
 
+use serde::{Deserialize, Serialize};
+
 use crate::evidence::{
     evidence_from_tool_result, AcceptanceCriterion, CommandExpectation, EvidenceBag, EvidenceItem,
     EvidenceKind, EvidenceRequirement, FailureExpectation, SemanticTarget, SubtaskRequirement,
@@ -13,7 +15,7 @@ use crate::protocol::{ToolErrorCode, ToolName, ToolResult};
 use crate::skill::SkillSpec;
 
 /// Kind of work a subtask represents — drives how evidence marks it done.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubtaskKind {
     /// Search / read / inspect.
     Read,
@@ -26,7 +28,7 @@ pub enum SubtaskKind {
 }
 
 /// Lifecycle of one subtask. `Done` requires non-empty evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubtaskStatus {
     Pending,
     Running,
@@ -54,7 +56,7 @@ impl SubtaskStatus {
 }
 
 /// Structural proof attached to a subtask. Never model prose.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Evidence {
     /// A successful (or gating) tool result id.
     ToolResultId { id: String, tool: String },
@@ -77,7 +79,7 @@ impl Evidence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subtask {
     pub id: String,
     pub title: String,
@@ -147,7 +149,7 @@ impl Subtask {
 }
 
 /// Plan handed to the model and used for acceptance evaluation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskPlan {
     pub goal: String,
     pub constraints: Vec<String>,
@@ -172,9 +174,178 @@ pub struct TaskPlan {
     /// Per-command criterion bindings from the last verification run:
     /// `(command, criterion_ids)`.
     pub verify_bindings: Vec<(String, Vec<String>)>,
+    /// Work-mode deliverable bar (DESIGN.md §11): the model claim is the
+    /// delivery. Free-form criteria stay checklist text for the answer
+    /// instead of a machine gate — work never runs verify, and the machine
+    /// cannot grade prose quality. Tools already enforce path containment
+    /// and permissions at execution time. Code mode keeps the fail-closed
+    /// evidence bar (`false`).
+    pub deliverable_bar: bool,
+    pub expected_outputs: Vec<String>,
+    pub requires_file_output: bool,
 }
 
 impl TaskPlan {
+    pub fn set_output_contract(&mut self, message: &str) {
+        let lower = message.to_ascii_lowercase();
+        let markers = [
+            "write", "create", "save", "export", "generate", "update", "输出", "保存", "生成",
+            "写入", "创建", "导出", "更新",
+        ];
+        let start = markers
+            .iter()
+            .filter_map(|m| lower.rfind(m).map(|i| i + m.len()))
+            .max();
+        let Some(start) = start else {
+            return;
+        };
+        let tail = &message[start..];
+        let tail = tail.split(" from ").next().unwrap_or(tail);
+        self.expected_outputs = tail
+            .split(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '`' | '\''
+                            | '"'
+                            | '，'
+                            | ','
+                            | '。'
+                            | ';'
+                            | '；'
+                            | '('
+                            | ')'
+                            | '（'
+                            | '）'
+                            | ':'
+                            | '：'
+                    )
+            })
+            .filter_map(|word| {
+                let word = word
+                    .trim_matches(['.', '!', '?'])
+                    .trim_start_matches("到")
+                    .trim_start_matches("为");
+                let ext = std::path::Path::new(word)
+                    .extension()?
+                    .to_str()?
+                    .to_lowercase();
+                if [
+                    "md", "txt", "csv", "tsv", "json", "html", "docx", "xlsx", "pdf", "pptx",
+                ]
+                .contains(&ext.as_str())
+                    && !word.contains("://")
+                {
+                    Some(word.to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.expected_outputs.sort();
+        self.expected_outputs.dedup();
+        self.requires_file_output = self.deliverable_bar
+            && (!self.expected_outputs.is_empty()
+                || [
+                    "文件", "保存", "导出", "file", "docx", "xlsx", "pdf", "pptx",
+                ]
+                .iter()
+                .any(|k| lower.contains(k)));
+    }
+
+    pub fn validate_deliverables(
+        &self,
+        project: &std::path::Path,
+        written: &[String],
+    ) -> Vec<String> {
+        if !self.requires_file_output {
+            return Vec::new();
+        }
+        let paths = if self.expected_outputs.is_empty() {
+            written
+        } else {
+            &self.expected_outputs
+        };
+        if paths.is_empty() {
+            return vec!["no output file was produced".into()];
+        }
+        paths
+            .iter()
+            .filter_map(|path| {
+                let result = (|| -> Result<(), String> {
+                    let full = crate::tools::resolve_in_project(project, path)?;
+                    let size = std::fs::metadata(&full).map_err(|e| e.to_string())?.len();
+                    if size == 0 {
+                        return Err("output is empty".into());
+                    }
+                    if crate::office::is_docx(path) {
+                        let doc = crate::office::read_docx(&full, 2 * 1024 * 1024)?;
+                        if doc.text.trim().is_empty() || doc.truncated {
+                            return Err(
+                                "DOCX readback is empty or exceeds the acceptance limit".into()
+                            );
+                        }
+                    } else if crate::office::is_spreadsheet(path) {
+                        let sheet = crate::office::read_spreadsheet(&full, 2 * 1024 * 1024)?;
+                        if sheet.sheets == 0 || sheet.non_empty_cells == 0 || sheet.truncated {
+                            return Err("spreadsheet has no readable cells".into());
+                        }
+                    } else {
+                        if size > 8 * 1024 * 1024 {
+                            return Err("output exceeds the readback limit".into());
+                        }
+                        let content = std::fs::read_to_string(&full)
+                            .map_err(|e| format!("unsupported or unreadable output: {e}"))?;
+                        if content.trim().is_empty() {
+                            return Err("output is blank".into());
+                        }
+                        if path.to_lowercase().ends_with(".json") {
+                            serde_json::from_str::<serde_json::Value>(&content)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        if path.to_lowercase().ends_with(".pdf")
+                            || path.to_lowercase().ends_with(".pptx")
+                        {
+                            return Err("this document format has no readback validator".into());
+                        }
+                    }
+                    Ok(())
+                })();
+                result.err().map(|e| format!("deliverable `{path}`: {e}"))
+            })
+            .collect()
+    }
+
+    /// Conversational Q&A plan (2026-09-29): no subtasks, no acceptance
+    /// criteria, no verify. The conversational channel — projectless
+    /// constrained Q&A, knowledge questions — must never gate the answer
+    /// behind task evidence: the first prose answer IS the delivery.
+    pub fn conversational(message: &str) -> Self {
+        let goal = message
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("question")
+            .trim()
+            .to_owned();
+        Self {
+            goal,
+            constraints: Vec::new(),
+            subtasks: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            criteria: Vec::new(),
+            current_subtask: 0,
+            requires_verify: false,
+            repro_commands: Vec::new(),
+            verify_commands: Vec::new(),
+            verify_target_ids: Vec::new(),
+            verify_bindings: Vec::new(),
+            deliverable_bar: true,
+            expected_outputs: Vec::new(),
+            requires_file_output: false,
+        }
+    }
+
     /// Heuristic plan when no model planner is available (still structured).
     pub fn from_task(message: &str) -> Self {
         let goal = message
@@ -299,6 +470,67 @@ impl TaskPlan {
             verify_commands: Vec::new(),
             verify_target_ids: Vec::new(),
             verify_bindings: Vec::new(),
+            deliverable_bar: false,
+            expected_outputs: Vec::new(),
+            requires_file_output: false,
+        }
+    }
+
+    /// Read-only summary plan: three Read subtasks, no verify, no mutation,
+    /// no skill workflow. Pairs with `Budget::for_summary()` so the agent
+    /// loop doesn't fail-fast on a 30+ tool-call sweep that ends in prose.
+    ///
+    /// Used by `is_summary_intent()`'s summary branch in `lib.rs::run()`.
+    /// The plan deliberately lacks verify — there's no "did the summary
+    /// pass tests" criterion; the user judges by the prose.
+    pub fn summarize(message: &str) -> Self {
+        let goal = message
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("summary")
+            .trim()
+            .to_owned();
+        let subtasks = vec![
+            Subtask::new(
+                "s1",
+                "Map the project structure (tree + manifests)",
+                SubtaskKind::Read,
+            )
+            .with_requirement(SubtaskRequirement::contextual(
+                EvidenceRequirement::AnyToolSuccess,
+            )),
+            Subtask::new(
+                "s2",
+                "Read the entry points and key modules",
+                SubtaskKind::Read,
+            )
+            .with_requirement(SubtaskRequirement::contextual(
+                EvidenceRequirement::AnyToolSuccess,
+            )),
+            Subtask::new("s3", "Read the wiring between modules", SubtaskKind::Read)
+                .with_requirement(SubtaskRequirement::contextual(
+                    EvidenceRequirement::AnyToolSuccess,
+                )),
+        ];
+        Self {
+            goal,
+            constraints: vec![
+                "Paths stay inside the project".to_owned(),
+                "No hidden chain-of-thought is stored".to_owned(),
+            ],
+            subtasks,
+            acceptance_criteria: Vec::new(),
+            criteria: Vec::new(),
+            current_subtask: 0,
+            requires_verify: false,
+            repro_commands: Vec::new(),
+            verify_commands: Vec::new(),
+            verify_target_ids: Vec::new(),
+            verify_bindings: Vec::new(),
+            deliverable_bar: true,
+            expected_outputs: Vec::new(),
+            requires_file_output: false,
         }
     }
 
@@ -334,6 +566,14 @@ impl TaskPlan {
                 .collect();
         }
         plan.requires_verify = skill.verification_policy.needs_run();
+        // Acceptance bar follows the skill's task family (DESIGN.md §11):
+        // Work tasks are judged on the deliverable itself — the model claim
+        // is the delivery, so free-form criteria stay answer checklist text.
+        // Code skills keep the fail-closed evidence bar.
+        plan.deliverable_bar = skill
+            .applicable_task_types
+            .contains(&crate::classify::TaskType::Work);
+        plan.set_output_contract(message);
         plan.constraints = vec![
             "Paths stay inside the project".to_owned(),
             "No hidden chain-of-thought is stored".to_owned(),
@@ -425,12 +665,19 @@ impl TaskPlan {
             verify_commands: Vec::new(),
             verify_target_ids: Vec::new(),
             verify_bindings: Vec::new(),
+            deliverable_bar: false,
+            expected_outputs: Vec::new(),
+            requires_file_output: false,
         })
     }
 
     /// Prompt fragment: structured plan for the model (no hidden reasoning).
     pub fn to_prompt_block(&self) -> String {
         let mut out = String::from("## Current plan\n");
+        if self.requires_file_output {
+            out.push_str(&format!("- File delivery requires nonempty, valid files and readback; expected outputs: {:?}\n", self.expected_outputs));
+        }
+
         out.push_str(&format!("- goal: {}\n", self.goal));
         for c in &self.constraints {
             out.push_str(&format!("- constraint: {c}\n"));
@@ -781,6 +1028,11 @@ impl TaskPlan {
     /// - no unresolved criterion
     /// - no unresolved critical failure
     ///
+    /// Exception — work-mode deliverable bar ([`Self::deliverable_bar`],
+    /// DESIGN.md §11): the model claim is the delivery, so free-form quality
+    /// criteria become the answer's checklist instead of a gate. Integrity
+    /// and verify failures above still fail closed.
+    ///
     /// `model_claimed_done` never creates evidence — it only triggers this
     /// evaluation. Model prose is never converted into TestPassed/FileChanged.
     pub fn evaluate_acceptance(&self, evidence: &AcceptanceEvidence) -> AcceptanceReport {
@@ -805,6 +1057,29 @@ impl TaskPlan {
         } else if evidence.verify_ok == Some(false) {
             // Unresolved critical failure even when the skill skips verify.
             failures.push("verification failed".to_owned());
+        }
+
+        // Work-mode deliverable bar (DESIGN.md §11): "deliverable quality is
+        // the bar" — work never runs verify and the machine cannot grade
+        // prose. The claim is the delivery; criteria become the answer's
+        // checklist text, unfinished workflow steps no longer block, and the
+        // tools already enforced path/permission constraints at execution.
+        // Integrity failures above still fail closed.
+        if self.deliverable_bar && evidence.model_claimed_done {
+            if self.requires_file_output {
+                match &evidence.deliverable_errors {
+                    None => failures.push("file deliverables have not been read back".into()),
+                    Some(errors) => failures.extend(errors.iter().cloned()),
+                }
+            }
+            for criterion in &self.criteria {
+                passed.push(criterion.description.clone());
+            }
+            return AcceptanceReport {
+                ok: failures.is_empty(),
+                passed,
+                failures,
+            };
         }
 
         // Evaluate structured criteria when present (strict), else legacy strings.
@@ -1136,7 +1411,7 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 }
 
 /// Inputs for acceptance evaluation (from tools, never from prose alone).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptanceEvidence {
     pub had_tool_success: bool,
     pub files_written: Vec<String>,
@@ -1151,11 +1426,13 @@ pub struct AcceptanceEvidence {
     pub verify_infra_failure: bool,
     /// True when at least one targeted verification command passed this turn.
     pub partial_verified: bool,
+    pub deliverable_errors: Option<Vec<String>>,
 }
 
 impl AcceptanceEvidence {
     pub fn absorb_results(&mut self, results: &[ToolResult]) {
         for r in results {
+            self.files_written.extend(r.changed_files.iter().cloned());
             if r.ok {
                 self.had_tool_success = true;
                 if ToolName::parse(&r.name)
@@ -1177,6 +1454,7 @@ impl AcceptanceEvidence {
         expectation: Option<&CommandExpectation>,
     ) {
         for r in results {
+            self.files_written.extend(r.changed_files.iter().cloned());
             if r.ok {
                 self.had_tool_success = true;
                 if ToolName::parse(&r.name)
@@ -1271,6 +1549,28 @@ mod tests {
         assert!(plan.subtasks.iter().all(|s| s.kind == SubtaskKind::Read));
         assert!(!plan.acceptance_criteria.is_empty());
         assert!(!plan.goal.is_empty());
+    }
+
+    #[test]
+    fn conversational_plan_carries_no_gates() {
+        // The Q&A channel must never gate Finish: no subtasks, no criteria,
+        // no verify requirement — the prose answer is the delivery.
+        let plan = TaskPlan::conversational("介绍下什么是数据仓库");
+        assert_eq!(plan.goal, "介绍下什么是数据仓库");
+        assert!(plan.subtasks.is_empty());
+        assert!(plan.acceptance_criteria.is_empty());
+        assert!(plan.criteria.is_empty());
+        assert!(!plan.requires_verify);
+        assert!(plan.deliverable_bar);
+        assert!(!plan.evaluate_acceptance(&AcceptanceEvidence::default()).ok);
+        assert!(
+            plan.evaluate_acceptance(&AcceptanceEvidence {
+                model_claimed_done: true,
+                ..Default::default()
+            })
+            .ok,
+            "a prose answer needs no code acceptance evidence"
+        );
     }
 
     #[test]
@@ -1642,6 +1942,44 @@ mod tests {
     }
 
     #[test]
+    fn deliverable_bar_claim_is_the_delivery_for_free_form_criteria() {
+        // Work-mode bar (DESIGN.md §11): free-form quality criteria cannot
+        // be graded by tools — the claim completes the turn and the criteria
+        // are reported as checklist text without fabricating evidence.
+        let mut plan = TaskPlan::from_task("Please update README with badges");
+        plan.deliverable_bar = true;
+        plan.requires_verify = false; // work skill: verification_policy none
+        plan.criteria.push(AcceptanceCriterion::new(
+            "m_cX",
+            "The deliverable answers the user's request completely",
+            infer_criterion_req("The deliverable answers the user's request completely"),
+        ));
+        assert!(
+            plan.criteria.iter().any(|c| c.is_unresolved()),
+            "unknown free-form must still infer fail-closed"
+        );
+        let evidence = AcceptanceEvidence {
+            model_claimed_done: true,
+            ..Default::default()
+        };
+        let report = plan.evaluate_acceptance(&evidence);
+        assert!(report.ok, "claim is the delivery: {:?}", report.failures);
+        assert!(report.passed.iter().any(|p| p.contains("answers the user")));
+        // The claim never injects observations.
+        assert!(evidence.bag.items.is_empty());
+        assert!(evidence.files_written.is_empty());
+    }
+
+    #[test]
+    fn deliverable_bar_without_claim_stays_closed() {
+        let mut plan = TaskPlan::from_task("Please update README with badges");
+        plan.deliverable_bar = true;
+        plan.requires_verify = false;
+        let report = plan.evaluate_acceptance(&AcceptanceEvidence::default());
+        assert!(!report.ok, "no claim → no delivery: {:?}", report.passed);
+    }
+
+    #[test]
     fn semantic_completion_root_cause_criterion_rejects_read_and_git_status() {
         let root = infer_criterion_req("root cause located in source");
         assert!(matches!(
@@ -1749,5 +2087,28 @@ mod tests {
             );
         }
         assert!(plan.repro_commands.is_empty());
+    }
+
+    /// Phase 0 second-pass — summary plan is read-only and verify-free.
+    /// Pairs with `Budget::for_summary()` selected by `is_summary_intent()`.
+    #[test]
+    fn summarize_plan_has_only_read_subtasks_and_no_verify() {
+        let plan = TaskPlan::summarize("为我输出该项目的总体架构设计");
+        assert_eq!(plan.subtasks.len(), 3);
+        assert!(
+            plan.subtasks
+                .iter()
+                .all(|s| matches!(s.kind, SubtaskKind::Read)),
+            "summary plan must contain only Read subtasks; got {:?}",
+            plan.subtasks.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
+        assert!(
+            !plan.requires_verify,
+            "summary tasks have nothing to verify against tests"
+        );
+        assert!(plan.criteria.is_empty());
+        assert!(plan.acceptance_criteria.is_empty());
+        // Goal captures the user message verbatim (first line).
+        assert!(plan.goal.contains("总体架构"));
     }
 }

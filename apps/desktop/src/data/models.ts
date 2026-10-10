@@ -19,7 +19,7 @@ export const PERMISSIONS: { value: Permission; label: string; description: strin
   { value: "auto", label: "自动批准安全操作", description: "普通命令自动执行，危险命令仍需确认" },
   {
     value: "full",
-    label: "完全访问",
+    label: "项目内自动执行",
     description: "项目内操作自动执行；破坏性 git / 提权仍需确认（不推荐）",
   },
 ];

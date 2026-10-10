@@ -1,6 +1,7 @@
 /* -------------------------------------------------------- response trace -- */
 
 .reply-card {
+  container: reply-card / inline-size;
   margin: 28px 0 8px;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
@@ -36,12 +37,13 @@
    the summary column against it, rather than splitting the row in half. */
 .reply-card-body {
   display: grid;
-  grid-template-columns: 2fr 3fr;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
   gap: 19px;
   padding: 2px 18px 18px 76px;
 }
 
 .reply-meta {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -69,6 +71,26 @@
   gap: 6px;
   margin: 0;
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.reply-meta-row .code-chip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reply-meta-row .icon-btn { flex: none; }
+
+@container reply-card (max-width: 640px) {
+  .reply-card-body {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 2px 18px 18px;
+    gap: 14px;
+  }
+  .reply-card-head { padding: 16px 18px 10px; }
+  .reply-mark { margin-right: 0; }
+  .reply-meta-row { grid-template-columns: 84px minmax(0, 1fr); }
 }
 
 .copied-hint {
@@ -100,9 +122,12 @@
   gap: 18px;
   margin-bottom: 15px;
   border-bottom: 1px solid var(--kodo-border);
+  overflow-x: auto;
 }
 
 .page-tab {
+  flex: none;
+  white-space: nowrap;
   height: 36px;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
@@ -122,6 +147,7 @@
 }
 
 .timeline {
+  min-width: 640px;
   width: 100%;
   border-collapse: collapse;
   font-size: var(--kodo-font-md);
@@ -172,6 +198,19 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tl-title .code-chip {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
 }
 
 .tl-note {
@@ -249,6 +288,7 @@
    column widths are what hold the gaps. Columns are fixed so the conversation
    title and summary truncate instead of wrapping the row taller. */
 .archive-table {
+  min-width: 680px;
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
@@ -257,7 +297,7 @@
 
 .archive-table th {
   height: 35px;
-  padding: 0;
+  padding: 0 8px;
   border-bottom: 1px solid var(--kodo-border);
   background: var(--kodo-surface);
   color: var(--kodo-text-secondary);
@@ -268,7 +308,7 @@
 
 .archive-table td {
   height: 35px;
-  padding: 0;
+  padding: 0 8px;
   border-bottom: 1px solid var(--kodo-border-subtle);
   vertical-align: middle;
   white-space: nowrap;
@@ -284,14 +324,21 @@
   background: var(--kodo-hover);
 }
 
-.archive-table th:nth-child(1) { width: 42px; }
-.archive-table th:nth-child(2) { width: 194px; }
-.archive-table th:nth-child(3) { width: 210px; }
-.archive-table th:nth-child(4) { width: 112px; }
-.archive-table th:nth-child(5) { width: 100px; }
-.archive-table th:nth-child(6) { width: 98px; }
-.archive-table th:nth-child(7) { width: 107px; }
-.archive-table th:nth-child(8) { width: 33px; }
+/* Six columns per LAYOUT §7. The old track map still carried eight columns
+   from a previous table shape and crushed Conversation to ~50px, which pushed
+   its header into Summary. Percentages track the table width at any viewport. */
+.archive-table th:nth-child(1) { width: 26%; }
+.archive-table th:nth-child(2) { width: 22%; }
+.archive-table th:nth-child(3) { width: 15%; }
+.archive-table th:nth-child(4) { width: 14%; }
+.archive-table th:nth-child(5) { width: 13%; }
+.archive-table th:nth-child(6) { width: 10%; }
+
+.archive-table th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .archive-table .row--selected {
   background: var(--kodo-selected);
@@ -311,11 +358,32 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  width: 100%;
+  text-align: left;
 }
 
 .arc-title svg {
   flex: none;
   color: var(--kodo-text-secondary);
+}
+
+/* The text sits in its own span so the flex row can shrink and the title
+   truncates instead of overflowing the fixed column. */
+.arc-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-pill {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .arc-summary {
@@ -369,6 +437,8 @@
 .settings-modal-panel {
   position: relative;
   z-index: 1;
+  display: flex;
+  flex-direction: column;
   width: min(980px, 100%);
   height: min(720px, 100%);
   overflow: hidden;
@@ -390,6 +460,8 @@
 }
 
 .skill-row {
+  width: 100%;
+  text-align: left;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -399,9 +471,69 @@
   color: var(--kodo-text-secondary);
 }
 
-.skill-row:last-child { border-bottom: 0; }
-.skill-row-label { color: var(--kodo-text); font-size: var(--kodo-font-md); }
-.skill-row code { margin-left: auto; color: var(--kodo-text-secondary); }
+.skill-row:last-child,
+.user-skill-row:last-child { border-bottom: 0; }
+
+.skill-row:hover,
+.user-skill-row:hover { background: var(--kodo-hover); }
+
+.skill-row svg,
+.user-skill-open svg,
+.agent-open svg { flex: none; }
+
+.skill-row-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+}
+
+.skill-row code,
+.user-skill-open code {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--kodo-text-secondary);
+}
+
+.user-skill-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.user-skill-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  color: var(--kodo-text-secondary);
+  text-align: left;
+}
+
+.skill-row-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.skills-empty {
+  padding: 16px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.6;
+}
 
 /* A category column and the detail beside it. The column is fixed so switching
    categories never moves the text the user is reading. */
@@ -464,6 +596,13 @@
   color: var(--kodo-text-secondary);
 }
 
+/* Category list emptied by the page-head search. */
+.settings-nav-empty {
+  padding: 8px 10px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
 .settings-nav-item:hover {
   background: var(--kodo-hover);
 }
@@ -479,8 +618,9 @@
 }
 
 .settings-detail {
+  container: settings-card / inline-size;
   width: min(760px, 100%);
-  min-height: 290px;
+  min-height: 0;
   margin: 16px auto 0;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
@@ -562,7 +702,8 @@
    11px, which is what keeps them on one line beside their selects. */
 .setting-hint {
   color: var(--kodo-text-secondary);
-  font-size: 10px;
+  font-size: var(--kodo-font-xs);
+  line-height: 1.5;
 }
 
 .setting-icon {
@@ -575,6 +716,8 @@
    Permissions hints, which sit beside it, on one line. The reference gives the
    select and slider rows, whose hint sits underneath, a fixed column instead. */
 .setting-control {
+  min-width: 0;
+  max-width: 100%;
   flex: none;
   display: flex;
   flex-direction: column;
@@ -644,4 +787,613 @@
   color: var(--kodo-text-secondary);
   font-size: 10px;
   line-height: 1.4;
+}
+
+/* --- Modal chrome for the transparency viewers (LLM I/O, file spans). --- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 11, 17, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 60;
+  padding: 24px;
+}
+
+.modal {
+  background: var(--kodo-surface, #14181f);
+  border: 1px solid var(--kodo-border, #232732);
+  border-radius: 10px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  width: min(720px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal--wide {
+  width: min(1080px, calc(100vw - 48px));
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--kodo-border, #232732);
+  flex: 0 0 auto;
+}
+
+.modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--kodo-text, #e8eaed);
+  margin: 0;
+}
+
+.modal-body {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal-body--scroll {
+  overflow-y: auto;
+}
+
+.modal-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.modal-cols h4 {
+  font-size: 12px;
+  color: var(--kodo-text-secondary);
+  margin: 0 0 6px 0;
+  font-weight: 500;
+}
+
+.modal-foot {
+  padding: 10px 18px;
+  border-top: 1px solid var(--kodo-border, #232732);
+  font-size: 11px;
+}
+
+/* --- LLM I/O viewer --- */
+
+.llm-io {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.llm-io-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--kodo-border, #232732);
+}
+
+.llm-io-bar-meta {
+  flex: 1 1 auto;
+  font-size: 13px;
+  color: var(--kodo-text);
+}
+
+.llm-io-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.llm-io-col h4 {
+  font-size: 12px;
+  color: var(--kodo-text-secondary);
+  margin: 0 0 10px 0;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.llm-io-block {
+  margin-bottom: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--kodo-border, #232732);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.llm-io-block > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--kodo-text-secondary);
+  gap: 8px;
+  list-style: none;
+}
+
+.llm-io-block > summary::-webkit-details-marker {
+  display: none;
+}
+
+.llm-io-pre {
+  font-family: var(--kodo-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--kodo-text);
+  margin: 10px 0 0 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
+}
+
+/* --- File span modal --- */
+
+.file-span-pre {
+  font-family: var(--kodo-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--kodo-text);
+  margin: 0;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 4px;
+  white-space: pre;
+  overflow: auto;
+  max-height: 480px;
+}
+
+/* --- Thinking view (reasoning + thinking blocks aggregated) --- */
+
+.thinking-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.thinking-list-item {
+  border-left: 2px solid var(--kodo-border, #232732);
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.thinking-list-phase {
+  font-size: 11px;
+  color: var(--kodo-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+/* --- Trace page artifact row (LLM I/O list / spans list) --- */
+
+.artifact-row {
+  display: grid;
+  grid-template-columns: 60px 1fr auto;
+  gap: 10px;
+  padding: 8px 12px;
+  align-items: center;
+  border-bottom: 1px solid var(--kodo-border, #232732);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.artifact-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.artifact-row .artifact-kind {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--kodo-text-secondary);
+  letter-spacing: 0.04em;
+}
+
+.artifact-row .artifact-label {
+  font-family: var(--kodo-mono, ui-monospace, SFMono-Regular, monospace);
+}
+
+.artifact-row .artifact-size {
+  color: var(--kodo-text-secondary);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+/* -------------------------------------------------------------- modal head/body/foot (fv-* / skill-detail-*) -- */
+/* Companion rules for the fv-* / skill-detail-* classes used by
+   SkillDetailModal and AgentDetailModal. The flex column on
+   .settings-modal-panel (above) sets the layout grid; these rules give
+   the head/body/foot their geometry, borders and spacing so the panel
+   looks like a real settings-modal card rather than stacked blocks. */
+
+.modal-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 64px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.modal-title {
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+  color: var(--kodo-text);
+  letter-spacing: 0.01em;
+}
+
+.modal-head .spacer { flex: 1; }
+
+.skill-detail-panel { /* identity class on the panel; layout comes from
+                        .settings-modal-panel which is the actual
+                        container. */ }
+
+/* §13c SkillDetailModal: narrower than AgentDetailModal (640px vs 980px).
+   The same `.skill-detail-panel` marker sits on both modals' root, so the
+   narrow variant is opt-in via this modifier class (AgentDetailModal
+   inherits the 980px settings-modal-panel geometry by default). */
+.skill-detail-panel--narrow {
+  width: min(640px, 100%);
+  height: min(720px, 100%);
+}
+
+.skill-detail-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  line-height: 1.55;
+}
+
+.skill-detail-body--edit {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.skill-detail-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  padding: 0 24px;
+  border-top: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.skill-detail-section {
+  margin-top: 18px;
+}
+.skill-detail-section:first-child { margin-top: 0; }
+.skill-detail-section h3 {
+  margin: 0 0 8px;
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--kodo-text-secondary);
+}
+
+.skill-detail-detail {
+  margin: 0 0 12px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  line-height: 1.55;
+}
+
+.skill-detail-md {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-surface);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+  color: var(--kodo-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.skill-detail-list {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  line-height: 1.6;
+}
+.skill-detail-list li { margin: 2px 0; }
+.skill-detail-list strong {
+  color: var(--kodo-text-secondary);
+  font-weight: 500;
+  margin-right: 4px;
+}
+.skill-detail-list code {
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  background: var(--kodo-surface);
+  padding: 1px 6px;
+  border-radius: var(--kodo-radius-sm);
+}
+
+.skill-detail-source {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+}
+
+.skill-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.skill-detail-tags > span,
+.skill-detail-tags > code {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-family: var(--kodo-font-mono);
+}
+
+.skill-detail-steps {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+}
+.skill-detail-steps li { margin: 4px 0; }
+.skill-detail-kind {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 8px;
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+}
+
+.skill-detail-examples {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  counter-reset: ex;
+}
+.skill-detail-examples > li {
+  counter-increment: ex;
+  position: relative;
+  padding: 8px 0 12px 28px;
+  border-bottom: 1px solid var(--kodo-border-subtle);
+}
+.skill-detail-examples > li:last-child { border-bottom: 0; }
+.skill-detail-examples > li::before {
+  content: counter(ex);
+  position: absolute;
+  left: 0; top: 8px;
+  width: 20px; height: 20px;
+  display: grid; place-items: center;
+  border-radius: 999px;
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+}
+.skill-detail-example-label {
+  margin: 8px 0 4px;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+  font-weight: 500;
+}
+
+/* skill editor (SkillDetailModal / AgentDetailModal edit/new body) */
+.skill-editor {
+  display: block;
+  width: 100%;
+  min-height: 320px;
+  padding: 12px 14px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-surface);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.55;
+  color: var(--kodo-text);
+  resize: vertical;
+}
+
+.skill-detail-body--edit > .skill-editor { flex: 1 0 220px; }
+.skill-detail-body--edit > :not(.skill-editor) { flex: none; }
+
+/* Adapt to the actual workspace column, including an open Inspector. */
+@container workspace (max-width: 720px) {
+  .settings-layout { flex-direction: column; }
+  .settings-nav {
+    width: 100%;
+    flex-direction: row;
+    padding: 10px 14px;
+    border-right: 0;
+    border-bottom: 1px solid var(--kodo-border);
+    overflow-x: auto;
+  }
+  .settings-nav-item { flex: none; white-space: nowrap; }
+  .filters { flex-wrap: wrap; gap: 10px; }
+  .filters .field { flex: 1 1 140px; min-width: 0; width: auto; }
+  .table-foot { flex-wrap: wrap; }
+}
+
+@container settings-card (max-width: 520px) {
+  .setting-row--field { flex-direction: column; gap: 6px; }
+  .setting-row--field > .setting-text { flex: none; }
+  .setting-row--field > .setting-control { width: 100%; }
+  .setting-row--field > .setting-icon { display: none; }
+}
+.skill-editor:focus {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.skill-editor-name {
+  display: block;
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-canvas);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-md);
+  color: var(--kodo-text);
+}
+.skill-editor-name:focus {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.skill-editor-error {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--kodo-error);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-error-bg);
+  color: var(--kodo-error);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+}
+
+.agent-editor-instructions {
+  min-height: 220px;
+}
+
+/* -------------------------------------------------------------- agent row (Plugins · Agents tab) -- */
+/* Companion rules for the .agent-row / .agent-open family used by
+   AgentsTab. Mirrors the .skill-row geometry (52px row, 12px gap) so the
+   agents list reads with the same density as the skills list. */
+
+.skills-card-head {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  color: var(--kodo-text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--kodo-border);
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+}
+.agent-row:last-child { border-bottom: 0; }
+
+.agent-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  min-height: 52px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-open:hover { background: var(--kodo-hover); }
+.agent-open:focus-visible {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: -2px;
+  border-radius: var(--kodo-radius-sm);
+}
+
+.agent-row-name {
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
+  font-size: var(--kodo-font-md);
+  font-weight: 500;
+  color: var(--kodo-text);
+}
+
+.agent-row-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-row-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--kodo-selected);
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.agent-row-favorite {
+  flex: none;
+  margin-left: 4px;
+  color: var(--kodo-text-secondary);
+}
+.agent-row-favorite--on { color: var(--kodo-accent); }
+
+.agent-row--project .agent-row-badge {
+  background: var(--kodo-success-bg-soft);
+  color: var(--kodo-success-text);
+}
+.agent-row--builtin .agent-row-badge {
+  /* the 内置 pill is the same accent-tinted style as the row's badge
+     class — explicit override here so future row variants don't
+     silently inherit a different tint. */
 }

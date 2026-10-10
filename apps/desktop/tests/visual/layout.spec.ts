@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * UI_ACCEPTANCE.md §1 asks for a smoke test at these two viewports. There is no
- * reference image at either size, so this asserts the layout invariants the
- * acceptance criteria name — panel widths, no horizontal overflow, the composer
- * and the trace rows staying usable — instead of comparing pixels.
+ * UI_ACCEPTANCE.md §1 asks for a smoke test at these two viewports. This asserts
+ * the layout invariants the acceptance criteria name — panel widths, no
+ * horizontal overflow, the composer staying usable, and a completed reply
+ * showing its answer without the process — rather than comparing pixels.
  *
  * 900 / 1100 / 1586 are covered in a11y.spec.ts (multi-viewport smoke).
  */
@@ -27,9 +27,6 @@ for (const viewport of VIEWPORTS) {
 
     const m = await page.evaluate(() => {
       const box = (selector: string) => document.querySelector(selector)?.getBoundingClientRect() ?? null;
-      const traceRows = [...document.querySelectorAll(".trace-row")].filter(
-        (row) => row.getBoundingClientRect().bottom <= window.innerHeight,
-      );
       return {
         scrollWidth: document.documentElement.scrollWidth,
         innerWidth: window.innerWidth,
@@ -38,7 +35,8 @@ for (const viewport of VIEWPORTS) {
         inspector: box(".ins-panel")?.width ?? 0,
         composerBottom: box(".composer")?.bottom ?? 0,
         composerWidth: box(".composer")?.width ?? 0,
-        visibleTraceRows: traceRows.length,
+        hasFinal: document.querySelector('[data-testid="answer-conclusion"]') !== null,
+        traceRows: document.querySelectorAll(".trace-row").length,
       };
     });
 
@@ -47,7 +45,12 @@ for (const viewport of VIEWPORTS) {
     expect(m.inspector).toBe(INSPECTOR_WIDTH);
     expect(m.composerBottom).toBeLessThanOrEqual(m.innerHeight);
     expect(m.composerWidth).toBeGreaterThan(0);
-    expect(m.visibleTraceRows).toBeGreaterThanOrEqual(6);
+    // The fixture conversation is complete: the reply shows its final answer
+    // alone — the execution process lives in the Response Trace page, and the
+    // running-state row density is asserted in behaviour.spec at the reference
+    // viewport (UI_ACCEPTANCE §3/§4).
+    expect(m.hasFinal).toBe(true);
+    expect(m.traceRows).toBe(0);
   });
 
   test(`collapsed inspector becomes a rail at ${label}`, async ({ page }) => {

@@ -420,6 +420,14 @@ pub enum EvidenceKind {
     ContextObservation {
         path: String,
     },
+    /// Phase 0 second-pass: the model surfaced a clarification question to
+    /// the user (via `ask_user`). Records the question and offered options
+    /// so the trace shows the conversation round-trip without forcing the
+    /// model to fake a tool-style success in its prose.
+    UserQuestionAsked {
+        question: String,
+        options: Vec<String>,
+    },
 }
 
 /// Sentinel `criterion_id` meaning the evidence is explicitly reusable
@@ -534,6 +542,13 @@ impl EvidenceItem {
             EvidenceKind::UserApproval { detail } => format!("approval:{detail}"),
             EvidenceKind::DiffReviewed { paths } => format!("diff:{}", paths.join(",")),
             EvidenceKind::ContextObservation { path } => format!("ctx:{path}"),
+            EvidenceKind::UserQuestionAsked { question, options } => {
+                if options.is_empty() {
+                    format!("user-question:{question}")
+                } else {
+                    format!("user-question:{question}[{}]", options.join("|"))
+                }
+            }
         };
         match &self.criterion_id {
             Some(id) => format!("{base} -> criterion:{id}"),
@@ -903,6 +918,32 @@ fn parse_exit_code(result: &ToolResult) -> Option<i32> {
         .or(Some(1))
 }
 
+/// Extract the `建议选项：a / b / c` segment from an `ask_user` placeholder
+/// result output. Returns an empty `Vec` when the model asked a free-form
+/// question without quick-pick options — same shape `ask_user` dispatch
+/// writes, so the evidence item mirrors what the user actually saw.
+fn extract_ask_user_options(output: &str) -> Vec<String> {
+    let Some(idx) = output.find("建议选项：") else {
+        return Vec::new();
+    };
+    let after = &output[idx + "建议选项：".len()..];
+    // Take until the next closing punctuation we know the dispatch writes:
+    // `；等待用户在下一轮回复)` is the placeholder tail.
+    let raw = after
+        .split('；')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches(')');
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    raw.split('/')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Infer a typed evidence item from a tool result + command expectation.
 pub fn evidence_from_tool_result(
     result: &ToolResult,
@@ -1069,6 +1110,34 @@ pub fn evidence_from_tool_result(
                 path: result.input.clone(),
             }
         }
+        ToolName::WebSearch => {
+            if !result.ok {
+                return None;
+            }
+            // Public-web hits count as evidence the same way repo search does:
+            // the model read something concrete. Counts the parsed result lines.
+            EvidenceKind::SearchHit {
+                query: result.input.clone(),
+                hits: result
+                    .output
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count()
+                    .max(1),
+            }
+        }
+        // Phase 0 second-pass: `ask_user` is recorded as a UserQuestionAsked
+        // evidence item so the trace shows the clarification round-trip and
+        // the offered options. `ask_user` is always ok (the model succeeded
+        // at asking); parse failures are caught upstream in protocol.rs.
+        // Options are extracted from the result output placeholder, which
+        // the dispatch arm formats as "建议选项：{a} / {b} / ..." when the
+        // model provided any.
+        ToolName::AskUser => {
+            let question = result.input.clone();
+            let options = extract_ask_user_options(&result.output);
+            EvidenceKind::UserQuestionAsked { question, options }
+        }
     };
     Some(EvidenceItem::new(id, source, kind))
 }
@@ -1083,7 +1152,7 @@ pub fn context_observation(path: impl Into<String>, id: impl Into<String>) -> Ev
 }
 
 /// Accumulator for a turn's evidence bag.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceBag {
     pub items: Vec<EvidenceItem>,
     pub verify_ok: Option<bool>,
@@ -1120,6 +1189,15 @@ impl EvidenceBag {
         expectation: Option<&CommandExpectation>,
     ) {
         let is_run = ToolName::parse(&result.name) == Some(ToolName::RunCommand);
+        for (index, path) in result.changed_files.iter().enumerate() {
+            self.files_written.push(path.clone());
+            self.push(EvidenceItem::new(
+                format!("ev_{}_file_{index}", result.id),
+                &result.name,
+                EvidenceKind::FileChanged { path: path.clone() },
+            ));
+        }
+
         if result.ok {
             if ToolName::parse(&result.name)
                 .map(|n| n.is_mutation())
@@ -2057,5 +2135,44 @@ mod tests {
             "test auth ... FAILED\nassertion failed left=1",
             "exit=101"
         ));
+    }
+
+    /// Phase 0 second-pass: an `ask_user` result with options produces a
+    /// `UserQuestionAsked` evidence item whose `describe()` includes both
+    /// the question and the offered options — never silently drops them.
+    #[test]
+    fn user_question_asked_describe_includes_question_and_options() {
+        let item = EvidenceItem::new(
+            "ask_1",
+            "ask_user",
+            EvidenceKind::UserQuestionAsked {
+                question: "用 Rust 还是 TS 写后端？".to_owned(),
+                options: vec!["Rust".to_owned(), "TypeScript".to_owned()],
+            },
+        );
+        let desc = item.describe();
+        assert!(desc.contains("用 Rust 还是 TS 写后端？"), "got: {desc}");
+        assert!(desc.contains("Rust"), "got: {desc}");
+        assert!(desc.contains("TypeScript"), "got: {desc}");
+    }
+
+    /// Phase 0 second-pass: `ask_user` with no options still produces a
+    /// valid evidence item — the question alone (no chip suffix).
+    #[test]
+    fn user_question_asked_describe_works_with_no_options() {
+        let item = EvidenceItem::new(
+            "ask_2",
+            "ask_user",
+            EvidenceKind::UserQuestionAsked {
+                question: "请补充复现步骤".to_owned(),
+                options: Vec::new(),
+            },
+        );
+        let desc = item.describe();
+        assert!(desc.contains("请补充复现步骤"), "got: {desc}");
+        assert!(
+            !desc.contains('['),
+            "no-chip describe must not add []: {desc}"
+        );
     }
 }

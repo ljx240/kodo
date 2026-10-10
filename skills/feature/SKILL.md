@@ -1,5 +1,8 @@
 # Skill: feature
 
+## description
+Implement new behavior against explicit acceptance criteria, then verify.
+
 ## applicable_task_types
 - feature
 
@@ -9,11 +12,18 @@ acceptance-first
 ## allowed_tools
 - search
 - read_file
+- list_files
+- find_symbol
+- find_references
+- read_range
 - run_command
 - write_file
 - apply_patch
 - replace_range
 - create_file
+
+## allowed_external_tools
+- mcp__*
 
 ## verification_policy
 full

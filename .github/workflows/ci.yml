@@ -110,11 +110,4 @@ jobs:
       # pages.spec.ts is pixel-snapshot only (darwin baselines); CI runs the
       # geometry/behavior suite so results stay stable across platforms.
       - name: behavior tests
-        run: >
-          npx playwright test
-          a11y.spec.ts
-          behaviour.spec.ts
-          composer-context.spec.ts
-          interaction-ux.spec.ts
-          layout.spec.ts
-          projects.spec.ts
+        run: npx playwright test --project=behaviour

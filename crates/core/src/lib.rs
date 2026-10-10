@@ -5,6 +5,7 @@
 
 pub mod session;
 pub mod settings;
+pub mod traces;
 pub mod workspace;
 
 mod line;

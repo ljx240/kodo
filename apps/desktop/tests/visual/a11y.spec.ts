@@ -51,16 +51,32 @@ test("900px: sidebar toggles; inspector opens as overlay without squeezing main"
   await page.goto("/ui-demo/conversation");
   await page.waitForLoadState("networkidle");
 
-  // Sidebar hideable via top-bar toggle (kept in DOM so aria-controls stays valid).
+  // Collapsed via the control at the top of the left menu (kept in DOM for aria-controls).
   await expect(page.locator(".sidebar")).toBeVisible();
-  await page.locator('button[aria-label="Toggle sidebar"]').click();
+  await expect(page.locator(".topbar-nav-icons")).toHaveCount(0);
+  await expect(page.locator(".topbar button[aria-label='切换侧边栏']")).toHaveCount(0);
+  await page.locator('.sidebar button[aria-label="切换侧边栏"]').click();
   await expect(page.locator(".sidebar")).toBeHidden();
-  await expect(page.locator('button[aria-label="Toggle sidebar"]')).toHaveAttribute(
+  // Scope to the top-bar control: the sidebar's own toggle stays in the DOM
+  // (hidden) so its aria-controls target remains valid.
+  await expect(page.locator('.topbar button[aria-label="切换侧边栏"]')).toHaveAttribute(
     "aria-expanded",
     "false",
   );
-  await page.locator('button[aria-label="Toggle sidebar"]').click();
+  // Collapsed destinations sit immediately right of the expand control.
+  await expect(page.locator(".topbar-nav-icons")).toBeVisible();
+  const strip = await page.evaluate(() => {
+    const toggle = document
+      .querySelector('.topbar button[aria-label="切换侧边栏"]')
+      ?.getBoundingClientRect();
+    const strip = document.querySelector(".topbar-nav-icons")?.getBoundingClientRect();
+    return { toggleRight: toggle?.right ?? 0, stripLeft: strip?.left ?? 0 };
+  });
+  expect(strip.toggleRight).toBeGreaterThan(0);
+  expect(strip.stripLeft).toBeGreaterThanOrEqual(strip.toggleRight);
+  await page.locator('.topbar button[aria-label="切换侧边栏"]').click();
   await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".topbar-nav-icons")).toHaveCount(0);
 
   // Main width stays stable when the inspector panel opens (overlay).
   const before = await page.locator(".main").evaluate((el) => el.getBoundingClientRect().width);
@@ -81,7 +97,7 @@ test("Menu keyboard: Escape, arrows, Home/End, focus return", async ({ page }) =
   await page.waitForLoadState("networkidle");
 
   // Projects + menu (sidebar).
-  const trigger = page.locator('.section-head button[aria-label="New project"]');
+  const trigger = page.locator('.section-head button[aria-label="新建项目"]');
   await trigger.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator('.menu[role="menu"]')).toBeVisible();
@@ -162,7 +178,9 @@ test("reduced-motion disables transitions", async ({ page }) => {
     return { transition: style.transitionDuration, animation: style.animationDuration };
   });
   if (durations) {
-    // 0.01ms rule from prefers-reduced-motion; Chrome may report it as 1e-05s.
+    // Reduced motion collapses transitions to 0s (not the usual 0.01ms trick):
+    // mermaid measures node sizes synchronously, and any non-zero duration
+    // makes those reads return pre-transition values, breaking the layout.
     expect(durations.transition.split(",")[0].trim()).toMatch(
       /^0(\.0+)?s$|^0\.01ms$|^1e-0?5s$/,
     );
@@ -179,17 +197,28 @@ test("decorative muted is not used as informational body color on key text", asy
       return el ? getComputedStyle(el).color : null;
     };
     return {
-      time: pick(".msg-time"),
       duration: pick(".trace-duration"),
       empty: pick(".empty-note"),
-      brandTag: pick(".brand-tagline"),
+      brandCaret: pick(".brand-caret"),
     };
   });
 
   // Readable secondary #667085 → rgb(102, 112, 133); muted is #98a2b3.
   const readable = "rgb(102, 112, 133)";
-  if (colors.time) expect(colors.time).toBe(readable);
   if (colors.duration) expect(colors.duration).toBe(readable);
   if (colors.empty) expect(colors.empty).toBe(readable);
-  if (colors.brandTag) expect(colors.brandTag).toBe(readable);
+  if (colors.brandCaret) expect(colors.brandCaret).toBe(readable);
+});
+
+test("⌘K palette is an accessible dialog with a focusable input", async ({ page }) => {
+  await page.goto("/ui-demo/conversation");
+  await page.waitForLoadState("networkidle");
+
+  await page.keyboard.press("ControlOrMeta+k");
+  const dialog = page.locator('[role="dialog"][aria-modal="true"][aria-label="快速切换"]');
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('[data-testid="palette-input"]')).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
 });

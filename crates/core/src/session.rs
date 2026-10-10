@@ -7,6 +7,7 @@
 //!
 //! ```text
 //! open           <project>  <title>  <at>
+//! mode           <work|code>
 //! ask            <at>  <text>
 //! item.started   <seq>  <at>  <durationMs|->  <kind>  <fields…>
 //! item.completed <seq>  <at>  <durationMs|->  <kind>  <fields…>
@@ -39,6 +40,32 @@ use crate::settings;
 
 const SESSIONS_DIR: &str = "sessions";
 
+/// Which agent world a session belongs to. Stamped once at creation and
+/// immutable afterwards, like the rest of history. Logs without a `mode` line
+/// predate dual-mode and read as [`Mode::Code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    Work,
+    #[default]
+    Code,
+}
+
+impl Mode {
+    pub fn parse(raw: &str) -> Mode {
+        match raw {
+            "work" => Mode::Work,
+            _ => Mode::Code,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Work => "work",
+            Mode::Code => "code",
+        }
+    }
+}
+
 /// A session as the sidebar needs it, without reading its events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRef {
@@ -47,6 +74,7 @@ pub struct SessionRef {
     pub title: String,
     pub at: u64,
     pub archived: bool,
+    pub mode: Mode,
 }
 
 /// A whole conversation.
@@ -58,6 +86,7 @@ pub struct Session {
     pub at: u64,
     pub turns: Vec<Turn>,
     pub archived: bool,
+    pub mode: Mode,
 }
 
 /// One request and everything the agent did about it.
@@ -113,6 +142,12 @@ pub enum ItemKind {
     /// here, so no renderer can show what must stay hidden.
     Reasoning {
         summary: String,
+        /// High-level public phase code (`prepare`/`analyze`/`execute`/
+        /// `verify`/`summarize`). Structured so the UI never parses the summary.
+        phase: String,
+        /// Internal scheduling/budget diagnostics. Debug surfaces only — the
+        /// default UI shows `phase`, never this.
+        diagnostics: Option<String>,
     },
     Search {
         query: String,
@@ -127,19 +162,148 @@ pub enum ItemKind {
         cwd: String,
         output: String,
         exit_code: Option<i32>,
+        /// The user refused to run this command. Distinct from a non-zero exit.
+        denied: bool,
     },
+    /// One LLM call. Extended payload; legacy 3-field lines still decode — see
+    /// [`decode_item`]. Full request/response I/O is referenced by `llm_io_ref`
+    /// to a sibling traces file (kept out of the session log to bound its size).
     ModelCall {
         model: String,
         input_tokens: u32,
         output_tokens: u32,
+        /// `native` / `json_fallback` / `tag_fallback` / `fence_fallback` / `text_only`.
+        /// Empty when this line predates the field — the UI renders it as unknown.
+        protocol: String,
+        /// Backend finish reason: `stop` / `length` / `tool_calls` /
+        /// `content_filter` / `cancelled` / `error`. Empty when unknown.
+        finish_reason: String,
+        /// Whether the response carried a private reasoning block (extended thinking).
+        saw_reasoning: bool,
+        /// Streaming wall time in ms. Persisted so the UI does not have to
+        /// recompute it from `at` alone.
+        duration_ms: u64,
+        /// Provider-reported end-to-end latency, excluding failover retries.
+        provider_latency_ms: u64,
+        /// 0 on the first attempt; `n` for the n-th retry of the same call.
+        retry_index: u32,
+        /// Relative path under `traces/<session>/<turn>/` pointing at the full
+        /// request/response JSON. `None` when capture is disabled or the call
+        /// never reached a provider.
+        llm_io_ref: Option<String>,
     },
     FileChange {
         changes: Vec<Change>,
+        /// Relative path under `traces/<session>/<turn>/spans/<seq>-file-…json`
+        /// — `None` when snapshotting is off or no file existed beforehand.
+        file_span_ref: Option<String>,
     },
     AgentMessage {
         text: String,
         checks: Vec<String>,
+        /// What the answer delivered: `ready`/`partial`/`blocked`/`failed`.
+        delivery: String,
+        /// Whether acceptance ran and how: `not_run`/`running`/`passed`/`failed`/`blocked`.
+        verification: String,
+        /// Conversational answer — the UI renders the text alone, no report chrome.
+        plain: bool,
+        /// Structured failure taxonomy (`budget_exhausted` / `acceptance_unmet` /
+        /// `unrecoverable` / `provider_error` / `unknown`) when this answer
+        /// ended the run in a failed state. Empty for `ready`/`partial` answers
+        /// — the UI uses this to surface a "继续本轮" affordance when the
+        /// failure is one the user can resume from.
+        failure_reason: String,
     },
+    /// A model's private reasoning block. Kept alongside the public `Reasoning`
+    /// summary, so the transparency UI can show both: the model said it was
+    /// going to do X, then thought about X in detail.
+    Thinking {
+        content: String,
+        /// Public phase that was active when this block was emitted.
+        phase: String,
+        /// `extraction_main` / `anthropic_reasoning` / `native` — which layer
+        /// surfaced the block.
+        source: String,
+    },
+    /// A history compaction. `source_summary` is the text that fed into the
+    /// compaction; without it, the trace would only show the *event* of
+    /// compacting and never the content that got compressed away.
+    Compaction {
+        dropped: usize,
+        summarized_into: usize,
+        freed_pct: u8,
+        source_summary: String,
+        covered_messages: usize,
+    },
+    /// A failover event. `error_class` is the bucketed cause (`rate_limit` /
+    /// `server_error` / `timeout` / `parse` / `unknown`).
+    Failover {
+        from_provider: String,
+        from_model: String,
+        error_class: String,
+        error: String,
+        to_provider: String,
+        to_model: String,
+        retry_index: u32,
+    },
+    /// A subtask of the task plan. `triggered_by` lists the item ids this step
+    /// caused, so the trace can be re-walked plan-first.
+    PlanStep {
+        step_id: String,
+        title: String,
+        /// `search` / `read` / `edit` / `verify` / `explore` / `external`.
+        kind: String,
+        /// `pending` / `running` / `done` / `failed` / `skipped`.
+        status: String,
+        triggered_by: Vec<u32>,
+        /// Verification evidence lines (commands, diffs, checks).
+        evidence: Vec<String>,
+    },
+    /// An approval decision. Distinct from a `commandExecution` with
+    /// `denied: true` because the latter records the *effect*; this one
+    /// records the *decision* with whatever the user said.
+    Permission {
+        /// `command` / `write` / `external` / `websearch`.
+        kind: String,
+        detail: String,
+        /// `approved` / `denied` / `approved_session`.
+        decision: String,
+        /// Project root, purely for human context.
+        context: String,
+    },
+    /// Context window usage snapshot. Stamped at the same cadence as the
+    /// existing sink event, so the trace carries both the chip and the detail.
+    ContextBudget {
+        used: u32,
+        window: u32,
+        percent: u8,
+        cumulative_chars: u64,
+        compacted_count: u32,
+        last_model: String,
+    },
+}
+
+impl ItemKind {
+    /// Reasoning with no phase/diagnostics — the shape legacy logs decode to.
+    pub fn reasoning(summary: impl Into<String>) -> Self {
+        ItemKind::Reasoning {
+            summary: summary.into(),
+            phase: String::new(),
+            diagnostics: None,
+        }
+    }
+
+    /// Answer without a structured outcome — legacy shape.
+    pub fn agent_message(text: impl Into<String>, checks: Vec<String>) -> Self {
+        ItemKind::AgentMessage {
+            text: text.into(),
+            checks,
+            delivery: String::new(),
+            verification: String::new(),
+            plain: false,
+            failure_reason: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +332,7 @@ pub fn now() -> u64 {
 /// on those being distinct: the file is opened with `create_new`, and an
 /// `AlreadyExists` simply means trying the next id. That is atomic, and it needs
 /// no assumption about the clock's resolution or about a restart's timing.
-pub fn open(dir: &Path, project: &Path, title: &str, at: u64) -> io::Result<String> {
+pub fn open(dir: &Path, project: &Path, title: &str, at: u64, mode: Mode) -> io::Result<String> {
     fs::create_dir_all(dir)?;
     loop {
         let id = new_id();
@@ -180,6 +344,9 @@ pub fn open(dir: &Path, project: &Path, title: &str, at: u64) -> io::Result<Stri
                     "{}",
                     line::join(&["open", &project.to_string_lossy(), title, &at.to_string()])
                 )?;
+                // The mode tag rides its own verb line: `open` is a strict
+                // 4-field match on read, and old readers skip unknown verbs.
+                writeln!(file, "{}", line::join(&["mode", mode.as_str()]))?;
                 return Ok(id);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -234,6 +401,7 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
         at: 0,
         turns: Vec::new(),
         archived: false,
+        mode: Mode::Code,
     };
 
     for raw in &lines {
@@ -298,6 +466,7 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
                 }
             }
             ("retitle", [title]) => session.title = title.clone(),
+            ("mode", [mode]) => session.mode = Mode::parse(mode),
             ("archive", _) => session.archived = true,
             ("restore", _) => session.archived = false,
             _ => {}
@@ -453,6 +622,12 @@ pub fn restore(dir: &Path, id: &str) -> io::Result<()> {
     append(dir, id, &["restore"])
 }
 
+/// Removes the session log outright. Only that file goes — project files are
+/// the project's business (the same rule as `workspace::remove_project`).
+pub fn delete(dir: &Path, id: &str) -> io::Result<()> {
+    fs::remove_file(path_of(dir, id)?)
+}
+
 fn append(dir: &Path, id: &str, fields: &[&str]) -> io::Result<()> {
     line::append(&path_of(dir, id)?, &line::join(fields))
 }
@@ -510,6 +685,7 @@ fn summarize(id: &str, lines: &[String]) -> Option<SessionRef> {
     let mut title = String::new();
     let mut at = 0;
     let mut archived = false;
+    let mut mode = Mode::Code;
 
     for raw in lines {
         if raw.starts_with("open\t") {
@@ -523,6 +699,11 @@ fn summarize(id: &str, lines: &[String]) -> Option<SessionRef> {
             let fields = line::split(raw);
             if let [_, title_field] = fields.as_slice() {
                 title = title_field.clone();
+            }
+        } else if raw.starts_with("mode\t") {
+            let fields = line::split(raw);
+            if let [_, mode_field] = fields.as_slice() {
+                mode = Mode::parse(mode_field);
             }
         } else if raw == "archive" {
             archived = true;
@@ -538,6 +719,7 @@ fn summarize(id: &str, lines: &[String]) -> Option<SessionRef> {
         title,
         at,
         archived,
+        mode,
     })
 }
 
@@ -584,7 +766,15 @@ fn encode_item(item: &Item) -> Vec<String> {
     ];
 
     match &item.kind {
-        ItemKind::Reasoning { summary } => fields.push(summary.clone()),
+        ItemKind::Reasoning {
+            summary,
+            phase,
+            diagnostics,
+        } => {
+            fields.push(summary.clone());
+            fields.push(phase.clone());
+            fields.push(diagnostics.clone().unwrap_or_default());
+        }
         ItemKind::Search { query, detail } => {
             fields.push(query.clone());
             fields.push(detail.clone());
@@ -598,32 +788,164 @@ fn encode_item(item: &Item) -> Vec<String> {
             cwd,
             output,
             exit_code,
+            denied,
         } => {
             fields.push(command.clone());
             fields.push(cwd.clone());
             fields.push(output.clone());
             fields.push(exit_code.map(|code| code.to_string()).unwrap_or_default());
+            fields.push(if *denied {
+                "1".to_owned()
+            } else {
+                "0".to_owned()
+            });
         }
         ItemKind::ModelCall {
             model,
             input_tokens,
             output_tokens,
+            protocol,
+            finish_reason,
+            saw_reasoning,
+            duration_ms,
+            provider_latency_ms,
+            retry_index,
+            llm_io_ref,
         } => {
             fields.push(model.clone());
             fields.push(input_tokens.to_string());
             fields.push(output_tokens.to_string());
+            fields.push(protocol.clone());
+            fields.push(finish_reason.clone());
+            fields.push(if *saw_reasoning {
+                "1".to_owned()
+            } else {
+                "0".to_owned()
+            });
+            fields.push(duration_ms.to_string());
+            fields.push(provider_latency_ms.to_string());
+            fields.push(retry_index.to_string());
+            fields.push(llm_io_ref.clone().unwrap_or_default());
         }
-        ItemKind::FileChange { changes } => {
+        ItemKind::FileChange {
+            changes,
+            file_span_ref,
+        } => {
             for change in changes {
                 fields.push(change.path.clone());
                 fields.push(change.added.to_string());
                 fields.push(change.removed.to_string());
             }
+            // `file_span_ref` rides along as the trailing field; `None` and
+            // legacy rows decode to `None`, keeping old logs readable.
+            fields.push(file_span_ref.clone().unwrap_or_default());
         }
-        ItemKind::AgentMessage { text, checks } => {
+        ItemKind::AgentMessage {
+            text,
+            checks,
+            delivery,
+            verification,
+            plain,
+            failure_reason,
+        } => {
             fields.push(text.clone());
             // Newlines are escaped by the codec, so one field can hold the list.
             fields.push(checks.join("\n"));
+            fields.push(delivery.clone());
+            fields.push(verification.clone());
+            fields.push(if *plain {
+                "1".to_owned()
+            } else {
+                "0".to_owned()
+            });
+            fields.push(failure_reason.clone());
+        }
+        ItemKind::Thinking {
+            content,
+            phase,
+            source,
+        } => {
+            fields.push(content.clone());
+            fields.push(phase.clone());
+            fields.push(source.clone());
+        }
+        ItemKind::Compaction {
+            dropped,
+            summarized_into,
+            freed_pct,
+            source_summary,
+            covered_messages,
+        } => {
+            fields.push(dropped.to_string());
+            fields.push(summarized_into.to_string());
+            fields.push(freed_pct.to_string());
+            fields.push(source_summary.clone());
+            fields.push(covered_messages.to_string());
+        }
+        ItemKind::Failover {
+            from_provider,
+            from_model,
+            error_class,
+            error,
+            to_provider,
+            to_model,
+            retry_index,
+        } => {
+            fields.push(from_provider.clone());
+            fields.push(from_model.clone());
+            fields.push(error_class.clone());
+            fields.push(error.clone());
+            fields.push(to_provider.clone());
+            fields.push(to_model.clone());
+            fields.push(retry_index.to_string());
+        }
+        ItemKind::PlanStep {
+            step_id,
+            title,
+            kind,
+            status,
+            triggered_by,
+            evidence,
+        } => {
+            fields.push(step_id.clone());
+            fields.push(title.clone());
+            fields.push(kind.clone());
+            fields.push(status.clone());
+            // Newline-separated ids / evidence; codec escapes embedded tabs.
+            fields.push(
+                triggered_by
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            fields.push(evidence.join("\n"));
+        }
+        ItemKind::Permission {
+            kind,
+            detail,
+            decision,
+            context,
+        } => {
+            fields.push(kind.clone());
+            fields.push(detail.clone());
+            fields.push(decision.clone());
+            fields.push(context.clone());
+        }
+        ItemKind::ContextBudget {
+            used,
+            window,
+            percent,
+            cumulative_chars,
+            compacted_count,
+            last_model,
+        } => {
+            fields.push(used.to_string());
+            fields.push(window.to_string());
+            fields.push(percent.to_string());
+            fields.push(cumulative_chars.to_string());
+            fields.push(compacted_count.to_string());
+            fields.push(last_model.clone());
         }
     }
 
@@ -639,8 +961,15 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
     let duration_ms = duration.parse().ok();
 
     let kind = match (kind.as_str(), payload) {
-        ("reasoning", [summary]) => ItemKind::Reasoning {
+        ("reasoning", [summary]) => ItemKind::reasoning(summary.clone()),
+        ("reasoning", [summary, phase, diagnostics]) => ItemKind::Reasoning {
             summary: summary.clone(),
+            phase: phase.clone(),
+            diagnostics: if diagnostics.is_empty() {
+                None
+            } else {
+                Some(diagnostics.clone())
+            },
         },
         ("search", [query, detail]) => ItemKind::Search {
             query: query.clone(),
@@ -655,11 +984,47 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
             cwd: cwd.clone(),
             output: output.clone(),
             exit_code: exit_code.parse().ok(),
+            denied: false,
         },
+        ("commandExecution", [command, cwd, output, exit_code, denied]) => {
+            ItemKind::CommandExecution {
+                command: command.clone(),
+                cwd: cwd.clone(),
+                output: output.clone(),
+                exit_code: exit_code.parse().ok(),
+                denied: denied == "1",
+            }
+        }
         ("modelCall", [model, input, output]) => ItemKind::ModelCall {
             model: model.clone(),
             input_tokens: input.parse().ok()?,
             output_tokens: output.parse().ok()?,
+            protocol: String::new(),
+            finish_reason: String::new(),
+            saw_reasoning: false,
+            duration_ms: 0,
+            provider_latency_ms: 0,
+            retry_index: 0,
+            llm_io_ref: None,
+        },
+        (
+            "modelCall",
+            [model, input, output, protocol, finish_reason, saw_reasoning, duration_ms, provider_latency_ms, retry_index, llm_io_ref],
+        ) => ItemKind::ModelCall {
+            model: model.clone(),
+            input_tokens: input.parse().ok()?,
+            output_tokens: output.parse().ok()?,
+            protocol: protocol.clone(),
+            finish_reason: finish_reason.clone(),
+            saw_reasoning: saw_reasoning == "1",
+            duration_ms: duration_ms.parse().unwrap_or(0),
+            provider_latency_ms: provider_latency_ms.parse().unwrap_or(0),
+            retry_index: retry_index.parse().unwrap_or(0),
+            llm_io_ref: if llm_io_ref.is_empty() {
+                None
+            } else {
+                Some(llm_io_ref.clone())
+            },
         },
         ("fileChange", changes) if changes.len() % 3 == 0 => ItemKind::FileChange {
             changes: changes
@@ -672,14 +1037,140 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
                     removed: change[2].parse().unwrap_or(0),
                 })
                 .collect(),
+            file_span_ref: None,
         },
-        ("agentMessage", [text, checks]) => ItemKind::AgentMessage {
+        // Modern rows carry a trailing `file_span_ref` field; older rows
+        // without it decode as `None` above — same shape either way.
+        ("fileChange", all) if !all.is_empty() && (all.len() - 1) % 3 == 0 => {
+            let body = &all[..all.len() - 1];
+            let file_span_ref = all.last().cloned().unwrap_or_default();
+            ItemKind::FileChange {
+                changes: body
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|change| Change {
+                        path: change[0].clone(),
+                        added: change[1].parse().unwrap_or(0),
+                        removed: change[2].parse().unwrap_or(0),
+                    })
+                    .collect(),
+                file_span_ref: if file_span_ref.is_empty() {
+                    None
+                } else {
+                    Some(file_span_ref)
+                },
+            }
+        }
+        ("agentMessage", [text, checks]) => ItemKind::agent_message(
+            text.clone(),
+            if checks.is_empty() {
+                Vec::new()
+            } else {
+                checks.split('\n').map(str::to_owned).collect()
+            },
+        ),
+        ("agentMessage", [text, checks, delivery, verification]) => ItemKind::AgentMessage {
             text: text.clone(),
             checks: if checks.is_empty() {
                 Vec::new()
             } else {
                 checks.split('\n').map(str::to_owned).collect()
             },
+            delivery: delivery.clone(),
+            verification: verification.clone(),
+            plain: false,
+            failure_reason: String::new(),
+        },
+        ("agentMessage", [text, checks, delivery, verification, plain]) => ItemKind::AgentMessage {
+            text: text.clone(),
+            checks: if checks.is_empty() {
+                Vec::new()
+            } else {
+                checks.split('\n').map(str::to_owned).collect()
+            },
+            delivery: delivery.clone(),
+            verification: verification.clone(),
+            plain: plain == "1",
+            failure_reason: String::new(),
+        },
+        ("agentMessage", [text, checks, delivery, verification, plain, failure_reason]) => {
+            ItemKind::AgentMessage {
+                text: text.clone(),
+                checks: if checks.is_empty() {
+                    Vec::new()
+                } else {
+                    checks.split('\n').map(str::to_owned).collect()
+                },
+                delivery: delivery.clone(),
+                verification: verification.clone(),
+                plain: plain == "1",
+                failure_reason: failure_reason.clone(),
+            }
+        }
+        ("thinking", [content, phase, source]) => ItemKind::Thinking {
+            content: content.clone(),
+            phase: phase.clone(),
+            source: source.clone(),
+        },
+        ("compaction", [dropped, summarized_into, freed_pct, source_summary, covered_messages]) => {
+            ItemKind::Compaction {
+                dropped: dropped.parse().unwrap_or(0),
+                summarized_into: summarized_into.parse().unwrap_or(0),
+                freed_pct: freed_pct.parse().unwrap_or(0),
+                source_summary: source_summary.clone(),
+                covered_messages: covered_messages.parse().unwrap_or(0),
+            }
+        }
+        (
+            "failover",
+            [from_provider, from_model, error_class, error, to_provider, to_model, retry_index],
+        ) => ItemKind::Failover {
+            from_provider: from_provider.clone(),
+            from_model: from_model.clone(),
+            error_class: error_class.clone(),
+            error: error.clone(),
+            to_provider: to_provider.clone(),
+            to_model: to_model.clone(),
+            retry_index: retry_index.parse().unwrap_or(0),
+        },
+        ("planStep", [step_id, title, kind, status, triggered_by, evidence]) => {
+            ItemKind::PlanStep {
+                step_id: step_id.clone(),
+                title: title.clone(),
+                kind: kind.clone(),
+                status: status.clone(),
+                triggered_by: if triggered_by.is_empty() {
+                    Vec::new()
+                } else {
+                    triggered_by
+                        .split('\n')
+                        .filter_map(|raw| raw.parse::<u32>().ok())
+                        .collect()
+                },
+                evidence: if evidence.is_empty() {
+                    Vec::new()
+                } else {
+                    evidence.split('\n').map(str::to_owned).collect()
+                },
+            }
+        }
+        ("permission", [kind, detail, decision, context]) => ItemKind::Permission {
+            kind: kind.clone(),
+            detail: detail.clone(),
+            decision: decision.clone(),
+            context: context.clone(),
+        },
+        (
+            "contextBudget",
+            [used, window, percent, cumulative_chars, compacted_count, last_model],
+        ) => ItemKind::ContextBudget {
+            used: used.parse().unwrap_or(0),
+            window: window.parse().unwrap_or(0),
+            percent: percent.parse().unwrap_or(0),
+            cumulative_chars: cumulative_chars.parse().unwrap_or(0),
+            compacted_count: compacted_count.parse().unwrap_or(0),
+            last_model: last_model.clone(),
         },
         _ => return None,
     };
@@ -702,6 +1193,12 @@ fn kind_name(kind: &ItemKind) -> &'static str {
         ItemKind::ModelCall { .. } => "modelCall",
         ItemKind::FileChange { .. } => "fileChange",
         ItemKind::AgentMessage { .. } => "agentMessage",
+        ItemKind::Thinking { .. } => "thinking",
+        ItemKind::Compaction { .. } => "compaction",
+        ItemKind::Failover { .. } => "failover",
+        ItemKind::PlanStep { .. } => "planStep",
+        ItemKind::Permission { .. } => "permission",
+        ItemKind::ContextBudget { .. } => "contextBudget",
     }
 }
 
@@ -709,6 +1206,11 @@ fn kind_name(kind: &ItemKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
+
+    /// Most tests predate dual-mode and just need a Code session.
+    fn open_code(dir: &Path, project: &Path, title: &str, at: u64) -> io::Result<String> {
+        open(dir, project, title, at, Mode::Code)
+    }
 
     fn item(id: u32, kind: ItemKind) -> Item {
         Item {
@@ -720,13 +1222,26 @@ mod tests {
         }
     }
 
+    /// Convenience helper to spawn a record + reload round-trip and surface the
+    /// round-tripped item under the same `id`. Used by every new-variant test.
+    fn round_trip(tmp_name: &str, kind: ItemKind) -> Item {
+        let tmp = TempDir::new(tmp_name);
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        let step = item(1, kind);
+        record_item(&dir, &id, &step, Phase::Completed).expect("record");
+        let session = load(&dir, &id).expect("load");
+        session.turns[0].items[0].clone()
+    }
+
     #[test]
     fn opening_twice_gives_two_distinct_sessions() {
         let tmp = TempDir::new("sess-open");
         let dir = tmp.dir("sessions");
 
-        let first = open(&dir, Path::new("/projects/one"), "新对话", 1).expect("first");
-        let second = open(&dir, Path::new("/projects/one"), "新对话", 1).expect("second");
+        let first = open_code(&dir, Path::new("/projects/one"), "新对话", 1).expect("first");
+        let second = open_code(&dir, Path::new("/projects/one"), "新对话", 1).expect("second");
 
         assert_ne!(first, second);
         assert!(dir.join(format!("{first}.log")).is_file());
@@ -737,7 +1252,7 @@ mod tests {
     fn an_opened_session_remembers_its_project_and_title() {
         let tmp = TempDir::new("sess-open-fields");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/projects/one"), "修复路由", 42).expect("open");
+        let id = open_code(&dir, Path::new("/projects/one"), "修复路由", 42).expect("open");
 
         let session = load(&dir, &id).expect("load");
         assert_eq!(session.project, PathBuf::from("/projects/one"));
@@ -747,10 +1262,22 @@ mod tests {
     }
 
     #[test]
+    fn an_opened_session_roundtrips_an_empty_project() {
+        let tmp = TempDir::new("sess-open-no-project");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new(""), "工作对话", 7).expect("open");
+
+        let session = load(&dir, &id).expect("load");
+        assert!(session.project.as_os_str().is_empty());
+        assert_eq!(session.title, "工作对话");
+        assert_eq!(session.at, 7);
+    }
+
+    #[test]
     fn an_id_is_a_single_plain_file_name() {
         let tmp = TempDir::new("sess-id-shape");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
 
         assert!(!id.contains('/'), "{id}");
         assert!(!id.contains('.'), "{id}");
@@ -768,14 +1295,34 @@ mod tests {
                 record_ask(&dir, id, 1, "hi").is_err(),
                 "{id:?} should have been refused"
             );
+            assert!(delete(&dir, id).is_err(), "{id:?} should have been refused");
         }
+    }
+
+    #[test]
+    fn deleting_removes_the_log_and_it_leaves_the_list() {
+        let tmp = TempDir::new("sess-delete");
+        let dir = tmp.dir("sessions");
+        let gone = open_code(&dir, Path::new("/p"), "删我", 1).expect("first");
+        let kept = open_code(&dir, Path::new("/p"), "留着", 2).expect("second");
+
+        delete(&dir, &gone).expect("delete");
+        assert!(!dir.join(format!("{gone}.log")).exists());
+        assert!(dir.join(format!("{kept}.log")).is_file());
+
+        let listed = list(&dir).expect("list");
+        assert!(
+            listed.iter().all(|item| item.id != gone),
+            "deleted id still listed"
+        );
+        assert!(listed.iter().any(|item| item.id == kept), "sibling lost");
     }
 
     #[test]
     fn ask_opens_a_turn_that_turn_complete_closes() {
         let tmp = TempDir::new("sess-turn");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
 
         record_ask(&dir, &id, 10, "帮我看一下这个报错").expect("ask");
         // context round-trip: with context field
@@ -812,7 +1359,7 @@ mod tests {
     fn ask_round_trips_pinned_context_paths() {
         let tmp = TempDir::new("sess-ctx");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
 
         record_ask(&dir, &id, 10, "无上下文").expect("ask");
         record_ask_with_context(
@@ -839,15 +1386,10 @@ mod tests {
     fn started_then_completed_is_one_item() {
         let tmp = TempDir::new("sess-item");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
-        let mut running = item(
-            1,
-            ItemKind::Reasoning {
-                summary: "先看看目录结构".to_owned(),
-            },
-        );
+        let mut running = item(1, ItemKind::reasoning("先看看目录结构".to_owned()));
         running.status = Status::Running;
         running.duration_ms = None;
         record_item(&dir, &id, &running, Phase::Started).expect("started");
@@ -861,12 +1403,7 @@ mod tests {
         );
 
         // The completion carries the duration the start could not know.
-        let finished = item(
-            1,
-            ItemKind::Reasoning {
-                summary: "先看看目录结构".to_owned(),
-            },
-        );
+        let finished = item(1, ItemKind::reasoning("先看看目录结构".to_owned()));
         record_item(&dir, &id, &finished, Phase::Completed).expect("completed");
         let after_done = load(&dir, &id).expect("load");
         assert_eq!(
@@ -884,17 +1421,12 @@ mod tests {
         // be written on the way out for this to be right.
         let tmp = TempDir::new("sess-killed");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
         record_item(
             &dir,
             &id,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("s".to_owned())),
             Phase::Started,
         )
         .expect("started");
@@ -911,17 +1443,12 @@ mod tests {
     fn recovery_turns_running_into_interrupted_without_completion() {
         let tmp = TempDir::new("sess-recover");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
         record_item(
             &dir,
             &id,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "phase note".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("phase note".to_owned())),
             Phase::Started,
         )
         .expect("started");
@@ -937,9 +1464,7 @@ mod tests {
         assert_eq!(session.turns[0].items[0].status, Status::Running);
         assert_eq!(
             session.turns[0].items[0].kind,
-            ItemKind::Reasoning {
-                summary: "phase note".to_owned()
-            },
+            ItemKind::reasoning("phase note".to_owned()),
             "item payload (last phase) is preserved"
         );
 
@@ -951,22 +1476,17 @@ mod tests {
     fn recovery_skips_completed_and_stopped_turns() {
         let tmp = TempDir::new("sess-recover-done");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
         record_turn_complete(&dir, &id, 20).expect("complete");
         assert!(!recover_interrupted_session(&dir, &id, 30).expect("done"));
 
-        let id2 = open(&dir, Path::new("/p"), "t2", 1).expect("open");
+        let id2 = open_code(&dir, Path::new("/p"), "t2", 1).expect("open");
         record_ask(&dir, &id2, 10, "go").expect("ask");
         record_item(
             &dir,
             &id2,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("s".to_owned())),
             Phase::Started,
         )
         .expect("started");
@@ -981,7 +1501,7 @@ mod tests {
     fn a_failed_item_is_marked_without_a_payload() {
         let tmp = TempDir::new("sess-failed");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
         let step = item(
@@ -991,6 +1511,7 @@ mod tests {
                 cwd: "/p".to_owned(),
                 output: "error[E0308]".to_owned(),
                 exit_code: Some(101),
+                denied: false,
             },
         );
         record_item(&dir, &id, &step, Phase::Completed).expect("completed");
@@ -1013,13 +1534,11 @@ mod tests {
     fn every_item_kind_round_trips() {
         let tmp = TempDir::new("sess-round-trip");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
         let kinds = vec![
-            ItemKind::Reasoning {
-                summary: "看目录\n再决定".to_owned(),
-            },
+            ItemKind::reasoning("看目录\n再决定".to_owned()),
             ItemKind::Search {
                 query: "unknown table".to_owned(),
                 detail: "12 处匹配".to_owned(),
@@ -1033,11 +1552,19 @@ mod tests {
                 cwd: "/p".to_owned(),
                 output: "warning: unused\n\tfinished".to_owned(),
                 exit_code: Some(0),
+                denied: false,
             },
             ItemKind::ModelCall {
                 model: "claude-sonnet-5".to_owned(),
                 input_tokens: 12_480,
                 output_tokens: 1_096,
+                protocol: "native".to_owned(),
+                finish_reason: "stop".to_owned(),
+                saw_reasoning: false,
+                duration_ms: 1_200,
+                provider_latency_ms: 1_150,
+                retry_index: 0,
+                llm_io_ref: None,
             },
             ItemKind::FileChange {
                 changes: vec![
@@ -1052,11 +1579,12 @@ mod tests {
                         removed: 8,
                     },
                 ],
+                file_span_ref: None,
             },
-            ItemKind::AgentMessage {
-                text: "已修复。".to_owned(),
-                checks: vec!["cargo test 通过".to_owned(), "无新增告警".to_owned()],
-            },
+            ItemKind::agent_message(
+                "已修复。".to_owned(),
+                vec!["cargo test 通过".to_owned(), "无新增告警".to_owned()],
+            ),
         ];
 
         let mut expected = Vec::new();
@@ -1074,16 +1602,10 @@ mod tests {
     fn an_empty_check_list_stays_empty() {
         let tmp = TempDir::new("sess-no-checks");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
-        let step = item(
-            1,
-            ItemKind::AgentMessage {
-                text: "done".to_owned(),
-                checks: Vec::new(),
-            },
-        );
+        let step = item(1, ItemKind::agent_message("done".to_owned(), Vec::new()));
         record_item(&dir, &id, &step, Phase::Completed).expect("record");
 
         assert_eq!(load(&dir, &id).expect("load").turns[0].items[0], step);
@@ -1093,7 +1615,7 @@ mod tests {
     fn retitle_changes_the_title_and_keeps_the_file_name() {
         let tmp = TempDir::new("sess-retitle");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "新对话", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "新对话", 1).expect("open");
 
         retitle(&dir, &id, "修复 k2k-rust 未知表路由").expect("retitle");
 
@@ -1111,7 +1633,7 @@ mod tests {
     fn archive_hides_without_deleting() {
         let tmp = TempDir::new("sess-archive");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
 
         archive(&dir, &id).expect("archive");
 
@@ -1125,9 +1647,9 @@ mod tests {
     fn list_returns_newest_first() {
         let tmp = TempDir::new("sess-list-order");
         let dir = tmp.dir("sessions");
-        let old = open(&dir, Path::new("/p"), "old", 100).expect("open");
-        let new = open(&dir, Path::new("/p"), "new", 300).expect("open");
-        let middle = open(&dir, Path::new("/p"), "middle", 200).expect("open");
+        let old = open_code(&dir, Path::new("/p"), "old", 100).expect("open");
+        let new = open_code(&dir, Path::new("/p"), "new", 300).expect("open");
+        let middle = open_code(&dir, Path::new("/p"), "middle", 200).expect("open");
 
         let ids: Vec<String> = list(&dir)
             .expect("list")
@@ -1141,7 +1663,7 @@ mod tests {
     fn list_uses_a_retitled_title() {
         let tmp = TempDir::new("sess-list-retitle");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "新对话", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "新对话", 1).expect("open");
         retitle(&dir, &id, "改过的标题").expect("retitle");
 
         let listed = list(&dir).expect("list");
@@ -1153,7 +1675,7 @@ mod tests {
     fn list_ignores_files_that_are_not_sessions() {
         let tmp = TempDir::new("sess-list-junk");
         let dir = tmp.dir("sessions");
-        open(&dir, Path::new("/p"), "real", 1).expect("open");
+        open_code(&dir, Path::new("/p"), "real", 1).expect("open");
         fs::write(dir.join("notes.txt"), "not a session").expect("junk");
         fs::write(dir.join("stray.log"), "no open line here").expect("junk");
 
@@ -1170,27 +1692,17 @@ mod tests {
     fn a_damaged_line_costs_only_itself() {
         let tmp = TempDir::new("sess-damaged");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
 
-        let good = item(
-            1,
-            ItemKind::Reasoning {
-                summary: "kept".to_owned(),
-            },
-        );
+        let good = item(1, ItemKind::reasoning("kept".to_owned()));
         record_item(&dir, &id, &good, Phase::Completed).expect("record");
         line::append(&dir.join(format!("{id}.log")), "item.completed\tnonsense").expect("junk");
         line::append(&dir.join(format!("{id}.log")), "a verb nobody knows\tx").expect("junk");
         record_item(
             &dir,
             &id,
-            &item(
-                2,
-                ItemKind::Reasoning {
-                    summary: "also kept".to_owned(),
-                },
-            ),
+            &item(2, ItemKind::reasoning("also kept".to_owned())),
             Phase::Completed,
         )
         .expect("record");
@@ -1205,20 +1717,71 @@ mod tests {
     }
 
     #[test]
+    fn the_mode_tag_round_trips() {
+        let tmp = TempDir::new("sess-mode-round-trip");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "工作对话", 1, Mode::Work).expect("open");
+
+        let listed = list(&dir).expect("list");
+        assert_eq!(listed[0].mode, Mode::Work, "list must surface the tag");
+
+        let session = load(&dir, &id).expect("load");
+        assert_eq!(session.mode, Mode::Work, "load must surface the tag");
+    }
+
+    #[test]
+    fn a_log_without_a_mode_line_reads_as_code() {
+        // Sessions written before dual-mode have no `mode` line; they were all
+        // coding work and must keep appearing in the Code space.
+        let tmp = TempDir::new("sess-mode-legacy");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
+        // Strip the tag line, as if the log predates it.
+        let path = dir.join(format!("{id}.log"));
+        let kept: Vec<String> = line::read_lines(&path)
+            .expect("read")
+            .into_iter()
+            .filter(|raw| !raw.starts_with("mode\t"))
+            .collect();
+        std::fs::write(&path, kept.join("\n") + "\n").expect("rewrite");
+
+        assert_eq!(list(&dir).expect("list")[0].mode, Mode::Code);
+        assert_eq!(load(&dir, &id).expect("load").mode, Mode::Code);
+    }
+
+    #[test]
+    fn a_damaged_mode_value_falls_back_to_code() {
+        let tmp = TempDir::new("sess-mode-damaged");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
+        line::append(&dir.join(format!("{id}.log")), "mode\tnonsense").expect("junk");
+
+        assert_eq!(list(&dir).expect("list")[0].mode, Mode::Code);
+        assert_eq!(load(&dir, &id).expect("load").mode, Mode::Code);
+    }
+
+    #[test]
+    fn an_unknown_verb_neither_drops_nor_crashes_a_listing() {
+        let tmp = TempDir::new("sess-mode-junk");
+        let dir = tmp.dir("sessions");
+        let id = open(&dir, Path::new("/p"), "t", 1, Mode::Work).expect("open");
+        line::append(&dir.join(format!("{id}.log")), "a verb nobody knows\tx").expect("junk");
+
+        // `summarize` skips unknown verbs — the session still lists, with its
+        // mode tag intact.
+        assert_eq!(list(&dir).expect("list")[0].mode, Mode::Work);
+    }
+
+    #[test]
     fn an_item_before_any_ask_is_skipped() {
         let tmp = TempDir::new("sess-item-no-turn");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
 
         record_item(
             &dir,
             &id,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("s".to_owned())),
             Phase::Completed,
         )
         .expect("record");
@@ -1236,11 +1799,11 @@ mod tests {
         let tmp = TempDir::new("sess-stopped");
         let dir = tmp.dir("sessions");
 
-        let stopped = open(&dir, Path::new("/p"), "stopped", 1).expect("open");
+        let stopped = open_code(&dir, Path::new("/p"), "stopped", 1).expect("open");
         record_ask(&dir, &stopped, 10, "go").expect("ask");
         record_stopped(&dir, &stopped, 11).expect("stopped");
 
-        let killed = open(&dir, Path::new("/p"), "killed", 2).expect("open");
+        let killed = open_code(&dir, Path::new("/p"), "killed", 2).expect("open");
         record_ask(&dir, &killed, 10, "go").expect("ask");
 
         let stopped = load(&dir, &stopped).expect("load").turns.remove(0);
@@ -1255,7 +1818,7 @@ mod tests {
     fn a_turn_error_is_kept() {
         let tmp = TempDir::new("sess-error");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "t", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
         record_error(&dir, &id, 11, "模型返回了无法解析的内容").expect("error");
 
@@ -1269,17 +1832,12 @@ mod tests {
     fn recovery_marks_running_as_interrupted_never_completed() {
         let tmp = TempDir::new("sess-recover");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "killed", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "killed", 1).expect("open");
         record_ask(&dir, &id, 10, "go").expect("ask");
         record_item(
             &dir,
             &id,
-            &item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                },
-            ),
+            &item(1, ItemKind::reasoning("s".to_owned())),
             Phase::Started,
         )
         .expect("started");
@@ -1295,13 +1853,7 @@ mod tests {
         assert_eq!(turn.items[0].status, Status::Running, "item envelope kept");
         assert_eq!(
             turn.items[0].kind,
-            item(
-                1,
-                ItemKind::Reasoning {
-                    summary: "s".to_owned(),
-                }
-            )
-            .kind,
+            item(1, ItemKind::reasoning("s".to_owned())).kind,
             "last phase payload preserved for undo/diff"
         );
 
@@ -1315,11 +1867,11 @@ mod tests {
         let tmp = TempDir::new("sess-recover-skip");
         let dir = tmp.dir("sessions");
 
-        let done = open(&dir, Path::new("/p"), "done", 1).expect("open");
+        let done = open_code(&dir, Path::new("/p"), "done", 1).expect("open");
         record_ask(&dir, &done, 10, "go").expect("ask");
         record_turn_complete(&dir, &done, 20).expect("complete");
 
-        let live = open(&dir, Path::new("/p"), "live", 2).expect("open");
+        let live = open_code(&dir, Path::new("/p"), "live", 2).expect("open");
         record_ask(&dir, &live, 10, "go").expect("ask");
 
         let mut live_set = std::collections::HashSet::new();
@@ -1334,7 +1886,7 @@ mod tests {
     fn restore_brings_an_archived_session_back() {
         let tmp = TempDir::new("sess-restore");
         let dir = tmp.dir("sessions");
-        let id = open(&dir, Path::new("/p"), "归档后恢复", 1).expect("open");
+        let id = open_code(&dir, Path::new("/p"), "归档后恢复", 1).expect("open");
         archive(&dir, &id).expect("archive");
         assert!(load(&dir, &id).expect("load").archived);
         assert!(list(&dir).expect("list")[0].archived);
@@ -1349,5 +1901,470 @@ mod tests {
         assert_eq!(base36(0), "0");
         assert_eq!(base36(35), "z");
         assert_eq!(base36(36), "10");
+    }
+
+    #[test]
+    fn reasoning_round_trips_phase_and_diagnostics() {
+        let tmp = TempDir::new("sess-reasoning-phase");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::Reasoning {
+                    summary: "Planning the work".to_owned(),
+                    phase: "analyze".to_owned(),
+                    diagnostics: Some("rounds 1/6 · tools 2/32".to_owned()),
+                },
+            ),
+            Phase::Completed,
+        )
+        .expect("record");
+        let session = load(&dir, &id).expect("load");
+        match &session.turns[0].items[0].kind {
+            ItemKind::Reasoning {
+                summary,
+                phase,
+                diagnostics,
+            } => {
+                assert_eq!(summary, "Planning the work");
+                assert_eq!(phase, "analyze");
+                assert_eq!(diagnostics.as_deref(), Some("rounds 1/6 · tools 2/32"));
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_denied_flag_round_trips() {
+        let tmp = TempDir::new("sess-denied");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::CommandExecution {
+                    command: "rm -rf /".to_owned(),
+                    cwd: "/p".to_owned(),
+                    output: String::new(),
+                    exit_code: None,
+                    denied: true,
+                },
+            ),
+            Phase::Completed,
+        )
+        .expect("record");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::CommandExecution {
+                    command: "rm -rf /".to_owned(),
+                    cwd: "/p".to_owned(),
+                    output: String::new(),
+                    exit_code: None,
+                    denied: true,
+                },
+            ),
+            Phase::Failed,
+        )
+        .expect("mark failed");
+        let session = load(&dir, &id).expect("load");
+        match &session.turns[0].items[0].kind {
+            ItemKind::CommandExecution {
+                denied, exit_code, ..
+            } => {
+                assert!(*denied);
+                assert_eq!(*exit_code, None);
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_message_round_trips_structured_outcome() {
+        let tmp = TempDir::new("sess-outcome");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        record_item(
+            &dir,
+            &id,
+            &item(
+                1,
+                ItemKind::AgentMessage {
+                    text: "已修复。".to_owned(),
+                    checks: vec!["cargo test 通过".to_owned()],
+                    delivery: "ready".to_owned(),
+                    verification: "passed".to_owned(),
+                    plain: true,
+                    failure_reason: String::new(),
+                },
+            ),
+            Phase::Completed,
+        )
+        .expect("record");
+        let session = load(&dir, &id).expect("load");
+        match &session.turns[0].items[0].kind {
+            ItemKind::AgentMessage {
+                delivery,
+                verification,
+                plain,
+                ..
+            } => {
+                assert_eq!(delivery, "ready");
+                assert_eq!(verification, "passed");
+                assert!(*plain);
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_lines_without_outcome_fields_still_decode() {
+        // Old logs: reasoning with one payload field, agentMessage with two,
+        // commandExecution with four. They must keep loading as empty-outcome
+        // legacy shapes rather than be dropped as damaged.
+        let tmp = TempDir::new("sess-legacy");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
+        let path = dir.join(format!("{id}.log"));
+        line::append(&path, "ask\t10\tgo").expect("ask");
+        line::append(&path, "item.completed\t1\t10\t5\treasoning\told summary").expect("r");
+        line::append(
+            &path,
+            "item.completed\t2\t10\t\tcommandExecution\tmake\t/p\tboom\t2",
+        )
+        .expect("c");
+        line::append(&path, "item.completed\t3\t10\t\tagentMessage\tdone\tcheck1").expect("a");
+        line::append(&path, "turn.complete\t20").expect("done");
+        let session = load(&dir, &id).expect("load");
+        let items = &session.turns[0].items;
+        assert_eq!(items.len(), 3);
+        assert!(
+            matches!(&items[0].kind, ItemKind::Reasoning { phase, diagnostics, .. }
+            if phase.is_empty() && diagnostics.is_none())
+        );
+        assert!(
+            matches!(&items[1].kind, ItemKind::CommandExecution { denied, exit_code, .. }
+            if !*denied && *exit_code == Some(2))
+        );
+        assert!(
+            matches!(&items[2].kind, ItemKind::AgentMessage { delivery, verification, plain, .. }
+            if delivery.is_empty() && verification.is_empty() && !*plain)
+        );
+    }
+
+    #[test]
+    fn model_call_round_trips_extended_fields() {
+        let tmp = TempDir::new("sess-modelcall-extended");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
+        record_ask(&dir, &id, 10, "go").expect("ask");
+        let step = item(
+            1,
+            ItemKind::ModelCall {
+                model: "claude-sonnet-5".to_owned(),
+                input_tokens: 12_480,
+                output_tokens: 2_196,
+                protocol: "native".to_owned(),
+                finish_reason: "tool_calls".to_owned(),
+                saw_reasoning: true,
+                duration_ms: 8_421,
+                provider_latency_ms: 8_200,
+                retry_index: 0,
+                llm_io_ref: Some("llm_io/001.json".to_owned()),
+            },
+        );
+        record_item(&dir, &id, &step, Phase::Completed).expect("record");
+        let session = load(&dir, &id).expect("load");
+        match &session.turns[0].items[0].kind {
+            ItemKind::ModelCall {
+                model,
+                input_tokens,
+                output_tokens,
+                protocol,
+                finish_reason,
+                saw_reasoning,
+                duration_ms,
+                provider_latency_ms,
+                retry_index,
+                llm_io_ref,
+            } => {
+                assert_eq!(model, "claude-sonnet-5");
+                assert_eq!(*input_tokens, 12_480);
+                assert_eq!(*output_tokens, 2_196);
+                assert_eq!(protocol, "native");
+                assert_eq!(finish_reason, "tool_calls");
+                assert!(*saw_reasoning);
+                assert_eq!(*duration_ms, 8_421);
+                assert_eq!(*provider_latency_ms, 8_200);
+                assert_eq!(*retry_index, 0);
+                assert_eq!(llm_io_ref.as_deref(), Some("llm_io/001.json"));
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_model_call_with_only_three_fields_still_decodes() {
+        // Logs written before the extended payload must round-trip into the
+        // new shape with empty/zero defaults rather than be dropped.
+        let tmp = TempDir::new("sess-modelcall-legacy");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new("/p"), "t", 1).expect("open");
+        let path = dir.join(format!("{id}.log"));
+        line::append(&path, "ask\t10\tgo").expect("ask");
+        line::append(&path, "item.completed\t1\t10\t0\tmodelCall\tgpt-4\t100\t40").expect("mc");
+        line::append(&path, "turn.complete\t20").expect("done");
+        let session = load(&dir, &id).expect("load");
+        let items = &session.turns[0].items;
+        assert_eq!(items.len(), 1);
+        match &items[0].kind {
+            ItemKind::ModelCall {
+                model,
+                input_tokens,
+                output_tokens,
+                protocol,
+                finish_reason,
+                saw_reasoning,
+                duration_ms,
+                provider_latency_ms,
+                retry_index,
+                llm_io_ref,
+            } => {
+                assert_eq!(model, "gpt-4");
+                assert_eq!(*input_tokens, 100);
+                assert_eq!(*output_tokens, 40);
+                assert!(protocol.is_empty(), "legacy lines have no protocol");
+                assert!(finish_reason.is_empty());
+                assert!(!*saw_reasoning);
+                assert_eq!(*duration_ms, 0);
+                assert_eq!(*provider_latency_ms, 0);
+                assert_eq!(*retry_index, 0);
+                assert!(llm_io_ref.is_none());
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thinking_round_trips_with_phase_and_source() {
+        let decoded = round_trip(
+            "sess-thinking",
+            ItemKind::Thinking {
+                content: "I should grep first\nthen read src/foo.rs".to_owned(),
+                phase: "analyze".to_owned(),
+                source: "anthropic_reasoning".to_owned(),
+            },
+        );
+        match decoded.kind {
+            ItemKind::Thinking {
+                content,
+                phase,
+                source,
+            } => {
+                assert_eq!(content, "I should grep first\nthen read src/foo.rs");
+                assert_eq!(phase, "analyze");
+                assert_eq!(source, "anthropic_reasoning");
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compaction_round_trips_with_source_summary() {
+        let decoded = round_trip(
+            "sess-compaction",
+            ItemKind::Compaction {
+                dropped: 4,
+                summarized_into: 1,
+                freed_pct: 38,
+                source_summary: "earlier file reads + 1 tool result".to_owned(),
+                covered_messages: 7,
+            },
+        );
+        match decoded.kind {
+            ItemKind::Compaction {
+                dropped,
+                summarized_into,
+                freed_pct,
+                source_summary,
+                covered_messages,
+            } => {
+                assert_eq!(dropped, 4);
+                assert_eq!(summarized_into, 1);
+                assert_eq!(freed_pct, 38);
+                assert_eq!(source_summary, "earlier file reads + 1 tool result");
+                assert_eq!(covered_messages, 7);
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failover_round_trips_with_retry_index() {
+        let decoded = round_trip(
+            "sess-failover",
+            ItemKind::Failover {
+                from_provider: "anthropic".to_owned(),
+                from_model: "claude-sonnet-5".to_owned(),
+                error_class: "rate_limit".to_owned(),
+                error: "429".to_owned(),
+                to_provider: "anthropic".to_owned(),
+                to_model: "claude-haiku-4-5".to_owned(),
+                retry_index: 2,
+            },
+        );
+        match decoded.kind {
+            ItemKind::Failover {
+                from_provider,
+                to_model,
+                retry_index,
+                ..
+            } => {
+                assert_eq!(from_provider, "anthropic");
+                assert_eq!(to_model, "claude-haiku-4-5");
+                assert_eq!(retry_index, 2);
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_step_round_trips_with_triggered_tool_ids() {
+        let decoded = round_trip(
+            "sess-plan",
+            ItemKind::PlanStep {
+                step_id: "sub-3".to_owned(),
+                title: "修复路由表".to_owned(),
+                kind: "edit".to_owned(),
+                status: "done".to_owned(),
+                triggered_by: vec![12, 13],
+                evidence: vec!["cargo check 通过".to_owned(), "未新增告警".to_owned()],
+            },
+        );
+        match decoded.kind {
+            ItemKind::PlanStep {
+                step_id,
+                title,
+                kind,
+                status,
+                triggered_by,
+                evidence,
+            } => {
+                assert_eq!(step_id, "sub-3");
+                assert_eq!(title, "修复路由表");
+                assert_eq!(kind, "edit");
+                assert_eq!(status, "done");
+                assert_eq!(triggered_by, vec![12, 13]);
+                assert_eq!(
+                    evidence,
+                    vec!["cargo check 通过".to_owned(), "未新增告警".to_owned()]
+                );
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permission_round_trips() {
+        let decoded = round_trip(
+            "sess-permission",
+            ItemKind::Permission {
+                kind: "command".to_owned(),
+                detail: "rm -rf build/".to_owned(),
+                decision: "approved".to_owned(),
+                context: "/p".to_owned(),
+            },
+        );
+        match decoded.kind {
+            ItemKind::Permission {
+                kind,
+                detail,
+                decision,
+                context,
+            } => {
+                assert_eq!(kind, "command");
+                assert_eq!(detail, "rm -rf build/");
+                assert_eq!(decision, "approved");
+                assert_eq!(context, "/p");
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_budget_round_trips() {
+        let decoded = round_trip(
+            "sess-context-budget",
+            ItemKind::ContextBudget {
+                used: 168_000,
+                window: 200_000,
+                percent: 84,
+                cumulative_chars: 412_080,
+                compacted_count: 2,
+                last_model: "claude-sonnet-5".to_owned(),
+            },
+        );
+        match decoded.kind {
+            ItemKind::ContextBudget {
+                used,
+                window,
+                percent,
+                cumulative_chars,
+                compacted_count,
+                last_model,
+            } => {
+                assert_eq!(used, 168_000);
+                assert_eq!(window, 200_000);
+                assert_eq!(percent, 84);
+                assert_eq!(cumulative_chars, 412_080);
+                assert_eq!(compacted_count, 2);
+                assert_eq!(last_model, "claude-sonnet-5");
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+    #[test]
+    fn long_append_only_turn_replays_each_item_and_final_status() {
+        let root = TempDir::new("session-stress");
+        let id = open(
+            root.path(),
+            Path::new("/tmp/fixture"),
+            "stress",
+            1,
+            Mode::Code,
+        )
+        .unwrap();
+        record_ask(root.path(), &id, 2, "task").unwrap();
+        for index in 1..=1000 {
+            let item = Item {
+                id: index,
+                at: 3,
+                status: Status::Done,
+                duration_ms: Some(1),
+                kind: ItemKind::reasoning(format!("step {index}")),
+            };
+            record_item(root.path(), &id, &item, Phase::Started).unwrap();
+            record_item(root.path(), &id, &item, Phase::Completed).unwrap();
+        }
+        record_turn_complete(root.path(), &id, 4).unwrap();
+        let replay = load(root.path(), &id).unwrap();
+        assert_eq!(replay.turns.len(), 1);
+        assert!(replay.turns[0].done);
+        assert_eq!(replay.turns[0].items.len(), 1000);
+        assert_eq!(replay.turns[0].items[999].id, 1000);
+        assert!(replay.turns[0]
+            .items
+            .iter()
+            .all(|i| i.status == Status::Done));
     }
 }

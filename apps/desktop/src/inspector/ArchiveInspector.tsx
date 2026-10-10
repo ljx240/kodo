@@ -1,5 +1,6 @@
 import { CircleCheckBig, Folder, RotateCcw, SquareArrowOutUpRight } from "lucide-react";
 import type { DemoState } from "../data/demoState";
+import { T } from "../i18n";
 
 export type ArchiveSelection = {
   id: string;
@@ -43,16 +44,16 @@ export function ArchiveOverview({
         ? "Claude 3.5 Sonnet"
         : "—";
   const archivedAt = selection?.at || (demo ? "Apr 29, 2024 10:25 AM" : "");
-  const summary = selection?.summary ?? fixture?.assistant.final ?? "—";
+  const summary = selection?.summary ?? fixture?.turns[0].assistant.final ?? "—";
   const canRestore = Boolean(selection && selection.id);
 
   return (
     <>
-      <SectionLite title="Conversation details">
+      <SectionLite title={T.page.archive.details}>
         <div className="ins-body">
           <div className="ins-title-row">
             <span className="ins-title">{title}</span>
-            <span className="archived-pill">Archived</span>
+            <span className="archived-pill">{T.page.archive.statusArchived}</span>
           </div>
           <div className="ins-title-row">
             <span className="meta-project">
@@ -76,11 +77,11 @@ export function ArchiveOverview({
           onClick={onRestore}
         >
           <RotateCcw size={15} strokeWidth={1.9} />
-          <span>Restore conversation</span>
+          <span>{T.page.archive.restore}</span>
         </button>
         <button type="button" className="btn btn--block" onClick={onOpenTrace}>
           <SquareArrowOutUpRight size={15} strokeWidth={1.9} />
-          <span>Open trace</span>
+          <span>{T.page.archive.openTrace}</span>
         </button>
       </div>
     </>

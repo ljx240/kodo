@@ -2,8 +2,10 @@
 //!
 //! Layer A — deterministic runtime checks (no LLM, no network).
 //! Layer B — real coding tasks against fixture repos with machine-checkable
-//! oracles. Without credentials Layer B validates baselines and reports
-//! `NOT RUN — credential unavailable` for the live agent portion.
+//! oracles. The default run validates baselines and leaves live quality
+//! `NOT RUN`; real provider evaluation requires an explicit `--live`.
+
+mod work;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,7 +23,9 @@ use kodo_agent::provider::{
     ProviderFailureClass, ProviderMessage, ToolSchema,
 };
 use kodo_agent::tools::{command_run, CommandOutcomeKind};
-use kodo_agent::{AgentEvidenceKind, AgentSkillRegistry, Permission, RunRequest, TaskType};
+use kodo_agent::{
+    AgentEvidenceKind, AgentMode, AgentSkillRegistry, Permission, RunRequest, TaskType,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -36,6 +40,7 @@ fn main() {
     println!("kodo-evals deterministic layer");
     let mut report = EvalReport::default();
     run_deterministic(&mut report);
+    work::run(&mut report);
 
     println!("\nkodo-evals fixture layer (Layer B)");
     run_fixture_baselines(&mut report);
@@ -45,7 +50,7 @@ fn main() {
         report.live_status = "NOT RUN — --live not requested".into();
         report
             .notes
-            .push("LIVE EVAL: NOT RUN — credential unavailable".into());
+            .push(format!("LIVE EVAL: {}", report.live_status));
     }
 
     report.print();
@@ -223,9 +228,9 @@ impl EvalReport {
             self.regression_false_completions
         );
         if self.live_tasks == 0 {
-            println!("G_holdout_success_ge_90: NOT RUN — credential unavailable");
-            println!("G_live_false_completion_le_5: NOT RUN — credential unavailable");
-            println!("G_no_destructive_false_completion: NOT RUN — credential unavailable");
+            println!("G_holdout_success_ge_90: {}", self.live_status);
+            println!("G_live_false_completion_le_5: {}", self.live_status);
+            println!("G_no_destructive_false_completion: {}", self.live_status);
         } else {
             let hold = self.holdout.success_rate() >= 0.90;
             println!(
@@ -531,6 +536,7 @@ fn run_deterministic(report: &mut EvalReport) {
                 streaming: false,
                 reasoning: false,
                 token_usage: true,
+                context_window_tokens: 32_000,
             }),
             api_key: String::new(),
             ..Provider::new("openai", "", "", "gpt-4o")
@@ -656,22 +662,27 @@ fn run_deterministic(report: &mut EvalReport) {
         );
     }
 
-    // 13) settings consumers wired in main.rs
+    // 13) Exercise the shared settings consumer with isolated, synthetic credentials.
     {
-        let main = std::fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../apps/desktop/src-tauri/src/main.rs"),
-        )
-        .unwrap_or_default();
-        let ok = main.contains("permission")
-            && main.contains("fallback-behavior")
-            && main.contains("extended-thinking")
-            && main.contains("max-output-tokens")
-            && main.contains("default-model")
-            && main.contains("recover_interrupted");
+        let result = Command::new("cargo")
+            .args([
+                "test",
+                "--offline",
+                "-p",
+                "kodo-shell",
+                "config::tests::stored_settings_reach_runtime",
+                "--",
+                "--exact",
+            ])
+            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."))
+            .output();
+        let ok = result.as_ref().is_ok_and(|r| {
+            r.status.success() && String::from_utf8_lossy(&r.stdout).contains("1 passed")
+        });
         report.check(
             "settings_have_runtime_consumers",
             ok,
-            "missing setting consumer keys",
+            "isolated ShellConfig runtime consumer test failed",
         );
     }
 
@@ -855,6 +866,7 @@ fn run_deterministic(report: &mut EvalReport) {
                 streaming: false,
                 reasoning: false,
                 token_usage: true,
+                context_window_tokens: 32_000,
             }),
             api_key: String::new(),
             ..Provider::new("openai", "", "", "gpt-4o")
@@ -888,14 +900,19 @@ fn run_deterministic(report: &mut EvalReport) {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../apps/desktop/src-tauri/src/main.rs"),
         )
         .unwrap_or_default();
+        let config = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../crates/shell/src/config.rs"),
+        )
+        .unwrap_or_default();
         let ok = app.contains("data-density")
             && app.contains("show-line-numbers")
             && app.contains("use-system-font")
             && app.contains("data-theme")
             && app.contains("auto-detect-git-branch")
-            && run.contains("fallback-behavior")
+            && config.contains("fallback-behavior")
+            && run.contains("ShellConfig::load")
             && run.contains("permission")
-            && run.contains("default-model")
+            && config.contains("default-model")
             && run.contains("recover_interrupted");
         report.check(
             "visible_settings_have_runtime_consumers",
@@ -1117,15 +1134,23 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         let mut repairs = 0usize;
         let mut claimed_verified = false;
         let request = RunRequest {
-            project: work.clone(),
+            project: Some(work.clone()),
             message: prompt.clone(),
+            conversation_history: Vec::new(),
             pinned_context: Vec::new(),
             provider: Some(provider.clone()),
             permission: Permission::Full,
+            mode: AgentMode::Code,
             fallback_to_local: false,
             max_output_tokens: 2048,
             extended_thinking: false,
+            local_trace: false,
             session_id: Some(format!("eval_{id}")),
+            user_skills_dir: None,
+            mcp_servers: Vec::new(),
+            agent_instructions: None,
+            personas: Vec::new(),
+            budget_family: None,
         };
         let alive = || true;
         let approve = |_kind: kodo_agent::StepKind, _cmd: &str| true;

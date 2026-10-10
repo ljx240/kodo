@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -13,60 +14,86 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
-use kodo_agent::{self as agent, FileDelta, SinkEvent, Step, StepKind};
-use kodo_core::session::{self, Item, ItemKind, Phase, Status};
+use kodo_agent::{self as agent, SinkEvent, StepKind};
+use kodo_shell::{approval_fingerprint, step_kind_label, Logged, TurnLogger, TurnOutcome};
 
 use crate::view::{ItemView, RunEvent};
 
 pub use kodo_agent::Permission;
+pub use kodo_shell::ApprovalChoice;
+
+#[derive(Clone)]
+pub struct RunToken {
+    generation: u64,
+    alive: Arc<AtomicBool>,
+}
+
+impl RunToken {
+    pub fn is_live(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
+    }
+}
 
 #[derive(Default, Clone)]
-pub struct Runs(Arc<Mutex<HashSet<String>>>);
+pub struct Runs(Arc<Mutex<HashMap<String, RunToken>>>);
 
 impl Runs {
-    fn lock(&self) -> MutexGuard<'_, HashSet<String>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, RunToken>> {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-
-    pub fn begin(&self, id: &str) -> bool {
-        self.lock().insert(id.to_owned())
+    pub fn begin(&self, id: &str) -> Option<RunToken> {
+        static GENERATION: AtomicU64 = AtomicU64::new(1);
+        let mut runs = self.lock();
+        if runs.contains_key(id) {
+            return None;
+        }
+        let token = RunToken {
+            generation: GENERATION.fetch_add(1, Ordering::SeqCst),
+            alive: Arc::new(AtomicBool::new(true)),
+        };
+        runs.insert(id.to_owned(), token.clone());
+        Some(token)
     }
-
-    pub fn is_live(&self, id: &str) -> bool {
-        self.lock().contains(id)
+    pub fn has_run(&self, id: &str) -> bool {
+        self.lock().contains_key(id)
     }
-
     pub fn cancel(&self, id: &str) {
-        self.lock().remove(id);
-    }
-}
-
-/// One approval decision from the user. `AllowSession` remembers the command
-/// fingerprint for the rest of the conversation (codex-style graduated allow).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalChoice {
-    Deny,
-    AllowOnce,
-    AllowSession,
-}
-
-impl ApprovalChoice {
-    pub fn from_parts(approved: bool, session_wide: bool) -> Self {
-        match (approved, session_wide) {
-            (false, _) => Self::Deny,
-            (true, true) => Self::AllowSession,
-            (true, false) => Self::AllowOnce,
+        if let Some(token) = self.lock().get(id) {
+            token.alive.store(false, Ordering::SeqCst);
         }
     }
-
-    pub fn allows(self) -> bool {
-        matches!(self, Self::AllowOnce | Self::AllowSession)
+    pub fn release(&self, id: &str, token: &RunToken) {
+        let mut runs = self.lock();
+        if runs
+            .get(id)
+            .is_some_and(|current| current.generation == token.generation)
+        {
+            runs.remove(id);
+        }
     }
 }
 
-type WaitMap = HashMap<(String, u32), Sender<ApprovalChoice>>;
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunEventEnvelope {
+    run_id: u64,
+    #[serde(flatten)]
+    event: RunEvent,
+}
+
+fn emit_run(app: &AppHandle, token: &RunToken, event: RunEvent) {
+    let _ = app.emit(
+        "run:event",
+        RunEventEnvelope {
+            run_id: token.generation,
+            event,
+        },
+    );
+}
+
+type WaitMap = HashMap<(String, u64, u32), Sender<ApprovalChoice>>;
 type AllowMap = HashMap<String, HashSet<String>>;
 
 #[derive(Default, Clone)]
@@ -92,22 +119,31 @@ impl Approvals {
     pub fn wait_point(
         &self,
         session: &str,
+        generation: u64,
         step: u32,
     ) -> (ApprovalTicket, Receiver<ApprovalChoice>) {
         let (tx, rx) = mpsc::channel();
-        self.waits().insert((session.to_owned(), step), tx);
+        self.waits()
+            .insert((session.to_owned(), generation, step), tx);
         (
             ApprovalTicket {
                 session: session.to_owned(),
                 step,
+                generation,
                 map: self.clone(),
             },
             rx,
         )
     }
 
-    pub fn resolve(&self, session: &str, step: u32, choice: ApprovalChoice) -> bool {
-        match self.waits().remove(&(session.to_owned(), step)) {
+    pub fn resolve(
+        &self,
+        session: &str,
+        generation: u64,
+        step: u32,
+        choice: ApprovalChoice,
+    ) -> bool {
+        match self.waits().remove(&(session.to_owned(), generation, step)) {
             Some(tx) => tx.send(choice).is_ok(),
             None => false,
         }
@@ -128,111 +164,55 @@ impl Approvals {
     }
 
     pub fn clear_session(&self, session: &str) {
-        self.waits().retain(|(id, _), _| id != session);
+        self.waits().retain(|(id, _, _), _| id != session);
     }
-}
-
-/// Stable fingerprint for "this exact step" when the user picks Allow for session.
-fn approval_fingerprint(kind: StepKind, command: &str) -> String {
-    format!("{}::{command}", step_kind_label(kind))
 }
 
 pub struct ApprovalTicket {
     session: String,
     step: u32,
+    generation: u64,
     map: Approvals,
 }
 
 impl Drop for ApprovalTicket {
     fn drop(&mut self) {
-        self.map.waits().remove(&(self.session.clone(), self.step));
-    }
-}
-
-fn step_kind_label(kind: StepKind) -> &'static str {
-    match kind {
-        StepKind::Reasoning => "thinking",
-        StepKind::Search => "search",
-        StepKind::FileRead => "read file",
-        StepKind::Command => "run command",
-        StepKind::ModelCall => "call model",
-        StepKind::FileChange => "edit files",
-        StepKind::AgentMessage => "draft answer",
-    }
-}
-
-fn step_failed(step: &Step, denied: bool) -> bool {
-    denied || matches!(step, Step::Command { exit_code: Some(code), .. } if *code != 0)
-}
-
-fn to_item_kind(step: &Step) -> ItemKind {
-    match step {
-        Step::Reasoning { summary } => ItemKind::Reasoning {
-            summary: summary.clone(),
-        },
-        Step::Search { query, detail } => ItemKind::Search {
-            query: query.clone(),
-            detail: detail.clone(),
-        },
-        Step::FileRead { path, detail } => ItemKind::FileRead {
-            path: path.clone(),
-            detail: detail.clone(),
-        },
-        Step::Command {
-            command,
-            cwd,
-            output,
-            exit_code,
-        } => ItemKind::CommandExecution {
-            command: command.clone(),
-            cwd: cwd.clone(),
-            output: output.clone(),
-            exit_code: *exit_code,
-        },
-        Step::ModelCall {
-            model,
-            input_tokens,
-            output_tokens,
-        } => ItemKind::ModelCall {
-            model: model.clone(),
-            input_tokens: *input_tokens,
-            output_tokens: *output_tokens,
-        },
-        Step::FileChange { changes } => ItemKind::FileChange {
-            changes: changes
-                .iter()
-                .map(
-                    |FileDelta {
-                         path,
-                         added,
-                         removed,
-                     }| session::Change {
-                        path: path.clone(),
-                        added: *added,
-                        removed: *removed,
-                    },
-                )
-                .collect(),
-        },
-        Step::AgentMessage { text, checks } => ItemKind::AgentMessage {
-            text: text.clone(),
-            checks: checks.clone(),
-        },
+        self.map
+            .waits()
+            .remove(&(self.session.clone(), self.generation, self.step));
     }
 }
 
 pub struct StartArgs {
     pub dir: PathBuf,
     pub id: String,
-    pub project: PathBuf,
+    /// `None` = no project selected (Work-mode pure conversation).
+    pub project: Option<PathBuf>,
     pub message: String,
+    pub conversation_history: Vec<(String, String)>,
     /// Project-relative context paths pinned for this turn.
     pub context: Vec<String>,
     pub provider: Option<agent::Provider>,
     pub permission: Permission,
+    pub mode: agent::AgentMode,
     pub fallback_to_local: bool,
     pub max_output_tokens: u32,
     pub extended_thinking: bool,
+    pub local_trace: bool,
+    /// MCP servers from the shared shell config (empty = no external tools).
+    pub mcp_servers: Vec<agent::mcp::McpServerConfig>,
+    /// Persona instructions resolved by the entry point (插件 · 智能体);
+    /// `None` = no agent selected for this send.
+    pub agent_instructions: Option<String>,
+    /// Persona chain (preferred when non-empty). Each block carries its
+    /// defaults / examples; `lib.rs::run` substitutes the declared
+    /// template variables and emits the chain header.
+    pub personas: Vec<agent::PersonaBlock>,
+    /// Optional budget-family override. `None` = per-intent default;
+    /// `Some("summary")` = lift to read-only-summary caps (12 / 128 / 0).
+    /// Currently only the desktop "继续本轮" affordance sets this to
+    /// `"summary"` when a prior turn died with `BudgetExhausted`.
+    pub budget_family: Option<String>,
 }
 
 pub fn start(
@@ -240,33 +220,29 @@ pub fn start(
     runs: &Runs,
     approvals: &Approvals,
     args: StartArgs,
+    token: RunToken,
 ) -> Result<(), String> {
-    if !runs.begin(&args.id) {
-        return Err("this session already has a run in flight".to_owned());
-    }
-
     let app = app.clone();
     let runs = runs.clone();
     let approvals = approvals.clone();
 
     thread::spawn(move || {
         let notify = |event: RunEvent| {
-            let _ = app.emit("run:event", event);
+            emit_run(&app, &token, event);
         };
 
         notify(RunEvent::TurnStarted {
             session: args.id.clone(),
         });
 
-        let alive_id = args.id.clone();
-        let alive_runs = runs.clone();
-        let alive = move || alive_runs.is_live(&alive_id);
+        let alive_token = token.clone();
+        let alive = move || alive_token.is_live();
 
         let approve_id = args.id.clone();
         let approve_approvals = approvals.clone();
         let approve_app = app.clone();
-        let approve_project = args.project.clone();
-        let approve_runs = runs.clone();
+        let approve_project = args.project.clone().unwrap_or_default();
+        let approve_token = token.clone();
         let permission = args.permission;
         let approve_seq = Arc::new(Mutex::new(0u32));
         let approve = {
@@ -281,14 +257,15 @@ pub fn start(
                     return true;
                 }
                 // Run already cancelled — never wait for an approval ticket.
-                if !approve_runs.is_live(&approve_id) {
+                if !approve_token.is_live() {
                     return false;
                 }
                 let mut seq = approve_seq.lock().unwrap_or_else(|p| p.into_inner());
                 *seq += 1;
                 let step = *seq;
                 drop(seq);
-                let (ticket, rx) = approve_approvals.wait_point(&approve_id, step);
+                let (ticket, rx) =
+                    approve_approvals.wait_point(&approve_id, approve_token.generation, step);
                 let risk = kodo_agent::tools::classify_command_risk(command);
                 let reason = agent::tools::redact_secrets(
                     agent::dangerous_reason(command).unwrap_or_else(|| risk.reason()),
@@ -297,6 +274,7 @@ pub fn start(
                     kodo_agent::tools::CommandRisk::Catastrophic => "Catastrophic",
                     kodo_agent::tools::CommandRisk::DestructiveGit => "DestructiveGit",
                     kodo_agent::tools::CommandRisk::SensitiveData => "SensitiveData",
+                    kodo_agent::tools::CommandRisk::Unknown => "Unknown",
                     kodo_agent::tools::CommandRisk::ProcessControl => "ProcessControl",
                     kodo_agent::tools::CommandRisk::PackageInstall => "PackageInstall",
                     kodo_agent::tools::CommandRisk::Network => "Network",
@@ -311,14 +289,15 @@ pub fn start(
                 };
                 let cwd = approve_project.to_string_lossy().into_owned();
                 let safe_command = kodo_agent::tools::redact_secrets(command);
-                let _ = approve_app.emit(
-                    "run:event",
+                emit_run(
+                    &approve_app,
+                    &approve_token,
                     RunEvent::ApprovalRequest {
                         session: approve_id.clone(),
                         step,
                         kind: step_kind_label(kind).to_owned(),
                         detail: format!("{safe_command}  ·  {reason}"),
-                        command: command.to_owned(),
+                        command: safe_command.clone(),
                         cwd,
                         risk_category: risk_category.to_owned(),
                         reason: reason.to_owned(),
@@ -329,7 +308,7 @@ pub fn start(
                 let deadline = std::time::Instant::now() + Duration::from_secs(300);
                 let mut choice = ApprovalChoice::Deny;
                 while std::time::Instant::now() < deadline {
-                    if !approve_runs.is_live(&approve_id) {
+                    if !approve_token.is_live() {
                         // Cancelled during approval → deny, do not run the step.
                         break;
                     }
@@ -351,38 +330,44 @@ pub fn start(
         };
 
         let record_id = args.id.clone();
-        let record_dir = args.dir.clone();
-        let record_runs = runs.clone();
+        let record_token = token.clone();
         let record_app = app.clone();
-        let mut seq = 0u32;
-        // id of the in-flight started step, if any
-        let mut open_id: Option<u32> = None;
+        // Envelope writes live in kodo-shell; this sink records first, then
+        // emits, so the log stays the source of truth for the GUI.
+        let mut logger =
+            TurnLogger::new(args.dir.clone(), args.id.clone()).with_capture(args.local_trace);
+        let logger_ref = &mut logger;
 
         let mut sink = move |event: SinkEvent| -> bool {
-            if !record_runs.is_live(&record_id) {
+            if !record_token.is_live() {
+                return false;
+            }
+            let logged = logger_ref.record(&event);
+            if matches!(logged, Logged::WriteFailed) {
                 return false;
             }
             match event {
+                SinkEvent::LocalTrace { .. } => {}
                 SinkEvent::TextDelta { text } => {
-                    let _ = record_app.emit(
-                        "run:event",
+                    emit_run(
+                        &record_app,
+                        &record_token,
                         RunEvent::TextDelta {
                             session: record_id.clone(),
                             text,
                         },
                     );
-                    record_runs.is_live(&record_id)
                 }
                 SinkEvent::Progress { phase, detail } => {
-                    let _ = record_app.emit(
-                        "run:event",
+                    emit_run(
+                        &record_app,
+                        &record_token,
                         RunEvent::Progress {
                             session: record_id.clone(),
                             phase,
                             detail,
                         },
                     );
-                    record_runs.is_live(&record_id)
                 }
                 SinkEvent::Failover {
                     from_provider,
@@ -392,8 +377,9 @@ pub fn start(
                     to_provider,
                     to_model,
                 } => {
-                    let _ = record_app.emit(
-                        "run:event",
+                    emit_run(
+                        &record_app,
+                        &record_token,
                         RunEvent::Failover {
                             session: record_id.clone(),
                             from_provider,
@@ -404,105 +390,103 @@ pub fn start(
                             to_model,
                         },
                     );
-                    record_runs.is_live(&record_id)
                 }
-                SinkEvent::Started { step } => {
-                    seq += 1;
-                    open_id = Some(seq);
-                    let at = session::now();
-                    let running_item = Item {
-                        id: seq,
-                        at,
-                        status: Status::Running,
-                        duration_ms: None,
-                        kind: to_item_kind(&step.running()),
-                    };
-                    if session::record_item(&record_dir, &record_id, &running_item, Phase::Started)
-                        .is_err()
-                    {
-                        return false;
-                    }
-                    let _ = record_app.emit(
-                        "run:event",
-                        RunEvent::ItemStarted {
-                            session: record_id.clone(),
-                            item: ItemView::from(running_item),
-                        },
-                    );
-                    record_runs.is_live(&record_id)
-                }
-                SinkEvent::Finished {
-                    step,
-                    duration_ms,
-                    denied,
-                } => {
-                    let id = open_id.take().unwrap_or_else(|| {
-                        seq += 1;
-                        seq
-                    });
-                    let at = session::now();
-                    if step_failed(&step, denied) {
-                        let failed = Item {
-                            id,
-                            at,
-                            status: Status::Failed,
-                            duration_ms: Some(duration_ms),
-                            kind: to_item_kind(&step),
-                        };
-                        if session::record_item(&record_dir, &record_id, &failed, Phase::Failed)
-                            .is_err()
-                        {
-                            return false;
-                        }
-                        let _ = record_app.emit(
-                            "run:event",
-                            RunEvent::ItemCompleted {
+                SinkEvent::Started { .. } => {
+                    if let Logged::Started(item) = logged {
+                        emit_run(
+                            &record_app,
+                            &record_token,
+                            RunEvent::ItemStarted {
                                 session: record_id.clone(),
-                                item: ItemView::from(failed),
+                                item: ItemView::from(item),
                             },
                         );
-                        return record_runs.is_live(&record_id);
                     }
-
-                    let finished_item = Item {
-                        id,
-                        at,
-                        status: Status::Done,
-                        duration_ms: Some(duration_ms),
-                        kind: to_item_kind(&step),
-                    };
-                    if session::record_item(
-                        &record_dir,
-                        &record_id,
-                        &finished_item,
-                        Phase::Completed,
-                    )
-                    .is_err()
-                    {
-                        return false;
+                }
+                SinkEvent::Finished { .. } => {
+                    if let Logged::Finished(item) = logged {
+                        emit_run(
+                            &record_app,
+                            &record_token,
+                            RunEvent::ItemCompleted {
+                                session: record_id.clone(),
+                                item: ItemView::from(item),
+                            },
+                        );
                     }
-                    let _ = record_app.emit(
-                        "run:event",
-                        RunEvent::ItemCompleted {
+                }
+                SinkEvent::ContextBudget {
+                    used,
+                    window,
+                    percent,
+                    cumulative_chars,
+                    compacted_count,
+                    last_model,
+                } => {
+                    emit_run(
+                        &record_app,
+                        &record_token,
+                        RunEvent::ContextBudget {
                             session: record_id.clone(),
-                            item: ItemView::from(finished_item),
+                            used,
+                            window,
+                            percent,
+                            cumulative_chars,
+                            compacted_count,
+                            last_model,
                         },
                     );
-                    record_runs.is_live(&record_id)
+                }
+                SinkEvent::Compacted {
+                    dropped,
+                    summarized_into,
+                    freed_pct,
+                } => {
+                    emit_run(
+                        &record_app,
+                        &record_token,
+                        RunEvent::Compacted {
+                            session: record_id.clone(),
+                            dropped,
+                            summarized_into,
+                            freed_pct,
+                        },
+                    );
+                }
+                SinkEvent::AskUser { question, options } => {
+                    emit_run(
+                        &record_app,
+                        &record_token,
+                        RunEvent::AskUser {
+                            session: record_id.clone(),
+                            question,
+                            options,
+                        },
+                    );
                 }
             }
+            record_token.is_live()
         };
 
         let request = agent::RunRequest {
             project: args.project.clone(),
             message: args.message.clone(),
+            conversation_history: args.conversation_history.clone(),
             pinned_context: args.context.clone(),
             provider: args.provider.clone(),
             permission: args.permission,
+            mode: args.mode,
             fallback_to_local: args.fallback_to_local,
             max_output_tokens: args.max_output_tokens,
             extended_thinking: args.extended_thinking,
+            local_trace: args.local_trace,
             session_id: Some(args.id.clone()),
+            // Same directory the skill CRUD commands read/write.
+            user_skills_dir: kodo_core::settings::state_dir().map(|d| d.join("skills")),
+            mcp_servers: args.mcp_servers.clone(),
+            agent_instructions: args.agent_instructions.clone(),
+            personas: args.personas.clone(),
+            budget_family: args.budget_family.clone(),
         };
 
         let result = agent::run(&request, &alive, &approve, &mut sink);
@@ -510,14 +494,12 @@ pub fn start(
 
         match result {
             Ok(()) => {
-                if !runs.is_live(&args.id) {
-                    let _ = session::record_stopped(&args.dir, &args.id, session::now());
+                if !token.is_live() {
+                    let _ = logger.finish(TurnOutcome::Stopped);
                     notify(RunEvent::Stopped {
                         session: args.id.clone(),
                     });
-                } else if session::record_turn_complete(&args.dir, &args.id, session::now())
-                    .is_err()
-                {
+                } else if logger.finish(TurnOutcome::Complete).is_err() {
                     notify(RunEvent::Error {
                         session: args.id.clone(),
                         message: "failed to mark the turn complete".to_owned(),
@@ -530,24 +512,18 @@ pub fn start(
             }
             Err(error) => {
                 let safe_error = kodo_agent::tools::redact_secrets(&error);
-                let _ = session::record_error(&args.dir, &args.id, session::now(), &safe_error);
+                // finish() redacts again before recording; cheap and idempotent.
+                let _ = logger.finish(TurnOutcome::Error(error));
                 notify(RunEvent::Error {
                     session: args.id.clone(),
                     message: safe_error,
                 });
             }
         }
-        runs.cancel(&args.id);
+        runs.release(&args.id, &token);
     });
 
     Ok(())
-}
-
-/// Secure-by-default: missing or unknown permission means Ask.
-pub fn permission_from_settings(value: Option<String>) -> Permission {
-    value
-        .map(|raw| Permission::parse(&raw))
-        .unwrap_or(Permission::Ask)
 }
 
 #[cfg(test)]
@@ -555,20 +531,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn non_zero_command_exit_is_a_failed_step() {
-        let command = Step::Command {
-            command: "check".into(),
-            cwd: "/tmp".into(),
-            output: "FAIL".into(),
-            exit_code: Some(1),
-        };
-        assert!(step_failed(&command, false));
-        assert!(step_failed(&command, true));
-        assert!(!step_failed(
-            &Step::Reasoning {
-                summary: "ok".into()
+    fn cancelled_run_cannot_revive_or_release_successor() {
+        let runs = Runs::default();
+        let first = runs.begin("session").unwrap();
+        runs.cancel("session");
+        assert!(!first.is_live());
+        assert!(
+            runs.begin("session").is_none(),
+            "old worker must finish before new admission"
+        );
+        runs.release("session", &first);
+        let second = runs.begin("session").unwrap();
+        assert_ne!(first.generation, second.generation);
+        runs.release("session", &first);
+        assert!(runs.has_run("session") && second.is_live());
+        assert!(!first.is_live());
+    }
+
+    #[test]
+    fn late_approval_and_old_ticket_cannot_touch_new_run() {
+        let approvals = Approvals::default();
+        let (old, _) = approvals.wait_point("s", 1, 1);
+        approvals.clear_session("s");
+        let (_new, rx) = approvals.wait_point("s", 2, 1);
+        drop(old);
+        assert!(!approvals.resolve("s", 1, 1, ApprovalChoice::AllowOnce));
+        assert!(approvals.resolve("s", 2, 1, ApprovalChoice::Deny));
+        assert!(!rx.recv().unwrap().allows());
+    }
+
+    #[test]
+    fn event_envelope_serializes_generation_without_changing_event_shape() {
+        let encoded = serde_json::to_value(RunEventEnvelope {
+            run_id: 7,
+            event: RunEvent::TurnStarted {
+                session: "s".into(),
             },
-            false
-        ));
+        })
+        .unwrap();
+        assert_eq!(encoded["runId"], 7);
+        assert_eq!(encoded["type"], "turnStarted");
     }
 }

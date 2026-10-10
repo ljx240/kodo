@@ -49,31 +49,45 @@ pub fn credentials_path() -> Option<PathBuf> {
     Some(config_dir(&home()?).join(CREDENTIALS_FILE))
 }
 
-/// The settings key one provider's secret is stored under.
-pub fn credential_key(provider_id: &str) -> String {
-    format!("provider.{provider_id}")
+/// The settings key one namespaced secret is stored under (`{namespace}.{id}`).
+/// Namespaces keep unrelated secret families (`provider.*`, `mcp.*`) in one
+/// file without a shared schema.
+pub fn secret_key(namespace: &str, id: &str) -> String {
+    format!("{namespace}.{id}")
 }
 
-/// Last stored secret for `provider_id`, if any.
-pub fn read_credential(path: &Path, provider_id: &str) -> Option<String> {
-    read(path, &credential_key(provider_id))
+/// Last stored secret for `namespace.id`, if any.
+pub fn read_secret(path: &Path, namespace: &str, id: &str) -> Option<String> {
+    read(path, &secret_key(namespace, id))
 }
 
-/// Appends one provider secret and locks the file down on Unix.
-pub fn write_credential(path: &Path, provider_id: &str, secret: &str) -> io::Result<()> {
-    append(path, &credential_key(provider_id), secret)?;
+/// Appends one secret and locks the file down on Unix.
+pub fn write_secret(path: &Path, namespace: &str, id: &str, secret: &str) -> io::Result<()> {
+    append(path, &secret_key(namespace, id), secret)?;
     restrict(path);
     Ok(())
 }
 
-/// Drops every stored secret for the given providers (others stay).
-pub fn clear_credentials(path: &Path, keep: &[(String, String)]) -> io::Result<()> {
+/// Rebuilds one namespace from `keep`, preserving every other namespace's
+/// lines as-is. A `save_providers` must not drop MCP blobs and vice versa.
+pub fn clear_secrets(path: &Path, namespace: &str, keep: &[(String, String)]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let prefix = format!("{namespace}.");
     let mut body = String::from("# Kodo credentials. Append-only. Not shared with settings.log.\n");
+    if let Ok(text) = fs::read_to_string(path) {
+        for (key, value) in text.lines().filter_map(parse_line) {
+            if !key.starts_with(&prefix) {
+                body.push_str(key);
+                body.push('=');
+                body.push_str(value);
+                body.push('\n');
+            }
+        }
+    }
     for (id, secret) in keep {
-        body.push_str(&credential_key(id));
+        body.push_str(&secret_key(namespace, id));
         body.push('=');
         body.push_str(secret);
         body.push('\n');
@@ -81,6 +95,26 @@ pub fn clear_credentials(path: &Path, keep: &[(String, String)]) -> io::Result<(
     fs::write(path, body)?;
     restrict(path);
     Ok(())
+}
+
+/// The settings key one provider's secret is stored under.
+pub fn credential_key(provider_id: &str) -> String {
+    secret_key("provider", provider_id)
+}
+
+/// Last stored secret for `provider_id`, if any.
+pub fn read_credential(path: &Path, provider_id: &str) -> Option<String> {
+    read_secret(path, "provider", provider_id)
+}
+
+/// Appends one provider secret and locks the file down on Unix.
+pub fn write_credential(path: &Path, provider_id: &str, secret: &str) -> io::Result<()> {
+    write_secret(path, "provider", provider_id, secret)
+}
+
+/// Drops every stored secret for the given providers (others stay).
+pub fn clear_credentials(path: &Path, keep: &[(String, String)]) -> io::Result<()> {
+    clear_secrets(path, "provider", keep)
 }
 
 #[cfg(unix)]
@@ -234,6 +268,33 @@ mod tests {
                 0o600,
                 "credentials must not be world-readable"
             );
+        }
+    }
+
+    #[test]
+    fn clearing_one_namespace_keeps_the_others() {
+        let tmp = TempDir::new("settings-namespaces");
+        let path = tmp.path().join("credentials.log");
+        write_secret(&path, "mcp", "srv", "{\"env\":{\"TOKEN\":\"t1\"}}").expect("write mcp");
+        write_credential(&path, "p1", "sk-old").expect("write provider");
+
+        clear_credentials(&path, &[("p1".to_owned(), "sk-new".to_owned())]).expect("clear");
+        assert_eq!(
+            read_secret(&path, "mcp", "srv").as_deref(),
+            Some("{\"env\":{\"TOKEN\":\"t1\"}}"),
+            "rebuilding provider.* must not drop mcp.* blobs"
+        );
+        assert_eq!(read_credential(&path, "p1").as_deref(), Some("sk-new"));
+
+        clear_secrets(&path, "mcp", &[]).expect("clear mcp");
+        assert_eq!(read_secret(&path, "mcp", "srv"), None);
+        assert_eq!(read_credential(&path, "p1").as_deref(), Some("sk-new"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
         }
     }
 

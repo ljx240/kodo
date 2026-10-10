@@ -1,130 +1,310 @@
-import { ChevronDown, Folder, GitBranch, PanelLeft, PanelRight, Plus, Sparkles } from "lucide-react";
-import type { ProviderConfig } from "../data/providers";
-import { templateById } from "../data/providers";
-import type { Project } from "../data/types";
+import { useState } from "react";
+import {
+  Archive,
+  Check,
+  ChevronDown,
+  Folder,
+  FolderPlus,
+  GitBranch,
+  MessageCircle,
+  MoreVertical,
+  PanelLeft,
+  PanelRight,
+  Pencil,
+  Puzzle,
+  Settings,
+  X,
+} from "lucide-react";
+import { T } from "../i18n";
+import type { RouteName } from "../routes";
+import { hrefTo, navigate } from "../routes";
 import { Menu, MenuItem } from "./Menu";
+import type { Project } from "../data/types";
+
+/**
+ * Conversation-level controls, owned by ConversationPage — it keeps the
+ * rename/archive handlers and their failure banners; the top bar only hosts
+ * the buttons, since 2026-09-30 the content area has no title header.
+ */
+export type ConvActions = {
+  rename: (title: string) => void;
+  archive: () => void;
+};
 
 type Props = {
-  projects: Project[];
-  activeProjectId: string | null;
-  onSelectProject: (id: string) => void;
-  /** The project the conversation belongs to. */
-  projectName: string;
-  /** Its branch, or null when it is not a checkout. */
-  branch: string | null;
-  /** Active provider config. */
-  provider: ProviderConfig | null;
-  onNewChat: (projectPath?: string) => void;
   inspectorOpen: boolean;
   onToggleInspector: () => void;
   sidebarVisible: boolean;
   onToggleSidebar: () => void;
+  /** New Task — only needed while the sidebar itself is collapsed. */
+  onNewTask: () => void;
+  onOpenSettings: () => void;
+  /** Project file browser entry (conversation route only). */
+  onOpenFiles?: () => void;
+  route: RouteName;
+  /** Project / conversation breadcrumb (LAYOUT §3); omitted on non-conversation routes. */
+  crumbProject?: string | null;
+  crumbTitle?: string | null;
+  /** Git branch of the active project, shown only when detected. */
+  branch?: string | null;
+  /** A new task can choose its project without opening an existing session. */
+  projectOptions?: Project[];
+  projectPath?: string;
+  onSelectProject?: (path: string | null) => void;
+  onAddProject?: () => Promise<void>;
+  /** Present only while a live conversation is open — gates rename/archive. */
+  convActions?: ConvActions | null;
 };
 
 export function TopBar({
-  projects,
-  activeProjectId,
-  onSelectProject,
-  projectName,
-  branch,
-  provider,
-  onNewChat,
   inspectorOpen,
   onToggleInspector,
   sidebarVisible,
   onToggleSidebar,
+  onNewTask,
+  onOpenSettings,
+  onOpenFiles,
+  route,
+  crumbProject,
+  crumbTitle,
+  branch,
+  projectOptions = [],
+  projectPath = "",
+  onSelectProject,
+  onAddProject,
+  convActions = null,
 }: Props) {
-  const tmpl = provider ? templateById(provider.template) : null;
-  const modelLabel = provider?.model ?? "No model";
+  // Inline title edit in the crumb — the pencil and the ⋯ menu below are its
+  // triggers (the content area lost its 64px title header on 2026-09-30).
+  const [renaming, setRenaming] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [projectError, setProjectError] = useState<string | null>(null);
+
+  const startRename = () => {
+    setRenameDraft(crumbTitle ?? "");
+    setRenaming(true);
+  };
+  const commitRename = () => {
+    const next = renameDraft.trim();
+    if (!next) return;
+    convActions?.rename(next);
+    setRenaming(false);
+  };
+
+  const goPlugins = () => {
+    navigate(hrefTo("plugins", inspectorOpen));
+  };
 
   return (
     <header className="topbar">
       <div className="topbar-left">
-        <button
-          type="button"
-          className={`icon-btn${sidebarVisible ? "" : " icon-btn--active"}`}
-          aria-label="Toggle sidebar"
-          aria-expanded={sidebarVisible}
-          aria-controls="kodo-sidebar"
-          onClick={onToggleSidebar}
-        >
-          <PanelLeft size={16} strokeWidth={1.7} />
-        </button>
-
-        <Menu
-          trigger={({ open, toggle }) => (
-            <button type="button" className="chip" aria-expanded={open} onClick={toggle}>
-              <Folder size={14} strokeWidth={1.7} />
-              <span>{projectName}</span>
-              <ChevronDown size={13} strokeWidth={1.9} />
+        {/* Expanded: the collapse control lives at the top of the sidebar.
+            Collapsed: only the expand control + destinations sit here, clear of
+            the traffic lights via .app--sidebar-hidden .topbar padding. */}
+        {!sidebarVisible && (
+          <>
+            <button
+              type="button"
+              className="icon-btn icon-btn--active"
+              aria-label={T.nav.toggleSidebar}
+              aria-expanded={false}
+              aria-controls="kodo-sidebar"
+              onClick={onToggleSidebar}
+            >
+              <PanelLeft size={16} strokeWidth={1.7} />
             </button>
-          )}
-        >
-          {(close) =>
-            projects.map((project) => (
-              <MenuItem
-                key={project.id}
-                icon={<Folder size={14} strokeWidth={1.8} />}
-                label={project.name}
-                onSelect={() => {
-                  close();
-                  onSelectProject(project.id);
-                }}
-              />
-            ))
-          }
-        </Menu>
 
-        {/* Not a picker: the branch is whatever the checkout says it is, and
-            Kodo has no way to change it without running git. */}
-        <span className="chip chip--static">
-          <GitBranch size={14} strokeWidth={1.7} />
-          <span>{branch ?? "无分支"}</span>
-        </span>
+            <div className="topbar-nav-icons" role="navigation" aria-label={T.nav.sidebarDestinations}>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label={T.nav.newTask}
+                title={T.nav.newTask}
+                onClick={onNewTask}
+              >
+                <MessageCircle size={16} strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                className={`icon-btn${route === "plugins" ? " icon-btn--active" : ""}`}
+                aria-label={T.nav.plugins}
+                title={T.nav.plugins}
+                onClick={goPlugins}
+              >
+                <Puzzle size={16} strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label={T.nav.settings}
+                title={T.nav.settings}
+                onClick={onOpenSettings}
+              >
+                <Settings size={16} strokeWidth={1.8} />
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Conversation context: project / title and branch — small chips,
+            never a large page header (LAYOUT §3). The title is the single
+            title surface since 2026-09-30 and edits in place. The model lives
+            on the composer only; the top bar does not repeat it (2026-09-23). */}
+        {route === "conversation" && (crumbProject || crumbTitle) && (
+          <nav className="crumbs topbar-crumbs">
+            {onSelectProject ? (
+              <div className="topbar-project-context" data-testid="topbar-project-context">
+                <Menu
+                  trigger={({ toggle }) => (
+                    <button
+                      type="button"
+                      className="topbar-project-picker"
+                      data-testid="topbar-project-picker"
+                      aria-label={T.nav.selectProject}
+                      title={projectPath || T.nav.selectProject}
+                      onClick={toggle}
+                    >
+                      <span data-testid="topbar-project-name">{crumbProject || T.nav.noProject}</span>
+                      <ChevronDown size={12} strokeWidth={1.8} />
+                    </button>
+                  )}
+                >
+                  {(close) => (
+                    <>
+                      {projectOptions.map((project) => (
+                        <MenuItem
+                          key={project.id}
+                          icon={project.path === projectPath ? <Check size={14} /> : <Folder size={14} />}
+                          label={project.name}
+                          selected={project.path === projectPath}
+                          onSelect={() => {
+                            close();
+                            setProjectError(null);
+                            onSelectProject(project.path ?? project.id);
+                          }}
+                        />
+                      ))}
+                      {onAddProject && (
+                        <MenuItem
+                          icon={<FolderPlus size={14} />}
+                          label={T.nav.addProject}
+                          onSelect={() => {
+                            close();
+                            setProjectError(null);
+                            void onAddProject().catch((error) => setProjectError(String(error)));
+                          }}
+                        />
+                      )}
+                      {projectPath && (
+                        <MenuItem
+                          icon={<X size={14} />}
+                          label={T.nav.clearProject}
+                          onSelect={() => {
+                            close();
+                            setProjectError(null);
+                            onSelectProject(null);
+                          }}
+                        />
+                      )}
+                    </>
+                  )}
+                </Menu>
+                {projectError && <p className="topbar-project-error" role="alert">{projectError}</p>}
+              </div>
+            ) : crumbProject && <span data-testid="topbar-project-name" title={projectPath}>{crumbProject}</span>}
+            {crumbProject && crumbTitle && <span className="crumb-sep">/</span>}
+            {renaming ? (
+              <input
+                className="conv-title-input"
+                aria-label={T.conv.rename}
+                value={renameDraft}
+                autoFocus
+                onChange={(event) => setRenameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && renameDraft.trim()) commitRename();
+                  if (event.key === "Escape") setRenaming(false);
+                }}
+                onBlur={() => setRenaming(false)}
+              />
+            ) : (
+              crumbTitle && <span className="crumb-current">{crumbTitle}</span>
+            )}
+          </nav>
+        )}
+        {route === "conversation" && branch && (
+          <span className="chip topbar-chip" title={branch} data-testid="topbar-branch">
+            <GitBranch size={12} strokeWidth={1.8} className="chip-icon" />
+            <span>{branch}</span>
+          </span>
+        )}
       </div>
 
       <div className="topbar-actions">
-        {/* Active provider / model chip — read-only display */}
-        <span className="chip chip--static">
-          {tmpl && <Sparkles size={14} strokeWidth={1.7} className="chip-icon" />}
-          <span>{provider?.name ? `${provider.name} / ` : ""}{modelLabel}</span>
-        </span>
-
-        {activeProjectId ? (
-          <button type="button" className="btn" onClick={() => onNewChat()}>
-            <Plus size={15} strokeWidth={1.9} />
-            <span>New chat</span>
-          </button>
-        ) : (
-          <Menu
-            trigger={({ open, toggle }) => (
-              <button type="button" className="btn" aria-expanded={open} onClick={toggle}>
-                <Plus size={15} strokeWidth={1.9} />
-                <span>New chat</span>
-              </button>
-            )}
-          >
-            {(close) =>
-              projects.map((project) => (
-                <MenuItem
-                  key={project.id}
-                  icon={<Folder size={14} strokeWidth={1.8} />}
-                  label={project.name}
-                  onSelect={() => {
-                    close();
-                    onSelectProject(project.id);
-                    onNewChat(project.id);
-                  }}
-                />
-              ))
-            }
-          </Menu>
+        {route === "conversation" && convActions && (
+          <>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={T.conv.rename}
+              title={T.conv.rename}
+              onClick={startRename}
+            >
+              <Pencil size={15} strokeWidth={1.8} />
+            </button>
+            <Menu
+              align="right"
+              trigger={({ toggle }) => (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label={T.conv.actions}
+                  title={T.conv.actions}
+                  onClick={toggle}
+                >
+                  <MoreVertical size={16} strokeWidth={1.8} />
+                </button>
+              )}
+            >
+              {(close) => (
+                <>
+                  <MenuItem
+                    icon={<Pencil size={14} strokeWidth={1.8} />}
+                    label={T.conv.rename}
+                    onSelect={() => {
+                      close();
+                      startRename();
+                    }}
+                  />
+                  <MenuItem
+                    icon={<Archive size={14} strokeWidth={1.8} />}
+                    label={T.conv.archive}
+                    danger
+                    onSelect={() => {
+                      close();
+                      convActions.archive();
+                    }}
+                  />
+                </>
+              )}
+            </Menu>
+          </>
         )}
-
+        {route === "conversation" && onOpenFiles && (
+          <button
+            type="button"
+            className="icon-btn icon-btn--boxed"
+            aria-label={T.nav.viewFiles}
+            title={T.nav.viewFiles}
+            data-testid="topbar-files"
+            onClick={onOpenFiles}
+          >
+            <Folder size={16} strokeWidth={1.7} />
+          </button>
+        )}
         <button
           type="button"
           className={`icon-btn icon-btn--boxed${inspectorOpen ? " icon-btn--active" : ""}`}
-          aria-label="Toggle inspector"
+          aria-label={T.nav.toggleInspector}
           aria-expanded={inspectorOpen}
           aria-controls={inspectorOpen ? "kodo-inspector-panel" : undefined}
           onClick={onToggleInspector}

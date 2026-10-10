@@ -33,6 +33,9 @@ export type ProviderConfig = {
   modelId?: string;
   /** UI label. */
   displayName?: string;
+  /** Configured models. `undefined` = legacy record (seed from template);
+   *  `[]` = user deliberately cleared the list. */
+  models?: ModelOption[];
   hasKey?: boolean;
 };
 
@@ -85,6 +88,19 @@ export function templateById(id: string): ProviderTemplate {
   return PROVIDER_TEMPLATES.find((t) => t.id === id) ?? PROVIDER_TEMPLATES[0];
 }
 
+/** Dedupe by lowercase id; first entry wins. */
+export function dedupeModels(list: ModelOption[]): ModelOption[] {
+  const seen = new Set<string>();
+  const out: ModelOption[] = [];
+  for (const m of list) {
+    const key = m.model_id.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ display_name: m.display_name.trim() || m.model_id, model_id: m.model_id.trim() });
+  }
+  return out;
+}
+
 /** Migrate legacy config: display label → model_id when known. */
 export function migrateProviderConfig(config: ProviderConfig): ProviderConfig {
   const template = config.template || "custom";
@@ -102,19 +118,39 @@ export function migrateProviderConfig(config: ProviderConfig): ProviderConfig {
     rawId ||
     tmpl.models[0]?.display_name ||
     "";
+  // Seed legacy records (models === undefined) from template presets + the
+  // selected pointer; an explicit [] means the user cleared the list.
+  let models: ModelOption[];
+  if (config.models === undefined) {
+    models = dedupeModels([...tmpl.models]);
+  } else {
+    models = dedupeModels(config.models);
+  }
+  if (modelId && !models.some((m) => m.model_id.toLowerCase() === modelId.toLowerCase())) {
+    models = [...models, { display_name: displayName || modelId, model_id: modelId }];
+  }
   return {
     ...config,
     template,
     model: modelId,
     modelId,
     displayName,
+    models,
   };
 }
 
 export async function loadProviders(): Promise<ProviderConfig[]> {
   if (!isDesktop()) return [];
   const list = await loadProvidersCommand();
-  return (list ?? []).map(migrateProviderConfig);
+  return (list ?? []).map((dto) =>
+    migrateProviderConfig({
+      ...dto,
+      // wire format is camelCase; internal ModelOption is snake_case
+      models: dto.models
+        ? dto.models.map((m) => ({ display_name: m.displayName, model_id: m.modelId }))
+        : undefined,
+    }),
+  );
 }
 
 export async function saveProviders(providers: ProviderConfig[]): Promise<void> {
@@ -124,6 +160,10 @@ export async function saveProviders(providers: ProviderConfig[]): Promise<void> 
     migrated.map((p) => ({
       ...p,
       model: p.modelId || p.model,
+      models: (p.models ?? []).map((m) => ({
+        modelId: m.model_id,
+        displayName: m.display_name,
+      })),
     })),
   );
 }
@@ -156,6 +196,7 @@ export function createFromTemplate(templateId: string): ProviderConfig {
     model: first?.model_id ?? "",
     modelId: first?.model_id ?? "",
     displayName: first?.display_name ?? "",
+    models: [...t.models],
   };
 }
 
@@ -167,9 +208,19 @@ export function maskApiKey(key: string, hasKey?: boolean): string {
   return `已保存 · …${key.slice(-4)}`;
 }
 
+/** Strips trailing version/channel tags that leak from raw model ids. Cosmetic
+ *  only — `providerModelId` (the wire value) is unchanged. */
+const VERSION_SUFFIX = /-(preview|latest|exp|beta|alpha)(\b|$)/i;
+
+function prettifyModelLabel(raw: string): string {
+  const s = raw.trim();
+  if (!s) return "";
+  return s.replace(VERSION_SUFFIX, "") || raw;
+}
+
 /** What the provider picker shows. */
-export function providerModelLabel(config: ProviderConfig): string {
-  return config.displayName || config.modelId || config.model || "";
+export function providerModelLabel(config: ProviderConfig | null | undefined): string {
+  return prettifyModelLabel(config?.displayName || config?.modelId || config?.model || "");
 }
 
 /** What the backend will send. */

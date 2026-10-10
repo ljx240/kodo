@@ -12,6 +12,9 @@ pub enum TaskType {
     Refactor,
     CodeReview,
     Docs,
+    /// General work mode tag (docs/summaries/Q&A). Never produced by
+    /// [`classify`] — selected explicitly for Work mode runs.
+    Work,
 }
 
 impl TaskType {
@@ -24,6 +27,7 @@ impl TaskType {
             Self::Refactor => "refactor",
             Self::CodeReview => "code-review",
             Self::Docs => "docs",
+            Self::Work => "work",
         }
     }
 
@@ -35,17 +39,19 @@ impl TaskType {
             "refactor" => Some(Self::Refactor),
             "code-review" | "review" | "code_review" => Some(Self::CodeReview),
             "docs" | "documentation" => Some(Self::Docs),
+            "work" => Some(Self::Work),
             _ => None,
         }
     }
 
-    pub const ALL: [TaskType; 6] = [
+    pub const ALL: [TaskType; 7] = [
         Self::BugFix,
         Self::Feature,
         Self::Test,
         Self::Refactor,
         Self::CodeReview,
         Self::Docs,
+        Self::Work,
     ];
 }
 
@@ -80,6 +86,9 @@ pub fn classify(message: &str) -> TaskType {
     let m = message.trim();
     if m.is_empty() {
         return TaskType::Feature;
+    }
+    if is_document_output(m) {
+        return TaskType::Docs;
     }
 
     let scores: [(TaskType, u32); 6] = [
@@ -225,6 +234,50 @@ pub fn classify(message: &str) -> TaskType {
         }
     }
     best
+}
+
+/// Saving an answer is a file task, even when its filename contains "架构".
+pub(crate) fn is_document_output(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if [
+        "如何",
+        "怎么",
+        "怎样",
+        "how to",
+        "修复",
+        "实现",
+        "重构",
+        "fix ",
+        "implement",
+        "refactor",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+    {
+        return false;
+    }
+    let output = [
+        "输出到",
+        "保存到",
+        "保存为",
+        "存成",
+        "写入",
+        "写到",
+        "写进",
+        "导出",
+        "另存为",
+        "落盘",
+        "save ",
+        "export ",
+        "write ",
+        "output to",
+    ]
+    .iter()
+    .any(|word| lower.contains(word));
+    let document = [".md", "markdown", "文档", "docs/", "docs下", "docs 下"]
+        .iter()
+        .any(|word| lower.contains(word));
+    output && document
 }
 
 #[cfg(test)]

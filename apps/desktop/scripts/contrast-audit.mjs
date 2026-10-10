@@ -14,10 +14,10 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const tokensPath = join(root, "src/styles/tokens.css");
 
-function parseTokens(css) {
-  const map = new Map();
-  const rootBlock = css.match(/:root\s*\{([^}]+)\}/);
-  if (!rootBlock) throw new Error("tokens.css: no :root block");
+function parseTokens(css, selector = /:root\s*\{([^}]+)\}/, base = new Map()) {
+  const map = new Map(base);
+  const rootBlock = css.match(selector);
+  if (!rootBlock) throw new Error(`tokens.css: missing block ${selector}`);
   for (const line of rootBlock[1].split(";")) {
     const m = line.match(/(--kodo-[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,8})\b/);
     if (m) map.set(m[1], m[2]);
@@ -64,16 +64,28 @@ const READABLE = [
   "--kodo-success-text",
   "--kodo-warning-text",
   "--kodo-error",
+  // Syntax tokens — highlighted code is informational text too.
+  "--kodo-syntax-comment",
+  "--kodo-syntax-keyword",
+  "--kodo-syntax-string",
+  "--kodo-syntax-number",
+  "--kodo-syntax-title",
+  "--kodo-syntax-meta",
 ];
 
 /** Inverse text on solid accent controls. */
-const INVERSE = [["#ffffff", "--kodo-accent"], ["#ffffff", "--kodo-accent-hover"], ["#ffffff", "--kodo-text"]];
+const INVERSE = ["--kodo-accent", "--kodo-accent-hover", "--kodo-text"];
 
 /** Decorative only — icons, chevrons, separators. Never informational body text. */
 const DECORATIVE = ["--kodo-text-muted"];
 
 const AA = 4.5;
-const tokens = parseTokens(readFileSync(tokensPath, "utf8"));
+const css = readFileSync(tokensPath, "utf8");
+const light = parseTokens(css);
+const themes = [
+  ["light", light],
+  ["dark", parseTokens(css, /\[data-theme="dark"\]\s*\{([^}]+)\}/, light)],
+];
 
 let failures = 0;
 const lines = [];
@@ -87,42 +99,46 @@ function report(ok, label, ratio, required) {
 lines.push("Kodo color contrast audit — WCAG AA");
 lines.push("");
 
-lines.push("Readable text on surfaces:");
-for (const fg of READABLE) {
-  const color = tokens.get(fg);
-  if (!color) {
-    report(false, `${fg} missing from tokens`, 0, AA);
-    continue;
-  }
-  for (const bg of BACKGROUNDS) {
-    const bgc = tokens.get(bg);
-    if (!bgc) {
-      report(false, `${bg} missing from tokens`, 0, AA);
+for (const [theme, tokens] of themes) {
+  lines.push(`${theme} theme — readable text on surfaces:`);
+  for (const fg of READABLE) {
+    const color = tokens.get(fg);
+    if (!color) {
+      report(false, `${fg} missing from tokens`, 0, AA);
       continue;
     }
-    const ratio = contrast(color, bgc);
-    report(ratio >= AA, `${fg} ${color} on ${bg} ${bgc}`, ratio, AA);
+    for (const bg of BACKGROUNDS) {
+      const bgc = tokens.get(bg);
+      if (!bgc) {
+        report(false, `${bg} missing from tokens`, 0, AA);
+        continue;
+      }
+      const ratio = contrast(color, bgc);
+      report(ratio >= AA, `${fg} ${color} on ${bg} ${bgc}`, ratio, AA);
+    }
   }
-}
 
-lines.push("");
-lines.push("Inverse text on solid controls:");
-for (const [fg, bg] of INVERSE) {
-  const bgc = tokens.get(bg) ?? bg;
-  const ratio = contrast(fg, bgc);
-  report(ratio >= AA, `#ffffff on ${bg} ${bgc}`, ratio, AA);
-}
-
-lines.push("");
-lines.push("Decorative (exempt — must not carry informational text):");
-for (const fg of DECORATIVE) {
-  const color = tokens.get(fg);
-  if (!color) {
-    report(false, `${fg} missing`, 0, 0);
-    continue;
+  lines.push("");
+  lines.push("Inverse text on solid controls:");
+  const fg = theme === "dark" ? tokens.get("--kodo-canvas") : "#ffffff";
+  for (const bg of INVERSE) {
+    const bgc = tokens.get(bg) ?? bg;
+    const ratio = contrast(fg, bgc);
+    report(ratio >= AA, `${fg} on ${bg} ${bgc}`, ratio, AA);
   }
-  const onCanvas = contrast(color, tokens.get("--kodo-canvas"));
-  lines.push(`INFO  ${onCanvas.toFixed(2)}:1  ${fg} ${color} on canvas (decorative only)`);
+
+  lines.push("");
+  lines.push("Decorative (exempt — must not carry informational text):");
+  for (const fg of DECORATIVE) {
+    const color = tokens.get(fg);
+    if (!color) {
+      report(false, `${fg} missing`, 0, 0);
+      continue;
+    }
+    const onCanvas = contrast(color, tokens.get("--kodo-canvas"));
+    lines.push(`INFO  ${onCanvas.toFixed(2)}:1  ${fg} ${color} on canvas (decorative only)`);
+  }
+  lines.push("");
 }
 
 lines.push("");

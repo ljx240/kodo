@@ -169,7 +169,11 @@ impl RepoMap {
             let Some(lang) = source_language(&file.language) else {
                 continue;
             };
-            let Ok(text) = fs::read_to_string(Path::new(&self.root).join(&file.path)) else {
+            let Ok(full) = crate::tools::resolve_in_project(Path::new(&self.root), &file.path)
+            else {
+                continue;
+            };
+            let Ok(text) = fs::read_to_string(full) else {
                 continue;
             };
             for (idx, line) in text.lines().enumerate() {
@@ -444,7 +448,9 @@ fn source_language(language: &str) -> Option<bool> {
 fn collect_manifests(root: &Path, map: &mut RepoMap) {
     if root.join("Cargo.toml").is_file() {
         map.packages.push("rust:cargo".into());
-        if let Ok(text) = fs::read_to_string(root.join("Cargo.toml")) {
+        if let Ok(text) = crate::tools::resolve_in_project(root, "Cargo.toml")
+            .and_then(|p| fs::read_to_string(p).map_err(|e| e.to_string()))
+        {
             for line in text.lines() {
                 let line = line.trim();
                 if let Some(name) = line.strip_prefix("name = ") {
@@ -456,7 +462,9 @@ fn collect_manifests(root: &Path, map: &mut RepoMap) {
     }
     if root.join("package.json").is_file() {
         map.packages.push("node:npm".into());
-        if let Ok(text) = fs::read_to_string(root.join("package.json")) {
+        if let Ok(text) = crate::tools::resolve_in_project(root, "package.json")
+            .and_then(|p| fs::read_to_string(p).map_err(|e| e.to_string()))
+        {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
                     map.packages.push(format!("npm:{name}"));
@@ -469,6 +477,15 @@ fn collect_manifests(root: &Path, map: &mut RepoMap) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy())
+            .unwrap_or_default();
+        if entry.file_type().map(|t| t.is_symlink()).unwrap_or(true)
+            || crate::tools::resolve_in_project(root, &relative).is_err()
+        {
+            continue;
+        }
         if path.is_dir() {
             if entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
@@ -477,7 +494,14 @@ fn collect_manifests(root: &Path, map: &mut RepoMap) {
                 for e in sub.flatten() {
                     let p = e.path();
                     if p.file_name().map(|n| n == "Cargo.toml").unwrap_or(false) {
-                        if let Ok(text) = fs::read_to_string(&p) {
+                        if let Ok(text) = p
+                            .strip_prefix(root)
+                            .map_err(|e| e.to_string())
+                            .and_then(|rel| {
+                                crate::tools::resolve_in_project(root, &rel.to_string_lossy())
+                            })
+                            .and_then(|full| fs::read_to_string(full).map_err(|e| e.to_string()))
+                        {
                             if let Some(name) =
                                 text.lines().find_map(|l| l.trim().strip_prefix("name = "))
                             {
@@ -520,6 +544,13 @@ fn walk_files(
             continue;
         }
         let path = entry.path();
+        if entry.file_type().map(|t| t.is_symlink()).unwrap_or(true)
+            || path.strip_prefix(root).ok().is_none_or(|rel| {
+                crate::tools::resolve_in_project(root, &rel.to_string_lossy()).is_err()
+            })
+        {
+            continue;
+        }
         if path.is_dir() {
             walk_files(root, &path, map, alive)?;
             continue;
@@ -593,6 +624,13 @@ fn collect_paths(
             continue;
         }
         let path = entry.path();
+        if entry.file_type().map(|t| t.is_symlink()).unwrap_or(true)
+            || path.strip_prefix(root).ok().is_none_or(|rel| {
+                crate::tools::resolve_in_project(root, &rel.to_string_lossy()).is_err()
+            })
+        {
+            continue;
+        }
         if path.is_dir() {
             collect_paths(root, &path, out, alive)?;
         } else if let Ok(rel) = path.strip_prefix(root) {
@@ -630,7 +668,9 @@ fn index_file(root: &Path, rel: &str, alive: &dyn Fn() -> bool) -> Result<FileIn
     if !alive() {
         return Err("cancelled".into());
     }
-    let path = root.join(rel);
+    let Ok(path) = crate::tools::resolve_in_project(root, rel) else {
+        return Ok(FileIndex::default());
+    };
     let language = language_of(&path);
     let Ok(meta) = fs::metadata(&path) else {
         return Ok(FileIndex::default());

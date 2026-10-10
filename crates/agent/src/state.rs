@@ -67,6 +67,18 @@ pub struct Budget {
     /// Soft context budget: max packed context chars charged this turn.
     pub max_context_chars: usize,
     pub context_chars_used: usize,
+    /// Last reported input-tokens from the provider (most recent model call).
+    /// `0` means the provider did not report or this turn never called a model.
+    pub last_input_tokens: u32,
+    /// Total reported input-tokens across all model calls in this turn.
+    /// Used by the UI to show monotonic consumption against the model window.
+    pub cumulative_input_tokens: u64,
+    /// Effective context window the UI / compaction should plan against
+    /// (tokens). Mirrors the provider's preset or user override at call time.
+    pub window_tokens: u32,
+    /// How many history-compaction passes have succeeded. Surfaced in the
+    /// `Prompt` so the UI can show "已压缩 N 条".
+    pub compacted_count: u32,
 }
 
 impl Default for Budget {
@@ -82,6 +94,10 @@ impl Default for Budget {
             repair_wall_ms: 0,
             max_context_chars: 80_000,
             context_chars_used: 0,
+            last_input_tokens: 0,
+            cumulative_input_tokens: 0,
+            window_tokens: 32_000,
+            compacted_count: 0,
         }
     }
 }
@@ -120,6 +136,67 @@ impl Budget {
         self.context_chars_used = self.context_chars_used.saturating_add(chars);
     }
 
+    /// Record input tokens from one model call. Saturates so an outlier does
+    /// not poison the running total (defensive: a runaway provider returning
+    /// 2^32 tokens should not overflow the budget struct).
+    pub fn charge_tokens(&mut self, input_tokens: u32) {
+        self.last_input_tokens = input_tokens;
+        self.cumulative_input_tokens = self
+            .cumulative_input_tokens
+            .saturating_add(input_tokens as u64);
+    }
+
+    /// Record one mid-turn compaction pass. Just bumps `compacted_count` —
+    /// the next `charge_tokens` call will overwrite `last_input_tokens` with
+    /// a smaller reading, so the UI naturally sees a drop.
+    pub fn record_compaction(&mut self) {
+        self.compacted_count = self.compacted_count.saturating_add(1);
+    }
+
+    /// Lift to bounded extended-work caps without discarding repair capacity.
+    /// Repeated calls are idempotent; an already larger configured cap stays.
+    /// Returns old/new caps for the progress event.
+    pub fn lift_for_pressure(&mut self) -> (usize, usize, usize, usize) {
+        let old_round = self.max_rounds;
+        let old_tool = self.max_tool_calls;
+        self.max_rounds = self.max_rounds.max(12);
+        self.max_tool_calls = self.max_tool_calls.max(128);
+        self.max_context_chars = self.max_context_chars.max(160_000);
+        (old_round, self.max_rounds, old_tool, self.max_tool_calls)
+    }
+
+    /// Refresh the planned context window (provider preset or user override).
+    /// Called once at the start of every turn before any model call.
+    pub fn set_window(&mut self, window: u32) {
+        self.window_tokens = window.max(1);
+    }
+
+    /// Percent (0..=100) of the planned window the last model call consumed.
+    /// Returns 0 when no model call has happened this turn yet.
+    pub fn percent_used(&self) -> u8 {
+        if self.window_tokens == 0 || self.last_input_tokens == 0 {
+            return 0;
+        }
+        // Round to nearest integer; clamp to 100 even when the provider
+        // returned a slightly-oversized estimate (e.g. counting-tool overhead).
+        let raw = (self.last_input_tokens as u64 * 100) / self.window_tokens as u64;
+        raw.min(100) as u8
+    }
+
+    /// Short summary used in the final agent message when the turn ends with
+    /// budget pressure. Format mirrors the desktop UI: "12.4k / 200k · 6%".
+    pub fn context_summary(&self) -> String {
+        if self.window_tokens == 0 {
+            return String::new();
+        }
+        format!(
+            "{} / {} · {}%",
+            shrink_tokens(self.last_input_tokens as u64),
+            shrink_tokens(self.window_tokens as u64),
+            self.percent_used()
+        )
+    }
+
     /// Auto-trip Failed only for rounds/tools; repair caps are checked on the
     /// repair transition itself (so denial→Plan is not stolen by BudgetExhausted).
     pub fn any_exhausted(&self) -> bool {
@@ -128,7 +205,7 @@ impl Budget {
 
     pub fn summary(&self) -> String {
         format!(
-            "rounds {}/{} · tools {}/{} · repairs {}/{} · repair_wall {}/{}ms",
+            "rounds {}/{} · tools {}/{} · repairs {}/{} · repair_wall {}/{}ms · tokens {}/{}",
             self.rounds_used,
             self.max_rounds,
             self.tool_calls_used,
@@ -136,8 +213,68 @@ impl Budget {
             self.repairs_used,
             self.max_repairs,
             self.repair_wall_ms,
-            self.max_repair_wall_ms
+            self.max_repair_wall_ms,
+            self.last_input_tokens,
+            self.window_tokens,
         )
+    }
+
+    /// Documentation needs room to inspect, write and re-read its deliverable.
+    /// Keep the task's evidence gates and repair allowance intact.
+    pub fn for_document() -> Self {
+        Self {
+            max_rounds: 12,
+            max_tool_calls: 128,
+            max_context_chars: 160_000,
+            ..Self::default()
+        }
+    }
+
+    /// Read-only summary family budget: many tool calls, no repairs.
+    ///
+    /// Read-only tasks (「为我输出该项目架构」,「总结仓库结构」, etc.) need
+    /// 20-30+ tool calls just to map a project — well past the code-mode
+    /// default of 32. They never mutate the project or trigger repair cycles,
+    /// so we keep `max_repairs = 0` (fail fast on denials) and lift the tool
+    /// and round caps. Context window also doubles because list-heavy tasks
+    /// accumulate a lot of repo_map output.
+    ///
+    /// `is_summary_family()` is the predicate callers use to pick the right
+    /// diagnostic style at Finish time.
+    pub fn for_summary() -> Self {
+        Self {
+            max_rounds: 12,
+            max_tool_calls: 128,
+            max_repairs: 0,
+            rounds_used: 0,
+            tool_calls_used: 0,
+            repairs_used: 0,
+            max_repair_wall_ms: 0,
+            repair_wall_ms: 0,
+            max_context_chars: 160_000,
+            context_chars_used: 0,
+            ..Self::default()
+        }
+    }
+
+    /// True when the budget was configured for the read-only summary family
+    /// (no repairs, ≥ 64 tool calls). Used by `run()` to surface a calmer
+    /// diagnostic when even that ceiling trips.
+    pub fn is_summary_family(&self) -> bool {
+        self.max_repairs == 0 && self.max_tool_calls >= 64
+    }
+}
+
+/// Shrink a token count to a short human label (e.g. 12_400 -> "12.4k").
+/// Falls back to plain digits below 1k. Mirrors the desktop UI's
+/// `formatTokens()` helper so the final agent message reads the same.
+fn shrink_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -318,17 +455,32 @@ impl AgentMachine {
             // Allow direct jump if context was gathered before plan locked in.
             (S::Plan, PlanReady) => Ok(S::Plan),
 
-            // --- GatherContext ---
-            (S::GatherContext, ModelRequestedTools { count }) => {
-                if self.budget.tools_exhausted() {
+            // All tool-request phases share the same budget protection.
+            (
+                S::GatherContext | S::Execute | S::Verify | S::Repair,
+                ModelRequestedTools { count },
+            ) => {
+                if self.budget.tools_exhausted()
+                    || count
+                        > self
+                            .budget
+                            .max_tool_calls
+                            .saturating_sub(self.budget.tool_calls_used)
+                {
                     return Ok(S::Failed {
                         reason: FailReason::BudgetExhausted,
                     });
                 }
+                self.budget.rounds_used = self.budget.rounds_used.saturating_add(1);
                 self.pending_tool_count = count;
                 self.plan.mark_current_running();
-                Ok(S::Execute)
+                Ok(if self.state == S::Verify {
+                    S::Verify
+                } else {
+                    S::Execute
+                })
             }
+            // --- GatherContext ---
             (S::GatherContext, ModelClaimedDone) => {
                 // Read-only path: context alone may satisfy acceptance.
                 self.evidence.model_claimed_done = true;
@@ -340,16 +492,6 @@ impl AgentMachine {
             }
 
             // --- Execute ---
-            (S::Execute, ModelRequestedTools { count }) => {
-                if self.budget.tools_exhausted() {
-                    return Ok(S::Failed {
-                        reason: FailReason::BudgetExhausted,
-                    });
-                }
-                self.pending_tool_count = count;
-                self.plan.mark_current_running();
-                Ok(S::Execute)
-            }
             (S::Execute, ToolsFinished { results }) => {
                 self.absorb(results);
                 self.after_tools(S::Execute)
@@ -392,11 +534,6 @@ impl AgentMachine {
                     self.begin_repair(S::Verify)
                 }
             }
-            (S::Verify, ModelRequestedTools { .. }) => {
-                // Unexpected mid-verify tools — allow but stay.
-                self.plan.mark_current_running();
-                Ok(S::Verify)
-            }
             (S::Verify, ToolsFinished { results }) => {
                 self.absorb(results);
                 Ok(S::Verify)
@@ -409,11 +546,6 @@ impl AgentMachine {
 
             // --- Repair ---
             (S::Repair, RepairApplied) => Ok(S::Execute),
-            (S::Repair, ModelRequestedTools { count }) => {
-                self.pending_tool_count = count;
-                self.plan.mark_current_running();
-                Ok(S::Execute)
-            }
             (S::Repair, ToolsFinished { results }) => {
                 self.absorb(results);
                 Ok(S::Repair)
@@ -751,6 +883,12 @@ mod tests {
             .map(|inv| match inv {
                 crate::protocol::ToolInvocation::Ready(c) => tools.execute(c),
                 crate::protocol::ToolInvocation::Rejected(r) => ToolResult::from_rejection(r),
+                crate::protocol::ToolInvocation::External(e) => ToolResult::failure(
+                    e.id.clone(),
+                    e.name.clone(),
+                    e.args_label(),
+                    ToolError::execution("external tools are not faked here"),
+                ),
             })
             .collect();
         m.handle(AgentEvent::ToolsFinished { results });
@@ -1279,6 +1417,62 @@ mod tests {
     }
 
     #[test]
+    fn tool_requests_share_round_and_batch_caps_in_every_phase() {
+        for phase in [
+            AgentState::GatherContext,
+            AgentState::Execute,
+            AgentState::Verify,
+            AgentState::Repair,
+        ] {
+            let mut m = AgentMachine::new(
+                "read only",
+                Budget {
+                    max_rounds: 2,
+                    max_tool_calls: 1,
+                    ..Budget::default()
+                },
+            );
+            m.state = phase.clone();
+            m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+            assert_eq!(m.budget().rounds_used, 1, "{phase:?}");
+            assert_eq!(
+                m.state(),
+                if phase == AgentState::Verify {
+                    &AgentState::Verify
+                } else {
+                    &AgentState::Execute
+                }
+            );
+            m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+            assert_eq!(
+                m.state(),
+                &AgentState::Failed {
+                    reason: FailReason::BudgetExhausted
+                },
+                "{phase:?}"
+            );
+
+            let mut oversized = AgentMachine::new(
+                "read only",
+                Budget {
+                    max_tool_calls: 1,
+                    ..Budget::default()
+                },
+            );
+            oversized.state = phase.clone();
+            oversized.handle(AgentEvent::ModelRequestedTools { count: 2 });
+            assert_eq!(
+                oversized.state(),
+                &AgentState::Failed {
+                    reason: FailReason::BudgetExhausted
+                },
+                "{phase:?}"
+            );
+            assert_eq!(oversized.budget().tool_calls_used, 0);
+        }
+    }
+
+    #[test]
     fn illegal_transition_is_rejected_not_panicking() {
         let mut m = AgentMachine::new("t", Budget::default());
         // Cannot ContextGathered from Understand
@@ -1322,6 +1516,12 @@ mod tests {
             .map(|inv| match inv {
                 crate::protocol::ToolInvocation::Ready(c) => tools.execute(c),
                 crate::protocol::ToolInvocation::Rejected(r) => ToolResult::from_rejection(r),
+                crate::protocol::ToolInvocation::External(e) => ToolResult::failure(
+                    e.id.clone(),
+                    e.name.clone(),
+                    e.args_label(),
+                    ToolError::execution("external tools are not faked here"),
+                ),
             })
             .collect();
         m.handle(AgentEvent::ToolsFinished { results });
@@ -1363,5 +1563,152 @@ mod tests {
         });
         m.handle(AgentEvent::VerifyFinished { ok: true });
         assert_eq!(m.state(), &AgentState::Finish);
+    }
+
+    // --- Budget token accounting (Phase A: water-level visibility) -------
+
+    #[test]
+    fn budget_charge_tokens_accumulates() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        b.charge_tokens(0);
+        assert_eq!(b.last_input_tokens, 0);
+        assert_eq!(b.cumulative_input_tokens, 0);
+        assert_eq!(b.percent_used(), 0);
+
+        b.charge_tokens(12_400);
+        assert_eq!(b.last_input_tokens, 12_400);
+        assert_eq!(b.cumulative_input_tokens, 12_400);
+        assert_eq!(b.percent_used(), 6);
+
+        b.charge_tokens(150_000);
+        assert_eq!(b.last_input_tokens, 150_000);
+        assert_eq!(b.cumulative_input_tokens, 12_400 + 150_000);
+        assert_eq!(b.percent_used(), 75);
+    }
+
+    #[test]
+    fn budget_percent_clamps_at_100() {
+        let mut b = Budget::default();
+        b.set_window(32_000);
+        b.charge_tokens(50_000); // over-sized estimate, clamp to 100
+        assert_eq!(b.percent_used(), 100);
+    }
+
+    #[test]
+    fn budget_charge_tokens_saturates_against_u64() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        for _ in 0..5 {
+            b.charge_tokens(u32::MAX);
+        }
+        assert!(b.cumulative_input_tokens <= (u32::MAX as u64) * 5);
+    }
+
+    #[test]
+    fn budget_context_summary_uses_short_labels() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        b.charge_tokens(12_400);
+        assert_eq!(b.context_summary(), "12.4k / 200.0k · 6%");
+    }
+
+    #[test]
+    fn budget_context_summary_empty_when_no_window() {
+        let mut b = Budget {
+            window_tokens: 0,
+            ..Budget::default()
+        };
+        b.charge_tokens(12_400);
+        assert_eq!(b.context_summary(), "");
+    }
+
+    /// Phase 0 second-pass — summary budget lifts tool/round caps and zeroes
+    /// repairs, but stays well-bounded so the loop still fail-closes.
+    #[test]
+    fn budget_for_summary_has_zero_repairs_and_at_least_64_tools() {
+        let b = Budget::for_summary();
+        assert_eq!(b.max_repairs, 0, "summary tasks never trigger repairs");
+        assert_eq!(
+            b.max_repair_wall_ms, 0,
+            "summary tasks fail fast on denials"
+        );
+        assert!(
+            b.max_tool_calls >= 64,
+            "summary tasks need ≥ 64 tool calls to map a real project: {}",
+            b.max_tool_calls
+        );
+        assert!(b.max_rounds >= 6, "summary tasks span ≥ 6 rounds");
+        assert!(b.max_context_chars >= 80_000);
+    }
+
+    #[test]
+    fn budget_is_summary_family_predicate_works() {
+        let code = Budget::default();
+        assert!(
+            !code.is_summary_family(),
+            "default code budget must NOT be summary family"
+        );
+
+        let summary = Budget::for_summary();
+        assert!(
+            summary.is_summary_family(),
+            "for_summary() must be summary family"
+        );
+    }
+
+    #[test]
+    fn budget_lift_for_pressure_is_bounded_and_preserves_repairs() {
+        let mut b = Budget::default();
+        let before_max_rounds = b.max_rounds;
+        let before_max_tools = b.max_tool_calls;
+        let before_repairs = b.max_repairs;
+        assert!(before_repairs > 0, "fixture must start with repairs > 0");
+
+        let (or, nr, ot, nt) = b.lift_for_pressure();
+
+        assert_eq!(or, before_max_rounds);
+        assert_eq!(ot, before_max_tools);
+        assert!(nr >= before_max_rounds + 6, "+6 rounds minimum, got {nr}");
+        assert!(nt >= before_max_tools + 96, "+96 tools minimum, got {nt}");
+        assert_eq!(
+            b.max_repairs, before_repairs,
+            "verification repairs must survive a lift"
+        );
+        assert!(
+            b.max_context_chars >= 80_000 + 40_000,
+            "context cap must lift, got {}",
+            b.max_context_chars
+        );
+    }
+
+    #[test]
+    fn budget_lift_for_pressure_is_idempotent() {
+        let mut b = Budget::default();
+        let _ = b.lift_for_pressure();
+        let lifted = b.clone();
+        let (_or, _nr, _ot, _nt) = b.lift_for_pressure();
+        assert_eq!(
+            b, lifted,
+            "a forgotten caller guard must not enable runaway work"
+        );
+        assert!(!Budget::for_document().is_summary_family());
+    }
+
+    /// Saturating math: even with caps already at usize::MAX the lift must
+    /// not wrap or panic. This protects against misconfigured test budgets.
+    #[test]
+    fn budget_lift_for_pressure_handles_overflow_safely() {
+        let mut b = Budget {
+            max_rounds: usize::MAX,
+            max_tool_calls: usize::MAX,
+            max_repairs: 3,
+            max_context_chars: usize::MAX,
+            ..Budget::default()
+        };
+        let (_or, nr, _ot, nt) = b.lift_for_pressure();
+        assert_eq!(nr, usize::MAX, "must saturate, not wrap");
+        assert_eq!(nt, usize::MAX, "must saturate, not wrap");
+        assert_eq!(b.max_repairs, 3);
     }
 }

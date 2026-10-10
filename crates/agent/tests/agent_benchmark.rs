@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 
-use kodo_agent::{Permission, Provider, RunRequest, SinkEvent, Step, StepKind};
+use kodo_agent::{AgentMode, Permission, Provider, RunRequest, SinkEvent, Step, StepKind};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -220,15 +220,23 @@ fn run_scenario(
     );
 
     let request = RunRequest {
-        project: project.to_path_buf(),
+        project: Some(project.to_path_buf()),
         message: message.to_owned(),
+        conversation_history: Vec::new(),
         pinned_context: Vec::new(),
         provider: Some(provider),
         permission,
+        mode: AgentMode::Code,
         fallback_to_local: true,
         max_output_tokens: 1024,
         extended_thinking: false,
+        local_trace: false,
         session_id: None,
+        user_skills_dir: None,
+        mcp_servers: Vec::new(),
+        agent_instructions: None,
+        personas: Vec::new(),
+        budget_family: None,
     };
 
     let cancel_after = Arc::new(AtomicUsize::new(
@@ -272,11 +280,14 @@ fn run_scenario(
                 true
             }
             SinkEvent::Finished { step, .. } => {
-                if let Step::AgentMessage { text, checks: c } = &step {
+                if let Step::AgentMessage {
+                    text, checks: c, ..
+                } = &step
+                {
                     answer = text.clone();
                     checks = c.clone();
                 }
-                if let Step::FileChange { changes } = &step {
+                if let Step::FileChange { changes, .. } = &step {
                     for ch in changes {
                         file_changes.push(ch.path.clone());
                     }
@@ -311,16 +322,20 @@ struct ScenarioOpts {
 
 fn preview(step: &Step) -> String {
     match step {
-        Step::Reasoning { summary } => format!("reasoning:{summary}"),
+        Step::Reasoning { summary, .. } => format!("reasoning:{summary}"),
         Step::Search { query, .. } => format!("search:{query}"),
         Step::FileRead { path, .. } => format!("read:{path}"),
         Step::Command { command, .. } => format!("command:{command}"),
         Step::ModelCall { model, .. } => format!("model:{model}"),
-        Step::FileChange { changes } => {
+        Step::FileChange { changes, .. } => {
             let paths: Vec<_> = changes.iter().map(|c| c.path.clone()).collect();
             format!("write:{}", paths.join(","))
         }
         Step::AgentMessage { .. } => "message".to_owned(),
+        // Phase D additions (Thinking / Compaction / Failover / PlanStep /
+        // Permission / ContextBudget) don't change the preview shape — they
+        // are UI chrome rather than tool-effect observations.
+        _ => "other".to_owned(),
     }
 }
 
@@ -351,8 +366,11 @@ fn benchmark_01_read_only_question() {
 
     let (passed, detail, outcome) = match cap {
         Ok(c) => {
+            // 2026-09-29: a read-only question is the conversational channel —
+            // it ships as plain Q&A (ready + not_run), so the task-run
+            // "Verification status" footer must NOT be appended.
             let ok = !c.cancelled
-                && c.answer.contains("Verification status")
+                && !c.answer.contains("Verification status")
                 && c.file_changes.is_empty();
             (
                 ok,

@@ -1,5 +1,8 @@
 # Skill: bug-fix
 
+## description
+Reproduce a bug, locate its root cause, apply the smallest fix, and verify the fix passes the same reproduction plus project tests.
+
 ## applicable_task_types
 - bug-fix
 
@@ -9,11 +12,18 @@ repro-first
 ## allowed_tools
 - search
 - read_file
+- list_files
+- find_symbol
+- find_references
+- read_range
 - run_command
 - write_file
 - apply_patch
 - replace_range
 - create_file
+
+## allowed_external_tools
+- mcp__*
 
 ## verification_policy
 full
