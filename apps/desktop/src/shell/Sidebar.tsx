@@ -21,8 +21,8 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { pickFolder } from "../api";
-// The official mark — same glyph the Dock icon and favicon are built from.
-import kodoMark from "../assets/kodo-mark.png";
+import kodoCodeMark from "../assets/kodo-code-mark.png";
+import kodoWorkMark from "../assets/kodo-work-mark.png";
 import type { WorkspaceState } from "../data/workspace";
 import { T } from "../i18n";
 import { hrefTo, navigate, type RouteName } from "../routes";
@@ -363,7 +363,13 @@ export function Sidebar({
               aria-label={T.nav.modeToggle}
               onClick={toggle}
             >
-              <img className="brand-mark" src={kodoMark} alt="" width={36} height={36} />
+              <img
+                className="brand-mark"
+                src={agentMode === "work" ? kodoWorkMark : kodoCodeMark}
+                alt=""
+                width={36}
+                height={36}
+              />
               {/* The trigger names the current space — the top-left always says
                   whether Kodo Work or Kodo Code is showing. */}
               <span className="brand-name">

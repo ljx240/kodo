@@ -220,7 +220,7 @@ test("switching away from a conversation of the other space falls back to the we
   await expect(page.locator(".crumb-current")).toHaveText("修复路由");
 });
 
-test("the welcome stage names the current space with its identity logo", async ({ page }) => {
+test("the sidebar and welcome stage name the current space with its identity logo", async ({ page }) => {
   await stubShell(page, {
     workspace: { projects: PROJECTS, sessions: [] },
   });
@@ -232,10 +232,12 @@ test("the welcome stage names the current space with its identity logo", async (
   await expect(identity).toHaveAttribute("data-mode", "code");
   await expect(identity).toHaveText("Kodo Code");
   await expect(identity.locator("img")).toHaveAttribute("src", /kodo-code-mark/);
+  await expect(page.locator(".brand-mark")).toHaveAttribute("src", /kodo-code-mark/);
 
   // Switching spaces swaps the whole stage — logo and wordmark follow.
   await switchMode(page, "work");
   await expect(identity).toHaveAttribute("data-mode", "work");
   await expect(identity).toHaveText("Kodo Work");
   await expect(identity.locator("img")).toHaveAttribute("src", /kodo-work-mark/);
+  await expect(page.locator(".brand-mark")).toHaveAttribute("src", /kodo-work-mark/);
 });
