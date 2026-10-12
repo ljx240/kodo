@@ -92,18 +92,13 @@
   animation: ins-panel-enter 120ms ease;
 }
 
-/* Focus mode (LAYOUT §5): the conversation column is fixed at 300px, so the
-   Inspector's inline width must be capped to whatever fits the remaining
-   viewport — otherwise a drag past the threshold overflows the window at
-   narrower screens. The sidebar-hidden override fires when the tree is
-   collapsed (no sidebar column). */
-.app--focus-mode .ins-panel {
-  max-width: calc(
-    100vw - var(--kodo-sidebar-width) - var(--kodo-focus-mode-column) - 6px
-  );
+/* A hidden conversation gives the Inspector all remaining workspace width. */
+.app--focus-mode .inspector {
+  flex: 1;
 }
-.app--sidebar-hidden.app--focus-mode .ins-panel {
-  max-width: calc(100vw - var(--kodo-focus-mode-column) - 6px);
+.app--focus-mode .ins-panel {
+  flex: 1;
+  min-width: 0;
 }
 
 @keyframes ins-panel-enter {

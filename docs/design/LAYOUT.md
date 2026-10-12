@@ -17,7 +17,7 @@ At the reference viewport:
 
 ```text
 Sidebar              260px
-Main                  minmax(620px, 1fr)
+Main                  minmax(400px, 1fr)
 Inspector expanded    330px
 Inspector rail         40px
 Top bar                44px
@@ -25,17 +25,16 @@ Top bar                44px
 
 Inspector:
 - default desktop width: 330px;
-- resizable within 320–**900**px via the boundary handle (pointer drag, or
+- resizable from 320px to the available workspace width (pointer drag, or
   `←`/`→` ±16 / Shift ±64 on keyboard focus) — windows ≥1200px only;
 - while the `文件` or `浏览` panel is open the column widens to its own 640px
   width (windows ≥1200px) so the tree and the file sit side by side (or the
   embedded page breathes); closing it restores the previous width over the
   same 120ms transition — the base and wide widths are two independent
   persisted keys (defaults 330 / 640);
-- **focus mode**: dragging past 900px triggers a deliberate swap — the
-  conversation column collapses to 300px and the Inspector continues up to
-  1100px (see §5 Inspector → Focus mode). This is the only case where the
-  conversation is **not** the largest visual region;
+- **focus mode**: once the conversation reaches its 400px minimum, further
+  leftward dragging hides it while keeping it mounted; the Inspector fills
+  the remaining workspace (see §5 Inspector → Focus mode);
 - collapse must always be supported.
 
 When collapsed:
@@ -408,34 +407,21 @@ Close:
 
 The user should always be able to open the panel with one click.
 
-### Focus mode (Inspector ≥ 900px)
+### Focus mode (adaptive workspace width)
 
-A deliberate exception to "conversation is the largest visual region":
+The conversation has a 400px minimum while visible. Further leftward dragging
+hides it immediately (`.app--focus-mode`), without unmounting its run or draft.
+The Inspector fills all remaining workspace width, including in 文件/浏览;
+its limit follows the window, sidebar, rail and border rather than a fixed cap.
 
-```text
-[ Sidebar ] [ Conversation: 300px narrow strip ] [ Inspector: ≥900px, fills the rest ]
-                              ├─ TopBar (project name)
-                              ├─ ScrollArea    rendered at narrow width
-                              │  └─ turn content + composer at the bottom
-                              └─ TurnRail      overlay on the right gutter of
-                                               the narrow strip (its 28px frame
-                                               fits the 300px column)
-```
+Rightward dragging first restores the conversation at its minimum, then keeps
+resizing with the pointer. This applies within one gesture and to a new gesture.
+Keyboard arrows use the same rule. Double-click toggles focus mode and restores
+the saved base/wide width on exit.
 
-Trigger: dragging the resizer past the 900px threshold flips `.app--focus-mode`
-on the root; conversation becomes `flex: none; width: var(--kodo-focus-mode-column)`;
-Inspector continues up to 1100px (`WIDTH_FOCUS_MAX`).
-Restore: drag back below 900, **double-click** the separator, or reload after
-exiting.
-The mode is persisted across reloads (`inspector-focus-mode` boolean,
-`inspector-focus-width` numeric string) and applies at every wide viewport.
-At viewports below `WIDTH_MAX + 300 + sidebar = 1460px`, CSS clamps the
-Inspector to whatever room is left (`max-width: calc(100vw - sidebar - 300 - 6px)`),
-so the gesture still swaps the conversation to the 300px strip but the
-Inspector itself can never overflow the window.
-In focus mode the turn rail's `< 900px` container-query hide is overridden
-(`.app--focus-mode .turn-rail { display: block; }`) so the rail stays
-visible as a navigator back out of focus.
+`inspector-focus-mode` persists the hidden state. Base and wide widths remain
+independent; the old `inspector-focus-width` is ignored. Below 1200px, the
+conversation is visible and the Inspector uses the existing overlay.
 
 ---
 
@@ -558,12 +544,12 @@ Inspector may show Help / Information.
 ### >= 1500px
 - Sidebar 260
 - Main flex
-- Inspector 330 default, resizable 320–900 (640 while the 文件 panel is open)
-- **Focus mode available**: drag past 900 → conversation → 300px, Inspector → 1100px
+- Inspector 330 default, resizable from 320px to the available width (640 by default for 文件)
+- **Focus mode available**: drag past the conversation's 400px minimum → hide conversation, Inspector fills workspace
 
 ### 1200–1499px
 - Sidebar 240
-- Inspector 330 default, resizable 320–900 (640 while the 文件 panel is open)
+- Inspector 330 default, resizable from 320px to the available width (640 by default for 文件)
 - slightly tighter content spacing
 - **Focus mode available** — Inspector is clamped to whatever room is left so it never overflows the window
 
@@ -582,14 +568,12 @@ Not a primary V1 target.
 ### Width handle & motion
 
 - the handle is a focusable `role="separator"` (`aria-orientation="vertical"`,
-  `aria-valuenow` tracking the current width, `aria-valuemin/max` 320/720)
+  `aria-valuenow` tracking the width, minimum 320px and an adaptive maximum)
   straddling the conversation ↔ inspector boundary; it renders only while the
   panel is open on ≥1200px windows;
-- it edits one of three persisted widths — base `inspector-width` (default
-  330), wide `inspector-wide-width` (default 640, the 文件/浏览 mode) and
-  focus `inspector-focus-width` (default 900, focus mode) — clamped to
-  320–900 in normal mode (the focus threshold) and 320–1100 in focus mode;
-  the keys never cross;
+- it edits two independent persisted widths — base `inspector-width` (default
+  330) and wide `inspector-wide-width` (default 640 for 文件/浏览); focus mode
+  retains these values and fills the available workspace without a width key;
 - motion is enter-only at `120ms ease`: the panel slides in on open (6px),
   the content re-enters on every chip/section switch (8px), the column width
   tweens across the same 120ms; while dragging, the width tween is suppressed
