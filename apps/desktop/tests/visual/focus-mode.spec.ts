@@ -1,14 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { project, sessionRef, stubShell } from "./shell";
 
-/**
- * Focus mode (LAYOUT §5 / COMPONENTS §9): the deliberate exception to
- * "conversation is the largest visual region". Dragging the Inspector past
- * 900px swaps the conversation column down to a 300px state strip and
- * lets the Inspector grow up to 1100px. Triggered by drag, double-click,
- * or Shift+ArrowLeft; exited by dragging back below 900, double-clicking,
- * or loading on a viewport <1440px.
- */
+/** The conversation stays mounted when resizing gives its space to the Inspector. */
 
 function focusShell() {
   return {
@@ -80,177 +73,191 @@ const mainWidth = (page: Page) =>
 const focusModeActive = (page: Page) =>
   page.locator(".app.app--focus-mode").count();
 
-test("drag past 900 enters focus mode; conversation collapses to 300px", async ({ page }) => {
+test("drag reaches the 400px minimum, then hides the mounted conversation before release", async ({ page }) => {
   await openFocus(page);
   const sep = page.locator('[data-testid="inspector-resizer"]');
-  await expect(sep).toBeVisible();
-  await expect(sep).toHaveAttribute("aria-valuemax", "900");
-  await expect(focusModeActive(page)).resolves.toBe(0);
+  const max = Number(await sep.getAttribute("aria-valuemax"));
+  const box = (await sep.boundingBox())!;
+  const x = box.x + 3;
+  const y = box.y + 300;
+  const boundary = x - (max - 400 - 330);
 
-  // 330 → drag the handle far enough left to overshoot the threshold.
-  let box = (await sep.boundingBox())!;
-  await page.mouse.move(box.x + 3, box.y + 300);
+  await page.mouse.move(x, y);
   await page.mouse.down();
-  await page.mouse.move(box.x + 3 - 700, box.y + 300, { steps: 8 });
-  await page.mouse.up();
+  await page.mouse.move(boundary, y);
+  await expect.poll(() => mainWidth(page)).toBe(400);
+  await expect(page.locator(".main")).toBeVisible();
 
-  // Threshold + class + geometry: Inspector at 900, conversation at 300.
-  await expect.poll(() => panelWidth(page)).toBeCloseTo(900, 0);
-  await expect.poll(() => mainWidth(page)).toBeCloseTo(300, 1);
-  await expect(focusModeActive(page)).resolves.toBe(1);
-  await expect(sep).toHaveAttribute("aria-valuemax", "1100");
-});
-
-test("drag back below 900 exits focus mode", async ({ page }) => {
-  await openFocus(page);
-  const sep = page.locator('[data-testid="inspector-resizer"]');
-
-  // Enter focus.
-  let box = (await sep.boundingBox())!;
-  await page.mouse.move(box.x + 3, box.y + 300);
-  await page.mouse.down();
-  await page.mouse.move(box.x + 3 - 700, box.y + 300, { steps: 8 });
+  await page.mouse.move(boundary - 1, y);
+  await expect(page.locator(".main")).toBeHidden();
+  await expect(page.locator(".main")).toHaveCount(1);
+  await expect.poll(() => panelWidth(page)).toBe(max);
+  await expect(page.locator(".app.app--resizing")).toHaveCount(1);
   await page.mouse.up();
   await expect(focusModeActive(page)).resolves.toBe(1);
-
-  // Pull back right past the threshold (now in focus mode, max=1100).
-  box = (await sep.boundingBox())!;
-  await page.mouse.move(box.x + 3, box.y + 300);
-  await page.mouse.down();
-  await page.mouse.move(box.x + 3 + 700, box.y + 300, { steps: 8 });
-  await page.mouse.up();
-  await expect.poll(() => panelWidth(page)).toBeLessThan(900);
-  await expect(focusModeActive(page)).resolves.toBe(0);
-  await expect.poll(() => mainWidth(page)).toBeGreaterThan(400);
-  await expect(sep).toHaveAttribute("aria-valuemax", "900");
+  await expect(sep).toHaveAttribute("aria-valuenow", String(max));
 });
 
-test("double-click toggles focus mode and back", async ({ page }) => {
+test("reversing the same drag immediately restores the conversation, then continues resizing", async ({ page }) => {
   await openFocus(page);
   const sep = page.locator('[data-testid="inspector-resizer"]');
-  await expect(focusModeActive(page)).resolves.toBe(0);
+  const max = Number(await sep.getAttribute("aria-valuemax"));
+  const box = (await sep.boundingBox())!;
+  const x = box.x + 3 - (max - 400 - 330) - 50;
+  const y = box.y + 300;
 
+  await page.mouse.move(box.x + 3, y);
+  await page.mouse.down();
+  await page.mouse.move(x, y);
+  await expect(page.locator(".main")).toBeHidden();
+
+  await page.mouse.move(x + 1, y);
+  await expect(page.locator(".main")).toBeVisible();
+  await expect.poll(() => mainWidth(page)).toBe(401);
+  await page.mouse.move(x + 49, y);
+  await expect.poll(() => mainWidth(page)).toBe(449);
+  await page.mouse.up();
+  await expect.poll(() => panelWidth(page)).toBe(max - 449);
+  await expect(focusModeActive(page)).resolves.toBe(0);
+});
+
+test("a new rightward drag restores a hidden conversation on its first pixel", async ({ page }) => {
+  await openFocus(page);
+  const sep = page.locator('[data-testid="inspector-resizer"]');
   await sep.dblclick();
-  await expect(focusModeActive(page)).resolves.toBe(1);
-  await expect.poll(() => panelWidth(page)).toBeCloseTo(900, 0);
-  await expect.poll(() => mainWidth(page)).toBeCloseTo(300, 1);
+  await expect(page.locator(".main")).toBeHidden();
+  const box = (await sep.boundingBox())!;
+  const y = box.y + 300;
 
-  await sep.dblclick();
-  await expect(focusModeActive(page)).resolves.toBe(0);
-  await expect.poll(() => mainWidth(page)).toBeGreaterThan(400);
+  await page.mouse.move(box.x + 3, y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 4, y);
+  await expect.poll(() => mainWidth(page)).toBe(401);
+  await page.mouse.up();
+  await expect(page.locator(".main")).toBeVisible();
 });
 
-test("Shift+ArrowLeft on the separator walks into focus mode", async ({ page }) => {
+test("double-click restores the saved width and keeps the draft", async ({ page }) => {
+  await openFocus(page);
+  const sep = page.locator('[data-testid="inspector-resizer"]');
+  await page.locator(".composer-input").fill("保留这份草稿");
+  await sep.dblclick();
+  await expect(page.locator(".main")).toBeHidden();
+  await sep.dblclick();
+  await expect(page.locator(".main")).toBeVisible();
+  await expect.poll(() => panelWidth(page)).toBe(330);
+  await expect(page.locator(".composer-input")).toHaveValue("保留这份草稿");
+});
+
+test("keyboard resizing hides and immediately restores the conversation", async ({ page }) => {
+  await openFocus(page);
+  const sep = page.locator('[data-testid="inspector-resizer"]');
+  const max = Number(await sep.getAttribute("aria-valuemax"));
+  await sep.focus();
+  for (let i = 0; i < Math.ceil((max - 400 - 330) / 64); i++) {
+    await page.keyboard.press("Shift+ArrowLeft");
+  }
+  await expect(page.locator(".main")).toBeHidden();
+  await expect.poll(() => panelWidth(page)).toBe(max);
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".main")).toBeVisible();
+  await expect.poll(() => mainWidth(page)).toBe(416);
+});
+
+test("below 1200px focus mode yields to the overlay and returns on widening", async ({ page }) => {
+  await openFocus(page);
+  await page.locator('[data-testid="inspector-resizer"]').dblclick();
+  await page.setViewportSize({ width: 1100, height: 992 });
+  await expect(page.locator('[data-testid="inspector-resizer"]')).toHaveCount(0);
+  await expect(focusModeActive(page)).resolves.toBe(0);
+  await expect(page.locator(".main")).toBeVisible();
+
+  await page.setViewportSize({ width: 1586, height: 992 });
+  await expect(focusModeActive(page)).resolves.toBe(1);
+  await expect(page.locator(".main")).toBeHidden();
+});
+
+test("focus mode leaves the saved base width intact", async ({ page }) => {
   await openFocus(page);
   const sep = page.locator('[data-testid="inspector-resizer"]');
   await sep.focus();
-
-  // 330 + 9 × 64 = 906, clamped at the threshold (900) → focus mode flips on.
-  for (let i = 0; i < 9; i++) {
-    await page.keyboard.press("Shift+ArrowLeft");
-  }
-  await expect(focusModeActive(page)).resolves.toBe(1);
-  await expect.poll(() => panelWidth(page)).toBeCloseTo(900, 0);
-});
-
-test("focus mode survives a toggle-off/on cycle; turn rail stays visible", async ({ page }) => {
-  await openFocus(page);
-  const sep = page.locator('[data-testid="inspector-resizer"]');
-
-  // Enter focus.
+  await page.keyboard.press("ArrowLeft");
+  await expect.poll(() => panelWidth(page)).toBe(346);
   await sep.dblclick();
-  await expect(focusModeActive(page)).resolves.toBe(1);
-  await expect(page.locator('[data-testid="turn-rail"]')).toBeVisible();
-
-  // Exit and re-enter — the state machine stays consistent within a session.
-  // (Reload-time persistence is owned by Tauri's setSetting, which is
-  // in-memory only in the Playwright harness, so we exercise the cycle here
-  // instead of across reload.)
-  await sep.dblclick();
-  await expect(focusModeActive(page)).resolves.toBe(0);
-  await sep.dblclick();
-  await expect(focusModeActive(page)).resolves.toBe(1);
-
-  // Turn rail container-query hide is overridden — it stays visible even
-  // though the conversation column dropped to 300px (its own <900px query).
-  await expect(page.locator('[data-testid="turn-rail"]')).toBeVisible();
-});
-
-test("below 1200px the resizer unmounts, so focus mode cannot be triggered", async ({ page }) => {
-  await openFocus(page);
-  // Narrow viewport (below the wide-mode 1200 threshold) → the Inspector
-  // overlays the conversation and there is no separator to drag or dblclick.
-  await page.setViewportSize({ width: 1100, height: 992 });
-  await expect(page.locator('[data-testid="inspector-resizer"]')).toHaveCount(0);
-
-  // Even if focus mode were re-armed later, the class still requires a
-  // wide+open Inspector at ≥1440px (LAYOUT §5). Sanity check: the body
-  // has no app--focus-mode class while we're narrow.
-  await expect(focusModeActive(page)).resolves.toBe(0);
-});
-
-test("focus mode keeps the base / wide widths clean — no bleed between the three keys", async ({ page }) => {
-  await openFocus(page);
-  const sep = page.locator('[data-testid="inspector-resizer"]');
-  const widthOf = (key: string) =>
-    page.evaluate(
-      (k) =>
-        ((window as unknown as { __settingsLog?: Array<{ key: string; value: string }> }).__settingsLog ?? []).find(
-          (entry) => entry.key === k,
-        )?.value,
-      key,
-    );
-
-  // First, drag within the base range to plant a known inspector-width value.
-  // The harness uses fallback defaults, so the key is unset until something
-  // writes to it.
-  let box = (await sep.boundingBox())!;
+  const box = (await sep.boundingBox())!;
   await page.mouse.move(box.x + 3, box.y + 300);
   await page.mouse.down();
-  await page.mouse.move(box.x + 3 + 50, box.y + 300, { steps: 4 });
-  await page.mouse.up();
-  await page.waitForTimeout(50);
-  const baseBefore = await widthOf("inspector-width");
-  expect(baseBefore).toBeDefined();
-
-  // Enter focus, drag *within* the focus range (900 → 1050, both > threshold),
-  // then exit. The focus gesture must not corrupt the persisted base width.
-  await sep.dblclick();
-  box = (await sep.boundingBox())!;
-  await page.mouse.move(box.x + 3, box.y + 300);
-  await page.mouse.down();
-  await page.mouse.move(box.x + 3 - 200, box.y + 300, { steps: 6 });
+  await page.mouse.move(box.x + 3 - 100, box.y + 300);
   await page.mouse.up();
   await sep.dblclick();
-
-  const baseAfter = await widthOf("inspector-width");
-  expect(baseAfter).toBe(baseBefore);
-  // And the focus key recorded the in-focus drag value.
-  const focusWidth = await widthOf("inspector-focus-width");
-  expect(Number(focusWidth)).toBeGreaterThanOrEqual(900);
+  await expect.poll(() => panelWidth(page)).toBe(346);
 });
 
-test("at narrower viewports the focus class still applies and the Inspector is clamped to fit", async ({ page }) => {
-  // 1280px is the common laptop viewport — below the 1440px threshold the
-  // older gate used. The fix removed the gate; CSS now caps the Inspector
-  // so it can't push past the available room.
+test("focus width adapts to the window and sidebar without a fixed cap", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openFocus(page);
   const sep = page.locator('[data-testid="inspector-resizer"]');
-  await expect(sep).toBeVisible();
+  await sep.dblclick();
+  await expect(page.locator(".main")).toBeHidden();
+  await expect.poll(() => panelWidth(page)).toBe(1280 - 260 - 40 - 1);
 
-  const box = (await sep.boundingBox())!;
-  await page.mouse.move(box.x + 3, box.y + 200);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await expect.poll(() => panelWidth(page)).toBe(1920 - 260 - 40 - 1);
+  await page.locator(".sidebar-strip button").click();
+  await expect.poll(() => panelWidth(page)).toBe(1920 - 40 - 1);
+  await expect(sep).toHaveAttribute("aria-valuemax", String(1920 - 40 - 1));
+});
+
+test("legacy focus settings fill the current workspace without retaining the old width cap", async ({ page }) => {
+  await stubShell(page, {
+    ...focusShell(),
+    settings: { "inspector-focus-mode": "true", "inspector-focus-width": "900" },
+  });
+  await page.goto("/");
+  await expect(page.locator(".main")).toBeHidden();
+  await expect.poll(() => panelWidth(page)).toBe(1586 - 260 - 40 - 1);
+  await page.locator('[data-testid="inspector-close"]').click();
+  await expect(page.locator(".main")).toBeVisible();
+});
+
+test("a narrower window clamps the normal width instead of squeezing the conversation", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await stubShell(page, { ...focusShell(), settings: { "inspector-width": "1100" } });
+  await page.goto("/");
+  await expect.poll(() => panelWidth(page)).toBe(1100);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect.poll(() => mainWidth(page)).toBe(400);
+  await expect(page.locator(".main")).toBeVisible();
+  await expect.poll(() => panelWidth(page)).toBe(1280 - 260 - 40 - 1 - 400);
+
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await expect.poll(() => panelWidth(page)).toBe(1100);
+});
+
+test("narrowing the window during a drag clears drag state and keeps the conversation usable", async ({ page }) => {
+  await openFocus(page);
+  const box = (await page.locator('[data-testid="inspector-resizer"]').boundingBox())!;
+  await page.mouse.move(box.x + 3, box.y + 300);
   await page.mouse.down();
-  await page.mouse.move(box.x + 3 - 700, box.y + 200, { steps: 8 });
+  await page.mouse.move(box.x + 3 - 700, box.y + 300);
+  await expect(page.locator(".main")).toBeHidden();
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await expect(page.locator(".app.app--resizing")).toHaveCount(0);
+  await expect(page.locator(".main")).toBeVisible();
   await page.mouse.up();
+});
 
-  await expect(focusModeActive(page)).resolves.toBe(1);
-  await expect.poll(() => mainWidth(page)).toBe(300);
-
-  // Inspector width must be ≤ viewport - sidebar(260) - 300 (focus column)
-  // - 6 (resizer). 1280 - 566 = 714.
-  const panel = await panelWidth(page);
-  expect(panel).toBeLessThanOrEqual(714);
-  expect(panel).toBeGreaterThan(300);
+test("cancelling a drag restores the saved layout without committing the hidden state", async ({ page }) => {
+  await openFocus(page);
+  const sep = page.locator('[data-testid="inspector-resizer"]');
+  const box = (await sep.boundingBox())!;
+  await page.mouse.move(box.x + 3, box.y + 300);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 3 - 700, box.y + 300);
+  await expect(page.locator(".main")).toBeHidden();
+  await sep.dispatchEvent("pointercancel", { pointerId: 1 });
+  await page.mouse.up();
+  await expect(page.locator(".main")).toBeVisible();
+  await expect(page.locator(".app.app--resizing")).toHaveCount(0);
+  await expect.poll(() => panelWidth(page)).toBe(330);
 });

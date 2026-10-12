@@ -71,10 +71,6 @@
   /* 文件/浏览 panel borrows a wider column: tree + content side by side. */
   --kodo-inspector-file-width: 640px;
   --kodo-inspector-rail-width: 40px;
-  /* Focus mode (Inspector ≥ 900px) is the deliberate exception to the
-     "conversation is the largest visual region" rule — the column drops to
-     this width so the Inspector can grow up to --kodo-inspector-width: 1100px. */
-  --kodo-focus-mode-column: 300px;
   --kodo-topbar-height: 44px;
   --kodo-control-height: 32px;
 

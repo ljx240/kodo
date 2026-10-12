@@ -54,12 +54,8 @@ Conversation screen must satisfy all:
 - [ ] the turn rail (≥2 turns) is an overlay in the conversation's right
       gutter — it consumes no layout width and never reads as a second
       column; it is hidden below 2 turns and on containers <900px;
-- [ ] conversation is the largest visual region — *except in **focus
-      mode** (Inspector width ≥ 900px), which is the deliberate swap
-      exception: conversation drops to a 300px state strip (TopBar +
-      composer + turn rail overlay) and Inspector fills the rest up to
-      1100px; this is the only case where conversation is not the largest
-      region*;
+- [ ] the visible conversation stays at least 400px wide on wide viewports;
+      dragging beyond that boundary hides it while retaining its run and draft;
 - [ ] Inspector can be opened and collapsed;
 - [ ] collapsed Inspector becomes a narrow rail;
 - [ ] file viewing happens in the right sidebar's `文件` panel — never a
@@ -157,30 +153,26 @@ Conversation screen must satisfy all:
 - [ ] width handle (`inspector-resizer`, `role="separator"`,
       `aria-orientation="vertical"`, `aria-valuenow/min/max`): present only
       while the panel is open on ≥1200px windows, straddling the conversation
-      ↔ panel boundary; drag resizes within 320–**900**px in normal mode
+      ↔ panel boundary; drag resizes from 320px to the available workspace width
       (`aria-valuemax` tracks), `←`/`→` step 16 (Shift 64), `aria-valuenow`
       tracks the width, and while dragging the shell carries `app--resizing`
       (col-resize cursor, width tween off);
 - [ ] base and `文件` widths are two independent keys (defaults 330 / 640):
       resizing the `文件` panel never moves the default width and vice versa;
-- [ ] **focus mode** (Inspector ≥ 900px): the root carries `app--focus-mode`,
-      the conversation column collapses to `var(--kodo-focus-mode-column)`
-      (300px, fixed), the Inspector grows up to 1100px (`aria-valuemax`
-      switches to 1100), the turn rail's <900px container-query hide is
-      overridden (rail stays visible as a navigator), and at viewports
-      where the full 1100px can't fit the Inspector is CSS-clamped to
-      `calc(100vw − sidebar − 300 − 6px)` so it never overflows the window;
-- [ ] **focus mode triggers**: pointer drag past 900 commits and enters;
-      `Shift+ArrowLeft` / repeated `ArrowLeft` reaches the threshold the
-      same way; **double-click** on the separator toggles (enter to 900,
-      exit to the active base/wide key);
-- [ ] **focus mode exits**: dragging back below 900 commits and exits to
-      the active base/wide key, or double-click again, or any re-load on a
-      viewport <1200px (the resizer unmounts, so the class has nothing to
-      apply to);
-- [ ] focus mode persistence is two keys (`inspector-focus-mode` boolean,
-      `inspector-focus-width` numeric string, default "900") and never
-      bleeds into `inspector-width` / `inspector-wide-width`;
+- [ ] **focus mode**: once the conversation reaches 400px, further leftward
+      dragging hides it before pointer release; the root carries `app--focus-mode`
+      and the Inspector fills the workspace without a fixed 900/1100px cap;
+- [ ] **focus mode triggers**: pointer and keyboard resizing use the same
+      boundary; double-click toggles the mode;
+- [ ] **focus mode exits**: the first rightward move restores the conversation
+      at its minimum, then continues resizing; this works within one gesture
+      and on a new gesture. Double-click restores the saved base/wide width;
+- [ ] window/sidebar resizing updates the panel limit and `aria-valuemax`;
+      normal mode clamps the panel to preserve the conversation minimum;
+- [ ] `inspector-focus-mode` persists the hidden state without changing the
+      base/wide widths; legacy `inspector-focus-width` values are ignored;
+- [ ] cancelling a drag or losing the handle clears transient drag state and
+      retains the saved layout; narrow viewports keep the conversation visible;
 - [ ] below 1200px there is no handle and no inline width — the overlay clamp
       stays token-driven;
 - [ ] panel switching animates in place — enter-only, 120ms ease (open slide

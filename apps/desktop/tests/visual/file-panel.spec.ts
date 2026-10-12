@@ -103,6 +103,27 @@ test("the file panel widens the column to ~640 and restores on demote", async ({
   await expect.poll(() => panelWidth(page)).toBeCloseTo(330, 0);
 });
 
+test("the file panel fills the workspace and its content grows beyond the old cap", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await openFileTurn(page);
+  await page.locator('[data-testid="review-files"]').click();
+  const sep = page.locator('[data-testid="inspector-resizer"]');
+  await sep.dblclick();
+  await expect.poll(() => panelWidth(page)).toBe(1920 - 260 - 1);
+  await expect(page.locator(".main")).toBeHidden();
+  expect(await page.locator(".fv-main").evaluate((el) => el.getBoundingClientRect().width)).toBeGreaterThan(1100);
+
+  const box = (await sep.boundingBox())!;
+  await page.mouse.move(box.x + 3, box.y + 300);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 4, box.y + 300);
+  await page.mouse.up();
+  await expect(page.locator(".main")).toBeVisible();
+  await expect.poll(() => panelWidth(page)).toBe(1920 - 260 - 1 - 401);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect.poll(() => panelWidth(page)).toBe(1280 - 260 - 1 - 400);
+});
+
 test("path-shaped inline code opens the probed file; non-paths stay plain", async ({ page }) => {
   await stubShell(
     page,
@@ -255,7 +276,8 @@ test("the width separator drags, clamps, and keeps base/文件 keys apart", asyn
   await expect(sep).toHaveAttribute("role", "separator");
   await expect(sep).toHaveAttribute("aria-orientation", "vertical");
   await expect(sep).toHaveAttribute("aria-valuemin", "320");
-  await expect(sep).toHaveAttribute("aria-valuemax", "900");
+  const max = 1586 - 260 - 40 - 1;
+  await expect(sep).toHaveAttribute("aria-valuemax", String(max));
   await expect(sep).toHaveAttribute("aria-valuenow", "330");
 
   // Keyboard: ← widens 16 (Shift 64), → narrows back.
@@ -279,15 +301,15 @@ test("the width separator drags, clamps, and keeps base/文件 keys apart", asyn
   await expect(page.locator(".app.app--resizing")).toHaveCount(0);
   await expect.poll(() => panelWidth(page)).toBeCloseTo(494, 0);
 
-  // Clamp high: a long pull stops at the focus threshold (900), and the
-  // commit flips focus mode on — the next pull-back exits it again.
+  // A long pull hides the conversation and fills the remaining workspace.
   box = (await sep.boundingBox())!;
   await page.mouse.move(box.x + 3, box.y + 300);
   await page.mouse.down();
   await page.mouse.move(box.x + 3 - 500, box.y + 300, { steps: 6 });
   await page.mouse.up();
-  await expect.poll(() => panelWidth(page)).toBeCloseTo(900, 0);
+  await expect.poll(() => panelWidth(page)).toBe(max);
   await expect(page.locator(".app.app--focus-mode")).toHaveCount(1);
+  await expect(page.locator(".main")).toBeHidden();
 
   // … and a pull back right stops at 320 (focus mode exits on commit).
   box = (await sep.boundingBox())!;
@@ -301,6 +323,7 @@ test("the width separator drags, clamps, and keeps base/文件 keys apart", asyn
   // The 文件 panel widens from its own key: 640, independently editable.
   await page.locator('[data-testid="review-files"]').click();
   await expect.poll(() => panelWidth(page)).toBeCloseTo(640, 0);
+  await expect(sep).toHaveAttribute("aria-valuemax", String(1586 - 260 - 1));
   await expect(sep).toHaveAttribute("aria-valuenow", "640");
   await sep.focus();
   await page.keyboard.press("ArrowRight");

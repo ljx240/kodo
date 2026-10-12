@@ -125,19 +125,16 @@ p {
   display: none;
 }
 
-/* Focus mode: the deliberate exception to "conversation is the largest
-   visual region". Inspector grows past its normal cap, conversation drops
-   to a narrow state strip (TopBar crumb + composer + turn rail overlay). */
-.app--focus-mode .content-body > .main {
-  flex: none;
-  width: var(--kodo-focus-mode-column);
-  min-width: var(--kodo-focus-mode-column);
+@media (min-width: 1200px) {
+  .content-body > .main {
+    min-width: var(--kodo-conversation-min-width);
+  }
 }
 
-/* In focus mode the conversation collapses to 300px and the Inspector can
-   be dragged up to 1100px inline, but at narrower viewports the three
-   columns would overflow. The clamp lives in inspector.css next to the
-   element that owns the explicit width (.ins-panel). */
+/* Keep the run and draft alive while the Inspector occupies this column. */
+.app--focus-mode .content-body > .main {
+  display: none;
+}
 
 .scroll {
   flex: 1;

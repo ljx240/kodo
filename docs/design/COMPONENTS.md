@@ -353,22 +353,18 @@ expanded
 ```
 
 Expanded width:
-- 330px default, resizable 320–**900**px via the boundary handle
+- 330px default, resizable from 320px to the available workspace width
   (`inspector-resizer`, `role="separator"`, drag or keyboard ←/→ ±16 /
   Shift ±64, windows ≥1200px only);
-- **three persisted widths**: base (default 330), wide (default 640, the
-  `文件` / `浏览` panels) and focus (default 900, focus mode) — the keys
-  never cross; the focus key is only written when the Inspector crosses
-  the 900px threshold;
-- **focus mode**: dragging past 900px flips `app--focus-mode` on the root,
-  the conversation column collapses to `var(--kodo-focus-mode-column)`
-  (300px), and the Inspector continues up to 1100px. Restored by dragging
-  back below 900, **double-clicking the separator**, or reloading after
-  exiting. The mode is persisted (`inspector-focus-mode` boolean,
-  `inspector-focus-width` numeric string); CSS clamps the Inspector to
-  `calc(100vw − sidebar − 300 − 6px)` at narrower viewports so it never
-  overflows. The turn rail's <900px container-query hide is overridden in
-  focus mode so the rail stays visible as a navigator.
+- two independent persisted widths: base (default 330) and wide (default
+  640 for 文件/浏览);
+- the visible conversation has a 400px minimum. Further leftward dragging
+  hides it without unmounting its run or draft, and the Inspector fills the
+  workspace (`app--focus-mode`). Its limit adapts to window/sidebar/rail width;
+- rightward dragging restores the conversation immediately at its minimum,
+  then continues resizing. Double-click restores the saved base/wide width;
+- `inspector-focus-mode` persists the hidden state; the old focus-width setting
+  is ignored. Below 1200px the conversation remains visible under the overlay.
 
 Panel layer (chips on the header row):
 

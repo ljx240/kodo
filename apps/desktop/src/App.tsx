@@ -20,7 +20,7 @@ import { Sidebar } from "./shell/Sidebar";
 import { AutoOnboarding } from "./shell/AutoOnboarding";
 import { Inspector, type FilePanelRequest, type InspectorTab } from "./inspector/Inspector";
 import { BrowsePanel } from "./inspector/BrowsePanel";
-import { PanelResizer, clampWidth, WIDTH_FOCUS_THRESHOLD } from "./inspector/PanelResizer";
+import { PanelResizer, clampWidth, CONVERSATION_WIDTH_MIN, WIDTH_MIN } from "./inspector/PanelResizer";
 import { FileViewer } from "./conversation/FileViewer";
 import type { ArchiveSelection } from "./inspector/ArchiveInspector";
 import { ArchivePage } from "./pages/ArchivePage";
@@ -81,50 +81,47 @@ export function App() {
   /** Right-sidebar width: base 330 / 文件·浏览 widen 640, each its own key. */
   const [inspectorWidth, setInspectorWidth] = useSetting("inspector-width", "330");
   const [inspectorWideWidth, setInspectorWideWidth] = useSetting("inspector-wide-width", "640");
-  /** Focus mode (≥ WIDTH_FOCUS_THRESHOLD px) swaps to its own width key —
-   *  deliberate exception to "conversation is the largest visual region". */
+  /** Keep the conversation mounted while the Inspector occupies its space. */
   const [inspectorFocusMode, setInspectorFocusMode] = useSettingBool("inspector-focus-mode", false);
-  const [inspectorFocusWidth, setInspectorFocusWidth] = useSetting("inspector-focus-width", "900");
   /** Transient drag value — committed to the active key on pointerup. */
   const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [panelMaxWidth, setPanelMaxWidth] = useState(WIDTH_MIN);
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!wide || !content) return;
+    const measure = () => {
+      const inspector = content.querySelector<HTMLElement>(".inspector");
+      const railWidth = inspector?.querySelector(".ins-rail")?.getBoundingClientRect().width ?? 0;
+      const borderWidth = inspector ? Number.parseFloat(getComputedStyle(inspector).borderLeftWidth) || 0 : 0;
+      setPanelMaxWidth(Math.max(WIDTH_MIN, Math.floor(content.getBoundingClientRect().width - railWidth - borderWidth)));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [wide, inspectorTab, route.name, route.inspectorOpen]);
   const baseWidth = clampWidth(Number.parseInt(inspectorWidth, 10) || 330);
   const wideWidth = clampWidth(Number.parseInt(inspectorWideWidth, 10) || 640);
-  const focusWidth = clampWidth(Number.parseInt(inspectorFocusWidth, 10) || 900);
   /** 文件 and 浏览 widen via their own key; the route guard mirrors Inspector. */
   const wideMode = (inspectorTab === "file" || inspectorTab === "browse") && route.name === "conversation";
-  const appliedWidth = dragWidth ?? (inspectorFocusMode ? focusWidth : (wideMode ? wideWidth : baseWidth));
+  const restoreWidth = Math.max(WIDTH_MIN, panelMaxWidth - CONVERSATION_WIDTH_MIN);
+  const focusModeActive = wide && route.inspectorOpen && route.name === "conversation" &&
+    (dragWidth === null ? inspectorFocusMode : dragWidth > restoreWidth);
+  const appliedWidth = focusModeActive ? panelMaxWidth : clampWidth(dragWidth ?? (wideMode ? wideWidth : baseWidth), restoreWidth);
   const commitInspectorWidth = (next: number) => {
     setDragWidth(null);
-    // Threshold crossing flips focus mode and writes to the matching key so
-    // the two modes' persisted widths never bleed into each other. While
-    // already inside one mode, drags stay inside that mode's key.
-    if (!inspectorFocusMode && next >= WIDTH_FOCUS_THRESHOLD) {
+    if (next > restoreWidth) {
       setInspectorFocusMode(true);
-      setInspectorFocusWidth(String(next));
-    } else if (inspectorFocusMode && next < WIDTH_FOCUS_THRESHOLD) {
+    } else {
       setInspectorFocusMode(false);
       if (wideMode) setInspectorWideWidth(String(next));
       else setInspectorWidth(String(next));
-    } else if (inspectorFocusMode) {
-      setInspectorFocusWidth(String(next));
-    } else if (wideMode) {
-      setInspectorWideWidth(String(next));
-    } else {
-      setInspectorWidth(String(next));
     }
   };
   const toggleInspectorFocus = () => {
     setDragWidth(null);
-    if (inspectorFocusMode) {
-      // Exit: restore to the active mode's stored width, clamped to its range.
-      const restore = wideMode ? wideWidth : baseWidth;
-      setInspectorFocusMode(false);
-      if (wideMode) setInspectorWideWidth(String(restore));
-      else setInspectorWidth(String(restore));
-    } else {
-      setInspectorFocusMode(true);
-      setInspectorFocusWidth(String(WIDTH_FOCUS_THRESHOLD));
-    }
+    if (route.name === "conversation") setInspectorFocusMode(!focusModeActive);
   };
   /** Incremented by the top-bar 文件 icon; ConversationPage opens its viewer. */
   const [openFilesRequest, setOpenFilesRequest] = useState(0);
@@ -615,18 +612,11 @@ export function App() {
   const activeProvider = providers[activeProviderIndex] ?? null;
   const projectName = activeProject?.name ?? (route.demo && demoState ? demoState.project.name : "未选择项目");
 
-  // Focus mode is the deliberate exception to "conversation is the largest
-  // visual region". Once the user has dragged past the threshold we honour
-  // it at every wide viewport — CSS handles the visual gracefully (the
-  // conversation column is fixed at 300, and the Inspector's max is
-  // dynamically clamped so it can never overflow the available width).
-  const focusModeActive = inspectorFocusMode && route.inspectorOpen;
-
   return (
     <div
       className={`app${sidebarVisible ? "" : " app--sidebar-hidden"}${
         systemFont === "true" ? " app--system-font" : ""
-      }${focusModeActive ? " app--focus-mode" : ""}`}
+      }${focusModeActive ? " app--focus-mode" : ""}${dragWidth === null ? "" : " app--resizing"}`}
       // Wide windows own both widths inline (inherited down to .ins-panel);
       // narrow ones fall back to the tokens so the overlay clamp stays intact.
       style={
@@ -634,6 +624,7 @@ export function App() {
           ? ({
               "--kodo-inspector-width": `${wideMode ? baseWidth : appliedWidth}px`,
               "--kodo-inspector-file-width": `${wideMode ? appliedWidth : wideWidth}px`,
+              "--kodo-conversation-min-width": `${CONVERSATION_WIDTH_MIN}px`,
             } as CSSProperties)
           : undefined
       }
@@ -712,7 +703,7 @@ export function App() {
           />
         )}
 
-        <div className="content-body">
+        <div className="content-body" ref={contentRef}>
           {/* A live run must survive opening the Response Trace: the page stays
               mounted (stowed) while the trace shows, so the run-event stream,
               queue and approval state keep flowing mid-answer (2026-09-30).
@@ -876,7 +867,8 @@ export function App() {
                   value={appliedWidth}
                   onDrag={setDragWidth}
                   onCommit={commitInspectorWidth}
-                  focusMode={inspectorFocusMode}
+                  max={route.name === "conversation" ? panelMaxWidth : restoreWidth}
+                  restoreWidth={restoreWidth}
                   onToggleFocus={toggleInspectorFocus}
                 />
               ) : null

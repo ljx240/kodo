@@ -1,17 +1,10 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { T } from "../i18n";
 
-/** House clamp for the right-sidebar column.
- *  Normal drag stops at the focus threshold (900); past it the conversation
- *  column collapses to a narrow state strip and the Inspector grows further
- *  (1100). The threshold is also the lower bound of the focus-mode range, so
- *  the two modes' domains touch at exactly one width. */
 export const WIDTH_MIN = 320;
-export const WIDTH_MAX = 900;
-export const WIDTH_FOCUS_THRESHOLD = 900;
-export const WIDTH_FOCUS_MAX = 1100;
+export const CONVERSATION_WIDTH_MIN = 400;
 
-export function clampWidth(value: number, max: number = WIDTH_MAX): number {
+export function clampWidth(value: number, max: number = Infinity): number {
   return Math.min(max, Math.max(WIDTH_MIN, Math.round(value)));
 }
 
@@ -20,12 +13,12 @@ type Props = {
   value: number;
   /** Live drag update; App applies it transiently and commits on pointerup. */
   onDrag: (width: number | null) => void;
-  /** Persist the width into the active key (base / wide / focus). */
+  /** Persist the width into the active key (base / wide). */
   onCommit: (width: number) => void;
-  /** Focus mode is the deliberate exception to "conversation is the largest
-   *  visual region": conversation drops to a 300px column so the Inspector
-   *  can grow up to {@link WIDTH_FOCUS_MAX}. */
-  focusMode: boolean;
+  /** Available panel width, after the sidebar, rail and borders. */
+  max: number;
+  /** Largest panel width that leaves room for the conversation. */
+  restoreWidth: number;
   /** Toggle focus mode (double-click on the separator). App owns persistence. */
   onToggleFocus: () => void;
 };
@@ -36,13 +29,15 @@ type Props = {
  * nothing to drag there. Drag reports moves and commits; the width state and
  * the persisted keys live in App (one source of truth for panel geometry).
  */
-export function PanelResizer({ value, onDrag, onCommit, focusMode, onToggleFocus }: Props) {
-  const startRef = useRef({ x: 0, w: 0 });
-  const max = focusMode ? WIDTH_FOCUS_MAX : WIDTH_MAX;
+export function PanelResizer({ value, onDrag, onCommit, max, restoreWidth, onToggleFocus }: Props) {
+  const dragRef = useRef({ x: 0, w: 0, moved: false });
 
-  const setResizing = (on: boolean) => {
-    const app = document.querySelector(".app");
-    app?.classList.toggle("app--resizing", on);
+  useEffect(() => () => onDrag(null), [onDrag]);
+
+  const resizedWidth = (width: number, delta: number) => {
+    // Reverse motion skips the gap left by collapsing the conversation.
+    const next = clampWidth((width > restoreWidth && delta < 0 ? restoreWidth : width) + delta, max);
+    return next > restoreWidth ? max : next;
   };
 
   return (
@@ -60,28 +55,32 @@ export function PanelResizer({ value, onDrag, onCommit, focusMode, onToggleFocus
         if (e.button !== 0) return;
         e.preventDefault();
         e.currentTarget.setPointerCapture(e.pointerId);
-        startRef.current = { x: e.clientX, w: value };
-        setResizing(true);
+        dragRef.current = { x: e.clientX, w: value, moved: false };
+        onDrag(value);
       }}
       onPointerMove={(e) => {
         if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
-        onDrag(clampWidth(startRef.current.w + (startRef.current.x - e.clientX), max));
+        const previous = dragRef.current;
+        const next = resizedWidth(previous.w, previous.x - e.clientX);
+        dragRef.current = { x: e.clientX, w: next, moved: previous.moved || next !== previous.w };
+        onDrag(next);
       }}
       onPointerUp={(e) => {
         if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
         e.currentTarget.releasePointerCapture(e.pointerId);
-        setResizing(false);
         onDrag(null);
         // A click without drag (e.g. the second click of a dblclick gesture)
         // would re-commit the current value, bleeding it into the active
         // persistence key. Only commit when the pointer actually moved.
-        const next = clampWidth(startRef.current.w + (startRef.current.x - e.clientX), max);
-        if (next !== startRef.current.w) onCommit(next);
+        const previous = dragRef.current;
+        const next = resizedWidth(previous.w, previous.x - e.clientX);
+        if (previous.moved || next !== previous.w) onCommit(next);
       }}
-      onPointerCancel={() => {
-        setResizing(false);
+      onPointerCancel={(e) => {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
         onDrag(null);
       }}
+      onLostPointerCapture={() => onDrag(null)}
       onDoubleClick={() => {
         onToggleFocus();
       }}
@@ -90,10 +89,10 @@ export function PanelResizer({ value, onDrag, onCommit, focusMode, onToggleFocus
         const step = e.shiftKey ? 64 : 16;
         if (e.key === "ArrowLeft") {
           e.preventDefault();
-          onCommit(clampWidth(value + step, max));
+          onCommit(resizedWidth(value, step));
         } else if (e.key === "ArrowRight") {
           e.preventDefault();
-          onCommit(clampWidth(value - step, max));
+          onCommit(resizedWidth(value, -step));
         }
       }}
     />
