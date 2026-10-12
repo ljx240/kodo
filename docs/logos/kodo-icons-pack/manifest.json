@@ -1,5 +1,7 @@
 {
   "package": "kodo-icons-pack",
+  "default": "kodo-icon-primary-1024.png",
+  "bg_color": "#11151B",
   "files": [
     "kodo-icon-primary-1024.png",
     "kodo-code-icon-1024.png",

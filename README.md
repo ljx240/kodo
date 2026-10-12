@@ -1,4 +1,4 @@
-<img src="docs/logos/kodo-transparent-icons-pack/kodo-code-icon-transparent-1254.png" width="96" alt="Kodo" />
+<img src="docs/logos/kodo-icons-pack/kodo-icon-primary-1024.png" width="96" alt="Kodo" />
 
 # Kodo
 

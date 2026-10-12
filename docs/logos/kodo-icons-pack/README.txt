@@ -1,5 +1,8 @@
 # Kodo Icons Pack
 
+FACET identity, selected 2026-10-12: black Kodo, blue Code, violet Work.
+Each 1024x1024 app tile has a transparent exterior and a light symbol.
+
 Included files:
 - kodo-icon-primary-1024.png   → Kodo 主图标
 - kodo-code-icon-1024.png     → Kodo Code 图标
