@@ -27,8 +27,6 @@ import {
   listSkills,
   pickFiles,
   probeContextFile,
-  setSetting,
-  setting,
   type SkillView,
 } from "../api";
 import {
@@ -39,6 +37,7 @@ import {
 } from "../data/providers";
 import { skillSpace, skillsFor } from "../data/skills";
 import { type Permission, PERMISSIONS, PERMISSION_SETTING, DEFAULT_PERMISSION, DEFAULT_MODEL } from "../data/models";
+import { useSetting } from "../data/useSetting";
 import { fileLook, kindFromPath } from "../fileKind";
 import { T } from "../i18n";
 import { ContextCard } from "./ContextCard";
@@ -205,7 +204,9 @@ export function Composer({
     return () => window.removeEventListener("kodo:focus-composer", onFocus);
   }, []);
 
-  const [permission, setPermission] = useState<Permission>(DEFAULT_PERMISSION);
+  const [permissionSetting, setPermission] = useSetting(PERMISSION_SETTING, DEFAULT_PERMISSION);
+  const permission: Permission = permissionSetting === "auto" || permissionSetting === "full"
+    ? permissionSetting : DEFAULT_PERMISSION;
   /** + opens a floating action menu anchored to the composer box. */
   const [plusOpen, setPlusOpen] = useState(false);
   /** Side panel next to the + menu (skills list / project files). */
@@ -277,17 +278,6 @@ export function Composer({
             skill.label.includes(slashQuery),
         );
   const slashOpen = slashQuery !== null && slashMatches.length > 0;
-
-  useEffect(() => {
-    void setting(PERMISSION_SETTING).then((v) => {
-      if (v === "ask" || v === "auto" || v === "full") setPermission(v);
-    });
-  }, []);
-
-  const setPerm = (p: Permission) => {
-    setPermission(p);
-    void setSetting(PERMISSION_SETTING, p);
-  };
 
   // Grow with the text up to the cap. Doing it in a layout effect keeps the
   // box from painting at its old height for a frame after every keystroke.
@@ -821,6 +811,7 @@ export function Composer({
                   type="button"
                   className="composer-perm-trigger"
                   aria-expanded={open}
+                  title={T.page.settings.rows.permissionHint}
                   onClick={toggle}
                 >
                   <PermIcon size={14} strokeWidth={2} style={{ color: permConfig.color }} />
@@ -840,7 +831,7 @@ export function Composer({
                       label={`${label} — ${description}`}
                       onSelect={() => {
                         close();
-                        setPerm(value);
+                        setPermission(value);
                       }}
                     />
                   );

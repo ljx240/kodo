@@ -15,12 +15,12 @@ export const MODEL_SETTING = "default-model";
 export type Permission = "ask" | "auto" | "full";
 
 export const PERMISSIONS: { value: Permission; label: string; description: string }[] = [
-  { value: "ask", label: "请求批准", description: "每个 shell 命令都需要您手动批准" },
-  { value: "auto", label: "自动批准安全操作", description: "普通命令自动执行，危险命令仍需确认" },
+  { value: "ask", label: "请求批准", description: "运行命令、编辑文件和外部调用均需批准" },
+  { value: "auto", label: "自动批准安全操作", description: "已识别的只读命令自动执行；其他操作需确认" },
   {
     value: "full",
     label: "项目内自动执行",
-    description: "项目内操作自动执行；破坏性 git / 提权仍需确认（不推荐）",
+    description: "项目文件编辑与已识别的只读命令自动执行；其他命令和外部调用需确认",
   },
 ];
 

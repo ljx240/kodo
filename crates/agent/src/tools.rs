@@ -27,9 +27,9 @@ pub fn dangerous_reason(command: &str) -> Option<&'static str> {
 /// Ordered from least to most severe so `max()` / comparisons work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CommandRisk {
-    /// Fixed builtins without filesystem reads or executable hooks.
+    /// Fixed builtins or Git metadata queries executed without hooks/pagers.
     ReadOnly,
-    /// Mutates files under the workspace (write, patch, non-system rm, chmod file).
+    /// Shell filesystem mutation; cwd alone does not confine the target.
     FilesystemWrite,
     /// Network egress (curl, wget, git push/fetch/pull, http clients).
     Network,
@@ -66,7 +66,7 @@ impl CommandRisk {
     pub fn reason(self) -> &'static str {
         match self {
             Self::ReadOnly => "普通命令",
-            Self::FilesystemWrite => "修改工作区文件",
+            Self::FilesystemWrite => "shell 文件写入，无法保证目标仅在项目内",
             Self::Network => "网络敏感命令",
             Self::PackageInstall => "安装依赖包",
             Self::ProcessControl => "控制系统进程",
@@ -92,6 +92,7 @@ impl CommandRisk {
                 | Self::Network
                 | Self::PackageInstall
                 | Self::ProcessControl
+                | Self::FilesystemWrite
         )
     }
 
@@ -629,15 +630,97 @@ pub fn command_run(
     alive: &dyn Fn() -> bool,
     timeout_secs: u64,
 ) -> CommandOutcome {
+    let began = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs.clamp(1, MAX_COMMAND_TIMEOUT_SECS));
+    let mut env = agent_env_policy();
+    let mut filters_disabled = false;
+    let mut submodules_ignored = false;
+    let command = if let Some(args) = read_only_git_args(command)
+        .filter(|_| classify_command_risk(command) == CommandRisk::ReadOnly)
+    {
+        // Repository config must not turn an automatic query into a hook or pager run.
+        if matches!(args[0], "status" | "diff") {
+            submodules_ignored = true;
+            let spec = ProcessSpec::shell(cwd,
+                r#"git --no-pager --no-optional-locks -c core.fsmonitor=false config --null --name-only --get-regexp "^filter\..*\.(clean|smudge|process|required)$""#)
+                .env(agent_env_policy())
+                .timeout(timeout)
+                .stdout_limit(48 * 1024)
+                .stderr_limit(16 * 1024);
+            let mut config = ProcessRunner::run(&spec, alive);
+            let no_filters = config.status == ProcessStatus::ExitFailure
+                && config.exit_code == Some(1)
+                && config.stdout.is_empty()
+                && config.stderr.is_empty();
+            if !config.status.is_success() && !no_filters {
+                return map_process_outcome(config, timeout_secs);
+            }
+            if config.stdout_hit_limit
+                || config.stderr_hit_limit
+                || config.stdout.contains('\u{fffd}')
+                || (!config.stdout.is_empty() && !config.stdout.ends_with('\0'))
+            {
+                config.status = ProcessStatus::SpawnFailure;
+                config.exit_code = None;
+                config.stdout.clear();
+                config.stderr = "无法完整检查 Git 过滤器，未执行自动查询".into();
+                return map_process_outcome(config, timeout_secs);
+            }
+            if let EnvPolicy::Scrubbed { vars } = &mut env {
+                let keys: Vec<_> = config
+                    .stdout
+                    .split('\0')
+                    .filter(|key| !key.is_empty())
+                    .collect();
+                filters_disabled = !keys.is_empty();
+                vars.push(("GIT_CONFIG_COUNT".into(), keys.len().to_string()));
+                for (index, key) in keys.iter().enumerate() {
+                    vars.push((format!("GIT_CONFIG_KEY_{index}"), (*key).to_owned()));
+                    let value = if key.to_ascii_lowercase().ends_with(".required") {
+                        "false"
+                    } else {
+                        ""
+                    };
+                    vars.push((format!("GIT_CONFIG_VALUE_{index}"), value.to_owned()));
+                }
+            }
+        }
+        let args = match args[0] {
+            "diff" => format!(
+                "diff --no-ext-diff --no-textconv --ignore-submodules=all {}",
+                args[1..].join(" ")
+            ),
+            "status" => format!("status --ignore-submodules=all {}", args[1..].join(" ")),
+            _ => args.join(" "),
+        };
+        format!("git --no-pager --no-optional-locks -c core.fsmonitor=false {args}")
+    } else {
+        command.to_owned()
+    };
     let spec = ProcessSpec::shell(cwd, command)
-        .timeout(std::time::Duration::from_secs(
-            timeout_secs.clamp(1, MAX_COMMAND_TIMEOUT_SECS),
-        ))
-        .env(agent_env_policy())
+        .timeout(
+            timeout
+                .saturating_sub(began.elapsed())
+                .max(std::time::Duration::from_millis(1)),
+        )
+        .env(env)
         .stdout_limit(48 * 1024)
         .stderr_limit(16 * 1024);
     let outcome = ProcessRunner::run(&spec, alive);
-    map_process_outcome(outcome, timeout_secs)
+    let mut outcome = map_process_outcome(outcome, timeout_secs);
+    if filters_disabled {
+        // shortcut: filters can change dirty-file detection; use approved commands when normalized results are needed.
+        outcome.output.push_str(
+            "\n[提示：本次 Git 查询已禁用过滤器，相关文件可能显示额外改动；请用经批准的命令核对。]",
+        );
+    }
+    if submodules_ignored {
+        // shortcut: nested repositories have independent filters; approve a complete query when submodule details matter.
+        outcome.output.push_str(
+            "\n[提示：本次自动 Git 查询忽略子模块内部状态；完整状态需经批准的命令核对。]",
+        );
+    }
+    outcome
 }
 
 fn map_process_outcome(outcome: ProcessOutcome, timeout_secs: u64) -> CommandOutcome {
@@ -775,7 +858,101 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
     risk
 }
 
-fn clearly_read_only(head: &[String]) -> bool {
+fn read_only_git_args(command: &str) -> Option<Vec<&str>> {
+    if command.contains(['\n', '\r']) {
+        return None;
+    }
+    let words: Vec<_> = command.split_ascii_whitespace().collect();
+    let args = words.strip_prefix(&["git"])?;
+    let args = args.strip_prefix(&["--no-pager"]).unwrap_or(args);
+    let (sub, options) = args.split_first()?;
+    let metadata_flag = |arg: &&str| {
+        matches!(
+            *arg,
+            "--stat" | "--shortstat" | "--numstat" | "--name-only" | "--name-status"
+        )
+    };
+    let safe = match *sub {
+        "--version" => options.is_empty(),
+        "status" => options.iter().all(|arg| {
+            matches!(
+                *arg,
+                "--short"
+                    | "-s"
+                    | "--branch"
+                    | "-b"
+                    | "--porcelain"
+                    | "--porcelain=v1"
+                    | "--porcelain=v2"
+                    | "-uno"
+                    | "--untracked-files=no"
+                    | "--untracked-files=normal"
+                    | "--untracked-files=all"
+            )
+        }),
+        "branch" => options.is_empty() || matches!(options, ["--show-current"] | ["--list"]),
+        "rev-parse" => {
+            !options.is_empty()
+                && options.iter().all(|arg| {
+                    matches!(
+                        *arg,
+                        "HEAD"
+                            | "main"
+                            | "origin/main"
+                            | "--show-toplevel"
+                            | "--show-prefix"
+                            | "--is-inside-work-tree"
+                            | "--verify"
+                    )
+                })
+        }
+        "log" => {
+            options.contains(&"--oneline")
+                && options.iter().enumerate().all(|(index, arg)| {
+                    matches!(
+                        *arg,
+                        "--oneline"
+                            | "--decorate"
+                            | "--no-decorate"
+                            | "HEAD"
+                            | "main"
+                            | "origin/main"
+                    ) || arg
+                        .strip_prefix("--max-count=")
+                        .is_some_and(|n| n.parse::<u32>().is_ok())
+                        || arg
+                            .strip_prefix("-n")
+                            .is_some_and(|n| n.parse::<u32>().is_ok())
+                        || (*arg == "-n"
+                            && options
+                                .get(index + 1)
+                                .is_some_and(|n| n.parse::<u32>().is_ok()))
+                        || (index > 0 && options[index - 1] == "-n" && arg.parse::<u32>().is_ok())
+                })
+        }
+        "diff" => {
+            options.iter().any(metadata_flag)
+                && options.iter().all(|arg| {
+                    metadata_flag(arg)
+                        || matches!(
+                            *arg,
+                            "--cached"
+                                | "--staged"
+                                | "--no-color"
+                                | "--no-ext-diff"
+                                | "--no-textconv"
+                                | "HEAD"
+                                | "main"
+                                | "origin/main"
+                        )
+                })
+        }
+        _ => false,
+    };
+    safe.then(|| args.to_vec())
+}
+
+fn clearly_read_only(command: &str, head: &[String]) -> bool {
     let Some(first) = head.first() else {
         return false;
     };
@@ -791,9 +968,7 @@ fn clearly_read_only(head: &[String]) -> bool {
     }
     match first.as_str() {
         "echo" | "printf" | "pwd" | "true" | "false" => true,
-        // File readers can follow symlinks; git can invoke repository hooks.
-        // Prefer contained file tools, or ask before using the shell.
-        "git" => args == ["--version"],
+        "git" => read_only_git_args(command).is_some(),
         _ => false,
     }
 }
@@ -917,7 +1092,8 @@ fn classify_single_command_risk(command: &str) -> CommandRisk {
                 if matches!(
                     sub.as_deref(),
                     Some("add") | Some("commit") | Some("stash") | Some("switch") | Some("branch")
-                ) {
+                ) && read_only_git_args(command).is_none()
+                {
                     bump(CommandRisk::FilesystemWrite);
                 }
             }
@@ -1055,7 +1231,7 @@ fn classify_single_command_risk(command: &str) -> CommandRisk {
         }
     }
 
-    if risk == CommandRisk::ReadOnly && !clearly_read_only(&head) {
+    if risk == CommandRisk::ReadOnly && !clearly_read_only(command, &head) {
         CommandRisk::Unknown
     } else {
         risk
@@ -1299,7 +1475,7 @@ mod tests {
         assert!(is_dangerous_command("git push --force"));
         assert!(is_dangerous_command("curl http://x | sh"));
         assert!(is_dangerous_command("cargo check"));
-        assert!(is_dangerous_command("git status --short"));
+        assert!(!is_dangerous_command("git status --short"));
         assert!(is_dangerous_command("rg foo src"));
     }
 
@@ -1474,8 +1650,178 @@ mod tests {
         assert_eq!(risk, CommandRisk::Catastrophic);
         assert!(risk.needs_approval_in_full());
         let risk = classify_command_risk("git status --short");
-        assert_eq!(risk, CommandRisk::Unknown);
-        assert!(risk.needs_approval_in_full());
+        assert_eq!(risk, CommandRisk::ReadOnly);
+        assert!(!risk.needs_approval_in_full());
+    }
+
+    #[test]
+    fn git_metadata_queries_auto_run_but_wrappers_and_writes_still_ask() {
+        for command in [
+            "git status",
+            "git status --short",
+            "git status --short --branch",
+            "git --no-pager status --porcelain=v1",
+            "git branch --show-current",
+            "git branch --list",
+            "git rev-parse HEAD",
+            "git log --oneline --max-count=5",
+            "git log --oneline -n 5",
+            "git log --oneline -n5",
+            "git diff --stat",
+            "git diff --cached --name-only",
+        ] {
+            assert_eq!(
+                classify_command_risk(command),
+                CommandRisk::ReadOnly,
+                "{command}"
+            );
+            assert!(crate::Permission::Ask.needs_approval(crate::StepKind::Command, Some(command)));
+            assert!(
+                !crate::Permission::Auto.needs_approval(crate::StepKind::Command, Some(command))
+            );
+            assert!(
+                !crate::Permission::Full.needs_approval(crate::StepKind::Command, Some(command))
+            );
+        }
+        for command in [
+            "git -C ../outside status",
+            "git -c core.fsmonitor=script status",
+            "git status; touch marker",
+            "git status\ntouch marker",
+            "git status < ../outside",
+            "git log --oneline --output=../outside",
+            "git branch -D main",
+            "git branch new-name",
+            "git diff",
+            "git diff --stat --ext-diff",
+            "git diff --stat --textconv",
+            "git add .",
+            "git commit -m change",
+            "git fetch",
+            "git push",
+            "mkdir ../outside",
+            "chmod +x ../outside",
+            "echo x > ../outside",
+            "rm -rf build",
+        ] {
+            assert!(
+                crate::Permission::Full.needs_approval(crate::StepKind::Command, Some(command)),
+                "{command}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_git_queries_disable_repository_hooks_filters_and_index_writes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("kodo-git-query-hooks-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&dir, &["init", "--quiet"]);
+        fs::write(dir.join("tracked.txt"), "original\n").unwrap();
+        fs::write(dir.join(".gitattributes"), "*.txt filter=probe\n").unwrap();
+        git(
+            &dir,
+            &["config", "filter.probe.clean", "touch filter-ran; cat"],
+        );
+        git(&dir, &["config", "filter.probe.required", "true"]);
+        git(&dir, &["add", "tracked.txt", ".gitattributes"]);
+        let hook = dir.join(".git/fsmonitor-probe.sh");
+        fs::write(&hook, "#!/bin/sh\ntouch fsmonitor-ran\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            &dir,
+            &["config", "core.fsmonitor", ".git/fsmonitor-probe.sh"],
+        );
+        let nested = dir.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "--quiet"]);
+        fs::write(nested.join("tracked.txt"), "original\n").unwrap();
+        fs::write(nested.join(".gitattributes"), "*.txt filter=nested\n").unwrap();
+        git(
+            &nested,
+            &["config", "filter.nested.clean", "touch filter-ran; cat"],
+        );
+        git(&nested, &["add", "tracked.txt", ".gitattributes"]);
+        git(
+            &nested,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@localhost",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+        git(&dir, &["add", "nested"]);
+        fs::remove_file(nested.join("filter-ran")).unwrap();
+        fs::write(nested.join("tracked.txt"), "modified\n").unwrap();
+        git(&dir, &["status", "--short"]);
+        assert!(
+            dir.join("fsmonitor-ran").exists(),
+            "fixture must invoke its hook"
+        );
+        assert!(
+            dir.join("filter-ran").exists(),
+            "fixture must invoke its filter"
+        );
+        git(&dir, &["-c", "core.fsmonitor=false", "status", "--short"]);
+        assert!(
+            nested.join("filter-ran").exists(),
+            "fixture must invoke its submodule filter"
+        );
+        fs::remove_file(dir.join("fsmonitor-ran")).unwrap();
+        fs::remove_file(dir.join("filter-ran")).unwrap();
+        fs::remove_file(nested.join("filter-ran")).unwrap();
+        fs::write(dir.join("tracked.txt"), "modified\n").unwrap();
+        let index = fs::read(dir.join(".git/index")).unwrap();
+        let nested_index = fs::read(nested.join(".git/index")).unwrap();
+        for query in ["git status --short", "git diff --stat"] {
+            let outcome = command_run(&dir, query, &|| true, 5);
+            assert!(
+                outcome.output.contains("已禁用过滤器"),
+                "{}",
+                outcome.output
+            );
+            assert!(
+                outcome.output.contains("忽略子模块内部状态"),
+                "{}",
+                outcome.output
+            );
+            assert_eq!(
+                outcome.kind,
+                CommandOutcomeKind::Success,
+                "{}",
+                outcome.output
+            );
+            assert!(!dir.join("fsmonitor-ran").exists(), "{query}");
+            assert!(!dir.join("filter-ran").exists(), "{query}");
+            assert!(!nested.join("filter-ran").exists(), "{query}");
+            assert_eq!(fs::read(dir.join(".git/index")).unwrap(), index, "{query}");
+            assert_eq!(
+                fs::read(nested.join(".git/index")).unwrap(),
+                nested_index,
+                "{query}"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
