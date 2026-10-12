@@ -290,6 +290,36 @@
 
 /* --------------------------------------------------------------- answer -- */
 
+.conversation-process {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 0 0 20px 46px;
+  min-width: 0;
+}
+.conversation-note {
+  color: var(--kodo-text);
+  overflow-wrap: anywhere;
+}
+.conversation-note .md > :first-child { margin-top: 0; }
+.conversation-note .md > :last-child { margin-bottom: 0; }
+.conversation-tools > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  color: var(--kodo-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+.conversation-tools > summary::-webkit-details-marker { display: none; }
+.conversation-tools > summary svg { flex-shrink: 0; }
+.conversation-tools[open] > summary svg { transform: rotate(90deg); }
+.conversation-tools-count { color: var(--kodo-text-tertiary); }
+.conversation-tools > .trace-groups { margin: 12px 0 0 -12px; }
+
 .final {
   margin-left: 46px;
 }
@@ -411,10 +441,6 @@
 /* 2. 本次完成 */
 .answer-body {
   margin-bottom: 14px;
-}
-
-.answer-expand {
-  margin-top: 4px;
 }
 
 /* 3. 验证结果 card */

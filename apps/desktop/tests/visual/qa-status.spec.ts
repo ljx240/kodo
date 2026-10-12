@@ -192,6 +192,8 @@ test("counters are honest: 统计中… / empty / 等待步骤完成, never a ba
     session: "s1",
     item: { id: 1, at: 1_700_000_000, status: "running", duration: null, kind: "modelCall", model: "deepseek-chat", inputTokens: 0, outputTokens: 0 },
   });
+  await expect(page.getByTestId("process-tools")).not.toHaveAttribute("open", "");
+  await page.locator('[data-testid="process-tools"] > summary').click();
   await expect(page.locator(".trace-tokens").first()).toContainText("统计中…");
   await expect(page.locator(".trace-duration").first()).toHaveText("进行中");
   // A running row opens on its own; the run status is announced politely.
@@ -208,6 +210,8 @@ test("counters are honest: 统计中… / empty / 等待步骤完成, never a ba
   await expect(page.locator(".reply")).not.toContainText("0 tokens");
   // An unmeasurable step leaves the column empty — never a bare `—` placeholder.
   await expect(page.locator(".trace-duration").first()).toHaveText("");
+  await emit(page, { type: "turnComplete", session: "s1" });
+  await expect(summary).not.toContainText("统计中…");
 });
 
 test("collapse rules: failed and running rows open, completed rows stay closed", async ({ page }) => {
@@ -311,6 +315,7 @@ test("consecutive thinking steps fold into one row with a sub-step count", async
     }),
   );
   await openLive(page);
+  await page.locator('[data-testid="process-tools"] > summary').click();
 
   await expect(page.locator(".trace-row")).toHaveCount(1);
   await expect(page.locator(".trace-row .code-chip").first()).toHaveText("3 个子步骤");
@@ -388,7 +393,7 @@ test("expanders are real buttons with aria-expanded/aria-controls wiring", async
   await expect(page.locator(".trace-row")).toHaveCount(0);
 });
 
-test("errors announce with role=alert; long answers summarize with an expand", async ({ page }) => {
+test("errors announce with role=alert; long answers remain fully readable", async ({ page }) => {
   const p1 = "第一段。".repeat(40);
   const p2 = "第二段。".repeat(40);
   const p3 = "第三段收尾标记。".repeat(30);
@@ -411,11 +416,7 @@ test("errors announce with role=alert; long answers summarize with an expand", a
   await expect(page.locator('[data-testid="reply-error"]')).toHaveAttribute("role", "alert");
   await expect(page.locator('[data-testid="reply-error"]')).toContainText("provider unavailable");
 
-  const expand = page.locator('[data-testid="answer-expand"]');
-  await expect(expand).toHaveText("展开完整回答");
-  await expect(page.locator('[data-testid="answer-body"]')).not.toContainText("收尾标记");
-  await expand.click();
-  await expect(expand).toHaveText("收起回答");
+  await expect(page.locator('[data-testid="answer-expand"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="answer-body"]')).toContainText("收尾标记");
 });
 
@@ -633,15 +634,17 @@ test("interim stream prose flushes as notes in normal order", async ({ page }) =
   await expect(notes.nth(1)).toContainText("编译通过，开始修改。");
 
   // Arrival order: note, step, note, step — the prose keeps its place in the flow.
-  const order = await page.locator(".trace-groups .trace-row").evaluateAll((rows) =>
+  const order = await page.locator(".conversation-process > *").evaluateAll((rows) =>
     rows.map((row) => ({
-      note: row.classList.contains("trace-row--note"),
+      note: row.classList.contains("conversation-note"),
       text: (row.textContent ?? "").replace(/\s+/g, " ").trim(),
     })),
   );
   expect(order.map((row) => row.note)).toEqual([true, false, true, false]);
   expect(order[1].text).toContain("cargo check");
   expect(order[3].text).toContain("cargo test");
+  const ids = await page.locator(".conversation-process [id]").evaluateAll((nodes) => nodes.map((n) => n.id));
+  expect(new Set(ids).size).toBe(ids.length);
 
   // The trailing stream is the draft of the answer — discarded, never a note.
   await emit(page, { type: "textDelta", session: "s1", text: "总结草稿" });
@@ -650,8 +653,82 @@ test("interim stream prose flushes as notes in normal order", async ({ page }) =
 
   await expect(page.locator('[data-testid="answer-body"]')).toContainText("最终回答。");
   await expect(page.locator(".reply")).not.toContainText("总结草稿");
-  // Final reply on screen → the process has left the conversation.
-  await expect(page.locator('[data-testid="trace-note"]')).toHaveCount(0);
+  // Public updates retain their place after the final answer.
+  await expect(page.locator('[data-testid="trace-note"]')).toHaveCount(2);
+});
+
+test("persisted progress survives the final answer and reload, with keyboard-accessible tool details", async ({ page }, testInfo) => {
+  const note = (id: number, summary: string) => ({ id, at: 1_700_000_000, duration: 1, status: "done", kind: "reasoning", phase: "commentary", summary, diagnostics: "PRIVATE_DIAGNOSTICS" });
+  await stubShell(page, liveCore({
+    id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false,
+    turns: [turn("评审权限设置的执行过程", [
+      note(1, "已找到**权限入口**，接下来检查调用方。"),
+      runItem(2),
+      note(3, "<think>PRIVATE_REASONING</think>调用方已核对，开始整理评审结果。"),
+      answerItem(4, "评审结果已整理。\n\n尚未覆盖的边界也已列出。"),
+    ])],
+  }));
+  await openLive(page);
+  const notes = page.getByTestId("trace-note");
+  await expect(notes).toHaveCount(2);
+  await expect(notes.first().locator("strong")).toHaveText("权限入口");
+  await expect(notes.last()).toHaveText("调用方已核对，开始整理评审结果。");
+  await expect(page.locator(".ins-content")).toContainText("1 个步骤");
+  await expect(page.locator(".ins-section", { hasText: "模型调用" })).toContainText("尚未调用模型");
+  await expect(page.locator(".reply")).not.toContainText("PRIVATE_");
+  expect(await page.locator(".conversation-process > *").evaluateAll((nodes) => nodes.map((n) => n.tagName))).toEqual(["DIV", "DETAILS", "DIV"]);
+  const tools = page.getByTestId("process-tools");
+  await expect(tools).not.toHaveAttribute("open", "");
+  await expect(page.locator(".trace-row-inner")).not.toBeVisible();
+  await tools.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await expect(tools).toHaveAttribute("open", "");
+  await page.locator(".trace-row-inner").click();
+  await expect(page.getByTestId("trace-run-output")).toHaveText("ok");
+  await tools.locator("summary").click();
+  for (const width of [1440, 900]) {
+    await page.setViewportSize({ width, height: 900 });
+    const layout = await page.locator(".conversation-process").evaluate((el) => ({ width: el.clientWidth, scroll: el.scrollWidth }));
+    expect(layout.scroll).toBeLessThanOrEqual(layout.width + 1);
+    await page.screenshot({ path: testInfo.outputPath(`conversation-progress-${width}.png`) });
+  }
+  await page.reload();
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+  await expect(notes).toHaveCount(2);
+  await expect(notes.first()).toBeVisible();
+  await expect(page.getByTestId("answer-body")).toContainText("尚未覆盖的边界");
+});
+
+test("committed progress replaces its draft once, and internal progress counters remain out of the status line", async ({ page }) => {
+  await stubShell(page, liveCore({ id: "s1", project: "/tmp/ws/alpha", title: "新对话", at: 1_700_000_000, archived: false, turns: [] }));
+  await openLive(page);
+  await page.getByTestId("composer-input").fill("检查调用方");
+  await page.getByTestId("composer-input").press("Enter");
+  await emit(page, { type: "turnStarted", session: "s1" });
+  await emit(page, { type: "progress", session: "s1", phase: "analyze", detail: "6 context spans · repo map ready" });
+  await expect(page.getByTestId("agent-progress")).toContainText("分析任务");
+  await expect(page.getByTestId("agent-progress")).not.toContainText("context spans");
+  await emit(page, { type: "progress", session: "s1", phase: "internal-wrap-up", detail: "rounds 2/6" });
+  await expect(page.getByTestId("agent-progress")).toContainText("正在处理您的请求");
+  await expect(page.getByTestId("agent-progress")).not.toContainText("internal-wrap-up");
+  await emit(page, { type: "textDelta", session: "s1", text: "已找到调用方。" });
+  await emit(page, { type: "itemCompleted", session: "s1", item: { id: 9, at: 1_700_000_000, duration: 0, status: "done", kind: "reasoning", phase: "budget", summary: "context 20%" } });
+  const note = { id: 1, at: 1_700_000_000, duration: 1, status: "done", kind: "reasoning", phase: "commentary", summary: "已找到调用方。" };
+  await emit(page, { type: "itemStarted", session: "s1", item: { ...note, status: "running" } });
+  await emit(page, { type: "itemCompleted", session: "s1", item: note });
+  await emit(page, { type: "itemCompleted", session: "s1", item: runItem(2) });
+  await emit(page, { type: "textDelta", session: "s1", text: "最终答复的草稿" });
+  await emit(page, { type: "itemCompleted", session: "s1", item: { ...note, id: 10, phase: "analyze", summary: "输出被截断，正在恢复" } });
+  await expect(page.getByTestId("trace-note")).toHaveCount(1);
+  const model = { id: 11, at: 1_700_000_000, duration: 1, status: "running", kind: "modelCall", model: "fake", inputTokens: 0, outputTokens: 0 };
+  await emit(page, { type: "itemStarted", session: "s1", item: model });
+  await emit(page, { type: "itemCompleted", session: "s1", item: { ...model, status: "done" } });
+  await emit(page, { type: "itemCompleted", session: "s1", item: runItem(12) });
+  await emit(page, { type: "itemCompleted", session: "s1", item: answerItem(13, "检查已完成。") });
+  await emit(page, { type: "turnComplete", session: "s1" });
+  await expect(page.getByTestId("trace-note")).toHaveText("已找到调用方。");
+  await expect(page.locator(".reply")).not.toContainText("最终答复的草稿");
 });
 
 test("command output renders without ANSI escape garbage", async ({ page }) => {
@@ -672,6 +749,7 @@ test("command output renders without ANSI escape garbage", async ({ page }) => {
     }),
   );
   await openLive(page);
+  await page.locator('[data-testid="process-tools"] > summary').click();
   await page.locator(".trace-row-inner").click();
   const output = page.locator('[data-testid="trace-run-output"]');
   await expect(output).toHaveText("ok done");
@@ -870,7 +948,7 @@ test("a budget-limited plain answer stays failed and long Inspector cards never 
   await expect(page.locator(".ins-content")).toContainText("未生成");
   await expect(page.getByTestId("ins-undo")).toHaveCount(0);
   await expect(page.locator(".reply .final")).toHaveCount(1);
-  await expect(page.locator(".reply .trace-row")).toHaveCount(0);
+  await expect(page.getByTestId("process-tools")).not.toHaveAttribute("open", "");
 
   const buttons = await page.locator(".reply-actions button").evaluateAll((nodes) => nodes.map((el) => el.getBoundingClientRect().top));
   expect(buttons).toHaveLength(3);

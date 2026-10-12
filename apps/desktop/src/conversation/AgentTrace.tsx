@@ -1,5 +1,5 @@
 import { ChevronRight } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { splitDetail, type TraceStep } from "../data/types";
 import { T, failureCopy } from "../i18n";
 import { DiffRows } from "./diff";
@@ -382,19 +382,18 @@ function TypeGroup({
 function PhaseBlock({
   group,
   fileDiffs,
-  phaseIndex,
   onOpenFile = null,
 }: {
   group: PhaseGroup;
   fileDiffs?: Record<string, string> | null;
-  phaseIndex: number;
   onOpenFile?: ((path: string) => void) | null;
 }) {
   // Phases start open so the steps stay one glance away; the header line is
   // what collapses them. Step rows inside follow their own expand rules.
   const [open, setOpen] = useState<boolean | null>(null);
   const shown = open ?? true;
-  const panelId = `trace-phase-${phaseIndex}`;
+  const scope = useId().replace(/:/g, "");
+  const panelId = `trace-phase-${scope}`;
   const blocked = group.steps.some(
     (step) =>
       step.failureClass === "command_not_found" ||
@@ -440,7 +439,7 @@ function PhaseBlock({
                 key={`group-${row.group[0].type}-${index}`}
                 steps={row.group}
                 fileDiffs={fileDiffs}
-                rowKey={`${phaseIndex}-${index}`}
+                rowKey={`${scope}-${index}`}
                 onOpenFile={onOpenFile}
               />
             ) : (
@@ -448,7 +447,7 @@ function PhaseBlock({
                 key={`${row.step.type}-${row.step.chip ?? "n"}-${index}`}
                 row={row}
                 fileDiffs={fileDiffs}
-                rowKey={`${phaseIndex}-${index}`}
+                rowKey={`${scope}-${index}`}
                 onOpenFile={onOpenFile}
               />
             ),
@@ -483,7 +482,6 @@ export function AgentTrace({
           key={`${group.phase}-${index}`}
           group={group}
           fileDiffs={fileDiffs}
-          phaseIndex={index}
           onOpenFile={onOpenFile}
         />
       ))}

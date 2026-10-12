@@ -448,6 +448,11 @@ mod tests {
         session::record_ask(&dir, &id, 2, "分析项目架构").unwrap();
         let mut logger = TurnLogger::new(dir.clone(), id.clone());
         for step in [
+            Step::Reasoning {
+                summary: "PUBLIC_PROGRESS".to_owned(),
+                phase: "commentary",
+                diagnostics: None,
+            },
             Step::Thinking {
                 content: "PRIVATE_REASONING".to_owned(),
                 phase: "analyze".to_owned(),
@@ -496,7 +501,12 @@ mod tests {
         });
         logger.finish(TurnOutcome::Complete).unwrap();
         session::record_ask(&dir, &id, 4, "CURRENT_OPEN_REQUEST").unwrap();
-        let history = conversation_history(&session::load(&dir, &id).unwrap());
+        let saved = session::load(&dir, &id).unwrap();
+        assert!(saved.turns[0].items.iter().any(|item| matches!(
+            &item.kind, ItemKind::Reasoning { summary, phase, diagnostics: None }
+                if phase == "commentary" && summary == "PUBLIC_PROGRESS"
+        )));
+        let history = conversation_history(&saved);
         assert_eq!(
             history,
             vec![

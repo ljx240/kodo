@@ -251,7 +251,8 @@ test("an edit-step file chip in the trace opens the diff tab", async ({ page }) 
   await page.locator(".tree-project-main").click();
   await page.locator(".tree-conversation").click();
 
-  // No final reply → the inline trace shows the edit step.
+  await page.locator('[data-testid="process-tools"] > summary').click();
+  // Expanded execution details keep the edited file directly accessible.
   await expect(page.locator(".trace-row")).toHaveCount(1);
   await page.locator(".trace-row-inner").click();
   const chip = page.locator('[data-testid="trace-file-chip"]');
