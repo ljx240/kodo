@@ -1440,6 +1440,50 @@ test("an approval request is shown and can be allowed or denied", async ({ page 
   await expect(bar).toHaveCount(0);
 });
 
+test("permission settings stay synchronized with the composer in both directions", async ({ page }) => {
+  await stubShell(page, { settings: { permission: "ask" } });
+  await page.goto("/");
+  const trigger = page.locator(".composer-perm-trigger");
+  await expect(trigger).toHaveText("请求批准");
+  await page.locator(".sidebar-foot .nav-item").click();
+  await page.locator(".settings-nav-item", { hasText: "工具与权限" }).click();
+  const select = page.getByRole("combobox", { name: "权限模式" });
+  await select.selectOption("full");
+  await expect(trigger).toHaveText("项目内自动执行");
+  await expect(trigger).toHaveAttribute("title", /下一轮生效/);
+  await expect(select).toHaveValue("full");
+  await page.locator('.settings-modal .icon-btn[aria-label="关闭设置"]').click();
+  await trigger.click();
+  await page.getByRole("menuitem", { name: /^自动批准安全操作/ }).click();
+  await expect(trigger).toHaveText("自动批准安全操作");
+  await page.locator(".sidebar-foot .nav-item").click();
+  await page.locator(".settings-nav-item", { hasText: "工具与权限" }).click();
+  await expect(select).toHaveValue("auto");
+  await expect(page.locator(".settings-detail")).toContainText("其他命令和外部调用仍需批准");
+});
+
+test("a late permission startup read cannot overwrite a new composer choice", async ({ page }) => {
+  await stubShell(page, { settings: { permission: "ask" } });
+  await page.addInitScript(() => {
+    const state = window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
+      __releasePermissionRead?: () => void;
+    };
+    const invoke = state.__TAURI_INTERNALS__.invoke;
+    state.__TAURI_INTERNALS__.invoke = (command, args) => command === "setting" && args?.key === "permission"
+      ? new Promise((resolve) => { state.__releasePermissionRead = () => resolve("ask"); })
+      : invoke(command, args);
+  });
+  await page.goto("/");
+  const trigger = page.locator(".composer-perm-trigger");
+  await expect.poll(() => page.evaluate(() => typeof (window as unknown as { __releasePermissionRead?: unknown }).__releasePermissionRead)).toBe("function");
+  await trigger.click();
+  await page.getByRole("menuitem", { name: /^项目内自动执行/ }).click();
+  await expect(trigger).toHaveText("项目内自动执行");
+  await page.evaluate(() => (window as unknown as { __releasePermissionRead: () => void }).__releasePermissionRead());
+  await expect(trigger).toHaveText("项目内自动执行");
+});
+
 test("settings toggles persist through the stubbed settings store", async ({ page }) => {
   await stubShell(page, { settings: { "auto-detect-git-branch": "false" } });
   await page.goto("/");

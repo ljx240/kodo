@@ -340,7 +340,7 @@ export const T = {
         viewArchive: "查看归档",
         closeAria: "关闭设置",
         fallbackHint: "所选模型不可用时",
-        permissionHint: "决定运行命令、修改文件和 Git 操作是否需要您的批准。",
+        permissionHint: "权限变更从下一轮生效。自动模式允许已识别的只读命令，项目模式还允许项目文件编辑；其他命令和外部调用仍需批准。",
         localStateHint: "项目、会话与设置写入 settings.log（append-only）；API Key 在 credentials.log",
         storageDirLabel: "macOS 目录：",
         storageNoteTail: "。会话与设置保存在此目录。",

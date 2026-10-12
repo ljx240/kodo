@@ -103,7 +103,7 @@ pub enum Permission {
     Ask,
     /// Safe commands auto-run; dangerous ones and writes require approval.
     Auto,
-    /// Project-local work runs without approval; catastrophic actions still ask.
+    /// Project file tools and recognized read-only commands auto-run; other effects ask.
     Full,
 }
 
@@ -6301,6 +6301,47 @@ mod tests {
         assert!(result.ok, "output={}", result.output);
         assert!(result.output.contains("observation-loop"));
         assert_eq!(result.name, "run_command");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_status_permission_runs_in_auto_and_full_but_ask_waits() {
+        let dir = std::env::temp_dir().join(format!("kodo-permission-git-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let call = ToolCall {
+            id: ToolCallId::new("git-status"),
+            name: ToolName::RunCommand,
+            args: ToolArgs::RunCommand {
+                command: "git status --short".into(),
+            },
+        };
+        for permission in [Permission::Ask, Permission::Auto, Permission::Full] {
+            let request = temp_request(&dir, permission);
+            let (_, result) = execute_tool_call(
+                &call,
+                &dir,
+                &request,
+                &|| true,
+                &|_, _| false,
+                &mut |_| true,
+                &mut Vec::new(),
+                &mut dedup::TurnDedup::new(),
+            )
+            .unwrap();
+            let result = result.unwrap();
+            if permission == Permission::Ask {
+                assert_eq!(result.error.unwrap().code, ToolErrorCode::PermissionDenied);
+            } else {
+                assert!(result.ok, "{}", result.output);
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
