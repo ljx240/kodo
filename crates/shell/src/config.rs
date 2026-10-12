@@ -139,6 +139,19 @@ pub fn mode_from_settings(value: Option<String>) -> AgentMode {
         .unwrap_or(AgentMode::Code)
 }
 
+/// Empty restores provider presets; a custom window must fit a positive u32.
+pub fn parse_context_window(raw: &str) -> Result<Option<u32>, &'static str> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    raw.parse::<u32>()
+        .ok()
+        .filter(|window| *window > 0)
+        .map(Some)
+        .ok_or("context window must be an integer between 1 and 4294967295 tokens")
+}
+
 fn load_provider(
     read_setting: &dyn Fn(&str) -> Option<String>,
     model_override: Option<&str>,
@@ -154,12 +167,14 @@ fn load_provider(
     }
 
     let creds = creds?;
+    let context_window = read_setting("context-window-tokens")
+        .and_then(|raw| parse_context_window(&raw).ok().flatten());
     let build = |p: &ProviderJson| -> Option<Provider> {
         let api_key = settings::read_credential(creds, &p.id).unwrap_or_default();
         if api_key.is_empty() {
             return None;
         }
-        Some(Provider::new(
+        let mut provider = Provider::new(
             p.template.clone(),
             api_key,
             p.endpoint.clone(),
@@ -167,7 +182,13 @@ fn load_provider(
                 .clone()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| p.model.clone()),
-        ))
+        );
+        if let Some(window) = context_window {
+            let mut caps = provider.capabilities();
+            caps.context_window_tokens = window;
+            provider.capabilities_override = Some(caps);
+        }
+        Some(provider)
     };
 
     let active = read_setting("active-provider")
@@ -205,6 +226,7 @@ fn load_provider(
                 primary.endpoint.clone(),
                 model,
             );
+            next.capabilities_override = primary.capabilities_override;
             next.fallbacks = std::mem::take(&mut primary.fallbacks);
             primary = next;
         }
@@ -215,6 +237,17 @@ fn load_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_window_accepts_auto_and_positive_integers_only() {
+        assert_eq!(parse_context_window(""), Ok(None));
+        assert_eq!(parse_context_window("   "), Ok(None));
+        assert_eq!(parse_context_window(" 64000 "), Ok(Some(64_000)));
+        assert_eq!(parse_context_window("4294967295"), Ok(Some(u32::MAX)));
+        for raw in ["0", "-1", "1.5", "1e5", "unknown", "4294967296"] {
+            assert!(parse_context_window(raw).is_err(), "{raw}");
+        }
+    }
 
     #[test]
     fn missing_permission_is_ask() {
@@ -267,6 +300,7 @@ mod tests {
             ("default-model", "configured"),
             ("fallback-behavior", "fail"),
             ("max-output-tokens", "8192"),
+            ("context-window-tokens", "64000"),
             ("extended-thinking", "true"),
             ("local-detailed-traces", "true"),
         ]);
@@ -279,6 +313,8 @@ mod tests {
         assert!(!config.fallback_to_local);
         let provider = config.provider.unwrap();
         assert_eq!(provider.resolved_model_id(), "configured");
+        assert_eq!(provider.context_window(), 64_000);
+        assert!(provider.capabilities().native_tools);
         assert!(provider.fallbacks.is_empty());
         let next = |k: &str| {
             if k == "fallback-behavior" {
@@ -300,7 +336,23 @@ mod tests {
         assert_eq!(config.mode, AgentMode::Code);
         let provider = config.provider.unwrap();
         assert_eq!(provider.resolved_model_id(), "override");
+        assert_eq!(provider.context_window(), 64_000);
         assert_eq!(provider.fallbacks.len(), 1);
+        assert_eq!(provider.fallbacks[0].context_window(), 64_000);
+        for raw in ["", "0", "invalid", "4294967296"] {
+            let reset = |key: &str| {
+                if key == "context-window-tokens" {
+                    Some(raw.to_owned())
+                } else {
+                    next(key)
+                }
+            };
+            let provider = ShellConfig::from_sources(Overrides::default(), &reset, Some(&creds))
+                .provider
+                .unwrap();
+            assert_eq!(provider.context_window(), 128_000, "{raw}");
+            assert_eq!(provider.fallbacks[0].context_window(), 128_000, "{raw}");
+        }
         let defaults = ShellConfig::from_sources(Overrides::default(), &|_| None, None);
         assert!(!defaults.local_trace);
         assert_eq!(defaults.max_output_tokens, 4096);

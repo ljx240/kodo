@@ -17,7 +17,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { listProviderModels } from "../api";
+import { listProviderModels, setSetting, setting } from "../api";
 import { DEFAULT_PERMISSION, MODELS } from "../data/models";
 import { PERMISSIONS, PERMISSION_SETTING } from "../data/models";
 import { T } from "../i18n";
@@ -832,6 +832,9 @@ function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m
       <Field label={T.page.settings.rows.maxOutputTokens} hint={T.page.settings.rows.maxTokensHint} hintBelow wide>
         <MaxTokens />
       </Field>
+      <Field label={T.page.settings.rows.contextWindow} hint={T.page.settings.rows.contextWindowHint} hintBelow wide>
+        <ContextWindow />
+      </Field>
     </>
   );
 }
@@ -849,6 +852,63 @@ function FallbackSelect() {
 function MaxTokens() {
   const [value, setValue] = useSetting("max-output-tokens", "4096");
   return <input className="input" inputMode="numeric" aria-label={T.page.settings.rows.maxOutputTokens} value={value} onChange={(e) => setValue(e.target.value)} />;
+}
+
+function ContextWindow() {
+  const [value, setValue] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const edited = useRef(false);
+
+  useEffect(() => {
+    let alive = true;
+    void setting("context-window-tokens").then((stored) => {
+      if (!alive) return;
+      setValue(stored ?? "");
+      setLoaded(true);
+    });
+    return () => { alive = false; };
+  }, []);
+
+  const save = async () => {
+    if (!edited.current) return;
+    const raw = value.trim();
+    if (raw && (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > 4_294_967_295)) {
+      setError(T.page.settings.rows.contextWindowInvalid);
+      return;
+    }
+    setSaving(true);
+    try {
+      await setSetting("context-window-tokens", raw);
+      edited.current = false;
+      setValue(raw);
+      setError("");
+    } catch {
+      setError(T.page.settings.rows.contextWindowSaveFailed);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <input
+        className="input"
+        inputMode="numeric"
+        aria-label={T.page.settings.rows.contextWindow}
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? "context-window-error" : undefined}
+        placeholder={T.page.settings.rows.contextWindowAuto}
+        value={value}
+        disabled={!loaded || saving}
+        onChange={(event) => { edited.current = true; setValue(event.target.value); setError(""); }}
+        onBlur={() => { void save(); }}
+        onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+      />
+      {error && <span id="context-window-error" className="setting-hint" role="alert">{error}</span>}
+    </>
+  );
 }
 
 function GeneralBody({ model, onSelectModel }: { model: string; onSelectModel: (m: string) => void }) {
