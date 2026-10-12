@@ -1514,6 +1514,68 @@ const providerFixture = {
   ],
 };
 
+test("context window validates, saves and restores automatic presets", async ({ page }) => {
+  await stubShell(page, { settings: { "context-window-tokens": "64000" } });
+  await page.goto("/");
+  await page.locator(".sidebar-foot .nav-item").click();
+  await page.locator(".settings-nav-item", { hasText: "模型" }).click();
+  const input = page.getByRole("textbox", { name: "上下文窗口 tokens", exact: true });
+  await expect(input).toHaveValue("64000");
+  await input.focus();
+  await input.press("Tab");
+  for (const value of ["0", "-1", "1.5", "1e5", "4294967296", "invalid"]) {
+    await input.fill(value);
+    await input.press("Tab");
+    await expect(input).toHaveAttribute("aria-invalid", "true");
+    await expect(page.locator(".settings-detail").getByRole("alert")).toContainText("请输入正整数");
+  }
+  const writes = () => page.evaluate(() =>
+    ((window as unknown as { __settingsLog?: Array<{ key: string; value: string }> }).__settingsLog ?? [])
+      .filter((item) => item.key === "context-window-tokens"),
+  );
+  expect(await writes()).toEqual([]);
+  await input.fill("96000");
+  await input.press("Enter");
+  await expect.poll(writes).toContainEqual({ key: "context-window-tokens", value: "96000" });
+  await page.locator(".settings-nav-item", { hasText: "通用" }).click();
+  await page.locator(".settings-nav-item", { hasText: "模型" }).click();
+  await expect(input).toHaveValue("96000");
+  await input.fill("");
+  await input.press("Tab");
+  await expect.poll(writes).toContainEqual({ key: "context-window-tokens", value: "" });
+  await page.locator(".settings-nav-item", { hasText: "通用" }).click();
+  await page.locator(".settings-nav-item", { hasText: "模型" }).click();
+  await expect(input).toHaveValue("");
+  await expect(input).toHaveAttribute("placeholder", "自动（服务商预设）");
+  await expect(page.locator(".settings-detail").getByRole("alert")).toHaveCount(0);
+});
+
+test("context window reports a failed save and preserves the stored value", async ({ page }) => {
+  await stubShell(page, { settings: { "context-window-tokens": "64000" } });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const shell = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    const invoke = shell.invoke;
+    shell.invoke = (command, args) => command === "set_setting" && args?.key === "context-window-tokens"
+      ? Promise.reject("synthetic settings write failure")
+      : invoke(command, args);
+  });
+  await page.locator(".sidebar-foot .nav-item").click();
+  await page.locator(".settings-nav-item", { hasText: "模型" }).click();
+  const input = page.getByRole("textbox", { name: "上下文窗口 tokens", exact: true });
+  await expect(input).toHaveValue("64000");
+  await input.fill("96000");
+  await input.press("Enter");
+  await expect(page.locator(".settings-detail").getByRole("alert")).toHaveText("保存失败，请重试。");
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("96000");
+  await page.locator(".settings-nav-item", { hasText: "通用" }).click();
+  await page.locator(".settings-nav-item", { hasText: "模型" }).click();
+  await expect(input).toHaveValue("64000");
+});
+
 test("Models category lists the configured provider models and self-heals a stale default", async ({ page }) => {
   await stubShell(page, {
     providers: [providerFixture],

@@ -7,7 +7,8 @@
 - `main` 是唯一集成主线，始终代表可交付代码。
 - 不在 `main` 上直接开发、修改业务代码或堆积临时提交。
 - `main` 合并前必须通过与改动范围匹配的验证；未验证的代码不得合入。
-- 远程 `origin/main` 是团队共享基线。开始新任务前先同步远程信息，并确认本地基线没有落后。
+- 本地 `main` 是本地开发基线，远程 `origin/main` 是团队共享基线。开始新任务先检查本地状态和已有引用；未获联网授权时，不把远程同步作为本地评审、开发和验证的前置条件。
+- `origin/main` 是最近一次 fetch 的本地缓存，不能仅凭它与 `main` 相同就宣称远程已同步。必须记录所用基线哈希，以及远程是否已在本次任务中核验。
 - 不允许使用 `git reset --hard`、`git checkout --`、强制推送等方式覆盖他人或用户改动。
 
 ## 2. 分支命名
@@ -25,21 +26,22 @@ chore/<short-name>      工程维护
 
 规则：
 
-- 分支必须从最新 `origin/main` 创建，不从其他功能分支、旧 worktree 或未确认的本地分支创建。
+- 分支默认从已检查并确认的本地 `main` 创建；已获联网授权并完成同步时，从已核验的 `origin/main` 创建。不从其他功能分支、旧 worktree 或未确认的本地分支创建。
 - 一个任务只能有一个主工作分支。不得为同一个任务同时创建 `feat/a`、`fix/a2`、`qa/a` 等平行实现。
 - 分支名使用小写英文和短横线，避免中文、空格和含义不清的编号。
 - 分支完成后必须合入 `main`，再删除分支；不保留已经完成的“备份分支”作为隐性版本源。
 
-创建新任务的标准流程：
+创建新任务的默认本地流程（先按第 3.1 节确认现有改动归属）：
 
 ```bash
-git fetch origin --prune
-git switch main
-git pull --ff-only origin main
-git switch -c feat/<short-name>
+git status --porcelain=v1
+git rev-parse main
+git switch -c feat/<short-name> main
 ```
 
-如果工作区不干净，先暂停并记录现有改动归属，不得直接切换或覆盖。
+需要远程协作、用户要求同步或准备远程交付时，再说明必要性并取得联网授权，执行 `git fetch origin --prune`，检查 `main...origin/main` 的差异。更新本地 `main`、rebase 或 merge 仍按 Git 历史修改的审批规则执行，不自动执行 `git pull`。
+
+如果工作区不干净，先记录并确认现有改动归属。已确认与本任务无关、明确原样保留且不会被分支切换覆盖的改动，可以保留现场继续；未确认归属或存在覆盖风险时，暂停相关变更。
 
 ## 3. worktree 规则
 
@@ -54,11 +56,10 @@ git switch -c feat/<short-name>
 
 - 禁止在多个 worktree 中同时修改同一个任务的同一批文件。
 - 禁止在 worktree 中直接 checkout 另一个已被其他 worktree 占用的分支。
-- 创建 worktree 时必须从最新 `origin/main` 的新分支开始：
+- 创建 worktree 时使用第 2 节已确认的基线，默认本地流程如下；只有已获联网授权并完成同步时才改用 `origin/main`：
 
 ```bash
-git fetch origin --prune
-git worktree add -b feat/<short-name> ../kodo-worktrees/<short-name> origin/main
+git worktree add -b feat/<short-name> ../kodo-worktrees/<short-name> main
 ```
 
 - 任务结束后，确认分支已经合入 `main` 且 worktree 没有需要保留的改动，再清理：
@@ -84,10 +85,12 @@ git status --short --branch
 
 每次会话开始、结束、跨任务切换时，执行一次 `git worktree list --porcelain`、`git branch --no-merged main` 与 `git stash list`，确认没有遗留现场。出现以下任意一项，必须先停下来报告、再决定保留/提交/转移/放弃，不得直接清理：
 
-- 任何 worktree 工作区不干净（`git status --short --branch` 有输出）；
+- 任何 worktree 存在尚未确认归属的改动（`git status --porcelain=v1` 有文件记录；`--short --branch` 的分支标题不算改动）；
 - 任何 worktree 的分支早于 7 天没有新提交、或最后提交不属于当前任务；
 - 存在未合并到 `main` 的本地任务分支、却没有对应的活跃 worktree；
 - `stash list` 非空，且最近一条 stash 晚于本会话开始时间。
+
+本会话已确认原样保留的文件、分支、worktree 和 stash 不重复请求确认；只有出现新增改动、归属变化或需要清理时重新报告。新任务分支尚无独有提交时，其基线提交不属于当前任务是正常状态，不据此认定为陈旧现场。
 
 清理约束：
 
@@ -138,7 +141,7 @@ git status --short
   git status --short -- <file>               # 看是否还存在未提交改动
   ```
 
-- 若发现目标文件近期有非本任务的提交、或自己工作区里已有未提交的他人修改，立即停下来报告并请求归属确认。
+- 若发现目标文件在本会话开始后有非本任务的新提交、或自己工作区里已有未确认归属的他人修改，立即停下来报告并请求归属确认。会话开始前已检查的基线提交不重复触发确认。
 - 写完一个文件后立即做最小自检：`cargo check -p <crate>`、`npm run typecheck` 等只覆盖本文件所在 crate / 模块的命令；不要因为"已经 add 了"就跳过。
 - `Write` / `Edit` 之后立刻再 `git diff -- <file>` 一次，确认没有把不相关的改动带进来。
 
@@ -146,7 +149,7 @@ git status --short
 
 工作区里出现以下任意信号，都按"可能踩到他人改动"处理：
 
-- `git status` 出现本会话没创建过的未跟踪文件或未提交修改；
+- `git status` 出现本会话没创建过、且尚未确认归属的未跟踪文件或未提交修改；
 - `git log --branches --remotes --since="<本会话开始时间>"` 出现非本任务的提交；
 - `git stash list` 非空，且存在晚于本会话开始的 stash；
 - 工作区里有 `.kodo/`、`settings.log`、`credentials.log`、`projects.log`、`sessions/` 等本地运行态文件（不得覆盖、也不得删除他人版本）；
@@ -164,8 +167,8 @@ git status --short
 - PR 的源分支只能是当前任务分支，目标分支固定为 `main`。
 - 合并前必须确认：
   - 当前分支只包含本任务改动；
-  - 所有相关提交已推送到 PR 分支；
-  - PR 通过代码审查和 CI；
+  - 远程 PR 流程中，所有相关提交已推送到 PR 分支，PR 通过代码审查和 CI；
+  - 已明确授权的本地合并完成对应本地验证，并如实报告审查范围和未运行的远程 CI；
   - 没有未提交业务代码；
   - 没有遗漏的 worktree 分支或悬空提交。
 - 默认使用 `--no-ff` 保留任务合并边界，除非仓库维护者明确要求线性历史。
@@ -182,7 +185,16 @@ git log --oneline --decorate -n 10 main
 
 ### 5.1 合并前的基线新鲜度检查
 
-合并到 `main` 之前，必须确认当前分支没有落后或被别的工作覆盖：
+经用户明确授权合并到本地 `main` 之前，先检查本地集成基线和本任务提交：
+
+```bash
+git rev-parse main
+git merge-base HEAD main
+git log --oneline main..HEAD
+git log --oneline HEAD..main
+```
+
+准备远程 PR / 推送 / 合并时，必须在已有联网授权范围内刷新远程引用，再检查共享基线：
 
 ```bash
 git fetch origin --prune
@@ -192,6 +204,7 @@ git log --oneline origin/main..HEAD        # 本任务的独有提交
 git log --oneline HEAD..origin/main | head # main 上本任务不掌握的新提交
 ```
 
+- 未获联网授权时，可以完成已明确授权的本地合并，但必须报告“远程新鲜度未核验”；不得宣称已满足远程交付条件。已有授权覆盖的同一动作不重复确认；fetch 授权不代表 push、PR 或合并授权。
 - 若 `origin/main` 领先共同祖先很多，先决定是 rebase 还是 merge commit；不要"自动跳过"。
 - 任何 `--ours` / `--theirs` 选择都要在 PR 描述里写明语义理由。**`git merge X` 在 Y 分支执行时，`ours` = Y、`theirs` = X**；这是 2026-10-08 recover 事故中实际踩过的方向陷阱，必须显式确认。
 - 合并完成后立即对关键文件做体积 / 行数 sanity check：
@@ -233,15 +246,15 @@ git branch -r --merged origin/main
 
 ```text
 [ ] 当前工作在正确的任务分支和唯一 worktree
-[ ] 分支从最新 origin/main 创建，或已明确同步基线
+[ ] 本地开发基线已检查并记录；远程交付时已同步并核验 origin/main
 [ ] 没有覆盖其他 Agent 或用户未提交改动
 [ ] 没有提交 .kodo、.env、密钥、node_modules、target、测试结果
 [ ] git diff --check 通过
 [ ] TypeScript / 前端构建通过（如涉及 apps/desktop）
 [ ] Rust fmt、check 和相关测试通过（如涉及 Rust）
 [ ] 相关 UI / 行为 / 单元测试通过
-[ ] PR 描述包含验证结果和剩余风险
-[ ] CI 通过，且已完成独立代码审查
+[ ] 交付说明包含验证结果和剩余风险；远程 PR 流程中写入 PR 描述
+[ ] 审查范围已说明；远程 PR 流程中 CI 通过且已完成独立代码审查
 [ ] 合并后 main 和 worktree 状态已复核
 ```
 

@@ -306,7 +306,7 @@ export const T = {
       },
       categoryHints: {
         general: "基础行为与默认值",
-        models: "模型偏好与行为",
+        models: "模型偏好、上下文窗口与行为",
         provider: "配置 API 密钥与接入地址",
         tools: "控制 Kodo 可以做什么",
         projects: "工作区与项目行为",
@@ -324,6 +324,8 @@ export const T = {
         systemFont: "使用系统字体",
         extendedThinking: "扩展思考",
         maxOutputTokens: "最大输出 tokens",
+        contextWindow: "上下文窗口 tokens",
+        contextWindowAuto: "自动（服务商预设）",
         autoGitBranch: "自动识别 Git 分支",
         template: "模板",
         displayName: "显示名称",
@@ -348,6 +350,9 @@ export const T = {
         systemFontHint: "使用设备的默认界面字体。",
         extendedThinkingHint: "允许模型逐步思考",
         maxTokensHint: "新会话的默认值",
+        contextWindowHint: "输入后离开输入框保存，下一轮生效。留空使用服务商预设；自定义值适用于所有模型，达到 80% 时尝试自动压缩。设置不能扩大模型实际容量。",
+        contextWindowInvalid: "请输入正整数 token 数，或留空使用预设。",
+        contextWindowSaveFailed: "保存失败，请重试。",
         projectsHint: "在上下文中包含当前分支",
       },
       provider: {

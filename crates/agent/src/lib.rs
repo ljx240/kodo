@@ -2719,8 +2719,8 @@ pub fn run(
     clamp_plan_verification(&mut plan, request.mode, has_project);
     let budget = budget_for_task(task_type, project_summary, request.budget_family.as_deref());
     let mut machine = AgentMachine::with_plan(&request.message, plan, budget);
-    // Anchor the planned context window to the resolved provider so the bar
-    // and any auto-compaction trigger see a stable denominator all turn.
+    // Start with the configured window; refresh it after each model attempt
+    // so failover uses the window of the provider that actually answered.
     if let Some(p) = request.provider.as_ref() {
         machine.budget_mut().set_window(p.context_window());
     }
@@ -3607,13 +3607,16 @@ pub fn run(
                     // Charge the budget with the reported input tokens and
                     // surface a fresh ContextBudget tick to the UI. The bar
                     // updates every model call, not only on the final turn.
+                    machine
+                        .budget_mut()
+                        .set_window(attempt.provider.context_window());
                     machine.budget_mut().charge_tokens(attempt.input_tokens);
                     let used = attempt.input_tokens;
                     let window = machine.budget().window_tokens;
                     let percent = machine.budget().percent_used();
                     let chars = history_chars(&history);
                     let compacted = machine.budget().compacted_count;
-                    let last_model = provider.display_label();
+                    let last_model = attempt.provider.display_label();
                     let _ = emit(SinkEvent::ContextBudget {
                         used,
                         window,
@@ -6654,6 +6657,45 @@ mod tests {
         // 170k / 200k = 85% → above default 80% trigger.
         b.charge_tokens(170_000);
         b
+    }
+
+    #[test]
+    fn context_budget_tracks_the_provider_that_answered_after_failover() {
+        let dir = std::env::temp_dir().join(format!("kodo-window-failover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("primary.jsonl");
+        std::fs::write(&empty, "").unwrap();
+        let script = write_fake_summary_script(&dir, "数据仓库集中存储分析数据。");
+        let backup = Provider::new("fake", "fake-key", script.to_string_lossy(), "backup-model");
+        let mut primary =
+            Provider::new("fake", "fake-key", empty.to_string_lossy(), "primary-model");
+        let mut caps = primary.capabilities();
+        caps.context_window_tokens = 128_000;
+        primary.capabilities_override = Some(caps);
+        primary.fallbacks.push(backup);
+        let mut request = temp_request(&dir, Permission::Ask);
+        request.project = None;
+        request.message = "介绍下什么是数据仓库".to_owned();
+        request.provider = Some(primary);
+        let mut captured = Vec::new();
+        run(&request, &|| true, &|_, _| true, &mut |event| {
+            captured.push(event);
+            true
+        })
+        .unwrap();
+        assert!(captured
+            .iter()
+            .any(|event| matches!(event, SinkEvent::Failover { .. })));
+        assert!(captured.iter().any(|event| matches!(event, SinkEvent::ContextBudget { window: 32_000, last_model, .. } if last_model == "backup-model")));
+        assert!(captured.iter().any(|event| matches!(event, SinkEvent::Finished { step: Step::ContextBudget { window: 32_000, last_model, .. }, .. } if last_model == "backup-model")));
+        assert!(!captured.iter().any(|event| matches!(
+            event,
+            SinkEvent::ContextBudget {
+                window: 128_000,
+                ..
+            }
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Mid-turn compaction: summarize the middle, keep system + tail.

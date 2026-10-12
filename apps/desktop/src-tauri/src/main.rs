@@ -161,6 +161,9 @@ fn set_setting(key: String, value: String) -> Result<(), String> {
     if value.contains('\n') || value.contains('\r') {
         return Err("setting values must be a single line".to_owned());
     }
+    if key == "context-window-tokens" {
+        kodo_shell::config::parse_context_window(&value).map_err(str::to_owned)?;
+    }
     settings::append(&path, &key, &value).map_err(|error| error.to_string())
 }
 
