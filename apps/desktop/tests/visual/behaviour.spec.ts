@@ -3,10 +3,7 @@ import type { Page } from "@playwright/test";
 import { emit, project, sessionRef, stubShell } from "./shell";
 
 /**
- * A finished turn that never produced a final reply. The rule (2026-09-24):
- * the inline trace leaves once the final reply lands — so a turn with no final
- * is where the trace UI is exercised afterwards. Six steps, six kinds, no
- * consecutive same-type pairs to fold.
+ * A process-only turn with six kinds, no consecutive same-type pairs to fold.
  */
 function processOnlyShell() {
   const item = (id: number, fields: Record<string, unknown>) => ({
@@ -54,6 +51,7 @@ async function openProcessTurn(page: Page) {
   await page.goto("/");
   await page.locator(".tree-project-main").click();
   await page.locator(".tree-conversation").click();
+  await page.locator('[data-testid="process-tools"] > summary').click();
 }
 
 test("a step row opens from anywhere along it, not just its chevron", async ({ page }) => {
@@ -94,7 +92,7 @@ test("every row reports whether it is open", async ({ page }) => {
   await expect(page.locator('.trace-row-inner[aria-expanded="true"]')).toHaveCount(0);
 });
 
-test("after the final reply the process is hidden and only the reply remains", async ({ page }) => {
+test("after the final reply the folded process remains available beside the answer", async ({ page }) => {
   await stubShell(page, {
     workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "收尾")] },
     session: { id: "s1", project: "/tmp/ws/alpha", title: "收尾", at: 1_700_000_000, archived: false, turns: [] },
@@ -121,14 +119,15 @@ test("after the final reply the process is hidden and only the reply remains", a
   }
   const rows = page.locator(".trace-row");
   await expect(rows).toHaveCount(8);
+  await expect(page.getByTestId("process-tools")).not.toHaveAttribute("open", "");
+  await page.locator('[data-testid="process-tools"] > summary').click();
   const visibleRows = await rows.evaluateAll((els) =>
     els.filter((el) => el.getBoundingClientRect().bottom <= window.innerHeight).length,
   );
   expect(visibleRows).toBeGreaterThanOrEqual(6);
 
-  // The final reply lands: the conversation keeps the reply body alone — the
-  // execution process and its step/token footer are gone (they live in the
-  // Response Trace page now).
+  await page.locator('[data-testid="process-tools"] > summary').click();
+  // The answer lands; completed details stay folded and can be reopened.
   await emit(page, {
     type: "itemCompleted",
     session: "s1",
@@ -137,7 +136,10 @@ test("after the final reply the process is hidden and only the reply remains", a
   await emit(page, { type: "turnComplete", session: "s1" });
 
   await expect(page.locator('[data-testid="answer-body"]')).toContainText("做好了。");
-  await expect(page.locator(".trace-row")).toHaveCount(0);
+  await expect(page.getByTestId("process-tools")).not.toHaveAttribute("open", "");
+  await expect(rows.first()).not.toBeVisible();
+  await page.locator('[data-testid="process-tools"] > summary').click();
+  await expect(rows).toHaveCount(8);
   await expect(page.locator('[data-testid="reply-footer"]')).toHaveCount(0);
 });
 
@@ -165,6 +167,7 @@ test("consecutive same-type steps fold under one group row, second level per cal
   await emit(page, { type: "itemCompleted", session: "s1", item: call(1, 1000) });
   await emit(page, { type: "itemCompleted", session: "s1", item: call(2, 2000) });
   await emit(page, { type: "itemCompleted", session: "s1", item: call(3, 3000) });
+  await page.locator('[data-testid="process-tools"] > summary').click();
 
   // One quiet group row — label, 次数, summed duration — collapsed by default
   // because every call is done.
@@ -344,6 +347,7 @@ test("a run draws itself in one step at a time, from the events", async ({ page 
   await expect(page.locator(".trace-duration")).toHaveText("1.5s");
   // A finished command collapses its output until the reader asks for it.
   await expect(page.locator(".trace-output")).toHaveCount(0);
+  await page.locator('[data-testid="process-tools"] > summary').click();
   await page.locator(".trace-row-inner").click();
   await expect(page.locator(".trace-output")).toContainText("Finished dev profile");
 
@@ -380,6 +384,7 @@ test("trace rows follow step ids when events arrive out of order", async ({ page
   // and the second level still follows step ids, not arrival order.
   await expect(page.locator(".trace-row--group")).toHaveCount(1);
   await expect(page.locator('[data-testid="trace-group-count"]')).toHaveText("2 次");
+  await page.locator('[data-testid="process-tools"] > summary').click();
   await page.locator(".trace-row--group .trace-row-inner").click();
   await expect(page.locator(".code-chip").filter({ hasText: "first" }).first()).toBeVisible();
   const commands = await page

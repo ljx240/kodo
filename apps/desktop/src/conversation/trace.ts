@@ -62,9 +62,9 @@ export function toStep(item: ItemDto): TraceStep {
     case "reasoning":
       return {
         ...base,
-        type: "thinking",
-        detail: stripAnsi(item.summary),
-        diagnostics: item.diagnostics ?? null,
+        type: item.phase === "commentary" ? "note" : "thinking",
+        detail: item.phase === "commentary" ? sanitizeAssistantText(stripAnsi(item.summary)) : stripAnsi(item.summary),
+        diagnostics: item.phase === "commentary" ? null : item.diagnostics ?? null,
       };
     case "search":
       return { ...base, type: "search", chip: stripAnsi(item.query), detail: stripAnsi(item.detail) };
@@ -255,7 +255,7 @@ export function toReply(turn: TurnDto, running: boolean, awaitingApproval = fals
     (sum, item) => sum + (item.kind === "modelCall" ? item.outputTokens : 0),
     0,
   );
-  const tokensPending = running || (modelCalls.length > 0 && input + output === 0);
+  const tokensPending = running;
   const verify = verifyCounts(steps);
   const failureGroups = mergeFailures(steps);
 
@@ -578,6 +578,8 @@ export function sanitizeAssistantText(text: string): string {
 /** Drops every <tool_call…</tool_call> / <function=…</function> / <parameter=…</parameter> span (debris included). */
 function stripTagSpans(text: string): string {
   const pairs: Array<[string, string]> = [
+    ["<think>", "</think>"],
+    ["<thinking>", "</thinking>"],
     ["<tool_call", "</tool_call>"],
     ["<function=", "</function>"],
     ["<parameter=", "</parameter>"],

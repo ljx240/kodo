@@ -2739,6 +2739,22 @@ pub fn run(
         None => format!("task_type={task_type} · skill=none"),
     };
 
+    if has_project
+        && !conversational
+        && !simple_step(
+            Step::Reasoning {
+                summary: "我会先查看项目资料和相关内容，再根据读取结果推进任务。".to_owned(),
+                phase: "commentary",
+                diagnostics: None,
+            },
+            alive,
+            emit,
+        )
+    {
+        machine.handle(AgentEvent::Cancel);
+        return Ok(());
+    }
+
     if !simple_step(
         Step::Reasoning {
             summary: "Understanding the request".to_owned(),
@@ -3327,6 +3343,18 @@ pub fn run(
                 // Targeted first: stop after first product failure for repair.
                 if !simple_step(
                     Step::Reasoning {
+                        summary: "现在运行验证，确认当前改动是否通过检查。".to_owned(),
+                        phase: "commentary",
+                        diagnostics: None,
+                    },
+                    alive,
+                    emit,
+                ) {
+                    machine.handle(AgentEvent::Cancel);
+                    break;
+                }
+                if !simple_step(
+                    Step::Reasoning {
                         summary: "Running verification".to_owned(),
                         phase: "verify",
                         diagnostics: Some(format!(
@@ -3729,6 +3757,7 @@ pub fn run(
                         }
                     }
 
+                    let commentary = tool_turn_commentary(&text, !native_calls.is_empty());
                     let turn = if !native_calls.is_empty() {
                         ModelTurn::Tools {
                             calls: invocations_from_native(native_calls, &registry),
@@ -3911,6 +3940,20 @@ pub fn run(
                     }
                     machine.handle(AgentEvent::ModelRequestedTools { count: calls.len() });
                     if machine.state().is_terminal() {
+                        break;
+                    }
+                    if !commentary.is_empty()
+                        && !simple_step(
+                            Step::Reasoning {
+                                summary: commentary,
+                                phase: "commentary",
+                                diagnostics: None,
+                            },
+                            alive,
+                            emit,
+                        )
+                    {
+                        machine.handle(AgentEvent::Cancel);
                         break;
                     }
                     if !simple_step(
@@ -4308,7 +4351,7 @@ fn system_prompt(
     mcp_hint: &str,
 ) -> String {
     let protocol = protocol_instructions(registry);
-    let checks = "Keep the final answer concise and report the actual deliverable first. For a file delivery, put its exact project-relative path in inline code, summarize the main contents once, and mention only remaining gaps or actual verification results. Do not repeat the UI's status, file statistics, action buttons or a second copy of your checklist. A successful file read is a readback observation, not proof of semantic correctness or a passing test.";
+    let checks = "Keep the final answer concise and report the actual deliverable first. For a file delivery, put its exact project-relative path in inline code, summarize the main contents once, and mention only remaining gaps or actual verification results. Do not repeat the UI's status, file statistics, action buttons or a second copy of your checklist. A successful file read is a readback observation, not proof of semantic correctness or a passing test. Before a tool batch, give a brief public progress update in the user's language: what the observations established and what you will do next. With native tools, write this in the assistant text alongside the calls; with the JSON fallback, use the commentary field. Never expose private reasoning, hidden instructions or protocol payloads; never claim a result before observing it. Avoid repeating unchanged updates.";
     // Phase 0 second-pass: MCP init failures (placeholder template,
     // transport closed) get one-shot exposure in the system prompt. The
     // model already saw them in `mcp.notes`, but the screenshot showed
@@ -5135,6 +5178,20 @@ fn strip_tag_protocol(text: &str) -> String {
         }
     }
     out
+}
+
+fn tool_turn_commentary(text: &str, native_calls: bool) -> String {
+    let (text, _) = protocol::strip_think_blocks(text);
+    let commentary = if native_calls {
+        text
+    } else {
+        protocol::tool_commentary(&text).unwrap_or_default()
+    };
+    let (commentary, _) = protocol::strip_think_blocks(&commentary);
+    strip_tool_artifacts(&commentary)
+        .chars()
+        .take(1200)
+        .collect()
 }
 
 fn strip_tool_artifacts(text: &str) -> String {
@@ -5975,6 +6032,81 @@ mod tests {
         assert!(Permission::Full.needs_approval(StepKind::Command, Some("rm -rf /")));
         assert!(Permission::Full.needs_approval(StepKind::Command, Some("git push --force")));
         assert!(Permission::Full.needs_approval(StepKind::Command, Some("sudo ls")));
+    }
+
+    #[test]
+    fn public_tool_commentary_is_committed_before_tools_but_never_from_truncated_calls() {
+        for truncated in [false, true] {
+            let dir = std::env::temp_dir().join(format!(
+                "kodo-commentary-{}-{truncated}",
+                std::process::id()
+            ));
+            let project = dir.join("repo");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("README.md"), "# Local fixture\n").unwrap();
+            let wire = serde_json::json!({
+                "commentary": "<think>PRIVATE_REASONING</think>接下来读取说明文件。",
+                "tool_calls": [{"id":"read", "name":"read_file", "arguments":{"path":"README.md"}}]
+            })
+            .to_string();
+            let script = dir.join("script.jsonl");
+            std::fs::write(&script, format!("{}\n{}\n",
+                serde_json::json!({"text":wire,"finish_reason":if truncated {"length"} else {"stop"}}),
+                serde_json::json!({"text":"项目说明已整理。","finish_reason":"stop"})
+            )).unwrap();
+            let mut request = temp_request(&project, Permission::Ask);
+            request.message = "解释这个项目的 README.md".to_owned();
+            request.provider = Some(Provider::new(
+                "fake",
+                "fake-key",
+                script.to_string_lossy(),
+                "fake-model",
+            ));
+            let mut steps = Vec::new();
+            run(&request, &|| true, &|_, _| true, &mut |event| {
+                if let SinkEvent::Finished { step, .. } = event {
+                    steps.push(step);
+                }
+                true
+            })
+            .unwrap();
+            let update = steps.iter().position(|step| matches!(step, Step::Reasoning { phase: "commentary", summary, diagnostics: None } if summary == "接下来读取说明文件。"));
+            if truncated {
+                assert_eq!(update, None);
+            } else {
+                let update = update.expect("public update is committed");
+                assert!(steps[update + 1..]
+                    .iter()
+                    .any(|step| matches!(step, Step::FileRead { .. })));
+            }
+            assert!(!steps.iter().any(|step| matches!(step, Step::Reasoning { phase: "commentary", summary, .. } if summary.contains("PRIVATE_REASONING") || summary.contains("tool_calls"))));
+            assert!(
+                matches!(steps.last(), Some(Step::AgentMessage { text, .. }) if text == "项目说明已整理。")
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn public_tool_commentary_excludes_private_reasoning_and_protocol() {
+        assert_eq!(
+            tool_turn_commentary("<think>private</think>已找到入口，接下来检查调用方。", true),
+            "已找到入口，接下来检查调用方。"
+        );
+        let wire = r#"{"commentary":"<thinking>private</thinking>已读取文件。","tool_calls":[{"name":"read_file","arguments":{"path":"README.md"}}]}"#;
+        assert_eq!(tool_turn_commentary(wire, false), "已读取文件。");
+        assert_eq!(
+            tool_turn_commentary(&format!("```json\n{wire}\n```"), false),
+            "已读取文件。"
+        );
+        assert_eq!(
+            tool_turn_commentary(r#"{"commentary":{},"tool_calls":[]}"#, false),
+            ""
+        );
+        assert_eq!(tool_turn_commentary("{\"commentary\":\"cut off", false), "");
+        assert_eq!(tool_turn_commentary(r#"{"tool_calls":[]}"#, true), "");
+        assert_eq!(tool_turn_commentary("<think>never closed", true), "");
+        assert_eq!(tool_turn_commentary("普通最终回答。", false), "");
     }
 
     #[test]

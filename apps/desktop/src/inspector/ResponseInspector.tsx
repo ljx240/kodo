@@ -76,7 +76,7 @@ function verifyText(reply: Reply | null): string {
 }
 
 function stepsText(reply: Reply | null, running: boolean): string {
-  const steps = reply?.steps.length ?? 0;
+  const steps = reply?.steps.filter((step) => step.type !== "note").length ?? 0;
   if (steps > 0) return T.reply.stepsCount(steps);
   return running ? T.inspector.stepsPending : T.reply.stepsCount(0);
 }
@@ -443,7 +443,7 @@ export function ToolsSection({ demo, demoState, live }: InspectorData) {
     <Section icon={<Terminal size={14} strokeWidth={1.7} />} title={T.inspector.toolsUsed} count={entries.length}>
       <div className="ins-body">
         {entries.length === 0 ? (
-          <p className="ins-note">{T.inspector.stepsPending}</p>
+          <p className="ins-note">{live?.running ? T.inspector.stepsPending : T.inspector.toolsNone}</p>
         ) : (
           entries.map(([name, count]) => <ToolRow key={name} name={name} count={count} />)
         )}
@@ -458,7 +458,7 @@ export function LlmSection({ demo, demoState, live, detailed = false }: Inspecto
     <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title={T.inspector.llmCalls} count={calls.length}>
       <div className="ins-body">
         {calls.length === 0 ? (
-          <p className="ins-note">{T.reply.statsPending}</p>
+          <p className="ins-note">{T.inspector.noModelCalls}</p>
         ) : (
           calls.map((call, index) => (
             <div key={index} className="llm-call">

@@ -2,7 +2,7 @@ import { BarChart3, Check, CircleAlert, Copy, RefreshCw, Square } from "lucide-r
 import { useEffect, useRef, useState } from "react";
 import type { DeliveryStatus, VerificationStatus } from "../api";
 import { T } from "../i18n";
-import { AgentTrace } from "./AgentTrace";
+import { ConversationProcess } from "./ConversationProcess";
 import { ChangedFilesSummary } from "./ChangedFilesSummary";
 import { Markdown } from "./Markdown";
 import type { FailureGroup, Reply } from "./trace";
@@ -89,7 +89,6 @@ export function AssistantReply({
   conflicts = [],
 }: Props) {
   const [copied, setCopied] = useState(false);
-  const [answerExpanded, setAnswerExpanded] = useState(false);
   const [ignoredVerification, setIgnoredVerification] = useState(false);
   const copyTimer = useRef<number | null>(null);
 
@@ -114,19 +113,16 @@ export function AssistantReply({
   const statusLine = waitingApproval
     ? T.reply.waitingApproval
     : progress
-      ? `${publicPhase(progress.phase)}${progress.detail ? ` · ${progress.detail}` : ""}`
+      ? `${publicPhase(progress.phase)}${elapsed != null ? ` · ${formatElapsed(elapsed)}` : ""}`
       : running
         ? elapsed != null
           ? `${T.reply.working}… ${formatElapsed(elapsed)}`
           : `${T.reply.working}...`
         : null;
 
-  // No streaming draft up top: the answer surface appears only once the final
-  // reply lands (2026-09-23). Interim prose rides in the trace in order.
+  // Drafts stay hidden; only committed public updates and the final answer render.
   const showFinal = Boolean(reply.final);
   const finalText = reply.final ?? "";
-  const { summary, rest } = summarizeAnswer(finalText);
-  const answerBody = answerExpanded ? finalText : summary;
 
   const budgetFailure = reply.failureReason === "budget_exhausted";
   const environmentBlocked = reply.status.verification === "blocked" || reply.failureGroups.some(
@@ -202,12 +198,8 @@ export function AssistantReply({
         </p>
       )}
 
-      {/* The process stays on screen only while there is no final reply —
-          running turns, and turns that ended without one. Once the answer
-          lands the conversation shows the reply alone; the full process lives
-          in the Response Trace page (2026-09-24). */}
-      {!showFinal && (
-        <AgentTrace steps={reply.steps} fileDiffs={fileDiffs} onOpenFile={onOpenFile} />
+      {reply.steps.length > 0 && (
+        <ConversationProcess steps={reply.steps} fileDiffs={fileDiffs} onOpenFile={onOpenFile} onOpenPath={onOpenPath} />
       )}
 
       {/* Conversational answers render as the sentence alone (2026-09-23):
@@ -246,18 +238,7 @@ export function AssistantReply({
           {/* 2. Result — failures and pending questions never claim completion. */}
           <section className="answer-body" data-testid="answer-body">
             <h3 className="answer-section-head">{documentsOnly && reply.status.outcome === "completed" ? T.reply.documentResult : reply.status.outcome === "completed" ? T.reply.doneThisTurn : T.reply.resultThisTurn}</h3>
-            <Markdown text={answerBody} onOpenPath={onOpenPath} />
-            {rest && (
-              <button
-                type="button"
-                className="btn btn--sm answer-expand"
-                data-testid="answer-expand"
-                aria-expanded={answerExpanded}
-                onClick={() => setAnswerExpanded((value) => !value)}
-              >
-                {answerExpanded ? T.action.collapseAnswer : T.action.expandAnswer}
-              </button>
-            )}
+            <Markdown text={finalText} onOpenPath={onOpenPath} />
           </section>
 
           {/* 3. 验证结果 — its own card; a blocked check never cancels the answer. */}
@@ -504,29 +485,10 @@ function FailureGroupCard({ group }: { group: FailureGroup }) {
   );
 }
 
-/** Structured phase codes map to public phase labels; anything else shows through. */
+/** Internal phase names and diagnostic counters stay in the trace. */
 function publicPhase(phase: string): string {
   const known = T.phase as Record<string, string>;
-  return known[phase] ?? phase;
-}
-
-/**
- * Long answers read as a summary first: paragraphs up to a soft cap, with the
- * full text behind 展开完整回答. The cut is on a paragraph boundary so the
- * summary never ends mid-line.
- */
-const ANSWER_SUMMARY_CHARS = 480;
-
-function summarizeAnswer(text: string): { summary: string; rest: string | null } {
-  if (!text || text.length <= ANSWER_SUMMARY_CHARS) return { summary: text, rest: null };
-  const paragraphs = text.split(/\n{2,}/);
-  let summary = "";
-  for (const para of paragraphs) {
-    if (summary && summary.length + para.length + 2 > ANSWER_SUMMARY_CHARS) break;
-    summary = summary ? `${summary}\n\n${para}` : para;
-  }
-  if (!summary) summary = text.slice(0, ANSWER_SUMMARY_CHARS);
-  return { summary, rest: text };
+  return known[phase] ?? T.reply.working;
 }
 
 function formatElapsed(seconds: number): string {

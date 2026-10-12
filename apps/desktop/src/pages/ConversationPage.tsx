@@ -732,12 +732,13 @@ export function ConversationPage({
     return () => onConvActions?.(null);
   }, [liveSession, sessionId, onConvActions]);
 
-  // Streaming prose between tool steps is genuine interim judgment — it flushes
-  // as a note before the item whose boundary caught it, so the trace reads in
-  // arrival order. Model-call and answer items never flush: text they carry is
-  // either the call's own payload or the draft of the final answer.
+  // Legacy streams flush only at tool boundaries; bookkeeping and retries are not public updates.
   const flushInterim = (item: ItemDto) => {
     if (item.kind === "modelCall" || item.kind === "agentMessage") return;
+    if (item.kind === "reasoning") {
+      if (item.phase === "commentary") textBufRef.current = "";
+      return;
+    }
     const text = textBufRef.current.trim();
     textBufRef.current = "";
     if (!text) return;
@@ -833,6 +834,7 @@ export function ConversationPage({
       return;
     }
     if (event.type === "itemStarted" || event.type === "itemCompleted") {
+      if (event.type === "itemStarted" && event.item.kind === "modelCall") textBufRef.current = "";
       flushInterim(event.item);
     }
     if (event.type === "itemCompleted" && event.item.kind === "agentMessage") {

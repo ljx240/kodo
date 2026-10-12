@@ -1097,6 +1097,12 @@ fn strip_code_fence_json(text: &str) -> &str {
     without_close.trim()
 }
 
+/// Optional public progress text from the JSON fallback, separate from tool arguments.
+pub fn tool_commentary(text: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(strip_code_fence_json(text)).ok()?;
+    value.get("commentary")?.as_str().map(str::to_owned)
+}
+
 fn next_id(provided: Option<String>, index: usize) -> ToolCallId {
     let raw = provided.unwrap_or_else(|| format!("tc_{index}"));
     ToolCallId::new(raw)
@@ -1660,10 +1666,12 @@ pub fn protocol_instructions(registry: &ToolRegistry) -> String {
         return String::new();
     }
     format!(
-        "Tool protocol: when you need a tool, reply with ONLY one JSON object (no prose):\n\
-         {{\"tool_calls\":[{{\"id\":\"1\",\"name\":\"<tool>\",\"arguments\":{{…}}}}]}}\n\
+        "Tool protocol: prefer native tool calls when available, with public progress in the assistant text.\n\
+         If native tools are unavailable, reply with ONLY one JSON object (no prose outside it):\n\
+         {{\"commentary\":\"<brief public progress update>\",\"tool_calls\":[{{\"id\":\"1\",\"name\":\"<tool>\",\"arguments\":{{…}}}}]}}\n\
          Available tools: {}.\n\
          You may put multiple calls in `tool_calls`.\n\
+         Use the optional `commentary` field for a short user-facing update, never private reasoning or tool arguments.\n\
          After tools run you will receive an <observations> block with matching ids.\n\
          When finished, answer in prose without JSON tool calls.",
         names.join(", ")

@@ -25,7 +25,7 @@ export function LlmCallsDetailed({ demo, demoState, live }: {
     <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title={T.inspector.llmCalls} count={calls.length}>
       <div className="ins-body">
         {calls.length === 0 ? (
-          <p className="ins-note">暂无模型调用。</p>
+          <p className="ins-note">{T.inspector.noModelCalls}</p>
         ) : (
           calls.map((call, index) => (
             <div key={`${call.model}-${index}`} className="llm-call">
@@ -56,10 +56,10 @@ function MetadataSection({ demo, demoState, live }: {
     <Section icon={<BarChart3 size={14} strokeWidth={1.7} />} title={T.inspector.metadata}>
       <div className="ins-body">
         <MetaRow label={T.inspector.model}>
-          {!demo ? (live?.reply?.steps.length ? "见 LLM 卡片" : "—") : meta?.model ?? "—"}
+          {!demo ? (live?.reply?.models.length ? "见 LLM 卡片" : "—") : meta?.model ?? "—"}
         </MetaRow>
         <MetaRow label={T.inspector.totalSteps}>
-          {!demo ? (live?.reply?.steps.length ?? 0) : meta?.totalSteps ?? 0}
+          {!demo ? (live?.reply?.steps.filter((step) => step.type !== "note").length ?? 0) : meta?.totalSteps ?? 0}
         </MetaRow>
         <MetaRow label={T.inspector.workspace}>
           {!demo ? live?.projectPath || "—" : meta?.workspace ?? "—"}
