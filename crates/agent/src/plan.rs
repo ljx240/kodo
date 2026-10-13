@@ -1041,6 +1041,99 @@ impl TaskPlan {
         flipped_unused(item);
     }
 
+    /// Check the report itself; successful reads cannot substitute for delivery.
+    pub fn validate_final_answer(&self, text: &str) -> Vec<String> {
+        if !self.requires_final_answer {
+            return Vec::new();
+        }
+        let lower = text.to_ascii_lowercase();
+        let contains_any = |words: &[&str]| words.iter().any(|word| lower.contains(word));
+        let scoring = contains_any(&["评分", "得分", "score", "rating"]);
+        let numeric_score = text.lines().any(|line| {
+            let line_lower = line.to_ascii_lowercase();
+            let labelled = ["评分", "得分", "score", "rating"].iter().any(|word| {
+                line_lower.match_indices(*word).any(|(start, _)| {
+                    line_lower[start + word.len()..]
+                        .trim_start_matches(|ch: char| {
+                            ch.is_whitespace() || matches!(ch, ':' | '：' | '=' | '*' | '`')
+                        })
+                        .starts_with(|ch: char| ch.is_ascii_digit())
+                })
+            });
+            let table_score = scoring
+                && line.trim_start().starts_with('|')
+                && line.split('|').any(|cell| {
+                    cell.trim()
+                        .parse::<f64>()
+                        .is_ok_and(|value| value.is_finite() && value >= 0.0)
+                });
+            labelled || table_score
+        });
+        let citation = text
+            .split(|ch: char| {
+                ch.is_whitespace() || matches!(ch, '`' | '(' | ')' | '[' | ']' | '，' | '；')
+            })
+            .any(|token| {
+                let Some((path, line)) = token.rsplit_once(':') else {
+                    return false;
+                };
+                let ext = path.rsplit('.').next().unwrap_or("");
+                let known_file = matches!(
+                    ext,
+                    "rs" | "ts"
+                        | "tsx"
+                        | "js"
+                        | "jsx"
+                        | "vue"
+                        | "py"
+                        | "go"
+                        | "java"
+                        | "toml"
+                        | "json"
+                        | "md"
+                        | "css"
+                        | "yml"
+                        | "yaml"
+                        | "sh"
+                        | "sql"
+                        | "c"
+                        | "cpp"
+                        | "h"
+                );
+                known_file
+                    && line
+                        .chars()
+                        .take_while(|ch| ch.is_ascii_digit())
+                        .collect::<String>()
+                        .parse::<usize>()
+                        .is_ok_and(|line| line > 0)
+            });
+        let mut errors = Vec::new();
+        if !scoring || !numeric_score {
+            errors.push("缺少实际数值评分，进度说明不是评分报告".into());
+        }
+        if !contains_any(&[
+            "维度",
+            "评分项",
+            "标准",
+            "criteria",
+            "dimension",
+            "category",
+        ]) {
+            errors.push("缺少评分项目或评分依据".into());
+        }
+        if !contains_any(&["问题", "风险", "发现", "finding", "issue", "risk"]) {
+            errors.push("缺少问题或风险分析".into());
+        }
+        if !contains_any(&["建议", "方案", "修复", "优化", "recommend", "fix", "improv"]) {
+            errors.push("缺少解决方案或优化建议".into());
+        }
+        if !citation {
+            errors.push("缺少具体文件:行号证据".into());
+        }
+        errors
+    }
+
     /// Completion gate for Finish / `model_claimed_done` evaluation.
     ///
     /// Passes only when **all** hold:
@@ -1062,6 +1155,13 @@ impl TaskPlan {
 
         // Claim flags are evaluation triggers, not observations.
         let _claimed = evidence.model_claimed_done;
+
+        if self.requires_final_answer {
+            match &evidence.final_answer_errors {
+                Some(errors) => failures.extend(errors.iter().cloned()),
+                None => failures.push("final assistant report has not been validated".into()),
+            }
+        }
 
         for s in &self.subtasks {
             if s.is_done() && s.evidence.is_empty() {
@@ -1448,6 +1548,9 @@ pub struct AcceptanceEvidence {
     /// True when at least one targeted verification command passed this turn.
     pub partial_verified: bool,
     pub deliverable_errors: Option<Vec<String>>,
+    /// Only validation results are persisted, never a private reasoning body.
+    #[serde(default)]
+    pub final_answer_errors: Option<Vec<String>>,
 }
 
 impl AcceptanceEvidence {
@@ -1600,6 +1703,34 @@ mod tests {
         assert!(plan.requires_verify);
         assert!(plan.subtasks.iter().any(|s| s.kind == SubtaskKind::Edit));
         assert!(plan.subtasks.iter().any(|s| s.kind == SubtaskKind::Verify));
+    }
+
+    #[test]
+    fn review_report_contract_rejects_progress_even_after_successful_reads() {
+        let skill = crate::skill::SkillRegistry::builtin()
+            .select(crate::classify::TaskType::CodeReview)
+            .unwrap()
+            .clone();
+        let plan = TaskPlan::from_skill(&skill, "详细代码评审及评分");
+        let progress = "已确认项目结构，下一步分析问题和方案；评分会参考 README.md:1。";
+        let mut evidence = AcceptanceEvidence::default();
+        evidence.absorb_results(&[read_ok()]);
+        evidence.model_claimed_done = true;
+        assert!(!plan.evaluate_acceptance(&evidence).ok);
+        evidence.final_answer_errors = Some(plan.validate_final_answer(progress));
+        assert!(!plan.evaluate_acceptance(&evidence).ok);
+        let report = "评分项目：权限边界。评分：80/100。\n问题：README.md:1 没有说明取消语义。\n解决方案：补充边界说明和验证用例。";
+        assert!(plan.validate_final_answer(report).is_empty());
+        let table =
+            "评分项目 | 得分\n| 权限边界 | 80 |\n问题：README.md:1 缺少说明。优化建议：补充说明。";
+        assert!(plan.validate_final_answer(table).is_empty());
+        let mut legacy = serde_json::to_value(&evidence).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("final_answer_errors");
+        let restored: AcceptanceEvidence = serde_json::from_value(legacy).unwrap();
+        assert!(restored.final_answer_errors.is_none());
     }
 
     /// Plan-level final-answer gate (2026-10-13): read-only review skills

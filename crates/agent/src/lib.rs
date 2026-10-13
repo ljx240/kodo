@@ -3877,7 +3877,7 @@ pub fn run(
 
             // Read-only answers reserve the last decision round for prose.
             // Keep the hard cap; stop gathering before there is no room to answer.
-            let finalize_answer = conversational
+            let finalize_answer = (conversational || machine.plan().requires_final_answer)
                 && !wrote_files
                 && (stop_gathering
                     || machine.budget().rounds_used + 1 >= machine.budget().max_rounds
@@ -3934,7 +3934,8 @@ pub fn run(
                 });
                 wrap_up_pushed = true;
             }
-            let call_schemas = if finalize_answer || final_only_requested {
+            let final_only_call = finalize_answer || final_only_requested;
+            let call_schemas = if final_only_call {
                 &[][..]
             } else {
                 schemas.as_slice()
@@ -4226,6 +4227,42 @@ pub fn run(
                     if calls.is_empty() {
                         answer = strip_tool_artifacts(&assistant_text);
                         checks = checks_from(&assistant_text);
+                        let report_errors = machine.plan().validate_final_answer(&answer);
+                        if let Some(evidence) = machine.evidence_mut() {
+                            evidence.final_answer_errors = Some(report_errors.clone());
+                        }
+                        if !answer.trim().is_empty() && !report_errors.is_empty() {
+                            // Interim prose stays in progress; it cannot satisfy report delivery.
+                            if !simple_step(
+                                Step::Reasoning {
+                                    summary: answer.chars().take(1200).collect(),
+                                    phase: "commentary",
+                                    diagnostics: None,
+                                },
+                                alive,
+                                emit,
+                            ) {
+                                machine.handle(AgentEvent::Cancel);
+                                break;
+                            }
+                            notes.push(format!(
+                                "review report incomplete: {}",
+                                report_errors.join("；")
+                            ));
+                            answer.clear();
+                            checks.clear();
+                            machine.budget_mut().rounds_used =
+                                machine.budget().rounds_used.saturating_add(1);
+                            if machine.budget().rounds_exhausted() {
+                                machine.handle(AgentEvent::BudgetExceeded);
+                                break;
+                            }
+                            history.push(ProviderMessage::user(format!(
+                                "上一轮是进度说明或不完整报告，任务尚未交付：{}。继续必要的代码读取，随后给出完整报告：评分项目及实际数值评分、问题分析、具体文件:行号、解决方案。不要用下一步计划代替结果，不得编造证据或声称未执行的验证通过。",
+                                report_errors.join("；")
+                            )));
+                            continue;
+                        }
                         if answer.trim().is_empty() {
                             // Plan-level final-answer gate: read-only review
                             // skills set `requires_final_answer = true` so the
@@ -4333,7 +4370,7 @@ pub fn run(
                         continue;
                     }
 
-                    if finalize_answer {
+                    if final_only_call {
                         machine.budget_mut().rounds_used =
                             machine.budget().rounds_used.saturating_add(1);
                         machine.handle(AgentEvent::BudgetExceeded);
@@ -4674,7 +4711,7 @@ pub fn run(
                 } else if wrote_files {
                     FinalStatus::NotVerified
                 } else if machine.state() == &AgentState::Finish {
-                    if request.mode == AgentMode::Work {
+                    if request.mode == AgentMode::Work || machine.plan().requires_final_answer {
                         // Work never verifies (DESIGN.md §11): a delivered
                         // work answer is completion, not a partial verify.
                         FinalStatus::NotVerified
@@ -5135,6 +5172,7 @@ fn build_persona_template_vars(
 /// and edit work is stripped when the skill forbids mutations.
 fn refine_plan_with_skill(mut plan: TaskPlan, skill: &SkillSpec) -> TaskPlan {
     plan.requires_verify = skill.verification_policy.needs_run();
+    plan.requires_final_answer = skill.requires_final_answer;
     // Model-refined plans start at the code bar; re-stamp the work-mode
     // deliverable bar (DESIGN.md §11) from the active skill's task family.
     plan.deliverable_bar = skill.applicable_task_types.contains(&TaskType::Work);
@@ -6347,6 +6385,114 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+        }
+    }
+
+    #[test]
+    fn review_progress_continues_until_a_report_and_never_fakes_verification() {
+        let progress = "已确认项目结构。下一步聚焦信任边界；评分会区分问题和风险。]<]minimax[>[";
+        let report = "评分项目：权限边界。评分：80/100。\n问题：README.md:1 缺少取消语义。\n解决方案：补充边界说明。]<]minimax[>[";
+        for case in ["recovers", "never-reports", "retry-cannot-run-tools"] {
+            let dir = std::env::temp_dir()
+                .join(format!("kodo-review-report-{}-{case}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("README.md"), "# Offline fixture\n").unwrap();
+            let read = serde_json::json!({"text": serde_json::json!({"tool_calls": [{"id": "r", "name": "read_file", "arguments": {"path": "README.md"}}]}).to_string()});
+            let mut responses = vec![read.clone()];
+            match case {
+                "recovers" => responses.extend([
+                    serde_json::json!({"text": progress}),
+                    read.clone(),
+                    serde_json::json!({"text": report}),
+                ]),
+                "never-reports" => {
+                    responses.extend((0..20).map(|_| serde_json::json!({"text": progress})))
+                }
+                _ => responses.extend([serde_json::json!({"text": ""}), read]),
+            }
+            let script = dir.join("responses.jsonl");
+            std::fs::write(
+                &script,
+                responses
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            let mut request = temp_request(&dir, Permission::Auto);
+            request.message = "为我做一个详细的代码评审，为我输出详细评分，按照该项目情况设定评分项目 然后评分 分析问题和解决方案".into();
+            request.provider = Some(Provider::new(
+                "fake",
+                "fixture-key",
+                script.to_string_lossy(),
+                "fixture-model",
+            ));
+            let mut calls = 0;
+            let mut reads = 0;
+            let mut saw_progress = false;
+            let mut result = None;
+            run(&request, &|| true, &|_, _| false, &mut |event| {
+                match event {
+                    SinkEvent::Started {
+                        step: Step::ModelCall { .. },
+                    } => calls += 1,
+                    SinkEvent::Finished {
+                        step: Step::FileRead { .. },
+                        ..
+                    } => reads += 1,
+                    SinkEvent::Finished {
+                        step:
+                            Step::Reasoning {
+                                summary,
+                                phase: "commentary",
+                                ..
+                            },
+                        ..
+                    } => {
+                        assert!(!summary.contains("minimax"), "{summary}");
+                        saw_progress |= summary.contains("下一步聚焦");
+                    }
+                    SinkEvent::Finished {
+                        step:
+                            Step::AgentMessage {
+                                text,
+                                delivery,
+                                verification,
+                                ..
+                            },
+                        ..
+                    } => result = Some((text, delivery, verification)),
+                    _ => {}
+                }
+                true
+            })
+            .unwrap();
+            let (text, delivery, verification) = result.unwrap();
+            assert!(!text.contains("minimax"), "{case}: {text}");
+            assert_eq!(verification, "not_run", "{case}: {text}");
+            if case == "recovers" {
+                assert!(saw_progress);
+                assert_eq!(calls, 4);
+                assert_eq!(delivery, "ready", "{text}");
+                assert!(text.contains("评分：80/100") && text.contains("README.md:1"));
+            } else {
+                assert_eq!(delivery, "failed", "{case}: {text}");
+                assert!(calls <= 12, "{case}: calls={calls}");
+                assert!(
+                    !text.contains("下一步聚焦"),
+                    "interim prose leaked into delivery"
+                );
+                if case == "retry-cannot-run-tools" {
+                    assert_eq!(calls, 3);
+                    assert_eq!(
+                        reads, 1,
+                        "final-only retry must not execute the requested tool"
+                    );
+                }
+            }
+            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
