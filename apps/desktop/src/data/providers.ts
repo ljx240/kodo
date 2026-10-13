@@ -17,6 +17,14 @@ export type ModelOption = {
    *  seeded catalog entries — treat undefined as opt-in (the template
    *  default kicks in). */
   vision?: boolean;
+  /** Whether this channel is suitable for tasks that need a long final
+   *  assistant message. Preview / flash / latest channels set this to
+   *  `false` via the suffix sniffer in
+   *  `kodo_agent::resolve_model_identity`; the desktop picker reads it
+   *  to render a "预览通道" warning on the active model. Undefined on
+   *  legacy seeded catalog entries — treated as `true` (the safe
+   *  default) so older data does not regress into a warning storm. */
+  suitableForLong?: boolean;
 };
 
 export type ProviderTemplate = {
@@ -169,12 +177,14 @@ export async function loadProviders(): Promise<ProviderConfig[]> {
       // wire format is camelCase; internal ModelOption is snake_case.
       // `vision` rides both ways (Tauri command returns it on the way
       // down; undefined entries fall back to the template default at
-      // notice-render time).
+      // notice-render time). `suitableForLong` rides too so the picker
+      // can render the preview-channel warning on the active model.
       models: dto.models
         ? dto.models.map((m) => ({
             display_name: m.displayName,
             model_id: m.modelId,
             vision: m.vision,
+            suitableForLong: m.suitableForLong,
           }))
         : undefined,
     }),
@@ -191,10 +201,15 @@ export async function saveProviders(providers: ProviderConfig[]): Promise<void> 
       // Pass through `vision` when known so the Tauri list_provider_models
       // recompute agrees with the frontend catalog. `undefined` entries
       // (e.g. user-added custom model ids) get the template default.
+      // `suitableForLong` rides the wire too so the picker can render
+      // the preview-channel warning without re-sniffing on every read.
       models: (p.models ?? []).map((m) => ({
         modelId: m.model_id,
         displayName: m.display_name,
         ...(m.vision === undefined ? {} : { vision: m.vision }),
+        ...(m.suitableForLong === undefined
+          ? {}
+          : { suitableForLong: m.suitableForLong }),
       })),
     })),
   );
@@ -248,6 +263,34 @@ function prettifyModelLabel(raw: string): string {
   const s = raw.trim();
   if (!s) return "";
   return s.replace(VERSION_SUFFIX, "") || raw;
+}
+
+/** Whether the given model id is a preview / flash / latest channel.
+ *  Mirrors `kodo_agent::looks_like_preview_channel` — keep them in sync
+ *  so the desktop picker and the agent loop agree on what counts as
+ *  "preview". Used both for catalog migration and for the per-row
+ *  warning rendered in the settings picker. */
+export function looksLikePreviewChannel(modelId: string): boolean {
+  const id = modelId.trim().toLowerCase();
+  if (!id) return false;
+  return (
+    id.endsWith("-preview") ||
+    id.endsWith("-flash-preview") ||
+    id.endsWith("-flash") ||
+    id.endsWith("-latest") ||
+    id.includes("-flash-preview-")
+  );
+}
+
+/** Whether the given model is suitable for tasks that need a long final
+ *  assistant message. Undefined → safe default `true` so legacy catalog
+ *  entries never render a false-positive warning. */
+export function isSuitableForLong(model: { suitableForLong?: boolean; model_id: string }): boolean {
+  if (model.suitableForLong !== undefined) return model.suitableForLong;
+  // Fall back to the local suffix sniffer so a catalog row that hasn't
+  // been refreshed through the Tauri list command still gets the
+  // warning. Matches the agent-side sniffer exactly.
+  return !looksLikePreviewChannel(model.model_id);
 }
 
 /** What the provider picker shows. */

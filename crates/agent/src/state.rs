@@ -327,6 +327,14 @@ pub struct AgentMachine {
     evidence: AcceptanceEvidence,
     last_acceptance: Option<AcceptanceReport>,
     pending_tool_count: usize,
+    /// Denials introduced by the **most recent** ToolsFinished batch. Reset
+    /// to false before each `absorb` call, then set true if any result in
+    /// that batch is a permission denial. `evidence.denied_tools` keeps the
+    /// full audit trail; this flag drives recovery without poisoning later
+    /// successful batches (2026-10-13 incident: cumulative `denied_tools`
+    /// kept re-triggering Plan even after the model had moved on to legal
+    /// read tools).
+    recent_batch_denied: bool,
 }
 
 impl AgentMachine {
@@ -338,6 +346,7 @@ impl AgentMachine {
             evidence: AcceptanceEvidence::default(),
             last_acceptance: None,
             pending_tool_count: 0,
+            recent_batch_denied: false,
         }
     }
 
@@ -454,6 +463,39 @@ impl AgentMachine {
             (S::Plan, ContextGathered) => Ok(S::GatherContext),
             // Allow direct jump if context was gathered before plan locked in.
             (S::Plan, PlanReady) => Ok(S::Plan),
+            // After a tool denial we drop to Plan so the loop can re-plan
+            // around the blocked call. The model almost always responds by
+            // either re-emitting a refined plan or by requesting legal tools
+            // immediately — Plan must accept both, otherwise the recovery
+            // path strands the turn on illegal-transition rejections
+            // (2026-10-13 incident: denied git diff → state sat in Plan →
+            // model re-asked with read_file → ModelRequestedTools rejected
+            // because Plan had no arm for it).
+            (S::Plan, ModelRequestedTools { count }) => {
+                if self.budget.tools_exhausted()
+                    || count
+                        > self
+                            .budget
+                            .max_tool_calls
+                            .saturating_sub(self.budget.tool_calls_used)
+                {
+                    return Ok(S::Failed {
+                        reason: FailReason::BudgetExhausted,
+                    });
+                }
+                self.budget.rounds_used = self.budget.rounds_used.saturating_add(1);
+                self.pending_tool_count = count;
+                self.plan.mark_current_running();
+                Ok(S::Execute)
+            }
+            (S::Plan, ToolsFinished { results }) => {
+                self.absorb(results);
+                self.after_tools(S::Plan)
+            }
+            (S::Plan, ModelClaimedDone) => {
+                self.evidence.model_claimed_done = true;
+                self.try_finish(S::Plan)
+            }
 
             // All tool-request phases share the same budget protection.
             (
@@ -589,6 +631,10 @@ impl AgentMachine {
     }
 
     fn absorb(&mut self, results: Vec<ToolResult>) {
+        // Reset batch-level denial flag before absorbing so each batch is
+        // judged on its own (the audit log in `evidence.denied_tools` keeps
+        // the cumulative trail for inspection).
+        self.recent_batch_denied = false;
         self.budget.tool_calls_used = self
             .budget
             .tool_calls_used
@@ -617,12 +663,25 @@ impl AgentMachine {
         self.plan.absorb_tool_results(&results);
         self.evidence
             .absorb_results_with_expectation(&results, expectation.as_ref());
+        for r in &results {
+            if !r.ok
+                && r.error
+                    .as_ref()
+                    .map(|e| e.code == crate::protocol::ToolErrorCode::PermissionDenied)
+                    .unwrap_or(false)
+            {
+                self.recent_batch_denied = true;
+            }
+        }
         self.pending_tool_count = 0;
     }
 
     fn after_tools(&mut self, from: AgentState) -> Result<AgentState, String> {
-        // Tool denial → replan if repairs remain, else fail safely.
-        if !self.evidence.denied_tools.is_empty() {
+        // Tool denial in the most recent batch → replan if repairs remain.
+        // Only the just-absorbed batch drives recovery: a later successful
+        // batch must not be punished for an earlier audit entry.
+        if self.recent_batch_denied {
+            self.recent_batch_denied = false;
             if !self.budget.repairs_exhausted() {
                 self.budget.repairs_used += 1;
                 // Back to Plan so the loop can re-plan around the denial.
@@ -1710,5 +1769,239 @@ mod tests {
         assert_eq!(nr, usize::MAX, "must saturate, not wrap");
         assert_eq!(nt, usize::MAX, "must saturate, not wrap");
         assert_eq!(b.max_repairs, 3);
+    }
+
+    /// 2026-10-13 regression: after a tool denial drops state to Plan, the
+    /// model often immediately retries via legal tools. Plan must accept
+    /// ModelRequestedTools / ToolsFinished / ModelClaimedDone — otherwise
+    /// the recovery transition `rejects` and the loop silently continues.
+    #[test]
+    fn plan_accepts_tool_request_after_denial_recovery() {
+        let mut m = AgentMachine::new("review git diff", Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+
+        // First batch: denial → replan.
+        let denied = ToolResult::failure(
+            ToolCallId::new("d"),
+            ToolName::RunCommand.label(),
+            "git diff",
+            ToolError::permission_denied("denied by user"),
+        );
+        let t = m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        assert!(matches!(t, Transition::Advanced { .. }));
+        let t = m.handle(AgentEvent::ToolsFinished {
+            results: vec![denied],
+        });
+        assert_eq!(m.state(), &AgentState::Plan, "denial lands in Plan");
+
+        // Recovery: model emits legal read_file request from Plan.
+        let t = m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        assert!(
+            matches!(
+                t,
+                Transition::Advanced {
+                    to: AgentState::Execute,
+                    ..
+                }
+            ),
+            "Plan must accept ModelRequestedTools; got {t:?}"
+        );
+        let t = m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("r"),
+                ToolName::ReadFile.label(),
+                "README.md",
+                "file body",
+            )],
+        });
+        assert!(
+            matches!(
+                t,
+                Transition::Stayed {
+                    state: AgentState::Execute
+                }
+            ),
+            "ToolsFinished in Execute must stay; got {t:?}"
+        );
+        assert_eq!(
+            m.state(),
+            &AgentState::Execute,
+            "successful recovery must NOT re-enter Plan"
+        );
+
+        // And ModelClaimedDone is accepted from Plan too (model may have
+        // decided to refuse and answer instead of more tool calls).
+        let mut m2 = AgentMachine::new("review git diff", Budget::default());
+        m2.handle(AgentEvent::TaskReceived);
+        m2.handle(AgentEvent::PlanReady);
+        m2.handle(AgentEvent::ContextGathered);
+        m2.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m2.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::failure(
+                ToolCallId::new("d"),
+                ToolName::RunCommand.label(),
+                "git diff",
+                ToolError::permission_denied("denied"),
+            )],
+        });
+        assert_eq!(m2.state(), &AgentState::Plan);
+        let t = m2.handle(AgentEvent::ModelClaimedDone);
+        // Plan+ModelClaim is accepted (we record model_claimed_done) but the
+        // machine stays in Plan because try_finish lacks verify/plan writes.
+        // A successful read+verify before this point would have moved to
+        // Finish instead. The "Stayed { state: Plan }" shape is the expected
+        // "claim registered, can't finish yet" signal.
+        assert!(
+            matches!(
+                t,
+                Transition::Stayed {
+                    state: AgentState::Plan
+                }
+            ),
+            "Plan+ModelClaim is accepted; try_finish stays Plan until evidence: {t:?}"
+        );
+        // But the transition itself is processed; evidence.model_claimed_done
+        // is set, and a successful read+verify before the denial would have
+        // moved the machine to Finish via try_finish.
+        assert!(m2.evidence().model_claimed_done);
+    }
+
+    /// 2026-10-13 regression: historical `denied_tools` (audit log) must not
+    /// re-trigger recovery on subsequent successful batches. Only the
+    /// most-recent batch's denials drive `Plan`. The audit trail in
+    /// `evidence.denied_tools` stays intact.
+    #[test]
+    fn historical_denial_audit_does_not_re_trigger_recovery() {
+        let mut m = AgentMachine::new("review", Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::failure(
+                ToolCallId::new("d1"),
+                ToolName::RunCommand.label(),
+                "git diff",
+                ToolError::permission_denied("user said no"),
+            )],
+        });
+        assert_eq!(m.state(), &AgentState::Plan);
+        assert_eq!(m.budget().repairs_used, 1);
+        assert_eq!(m.evidence().denied_tools.len(), 1, "audit log kept");
+
+        // Model now reads a file successfully. Loop must NOT re-plan: the
+        // recovery cycle only fires for newly-denied batches.
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("r1"),
+                ToolName::ReadFile.label(),
+                "README.md",
+                "ok",
+            )],
+        });
+        assert_eq!(
+            m.state(),
+            &AgentState::Execute,
+            "successful batch must not be punished for earlier audit denial"
+        );
+        assert_eq!(
+            m.budget().repairs_used,
+            1,
+            "no second repair cycle for an earlier denial"
+        );
+        assert_eq!(
+            m.evidence().denied_tools.len(),
+            1,
+            "audit log preserved across successful batches"
+        );
+    }
+
+    /// 2026-10-13 regression: the audit trail can grow across many denials
+    /// in the same batch (a long prompt may emit several blocked commands).
+    /// Only one repair slot is charged per batch — the rest are recorded as
+    /// audit entries, not extra replan cycles.
+    #[test]
+    fn multi_denial_batch_charges_one_repair_slot() {
+        let mut m = AgentMachine::new("review", Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 3 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![
+                ToolResult::failure(
+                    ToolCallId::new("a"),
+                    ToolName::RunCommand.label(),
+                    "git diff",
+                    ToolError::permission_denied("no"),
+                ),
+                ToolResult::failure(
+                    ToolCallId::new("b"),
+                    ToolName::RunCommand.label(),
+                    "git log",
+                    ToolError::permission_denied("no"),
+                ),
+                ToolResult::failure(
+                    ToolCallId::new("c"),
+                    ToolName::RunCommand.label(),
+                    "git show",
+                    ToolError::permission_denied("no"),
+                ),
+            ],
+        });
+        assert_eq!(m.state(), &AgentState::Plan);
+        assert_eq!(
+            m.budget().repairs_used,
+            1,
+            "one batch of denials charges one repair slot"
+        );
+        assert_eq!(
+            m.evidence().denied_tools.len(),
+            3,
+            "every denial is preserved in the audit log"
+        );
+    }
+
+    /// The fixed machine still fails closed when repairs are exhausted —
+    /// permission denials must not silently extend the run.
+    #[test]
+    fn repeated_denials_with_exhausted_repairs_yield_failed() {
+        let budget = Budget {
+            max_repairs: 1,
+            ..Budget::default()
+        };
+        let mut m = AgentMachine::new("review", budget);
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::failure(
+                ToolCallId::new("d"),
+                ToolName::RunCommand.label(),
+                "git diff",
+                ToolError::permission_denied("no"),
+            )],
+        });
+        assert_eq!(m.state(), &AgentState::Plan);
+        // Single repair was burned; next denial trips Failed.
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::failure(
+                ToolCallId::new("d2"),
+                ToolName::RunCommand.label(),
+                "git diff",
+                ToolError::permission_denied("no"),
+            )],
+        });
+        assert_eq!(
+            m.state(),
+            &AgentState::Failed {
+                reason: FailReason::Unrecoverable
+            }
+        );
     }
 }

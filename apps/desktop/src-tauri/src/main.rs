@@ -1007,6 +1007,7 @@ fn list_provider_models(
                 model_id: m.model_id,
                 display_name: m.display_name,
                 vision,
+                suitable_for_long: m.suitable_for_long,
             }
         })
         .collect())

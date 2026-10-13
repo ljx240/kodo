@@ -36,6 +36,7 @@ import {
   type ProviderConfig,
   templateById,
   dedupeModels,
+  isSuitableForLong,
   loadProviders,
   saveProviders,
   uid,
@@ -657,6 +658,26 @@ function ProviderEditor({
               <RotateCw size={14} strokeWidth={1.8} />
             </button>
           </div>
+          {/* Long-final task warning (2026-10-13): preview / flash / latest
+              channels are known to land with an empty `text` block on
+              tasks that need a long final report. The warning is rendered
+              for the currently selected model only — switching the active
+              chip makes it disappear without disturbing the rest of the
+              model list. The renderer reads `suitableForLong` straight off
+              the chip entry (Tauri pre-fills it from the agent-side
+              suffix sniffer) and falls back to the local sniffer in
+              `data/providers.ts` so catalog rows that have not been
+              refreshed still get the warning. */}
+          {(() => {
+            const selected = models.find((m) => m.model_id.toLowerCase() === modelId.toLowerCase());
+            if (!selected) return null;
+            if (isSuitableForLong(selected)) return null;
+            return (
+              <p className="model-status model-status--warning" role="note">
+                {T.page.settings.rows.previewChannelWarning}
+              </p>
+            );
+          })()}
           <p
             className={`model-status${fetchState === "error" ? " model-status--error" : ""}`}
             role={fetchState === "error" ? "alert" : undefined}

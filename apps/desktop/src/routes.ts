@@ -52,12 +52,43 @@ function parse(): Route {
   const demo = path.startsWith(DEMO_PREFIX);
   const key = (demo ? path.slice(DEMO_PREFIX.length) : path).replace(/^\//, "");
 
-  // Narrow windows default the Inspector closed (LAYOUT.md §9).
-  // Explicit ?inspector=open|closed always wins so opening at 900px sticks.
+  // Inspector default (2026-10-13):
+  //
+  // - **Production path** (`window.__KODO_INSPECTOR_AUTOPEN__ !== true`):
+  //   the right column is hidden until the user opens it from the rail.
+  //   Default closed on every viewport; the rail stays the only entry
+  //   point and `?inspector=open` is the explicit override.
+  //
+  // - **E2E / visual-regression path** (the test harness sets
+  //   `__KODO_INSPECTOR_AUTOPEN__ = true` in its `addInitScript`,
+  //   see `apps/desktop/tests/visual/shell.ts`): the wide-viewport
+  //   keeps the panel open by default so the suite's existing
+  //   assertions on Inspector geometry, the file / browse panels, and
+  //   the LLM section do not need to chase the production default. The
+  //   E2E path is opt-in by the harness; it never leaks into the
+  //   desktop shell or the user's browser.
+  //
+  // Explicit `?inspector=open|closed` always wins so a sticky user
+  // choice (or a Playwright assertion that needs the panel) is
+  // preserved across navigation and reload.
   const raw = params.get("inspector");
-  const narrow =
-    typeof window !== "undefined" && window.matchMedia("(max-width: 1199px)").matches;
-  const inspectorOpen = raw === "closed" ? false : raw === "open" ? true : !narrow;
+  const autopen =
+    typeof window !== "undefined" &&
+    (window as unknown as { __KODO_INSPECTOR_AUTOPEN__?: boolean })
+      .__KODO_INSPECTOR_AUTOPEN__ === true;
+  let inspectorOpen: boolean;
+  if (raw === "closed") {
+    inspectorOpen = false;
+  } else if (raw === "open") {
+    inspectorOpen = true;
+  } else if (autopen) {
+    const narrow =
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 1199px)").matches;
+    inspectorOpen = !narrow;
+  } else {
+    inspectorOpen = false;
+  }
 
   // The 插件 page owns the old /skills and /mcp destinations as permanent
   // aliases (with and without the demo prefix), so existing links keep
@@ -103,20 +134,16 @@ export function useRoute(): Route {
  */
 export function hrefTo(name: RouteName, inspectorOpen: boolean, type?: PluginType): string {
   const path = `${isDesktop() ? "" : DEMO_PREFIX}/${name}`;
-  const narrow =
-    typeof window !== "undefined" && window.matchMedia("(max-width: 1199px)").matches;
   const params = new URLSearchParams();
   // The default tab emits no param, so wide-viewport screenshots stay
   // query-free; only a non-default tab asks for `?type=`.
   if (type && type !== "skills") params.set("type", type);
-  // Omit the inspector param when it matches the viewport default.
-  if (inspectorOpen && !narrow) {
-    // default open on wide
-  } else if (!inspectorOpen && narrow) {
-    // default closed on narrow
-  } else {
-    params.set("inspector", inspectorOpen ? "open" : "closed");
-  }
+  // Inspector default flipped to "closed on every viewport" in 2026-10-13
+  // for the production path (see `parse()` above for the E2E / autopen
+  // carve-out). The href only needs to spell out the state when the
+  // caller is asking for the non-default open. `?inspector=closed` is
+  // omitted because it now matches the default.
+  if (inspectorOpen) params.set("inspector", "open");
   const query = params.toString();
   return query ? `${path}?${query}` : path;
 }

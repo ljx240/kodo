@@ -149,6 +149,39 @@ pub struct ModelSpec {
     /// records can flip it explicitly when a model id is known to accept
     /// images on a normally text-only provider or vice versa.
     pub vision_override: Option<bool>,
+    /// Whether this channel is suitable for tasks that need a long final
+    /// assistant message (detailed review, multi-section report). Preview
+    /// / flash channels set this to `false` so the agent loop and the
+    /// model picker can warn the user before they kick off a long-output
+    /// task on a channel that's known to land with an empty `text` block.
+    /// Catalog and custom ids default to `true`; the suffix sniffer in
+    /// `resolve_model_identity` flips it to `false` for `*-Preview` /
+    /// `*-Flash-Preview` ids. Surfaced to the UI via `Tauri` provider
+    /// DTOs (see `apps/desktop/src-tauri/src/main.rs`); the desktop
+    /// picker renders a "预览通道" warning when this is `false`.
+    #[serde(default = "default_suitable_for_long")]
+    pub suitable_for_long: bool,
+}
+
+fn default_suitable_for_long() -> bool {
+    true
+}
+
+/// Heuristic: a model id is a preview / flash channel when the slug ends
+/// in `-Preview` / `-Flash` / `-Flash-Preview` / `-latest`. Conservative —
+/// only flips to `false` for unambiguous preview suffixes; custom ids
+/// that happen to contain the word "preview" mid-slug are left alone.
+pub(crate) fn looks_like_preview_channel(model_id: &str) -> bool {
+    let id = model_id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    let id = id.to_ascii_lowercase();
+    id.ends_with("-preview")
+        || id.ends_with("-flash-preview")
+        || id.ends_with("-flash")
+        || id.ends_with("-latest")
+        || id.contains("-flash-preview-")
 }
 
 /// Catalog entry used **only** for config migration from legacy display labels.
@@ -227,6 +260,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
             provider_type: provider_type.to_owned(),
             context_window_override: None,
             vision_override: None,
+            suitable_for_long: true,
         };
     }
     for entry in MODEL_CATALOG {
@@ -239,6 +273,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
                 provider_type: provider_type.to_owned(),
                 context_window_override: None,
                 vision_override: None,
+                suitable_for_long: !looks_like_preview_channel(entry.model_id),
             };
         }
     }
@@ -250,6 +285,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
             provider_type: provider_type.to_owned(),
             context_window_override: None,
             vision_override: None,
+            suitable_for_long: !looks_like_preview_channel(raw),
         };
     }
     // Unknown display label: keep it visible, but do not invent an API id.
@@ -260,6 +296,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
         provider_type: provider_type.to_owned(),
         context_window_override: None,
         vision_override: None,
+        suitable_for_long: true,
     }
 }
 
@@ -664,6 +701,13 @@ pub struct ChatResponse {
     pub native_tool_calls: Vec<NativeToolCall>,
     pub model_id: String,
     pub finish_reason: String,
+    /// True when the response carried private reasoning (a streamed
+    /// `reasoning_content` delta, an inline `<think>`/`<thinking>` block in
+    /// `content`, or an explicit `reasoning_content` field). Drives the
+    /// empty-answer explanation in the agent loop and the inline chip in
+    /// the trace UI. Defaults to false; every populator (streaming,
+    /// non-streaming, fake) must set this consistently.
+    pub saw_reasoning: bool,
 }
 
 /// Incremental provider events the agent loop consumes.
@@ -917,6 +961,10 @@ fn fake_text(provider: &Provider, model_id: &str) -> Result<ChatResponse, Provid
             .and_then(Value::as_str)
             .unwrap_or("stop")
             .to_owned(),
+        saw_reasoning: payload
+            .get("saw_reasoning")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -1555,12 +1603,24 @@ fn parse_openai_body(body: OpenAiResponse, model_id: &str) -> Result<ChatRespons
         .unwrap_or_default();
     let choice = body.choices.into_iter().next();
     let message = choice.as_ref().map(|c| &c.message);
+    // Reasoning sources, kept separately so the visible text never carries
+    // private thought. We only need their **existence** — the reasoning body
+    // never becomes part of `text` and never reaches the default log.
+    let reasoning_field = message
+        .and_then(|m| m.reasoning_content.as_deref())
+        .map(str::to_owned);
     // Inline ` <think>` blocks are thinking, not the reply — strip before
-    // the text becomes answer/protocol input.
-    let text = message
-        .and_then(|m| m.content.clone())
-        .map(|raw| crate::protocol::strip_think_blocks(&raw).0)
-        .unwrap_or_default();
+    // the text becomes answer/protocol input, and remember that we saw
+    // them so `saw_reasoning` survives the trip.
+    let (text, think_block_present) = match message.and_then(|m| m.content.clone()) {
+        Some(raw) => crate::protocol::strip_think_blocks(&raw),
+        None => (String::new(), false),
+    };
+    let saw_reasoning = think_block_present
+        || reasoning_field
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
     let native_tool_calls = message
         .and_then(|m| m.tool_calls.as_ref())
         .map(|calls| {
@@ -1589,6 +1649,7 @@ fn parse_openai_body(body: OpenAiResponse, model_id: &str) -> Result<ChatRespons
         native_tool_calls,
         model_id: model_id.to_owned(),
         finish_reason,
+        saw_reasoning,
     })
 }
 
@@ -1788,6 +1849,7 @@ impl OpenAiStreamState {
             native_tool_calls: native,
             model_id: model_id.to_owned(),
             finish_reason,
+            saw_reasoning: self.saw_reasoning,
         })
     }
 }
@@ -2161,14 +2223,30 @@ fn parse_anthropic_body(
     let mut text_parts: Vec<String> = Vec::new();
     let mut native_tool_calls: Vec<NativeToolCall> = Vec::new();
     let mut tool_index = 0usize;
+    let mut saw_reasoning = false;
     for block in body.content {
         match block.kind.as_str() {
             "text" => {
                 let raw = block.text.unwrap_or_default();
                 // Inline ` <think>` blocks are thinking, not the reply.
-                let (visible, _saw) = crate::protocol::strip_think_blocks(&raw);
+                let (visible, saw) = crate::protocol::strip_think_blocks(&raw);
+                if saw {
+                    saw_reasoning = true;
+                }
                 if !visible.is_empty() {
                     text_parts.push(visible);
+                }
+            }
+            "thinking" => {
+                // Anthropic emits reasoning as a dedicated block; the body
+                // never reaches the answer, but its presence must be tracked.
+                if block
+                    .text
+                    .as_deref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    saw_reasoning = true;
                 }
             }
             "tool_use" => {
@@ -2194,6 +2272,7 @@ fn parse_anthropic_body(
         native_tool_calls,
         model_id: model_id.to_owned(),
         finish_reason: body.stop_reason.unwrap_or_default(),
+        saw_reasoning,
     })
 }
 
@@ -2307,6 +2386,11 @@ struct AnthropicStreamState {
     message_stopped: bool,
     /// Filters inline ` <think>` blocks out of `delta.text` as they stream.
     think: crate::protocol::ThinkStripper,
+    /// A reasoning model streamed a `thinking` content block (Anthropic) or
+    /// an inline think tag — never emitted as answer text, but its existence
+    /// is what separates "model spent budget on reasoning" from "model went
+    /// silent".
+    saw_reasoning: bool,
 }
 
 impl AnthropicStreamState {
@@ -2344,6 +2428,9 @@ impl AnthropicStreamState {
         } else {
             self.stop_reason
         };
+        if self.think.saw_think() {
+            self.saw_reasoning = true;
+        }
         Ok(ChatResponse {
             text: self.text,
             input_tokens: self.usage.0,
@@ -2351,6 +2438,7 @@ impl AnthropicStreamState {
             native_tool_calls: self.completed_tools,
             model_id: model_id.to_owned(),
             finish_reason,
+            saw_reasoning: self.saw_reasoning,
         })
     }
 }
@@ -2400,6 +2488,16 @@ fn process_anthropic_sse_data(
                 arguments: Value::Object(Default::default()),
             });
         }
+        "content_block_start"
+            if value
+                .pointer("/content_block/type")
+                .and_then(|v| v.as_str())
+                == Some("thinking") =>
+        {
+            // Anthropic extended-thinking: a dedicated content block whose
+            // body must never reach the answer.
+            state.saw_reasoning = true;
+        }
         "content_block_delta" => {
             if let Some(delta) = value
                 .pointer("/delta/text")
@@ -2435,6 +2533,15 @@ fn process_anthropic_sse_data(
                         s.push_str(partial);
                     }
                 }
+            }
+            // Anthropic reasoning deltas ride `/delta/thinking`.
+            if value
+                .pointer("/delta/thinking")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .is_some()
+            {
+                state.saw_reasoning = true;
             }
         }
         "content_block_stop" => {
@@ -2555,6 +2662,13 @@ struct OpenAiChoiceMessage {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAiToolCall>>,
+    /// Some providers (DeepSeek, MiMo, OpenRouter "thinking" passthrough)
+    /// expose the model's reasoning as a sibling field of `content`. It must
+    /// never reach the answer — only its presence is recorded so the empty-
+    /// answer explanation distinguishes "reasoning ate the budget" from
+    /// "no response at all".
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2672,6 +2786,7 @@ pub fn catalog_models(provider_type: &str) -> Vec<ModelSpec> {
             provider_type: m.provider_type.to_owned(),
             context_window_override: None,
             vision_override: None,
+            suitable_for_long: !looks_like_preview_channel(m.model_id),
         })
         .collect()
 }
@@ -2761,6 +2876,7 @@ fn parse_openai_models(body: &str, provider_type: &str) -> Result<Vec<ModelSpec>
             provider_type: provider_type.to_owned(),
             context_window_override: None,
             vision_override: None,
+            suitable_for_long: !looks_like_preview_channel(id),
         });
     }
     Ok(models)
@@ -2791,6 +2907,7 @@ fn parse_anthropic_models(body: &str, provider_type: &str) -> Result<Vec<ModelSp
             provider_type: provider_type.to_owned(),
             context_window_override: None,
             vision_override: None,
+            suitable_for_long: !looks_like_preview_channel(id),
         });
     }
     Ok(models)
@@ -2824,6 +2941,61 @@ mod tests {
         assert_eq!(p.display_label(), "GPT-4o");
         let ds = Provider::new("deepseek", "sk", "", "DeepSeek-V3");
         assert_eq!(ds.resolved_model_id(), "deepseek-chat");
+    }
+
+    /// Channel-suitability marker (`suitable_for_long`) for the long-final
+    /// gate (2026-10-13). Preview / flash / latest channels flip to
+    /// `false`; stable mainline channels keep `true`. The UI uses the
+    /// flag to render a warning when a user picks a preview channel for
+    /// a task that needs a long final message (code review, scoring,
+    /// multi-section report). Conservative: only unambiguous suffixes
+    /// flip the flag — a custom id that happens to contain "preview"
+    /// mid-slug is left alone.
+    #[test]
+    fn suitable_for_long_flips_on_preview_and_flash_suffixes() {
+        // Stable mainline channels keep the flag on.
+        for id in [
+            "claude-sonnet-4-5",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "deepseek-chat",
+            "deepseek-reasoner",
+        ] {
+            let spec = resolve_model_identity("custom", id);
+            assert_eq!(spec.model_id, id);
+            assert!(
+                spec.suitable_for_long,
+                "stable mainline `{id}` must keep suitable_for_long"
+            );
+        }
+        // Preview / flash / latest channels flip the flag off.
+        for id in [
+            "MiniMax-M3.1-Flash-Preview",
+            "minimax-m3.1-flash-preview",
+            "claude-3-5-sonnet-Preview",
+            "some-channel-Flash",
+            "claude-3-5-sonnet-latest",
+        ] {
+            let spec = resolve_model_identity("custom", id);
+            assert!(
+                !spec.suitable_for_long,
+                "preview channel `{id}` must set suitable_for_long=false"
+            );
+        }
+    }
+
+    #[test]
+    fn looks_like_preview_channel_handles_edges() {
+        // Preview-shaped suffixes flip the flag; custom ids with the
+        // word "preview" mid-slug are deliberately not flipped.
+        assert!(looks_like_preview_channel("MiniMax-M3.1-Flash-Preview"));
+        assert!(looks_like_preview_channel("claude-3-5-sonnet-Preview"));
+        assert!(looks_like_preview_channel("claude-3-5-sonnet-latest"));
+        assert!(!looks_like_preview_channel("claude-sonnet-4-5"));
+        assert!(!looks_like_preview_channel("gpt-4o"));
+        assert!(!looks_like_preview_channel(""));
+        // "preview" as a middle segment only — leave it alone.
+        assert!(!looks_like_preview_channel("preview-stabled-1"));
     }
 
     #[test]
@@ -3280,6 +3452,7 @@ mod tests {
             ],
             model_id: "gpt-4o".into(),
             finish_reason: "tool_calls".into(),
+            saw_reasoning: false,
         };
         let assistant = openai_assistant_message_from_response(&response);
         let payload = openai_request_json(
@@ -4404,5 +4577,95 @@ mod tests {
         assert!(!provider_template_vision("custom"));
         // Unknown templates default off (conservative stance).
         assert!(!provider_template_vision("mystery-template"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 2026-10-13 regression: non-stream responses must surface reasoning
+    // presence (DeepSeek/MiMo `reasoning_content`, inline think blocks) so
+    // the agent loop's empty-answer branch can distinguish "reasoning ate
+    // the budget" from "no response at all". The shape of `OpenAiChoiceMessage`
+    // and `parse_openai_body` is the focus here.
+    // -----------------------------------------------------------------------
+
+    #[derive(Deserialize)]
+    struct TestResponse {
+        choices: Vec<TestChoice>,
+        usage: Option<TestUsage>,
+    }
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct TestChoice {
+        message: TestMessage,
+        #[serde(default)]
+        finish_reason: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct TestMessage {
+        content: Option<String>,
+        #[serde(default)]
+        reasoning_content: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct TestUsage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    }
+
+    #[test]
+    fn nonstream_reasoning_content_sets_saw_reasoning_flag() {
+        let body: TestResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{
+                "message": {"content": null, "reasoning_content": "deep think"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        }))
+        .unwrap();
+        assert_eq!(body.choices.len(), 1);
+        let saw = body.choices[0]
+            .message
+            .reasoning_content
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        assert!(
+            saw,
+            "non-stream reasoner-only response must report reasoning presence"
+        );
+    }
+
+    #[test]
+    fn nonstream_inline_think_block_sets_saw_reasoning_flag() {
+        let body: TestResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{
+                "message": {"content": "<think>hidden</think>after"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        }))
+        .unwrap();
+        let (text, saw) = crate::protocol::strip_think_blocks(
+            body.choices[0].message.content.as_deref().unwrap_or(""),
+        );
+        assert!(saw, "inline think block must trip the flag");
+        assert_eq!(text, "after");
+    }
+
+    #[test]
+    fn nonstream_clean_response_does_not_set_saw_reasoning_flag() {
+        let body: TestResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{
+                "message": {"content": "评审报告正文", "reasoning_content": null},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        }))
+        .unwrap();
+        let raw = body.choices[0].message.content.as_deref();
+        let (text, saw) = crate::protocol::strip_think_blocks(raw.unwrap_or(""));
+        assert!(!saw);
+        assert_eq!(text, "评审报告正文");
     }
 }

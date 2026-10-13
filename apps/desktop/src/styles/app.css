@@ -1986,6 +1986,20 @@ button.code-chip--link:focus-visible {
   color: var(--kodo-error);
 }
 
+/* Long-final task warning (2026-10-13): preview / flash / latest channels
+ * are known to land with an empty `text` block on tasks that need a long
+ * final report. Rendered under the model picker when the selected chip
+ * has `suitableForLong = false`. Visual hierarchy sits between the muted
+ * `model-status` and the hard `--error` red so it reads as a heads-up,
+ * not a blocker. */
+.model-status--warning {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: var(--kodo-radius-sm, 4px);
+  background: color-mix(in srgb, var(--kodo-warning, #c08a2a) 12%, transparent);
+  color: color-mix(in srgb, var(--kodo-warning, #c08a2a) 80%, var(--kodo-text) 20%);
+}
+
 /* MCP env / header rows: key and value inputs share the line with a remove
    button; the flex basis lets them wrap in a narrower pane. */
 .kv-row {
