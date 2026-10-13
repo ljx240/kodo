@@ -9,6 +9,7 @@ pub mod traces;
 pub mod workspace;
 
 mod line;
+pub mod redact;
 
 #[cfg(test)]
 mod test_support;

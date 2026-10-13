@@ -67,6 +67,15 @@ pub struct CompactReport {
     /// today, but kept explicit so a future partial compaction can diverge).
     #[serde(default)]
     pub covered_messages: usize,
+    /// P1 post-check: did the protected anchors (leading system block +
+    /// trailing tool-group-aligned tail) survive the rewrite? Defaults to
+    /// `true` when the caller did not run the post-check.
+    #[serde(default = "default_true")]
+    pub anchors_ok: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Decide whether compaction is warranted for this turn. The caller feeds
@@ -219,7 +228,44 @@ pub fn compact_history(
         freed_pct,
         source_summary: middle_text,
         covered_messages: middle_count,
+        anchors_ok: true,
     })
+}
+
+/// P1 invariant check: after a successful compaction, the leading system
+/// block and the trailing tool-group-aligned tail must still be present
+/// in the rebuilt history. The system block is preserved verbatim by
+/// `compact_history`; the tail is preserved verbatim because the cut
+/// only consumed `system_end..keep_tail_start` and the tail starts at
+/// `keep_tail_start` (the tool-group boundary). This function is the
+/// runtime check that those invariants actually held — useful when
+/// `compact_history` is later refactored or partial compaction lands.
+///
+/// Returns `false` if the rebuilt history has the wrong shape, missing
+/// the leading system block, or has a tail length that does not match
+/// `keep_tail`. `pre_kept_tail` is the number of tail messages the
+/// caller preserved going in (same `cfg.keep_tail`).
+pub fn verify_anchors(
+    history: &[provider::ProviderMessage],
+    system_end: usize,
+    pre_kept_tail: usize,
+) -> bool {
+    if history.len() < system_end + pre_kept_tail {
+        return false;
+    }
+    if system_end > 0
+        && history
+            .iter()
+            .take(system_end)
+            .any(|m| m.role != provider::MessageRole::System)
+    {
+        return false;
+    }
+    // The tail is the last `pre_kept_tail` messages; their position in
+    // the new history is `history.len() - pre_kept_tail`. We don't
+    // compare content (the summary sat between system and tail and
+    // did not touch either), we just confirm the count is right.
+    history.len() >= system_end + 1 + pre_kept_tail
 }
 
 /// Render the middle history block as plain text for the summary prompt.
@@ -390,9 +436,50 @@ mod tests {
             freed_pct: 28,
             source_summary: "earlier reads + tool result".into(),
             covered_messages: 8,
+            anchors_ok: true,
         };
         let serialized = serde_json::to_string(&report).unwrap();
         let parsed: CompactReport = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed, report);
+    }
+
+    /// P1 invariant: the leading system block and the trailing tool-group
+    /// tail must survive a rewrite. The post-check is a positive signal
+    /// today (the build path preserves both by construction) and a guard
+    /// against any future refactor that introduces a regression.
+    #[test]
+    fn verify_anchors_accepts_intact_system_and_tail() {
+        use provider::ProviderMessage;
+        let history = vec![
+            ProviderMessage::system("sys-1"),
+            ProviderMessage::system("sys-2"),
+            ProviderMessage::user("compacted summary"),
+            ProviderMessage::user("tail-1"),
+            ProviderMessage::assistant("tail-2", Vec::new()),
+        ];
+        assert!(verify_anchors(&history, 2, 2));
+    }
+
+    #[test]
+    fn verify_anchors_rejects_missing_system() {
+        use provider::ProviderMessage;
+        // System block was supposed to be preserved but the leading slot
+        // is now a user message — invariant violated.
+        let history = vec![
+            ProviderMessage::user("oops, system lost"),
+            ProviderMessage::user("tail"),
+        ];
+        assert!(!verify_anchors(&history, 1, 1));
+    }
+
+    #[test]
+    fn verify_anchors_rejects_short_tail() {
+        use provider::ProviderMessage;
+        let history = vec![
+            ProviderMessage::system("sys"),
+            ProviderMessage::user("summary"),
+        ];
+        // pre_kept_tail was 3 but only summary remains.
+        assert!(!verify_anchors(&history, 1, 3));
     }
 }

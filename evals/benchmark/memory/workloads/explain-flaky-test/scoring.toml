@@ -1,0 +1,23 @@
+# Scoring weights for the flaky-test workload.
+# Total weight = 1.0. The harness reports each as a 0..1 ratio and
+# combines them with these weights; the workload passes when
+# combined >= 0.6 AND no individual score falls below 0.3.
+
+[recall_at_10]
+weight = 0.4
+# Fraction of `expected_recall_ids` that appear in the top-10 of the
+# memory pack produced at the start of the second turn.
+
+[first_turn_tokens]
+weight = 0.1
+# Sum of input_tokens on the first model call. The candidate strategy
+# is judged on whether it shrinks this without losing recall quality.
+
+[end_task_success]
+weight = 0.4
+# Whether the `verify.sh` script returns 0 within 120 seconds.
+
+[no_regressions]
+weight = 0.1
+# The candidate must not flip the prior quarantine to active, and
+# must not introduce a duplicate rule for the same fix.

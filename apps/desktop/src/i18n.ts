@@ -895,6 +895,50 @@ export const T = {
     thinkingExtraction:
       "从模型响应里抽取 `<think>…</think>` 块，保留段落结构。",
   },
+  /** Memory Engine labels — shared by the Settings page, the Inspector
+   *  Memory tab, the conversation header chip, and the doctor reports. */
+  memory: {
+    section: "Memory",
+    description:
+      "Kodo 会把跨会话有用的发现写入本地 Memory Engine；召回时自动注入本轮。",
+    enabled: "启用",
+    mode: "模式",
+    modeOff: "关闭",
+    modeShadow: "观察（不写）",
+    modeReadWrite: "读写",
+    maxPackTokens: "每次召回 token 上限",
+    storage: "存储路径",
+    runDoctor: "运行诊断",
+    reindex: "重建索引",
+    doctorReport: "诊断报告",
+    doctorApply: "应用修复",
+    doctorDone: "诊断完成",
+    entries: (n: number) => `${n} 条记忆`,
+    used: (n: number) => `已用 ${n} 条记忆`,
+    empty: "（暂无）",
+    noResults: "没有匹配的记忆",
+    searchPlaceholder: "搜索记忆（关键词 / 路径 / 符号）",
+    search: "搜索",
+    refresh: "刷新",
+    disable: "停用",
+    inspect: "查看",
+    status: "状态",
+    kind: "类型",
+    authority: "权威",
+    title: "标题",
+    updated: "更新",
+    validity: "有效性",
+    noTitle: "（无标题）",
+    confirmDisable: "确认停用此记忆？",
+    recalled: (n: number) => `召回 ${n} 条`,
+    outbox: (n: number) => `待处理 outbox ${n}`,
+    tombstones: (n: number) => `墓碑 ${n}`,
+    size: (bytes: number) => {
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+    },
+  },
 } as const;
 
 export type FailureClassKey = keyof typeof T.failure;

@@ -809,6 +809,28 @@ pub enum RunEvent {
         question: String,
         options: Vec<String>,
     },
+    /// Memory Engine recall summary. Emitted at most once per turn when
+    /// the engine is on. `count = 0` is a valid state (engine on, nothing
+    /// matched); the absence of the event itself means the engine is off.
+    MemoryRecalled {
+        session: String,
+        count: usize,
+        ids: Vec<String>,
+    },
+    /// Terminal answer from the agent loop. Always emitted exactly once
+    /// per turn unless the loop was killed before it could finish; in
+    /// that case the run-side fallback emits a `delivery = "partial"`
+    /// synthesized answer so the GUI never sees an empty TurnComplete.
+    AgentMessage {
+        session: String,
+        text: String,
+        delivery: String,
+        verification: String,
+        plain: bool,
+        #[serde(rename = "failureReason")]
+        failure_reason: String,
+        checks: Vec<String>,
+    },
 }
 
 /// One archived conversation, as the Archive table needs it.
@@ -1613,5 +1635,60 @@ mod tests {
         let status = turn_status(&turn);
         assert_eq!(status.verification, "blocked");
         assert_eq!(status.outcome, "blocked_by_environment");
+    }
+}
+
+/// Memory entry surfaced through Tauri. Mirrors `kodo_memory::MemoryEntry`
+/// with a flat string encoding for the enums (the React side already
+/// passes the same string back through `MemoryListArgs`).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryEntryView {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub authority: String,
+    pub source_trust: String,
+    pub title: String,
+    pub abstract_text: String,
+    pub body: serde_json::Value,
+    pub content_hash: String,
+    pub confidence: f32,
+    pub verified: bool,
+    pub conditions: Vec<String>,
+    pub source_uris: Vec<String>,
+    pub scope_project_id: Option<String>,
+    pub scope_repository_id: Option<String>,
+    pub scope_branch: Option<String>,
+    pub use_count: u32,
+    pub version: u32,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl From<kodo_memory::MemoryEntry> for MemoryEntryView {
+    fn from(value: kodo_memory::MemoryEntry) -> Self {
+        Self {
+            id: value.id,
+            kind: value.kind.as_str().to_owned(),
+            status: value.status.as_str().to_owned(),
+            authority: value.authority.as_str().to_owned(),
+            source_trust: value.source_trust.as_str().to_owned(),
+            title: value.title,
+            abstract_text: value.abstract_text,
+            body: value.body,
+            content_hash: value.content_hash,
+            confidence: value.confidence,
+            verified: value.verified,
+            conditions: value.conditions,
+            source_uris: value.source_uris,
+            scope_project_id: value.scope.project_id,
+            scope_repository_id: value.scope.repository_id,
+            scope_branch: value.scope.branch,
+            use_count: value.use_count,
+            version: value.version,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
     }
 }

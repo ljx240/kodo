@@ -47,6 +47,7 @@ fn online_read_only_smoke() {
         agent_instructions: None,
         personas: Vec::new(),
         budget_family: None,
+        memory: None,
     };
 
     let mut answer = String::new();

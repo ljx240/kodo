@@ -1,0 +1,11 @@
+[recall_at_10]
+weight = 0.4
+
+[first_turn_tokens]
+weight = 0.1
+
+[end_task_success]
+weight = 0.4
+
+[no_regressions]
+weight = 0.1

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use kodo_agent::{tools, AgentMode, Permission, RunRequest, SinkEvent};
 use kodo_core::session;
+use kodo_memory::{MemoryHandle, SqliteMemory};
 use kodo_shell::{Logged, ShellConfig, TurnLogger, TurnOutcome};
 
 use crate::approve::Approver;
@@ -164,10 +165,12 @@ impl TurnContext {
             agent_instructions: None,
             personas: Vec::new(),
             budget_family: None,
+            memory: open_memory_handle(),
         };
 
         let mut logger = TurnLogger::new(self.session_dir.clone(), session_id)
             .with_capture(self.config.local_trace);
+        let memory_handle = open_memory_handle();
         let result = {
             let logger_ref = &mut logger;
             let renderer = &mut self.renderer;
@@ -180,6 +183,32 @@ impl TurnContext {
                 let logged = logger_ref.record(&event);
                 if matches!(logged, Logged::WriteFailed) {
                     return false;
+                }
+                // Forward the started/completed item to the memory outbox.
+                // Failures are non-fatal (write_event returns false and we
+                // do not block the turn).
+                match &logged {
+                    Logged::Started(item) => {
+                        if let (Some(handle), Some(ev)) = (
+                            memory_handle.as_ref(),
+                            kodo_shell::event_for_item(item, kodo_core::session::Phase::Started),
+                        ) {
+                            kodo_shell::write_event(handle, &ev);
+                        }
+                    }
+                    Logged::Finished(item) => {
+                        let phase = match item.status {
+                            kodo_core::session::Status::Failed => kodo_core::session::Phase::Failed,
+                            _ => kodo_core::session::Phase::Completed,
+                        };
+                        if let (Some(handle), Some(ev)) = (
+                            memory_handle.as_ref(),
+                            kodo_shell::event_for_item(item, phase),
+                        ) {
+                            kodo_shell::write_event(handle, &ev);
+                        }
+                    }
+                    _ => {}
                 }
                 renderer.handle(&event);
                 !interrupt::pending()
@@ -311,5 +340,28 @@ mod tests {
         assert_eq!(ctx.continue_last().expect("list"), None);
         assert!(ctx.session_id.is_none());
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// Open the on-disk memory store at `$XDG_STATE_HOME/kodo/memory/v1/memory.sqlite`
+/// (falling back to `$HOME/.local/state/kodo/...` per `kodo_core::settings::state_dir`)
+/// and wrap it in a `MemoryHandle`. Returns `None` if the state directory
+/// is unavailable — fail-open: the agent loop continues with the memory
+/// channel disabled. Mirrors the Tauri side's behaviour.
+fn open_memory_handle() -> Option<MemoryHandle> {
+    let state_dir = kodo_core::settings::state_dir()?;
+    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match SqliteMemory::open(&path) {
+        Ok(mem) => Some(mem.into()),
+        Err(e) => {
+            eprintln!(
+                "kodo memory: failed to open store at {}: {e}",
+                path.display()
+            );
+            None
+        }
     }
 }

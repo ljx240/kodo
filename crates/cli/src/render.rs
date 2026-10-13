@@ -102,7 +102,9 @@ impl<O: Write, E: Write> Renderer<O, E> {
             SinkEvent::ContextBudget { .. }
             | SinkEvent::Compacted { .. }
             | SinkEvent::AskUser { .. }
-            | SinkEvent::LocalTrace { .. } => {}
+            | SinkEvent::LocalTrace { .. }
+            | SinkEvent::MemoryRecalled { .. }
+            | SinkEvent::AgentMessage { .. } => {}
         }
     }
 

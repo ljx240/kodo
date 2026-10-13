@@ -7,6 +7,7 @@ import type { LiveSnapshot } from "../data/liveContext";
 import { T } from "../i18n";
 import { ArchiveOverview, type ArchiveSelection } from "./ArchiveInspector";
 import { HelpOverview } from "./HelpInspector";
+import { MemoryOverview } from "./MemoryInspector";
 import {
   ChangedFilesSection,
   LlmSection,
@@ -32,7 +33,8 @@ export type InspectorTab =
   | "llm"
   | "help"
   | "file"
-  | "browse";
+  | "browse"
+  | "memory";
 
 /**
  * One open-file request for the right-sidebar file panel. `nonce` bumps on
@@ -60,6 +62,7 @@ const PANEL_TABS: Record<RouteName, { tab: InspectorTab; label: string }[]> = {
     { tab: "terminal", label: T.inspector.terminal },
     { tab: "file", label: T.inspector.file },
     { tab: "browse", label: T.inspector.browse },
+    { tab: "memory", label: T.memory.section },
   ],
   plugins: [{ tab: "summary", label: T.inspector.panel }],
   trace: [
@@ -119,6 +122,14 @@ function contentFor(
     if (tab === "files") return <ChangedFilesSection {...data} />;
     if (tab === "tools") return <ToolsSection {...data} />;
     if (tab === "llm") return <LlmSection {...data} detailed />;
+    if (tab === "memory") {
+      return (
+        <MemoryOverview
+          project={project?.path ?? null}
+          onSelectTab={onSelectTab}
+        />
+      );
+    }
     return <ResponseOverview {...data} onShowAllFiles={() => onSelectTab("files")} />;
   }
   if (route === "trace") {

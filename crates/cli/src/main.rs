@@ -6,6 +6,7 @@
 mod approve;
 mod args;
 mod interrupt;
+mod memory_cmd;
 mod render;
 mod repl;
 mod turn;
@@ -36,6 +37,11 @@ fn main() {
             2
         }
         Parsed::Run(parsed) => run(parsed),
+        Parsed::Memory(cmd) => memory_cmd::run(cmd),
+        Parsed::MemoryHelp => {
+            println!("{}", memory_cmd::USAGE);
+            0
+        }
     };
     // `process::exit` skips destructors — flush explicitly.
     let _ = io::stdout().flush();

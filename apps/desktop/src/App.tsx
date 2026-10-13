@@ -127,6 +127,10 @@ export function App() {
   const [openFilesRequest, setOpenFilesRequest] = useState(0);
   /** Rename/archive entry points published by ConversationPage for the TopBar. */
   const [convActions, setConvActions] = useState<ConvActions | null>(null);
+  /** Memory recall summary for the active turn. `-1` means "engine off"
+   *  (no event was emitted this turn) — distinct from `0` ("engine on,
+   *  nothing matched"). The TopBar renders different copy in each case. */
+  const [memoryRecalledCount, setMemoryRecalledCount] = useState<number>(-1);
   /**
    * Composer persona selection per conversation — the chain in application
    * order. A single-element list is the common case; shift-click on the
@@ -681,6 +685,14 @@ export function App() {
             route={route.name}
             crumbProject={projectName}
             projectPath={activeProject?.path ?? ""}
+            onOpenMemoryTab={
+              route.name === "conversation"
+                ? () => {
+                    setInspectorOpen(true);
+                    setInspectorTab("memory");
+                  }
+                : undefined
+            }
             projectOptions={workspace.projects.filter((project) => Boolean(project.path))}
             onSelectProject={activeConversationId === null && !liveSnapshot?.running ? newChat : undefined}
             onAddProject={workspace.live ? async () => {
@@ -700,6 +712,7 @@ export function App() {
             }
             branch={branch}
             convActions={convActions}
+            memoryRecalledCount={memoryRecalledCount}
           />
         )}
 
@@ -748,6 +761,7 @@ export function App() {
                 setArchiveReload((n) => n + 1);
               }}
               onConvActions={setConvActions}
+              onMemoryRecalled={setMemoryRecalledCount}
               personaListBySession={personaListBySession}
               onSelectAgents={selectAgents}
               favoriteAgents={favoriteAgents}

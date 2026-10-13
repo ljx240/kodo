@@ -1151,6 +1151,7 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             agent_instructions: None,
             personas: Vec::new(),
             budget_family: None,
+            memory: None,
         };
         let alive = || true;
         let approve = |_kind: kodo_agent::StepKind, _cmd: &str| true;

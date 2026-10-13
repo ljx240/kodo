@@ -1,6 +1,7 @@
 import {
   Archive,
   Box,
+  Brain,
   Cloud,
   Database,
   Folder,
@@ -17,7 +18,14 @@ import {
   Wrench,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { listProviderModels, setSetting, setting } from "../api";
+import {
+  listProviderModels,
+  memoryDoctor,
+  memoryStatus,
+  setSetting,
+  setting,
+  type MemoryStatusDto,
+} from "../api";
 import { DEFAULT_PERMISSION, MODELS } from "../data/models";
 import { PERMISSIONS, PERMISSION_SETTING } from "../data/models";
 import { T } from "../i18n";
@@ -104,6 +112,12 @@ const SECTIONS: { id: string; title: string; subtitle: string; icon: ReactNode }
     title: T.page.settings.categories.storage,
     subtitle: T.page.settings.categoryHints.storage,
     icon: <Database size={17} strokeWidth={1.7} />,
+  },
+  {
+    id: "memory",
+    title: T.memory.section,
+    subtitle: T.memory.description,
+    icon: <Brain size={17} strokeWidth={1.7} />,
   },
   {
     id: "appearance",
@@ -911,6 +925,75 @@ function ContextWindow() {
   );
 }
 
+/** Memory Engine surface: status snapshot, run doctor / reindex. Read-only
+ *  for now — toggles live in their own settings keys, not in this pane. */
+function MemoryBody() {
+  const [status, setStatus] = useState<MemoryStatusDto | null>(null);
+  const [busy, setBusy] = useState<null | "doctor" | "reindex">(null);
+  const [report, setReport] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    memoryStatus()
+      .then((s) => { if (!cancelled) setStatus(s); })
+      .catch(() => { if (!cancelled) setStatus(null); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const runDoctor = async (apply: boolean) => {
+    setBusy(apply ? "reindex" : "doctor");
+    try {
+      const result = await memoryDoctor(apply);
+      setReport(
+        `${T.memory.doctorDone} · ok=${result.ok} · ${T.memory.outbox(result.outboxPending)} · ${T.memory.tombstones(result.tombstones)}`,
+      );
+      const fresh = await memoryStatus();
+      setStatus(fresh);
+    } catch (error) {
+      setReport(String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="setting-row">
+        <span className="setting-label">{T.memory.storage}</span>
+        <span className="setting-hint" style={{ fontFamily: "var(--font-mono, monospace)" }}>
+          {status?.path ?? "—"}
+        </span>
+      </div>
+      <div className="setting-row">
+        <span className="setting-label">{T.memory.entries(
+          Object.values(status?.rowCounts ?? {}).reduce((a, b) => a + b, 0),
+        )}</span>
+        <span className="setting-hint">
+          {T.memory.outbox(status?.outboxPending ?? 0)} · {T.memory.size(status?.dbSizeBytes ?? 0)}
+        </span>
+      </div>
+      <div className="setting-row">
+        <button
+          className="btn"
+          onClick={() => void runDoctor(false)}
+          disabled={busy !== null}
+        >
+          {busy === "doctor" ? "…" : T.memory.runDoctor}
+        </button>
+        <button
+          className="btn"
+          onClick={() => void runDoctor(true)}
+          disabled={busy !== null}
+        >
+          {busy === "reindex" ? "…" : T.memory.reindex}
+        </button>
+      </div>
+      {report && <p className="setting-hint">{report}</p>}
+      <p className="setting-hint">{T.memory.description}</p>
+    </>
+  );
+}
+
 function GeneralBody({ model, onSelectModel }: { model: string; onSelectModel: (m: string) => void }) {
   return (
     <>
@@ -949,6 +1032,8 @@ function body(
       );
     case "storage":
       return <StorageBody onOpenArchive={onOpenArchive} />;
+    case "memory":
+      return <MemoryBody />;
     case "appearance":
       return <AppearanceBody />;
     default:

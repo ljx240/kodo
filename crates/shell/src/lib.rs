@@ -6,8 +6,10 @@
 
 pub mod approve;
 pub mod config;
+pub mod memory_outbox;
 pub mod turn;
 
 pub use approve::{approval_fingerprint, step_kind_label, ApprovalChoice};
 pub use config::{permission_from_settings, Overrides, ShellConfig};
+pub use memory_outbox::{event_for_item, open_default_handle, write_event};
 pub use turn::{Logged, TurnLogger, TurnOutcome};

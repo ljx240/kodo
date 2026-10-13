@@ -1,0 +1,16 @@
+{
+  "workload": "find-unused-dep",
+  "expected_recall_ids": [
+    "44444444-4444-4444-4444-444444444444"
+  ],
+  "expected_new_entries": [
+    {
+      "kind": "episodic",
+      "abstract_contains": "lodash",
+      "evidence_paths": ["package.json"]
+    }
+  ],
+  "expected_status_changes": {},
+  "expected_tombstone_count_after": 0,
+  "expected_outbox_pending_after": 0
+}

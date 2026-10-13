@@ -72,6 +72,11 @@ type Props = {
    * conversation is open.
    */
   onConvActions?: (actions: ConvActions | null) => void;
+  /** Pushed by the run-event stream: the count of memories the agent
+   *  actually injected into the user-message observation block this turn.
+   *  App uses this to render the live count on the TopBar Memory chip.
+   *  `null` = no event this turn (engine off). */
+  onMemoryRecalled?: (count: number) => void;
   /** Top-bar 文件 icon pulse (App); each increment opens the file viewer. */
   openFilesRequest?: number;
   /** Opens App's right-sidebar 文件 panel (demo / no project → onViewFiles). */
@@ -206,6 +211,7 @@ export function ConversationPage({
   onArchive,
   onOpenTrace,
   onConvActions,
+  onMemoryRecalled,
   openFilesRequest = 0,
   onOpenFilePanel,
   onFileDiffs,
@@ -757,6 +763,10 @@ export function ConversationPage({
       } else if (current !== undefined && event.runId !== current) return;
       else runGenerationsRef.current.set(event.session, event.runId);
     }
+    if (event.type === "memoryRecalled") {
+      onMemoryRecalled?.(event.count);
+      return;
+    }
     if (event.type === "approvalRequest") {
       setApproval({
         runId: event.runId,
@@ -849,6 +859,10 @@ export function ConversationPage({
       setFailover(null);
       setBudget(null);
       setCompactToast(null);
+      // A new turn starts: until the next memoryRecalled event, the chip
+      // should show "engine on, nothing yet" rather than the prior turn's
+      // count. `null` = "no event yet this turn".
+      onMemoryRecalled?.(0);
       setBudgetLiftToast(null);
       if (compactToastTimerRef.current !== null) {
         window.clearTimeout(compactToastTimerRef.current);

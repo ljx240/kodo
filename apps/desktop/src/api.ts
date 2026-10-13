@@ -255,6 +255,12 @@ type RunEventPayload =
       dropped: number;
       summarizedInto: number;
       freedPct: number;
+    }
+  | {
+      type: "memoryRecalled";
+      session: string;
+      count: number;
+      ids: string[];
     };
 
 export type RunEventDto = RunEventPayload & { runId?: number };
@@ -924,4 +930,121 @@ export function probeContextFile(project: string, path: string): Promise<Context
 export function onRunEvent(handler: (event: RunEventDto) => void): Promise<() => void> {
   if (!isDesktop()) return Promise.resolve(() => {});
   return listen<RunEventDto>(RUN_EVENT, (event) => handler(event.payload));
+}
+
+// ---- Memory Engine IPC ---------------------------------------------------
+
+export type MemoryKind =
+  | "working"
+  | "episodic"
+  | "semantic"
+  | "procedural"
+  | "rule"
+  | "evidence_ref";
+
+export type MemoryStatus =
+  | "candidate"
+  | "active"
+  | "stale"
+  | "superseded"
+  | "quarantined"
+  | "rejected";
+
+export type MemoryAuthority = "historical" | "user_rule" | "system";
+export type SourceTrust =
+  | "untrusted"
+  | "tool_verified"
+  | "test_verified"
+  | "user_confirmed";
+
+export type MemoryEntryDto = {
+  id: string;
+  kind: MemoryKind;
+  status: MemoryStatus;
+  authority: MemoryAuthority;
+  sourceTrust: SourceTrust;
+  title: string;
+  abstractText: string;
+  body: unknown;
+  contentHash: string;
+  confidence: number;
+  verified: boolean;
+  conditions: string[];
+  sourceUris: string[];
+  scopeProjectId: string | null;
+  scopeRepositoryId: string | null;
+  scopeBranch: string | null;
+  useCount: number;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type MemoryStatusDto = {
+  path: string;
+  rowCounts: Record<string, number>;
+  outboxPending: number;
+  tombstones: number;
+  dbSizeBytes: number;
+  mode: string;
+};
+
+export type MemorySnippetDto = {
+  id: string;
+  kind: MemoryKind;
+  title: string;
+  abstractText: string;
+  sourceUris: string[];
+  validity: string;
+  authority: MemoryAuthority;
+  scopeLabel: string;
+};
+
+export type MemoryDoctorDto = {
+  ok: boolean;
+  integrity: string[];
+  rowCounts: Record<string, number>;
+  outboxPending: number;
+  outboxReplayed: number;
+  tombstones: number;
+  notes: string[];
+  dbSizeBytes: number;
+};
+
+export function memoryStatus(): Promise<MemoryStatusDto> {
+  return invoke<MemoryStatusDto>("memory_status", {});
+}
+
+export type MemoryListArgs = {
+  project?: string;
+  kind?: MemoryKind;
+  status?: MemoryStatus;
+  limit?: number;
+  includeHistory?: boolean;
+};
+
+export function memoryList(args: MemoryListArgs): Promise<MemoryEntryDto[]> {
+  return invoke<MemoryEntryDto[]>("memory_list", { args });
+}
+
+export function memorySearch(
+  project: string | undefined,
+  query: string,
+  limit?: number,
+): Promise<MemorySnippetDto[]> {
+  return invoke<MemorySnippetDto[]>("memory_search", {
+    args: { project, query, limit },
+  });
+}
+
+export function memoryInspect(id: string): Promise<MemoryEntryDto | null> {
+  return invoke<MemoryEntryDto | null>("memory_inspect", { id });
+}
+
+export function memoryDisable(id: string): Promise<void> {
+  return invoke<void>("memory_disable", { id });
+}
+
+export function memoryDoctor(apply: boolean): Promise<MemoryDoctorDto> {
+  return invoke<MemoryDoctorDto>("memory_doctor", { apply });
 }

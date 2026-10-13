@@ -1,0 +1,18 @@
+{
+  "workload": "refactor-duplicate-helper",
+  "expected_recall_ids": [
+    "33333333-3333-3333-3333-333333333333"
+  ],
+  "expected_new_entries": [
+    {
+      "kind": "procedural",
+      "abstract_contains": "canonical",
+      "evidence_paths": ["src/util.py"]
+    }
+  ],
+  "expected_status_changes": {
+    "33333333-3333-3333-3333-333333333333": "stale"
+  },
+  "expected_tombstone_count_after": 0,
+  "expected_outbox_pending_after": 0
+}

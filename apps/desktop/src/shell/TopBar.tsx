@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Archive,
+  Brain,
   Check,
   ChevronDown,
   Folder,
@@ -54,6 +55,14 @@ type Props = {
   onAddProject?: () => Promise<void>;
   /** Present only while a live conversation is open — gates rename/archive. */
   convActions?: ConvActions | null;
+  /** Click handler for the Memory chip — opens the Memory tab in the
+   *  Inspector. The TopBar doesn't own navigation; App does. */
+  onOpenMemoryTab?: () => void;
+  /** Live memory recall count for the active turn. `undefined` means the
+   *  engine is off (no `memoryRecalled` event has been emitted yet);
+   *  `0` means the engine is on but nothing matched; `n > 0` shows the
+   *  number of memories the agent actually saw. */
+  memoryRecalledCount?: number;
 };
 
 export function TopBar({
@@ -73,6 +82,8 @@ export function TopBar({
   onSelectProject,
   onAddProject,
   convActions = null,
+  onOpenMemoryTab,
+  memoryRecalledCount,
 }: Props) {
   // Inline title edit in the crumb — the pencil and the ⋯ menu below are its
   // triggers (the content area lost its 64px title header on 2026-09-30).
@@ -236,6 +247,31 @@ export function TopBar({
             <GitBranch size={12} strokeWidth={1.8} className="chip-icon" />
             <span>{branch}</span>
           </span>
+        )}
+        {route === "conversation" && onOpenMemoryTab && (
+          <button
+            type="button"
+            className="chip topbar-chip topbar-chip--button"
+            title={
+              memoryRecalledCount === undefined
+                ? T.memory.section
+                : memoryRecalledCount > 0
+                  ? T.memory.recalled(memoryRecalledCount)
+                  : T.memory.empty
+            }
+            data-testid="topbar-memory"
+            data-memory-count={memoryRecalledCount ?? "off"}
+            onClick={onOpenMemoryTab}
+          >
+            <Brain size={12} strokeWidth={1.8} className="chip-icon" />
+            <span>
+              {memoryRecalledCount === undefined
+                ? T.memory.section
+                : memoryRecalledCount > 0
+                  ? T.memory.recalled(memoryRecalledCount)
+                  : T.memory.empty}
+            </span>
+          </button>
         )}
       </div>
 

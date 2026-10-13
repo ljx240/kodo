@@ -347,242 +347,11 @@ pub const MAX_COMMAND_TIMEOUT_SECS: u64 = 600;
 /// Redact secret-looking material from command output, errors, commands, and
 /// anything else that reaches the model, session log, or UI. Never prints raw
 /// env dumps. Applied at every boundary (tool result, trace, session, events).
+///
+/// Re-exports the canonical implementation in `kodo_core::redact` so
+/// `kodo-agent` and `kodo-memory` share one definition.
 pub fn redact_secrets(text: &str) -> String {
-    if text.is_empty() {
-        return text.to_owned();
-    }
-    let mut out = text.to_owned();
-    out = redact_private_key_blocks(&out);
-    out = redact_token_prefixes(&out);
-    out = redact_bearer_and_basic(&out);
-    out = redact_json_secrets(&out);
-    out = redact_url_userinfo(&out);
-    redact_env_assignments(&out)
-}
-
-fn redact_private_key_blocks(text: &str) -> String {
-    // Collapse PEM private key bodies between headers.
-    let mut out = text.to_owned();
-    for header in [
-        "-----BEGIN PRIVATE KEY-----",
-        "-----BEGIN RSA PRIVATE KEY-----",
-    ] {
-        while let Some(start) = out.find(header) {
-            let end_marker = header.replace("BEGIN", "END");
-            let rest_start = start + header.len();
-            match out[rest_start..].find(&end_marker) {
-                Some(rel) => {
-                    let end = rest_start + rel + end_marker.len();
-                    out.replace_range(start..end, "-----REDACTED PRIVATE KEY-----");
-                }
-                None => {
-                    out.replace_range(start.., "-----REDACTED PRIVATE KEY-----");
-                    break;
-                }
-            }
-        }
-    }
-    out
-}
-
-fn redact_token_prefixes(text: &str) -> String {
-    let mut out = text.to_owned();
-    for pattern in [
-        "sk-ant-",
-        "sk-proj-",
-        "ghp_",
-        "gho_",
-        "ghu_",
-        "ghs_",
-        "ghr_",
-        "github_pat_",
-        "xoxb-",
-        "xoxp-",
-        "xoxa-",
-        "xoxs-",
-        "glpat-",
-        "AIza",
-        "AKIA",
-        "eyJ",
-        "sk-",
-    ] {
-        let mut search_from = 0;
-        while let Some(rel) = out[search_from..].find(pattern) {
-            let pos = search_from + rel;
-            let after = pos + pattern.len();
-            if out[after..].starts_with('•') {
-                search_from = after;
-                continue;
-            }
-            let mut end = after;
-            let bytes = out.as_bytes();
-            while end < bytes.len()
-                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-' || bytes[end] == b'_')
-            {
-                end += 1;
-            }
-            // JWT / AWS need a minimum body so we don't shred ordinary words.
-            let min_body = if pattern == "eyJ" || pattern == "AKIA" {
-                pattern.len() + 8
-            } else {
-                after
-            };
-            if end > min_body || (pattern != "eyJ" && pattern != "AKIA" && end > after) {
-                out.replace_range(after..end, "•••");
-                search_from = after + "•••".len();
-            } else {
-                search_from = after;
-            }
-        }
-    }
-    out
-}
-
-fn redact_bearer_and_basic(text: &str) -> String {
-    let mut out = text.to_owned();
-    for prefix in ["Bearer ", "Basic "] {
-        let mut search_from = 0;
-        while let Some(rel) = out[search_from..].find(prefix) {
-            let pos = search_from + rel + prefix.len();
-            if out[pos..].starts_with('•') {
-                search_from = pos;
-                continue;
-            }
-            let mut end = pos;
-            let bytes = out.as_bytes();
-            while end < bytes.len() && !bytes[end].is_ascii_whitespace() && bytes[end] != b'"' {
-                end += 1;
-            }
-            if end > pos {
-                out.replace_range(pos..end, "•••");
-                search_from = pos + "•••".len();
-            } else {
-                search_from = pos;
-            }
-        }
-    }
-    out
-}
-
-fn redact_json_secrets(text: &str) -> String {
-    // "api_key": "secret" / "password": "secret" / "token": "secret"
-    let keys = [
-        "api_key",
-        "apikey",
-        "accessToken",
-        "access_token",
-        "refresh_token",
-        "client_secret",
-        "password",
-        "secret",
-        "token",
-        "authorization",
-        "private_key",
-    ];
-    let mut out = text.to_owned();
-    for key in keys {
-        for quote in ['"', '\''] {
-            let needle = format!("{quote}{key}{quote}");
-            let mut from = 0;
-            while let Some(rel) = out[from..].find(&needle) {
-                let key_end = from + rel + needle.len();
-                let rest = &out[key_end..];
-                let Some(colon_rel) = rest.find(':') else {
-                    break;
-                };
-                let after_colon = key_end + colon_rel + 1;
-                let value_part = &out[after_colon..];
-                let trimmed = value_part.trim_start();
-                if trimmed.is_empty() {
-                    break;
-                }
-                let q = trimmed.chars().next().unwrap();
-                if q != '"' && q != '\'' {
-                    // numeric / bare — leave
-                    from = after_colon;
-                    continue;
-                }
-                let value_start_offset =
-                    value_part.len() - trimmed[q.len_utf8()..].len().saturating_sub(0);
-                // absolute index of first quote
-                let abs_q = after_colon + value_part.find(q).unwrap_or(0);
-                let body_start = abs_q + q.len_utf8();
-                if body_start >= out.len() {
-                    break;
-                }
-                let Some(end_rel) = out[body_start..].find(q) else {
-                    break;
-                };
-                let body_end = body_start + end_rel;
-                if body_end > body_start {
-                    out.replace_range(body_start..body_end, "•••");
-                }
-                from = body_start + 3;
-                let _ = value_start_offset;
-            }
-        }
-    }
-    out
-}
-
-fn redact_url_userinfo(text: &str) -> String {
-    // scheme://user:pass@host → scheme://user:•••@host
-    let mut out = text.to_owned();
-    let mut search_from = 0;
-    while let Some(rel) = out[search_from..].find("://") {
-        let scheme_end = search_from + rel + 3;
-        let rest = &out[scheme_end..];
-        let Some(at_rel) = rest.find('@') else {
-            search_from = scheme_end;
-            continue;
-        };
-        let authority = &rest[..at_rel];
-        if let Some(colon) = authority.find(':') {
-            if colon > 0 && authority[colon + 1..].len() > 2 {
-                let pass_start = scheme_end + colon + 1;
-                let pass_end = scheme_end + at_rel;
-                if pass_end > pass_start {
-                    out.replace_range(pass_start..pass_end, "•••");
-                    search_from = pass_start + 3;
-                    continue;
-                }
-            }
-        }
-        search_from = scheme_end;
-    }
-    out
-}
-
-fn redact_env_assignments(text: &str) -> String {
-    text.split('\n')
-        .map(|line| {
-            if let Some(eq) = line.find('=') {
-                let name = &line[..eq];
-                let upper = name.to_ascii_uppercase();
-                let sensitive = upper.ends_with("_TOKEN")
-                    || upper.ends_with("_KEY")
-                    || upper.ends_with("_SECRET")
-                    || upper.ends_with("_PASSWORD")
-                    || upper.ends_with("_CREDENTIAL")
-                    || upper.ends_with("_CREDENTIALS")
-                    || upper.contains("PASSWORD")
-                    || upper.contains("AUTHORIZATION")
-                    || upper.contains("APIKEY")
-                    || upper.contains("API_KEY")
-                    || upper == "TOKEN"
-                    || upper == "KEY"
-                    || upper == "SECRET";
-                if sensitive && line[eq + 1..].trim().len() > 3 {
-                    format!("{name}=•••")
-                } else {
-                    line.to_owned()
-                }
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    kodo_core::redact::redact_secrets(text)
 }
 
 /// Read a line range from a file with an output cap.
@@ -845,17 +614,64 @@ pub enum RepoToolRequest {
 pub fn classify_command_risk(command: &str) -> CommandRisk {
     let risk = classify_single_command_risk(command);
     let tokens = tokenize_shell(command);
+    // Hard stops: anything that can swallow an argument or reach a shell
+    // substitution is opaque to the static classifier. These keep the
+    // old "always approval" behavior.
     if tokens.first().is_some_and(|t| t.contains('='))
         || command.contains(['\n', '\r', '`', '$'])
         || command.contains("$(")
         || command.contains("${")
-        || tokens
-            .iter()
-            .any(|t| matches!(t.as_str(), ";" | "|" | "&" | "&&" | "||" | "(" | ")"))
+        // Backgrounding `&` (alone, not part of `&&`) can fork and the
+        // classifier can't see what the right side does.
+        || tokens.iter().any(|t| t == "&")
+        // Subshell `(...)` is a fresh scope — refuse to reason about it.
+        || tokens.iter().any(|t| matches!(t.as_str(), "(" | ")"))
+        // Bare `;` (without `&&` / `||`) is a footgun for read-only
+        // review; keep it on the conservative path. The chain logic
+        // below handles `&&` / `||` / `|` explicitly.
+        || command.contains(';')
     {
         return risk.max(CommandRisk::Unknown);
     }
+
+    // Compound-but-transparently-readable: a chain of `&&` or `||` is
+    // allowed if **every** segment individually classifies as ReadOnly.
+    // This is the fix for the "复合命令被只读权限策略拒绝" symptom in
+    // review tasks — `git status && git diff --numstat` no longer
+    // forces Full permission. Note we do NOT take this path for `;`
+    // (kept conservative) or commands containing `>` / `<` (the
+    // single-command path handles those via the absolute-path
+    // heuristic and bumps to Catastrophic / FilesystemWrite correctly).
+    if command.contains("&&") || command.contains("||") || command.contains('|') {
+        return classify_chain_risk(command);
+    }
+
     risk
+}
+
+/// Split on `&&` / `||` / `|` and classify every segment. Returns the
+/// worst risk across segments. Empty segments force Unknown (the model
+/// ran `cmd1 &&` and forgot the right side).
+fn classify_chain_risk(command: &str) -> CommandRisk {
+    let mut worst = CommandRisk::ReadOnly;
+    for segment in command.split(|c| c == '&' || c == '|' || c == ';') {
+        // `&&` / `||` split on a single char produces empty strings
+        // between the operator and the next char. Drop them.
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Re-stitch the operator we lost: a segment that came from
+        // `cmd1 && cmd2` arrives as `cmd1 ` and ` cmd2`. Recombine by
+        // re-classifying the segment as-is.
+        let seg_risk = classify_single_command_risk(trimmed);
+        worst = worst.max(seg_risk);
+    }
+    if worst == CommandRisk::ReadOnly {
+        CommandRisk::ReadOnly
+    } else {
+        worst.max(CommandRisk::Unknown)
+    }
 }
 
 fn read_only_git_args(command: &str) -> Option<Vec<&str>> {
@@ -1849,6 +1665,36 @@ mod tests {
         // Ask always needs approval for any command (including these).
         assert!(crate::Permission::Ask
             .needs_approval(crate::StepKind::Command, Some("npm install left-pad")));
+    }
+
+    #[test]
+    fn chain_of_readonly_commands_stays_readonly() {
+        // The whole point of the fix: `git status && git diff --numstat`
+        // should be ReadOnly when every segment is ReadOnly, so the
+        // review task can run it without Full permission.
+        let r = classify_command_risk("git status && git diff --numstat");
+        assert_eq!(r, CommandRisk::ReadOnly, "chain 1 actual={:?}", r);
+        // `ls -la` is conservatively classified as FilesystemWrite by
+        // the single-command path; the chain takes the worst segment.
+        let r = classify_command_risk("ls -la || echo empty");
+        assert_eq!(r, CommandRisk::Unknown, "chain 2 actual={:?}", r);
+        // `||` between two read-only commands stays ReadOnly.
+        let r = classify_command_risk("git log --oneline -n 5 || echo empty");
+        assert_eq!(r, CommandRisk::ReadOnly, "chain 3 actual={:?}", r);
+        // `cmd1 && rm -rf /` collapses to the worst segment — the
+        // rm segment is Catastrophic, so the chain is too.
+        let r = classify_command_risk("git status && rm -rf /");
+        assert_eq!(r, CommandRisk::Catastrophic, "chain 4 actual={:?}", r);
+        // Bare `;` and `&` / `>` / `<` still force Unknown — footguns
+        // we want to keep on the conservative path.
+        let r = classify_command_risk("git status; rm -rf /");
+        assert_eq!(r, CommandRisk::Unknown, "chain 5 actual={:?}", r);
+        // `git status > /tmp/x` triggers the absolute-path redirection
+        // heuristic → Catastrophic in the single-command classifier.
+        let r = classify_command_risk("git status > /tmp/x");
+        assert_eq!(r, CommandRisk::Catastrophic, "chain 6 actual={:?}", r);
+        let r = classify_command_risk("rm -rf / &");
+        assert_eq!(r, CommandRisk::Catastrophic, "chain 7 actual={:?}", r);
     }
 
     #[test]

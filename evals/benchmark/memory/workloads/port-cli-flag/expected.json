@@ -1,0 +1,18 @@
+{
+  "workload": "port-cli-flag",
+  "expected_recall_ids": [
+    "55555555-5555-5555-5555-555555555555"
+  ],
+  "expected_new_entries": [
+    {
+      "kind": "procedural",
+      "abstract_contains": "config",
+      "evidence_paths": ["config.toml"]
+    }
+  ],
+  "expected_status_changes": {
+    "55555555-5555-5555-5555-555555555555": "stale"
+  },
+  "expected_tombstone_count_after": 0,
+  "expected_outbox_pending_after": 0
+}

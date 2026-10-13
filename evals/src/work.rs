@@ -82,6 +82,7 @@ pub(super) fn run(report: &mut super::EvalReport) {
                 agent_instructions: None,
                 personas: Vec::new(),
                 budget_family: None,
+                memory: None,
             };
             let mut ready = false;
             let mut sink = |event| {

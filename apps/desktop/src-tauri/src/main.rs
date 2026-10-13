@@ -22,6 +22,11 @@ use run::{ApprovalChoice, Approvals, Runs, StartArgs};
 mod run;
 mod view;
 
+mod memory;
+use memory::{
+    memory_disable, memory_doctor, memory_inspect, memory_list, memory_search, memory_status,
+};
+
 use view::{
     agent_view, skill_view, AgentView, ArchivedItemView, ModelOptionView, ProjectView,
     ProviderView, SessionRefView, SessionView, SkillView, Workspace,
@@ -1580,6 +1585,12 @@ fn main() {
             load_llm_io,
             load_file_span,
             turn_has_artifacts,
+            memory_status,
+            memory_list,
+            memory_search,
+            memory_inspect,
+            memory_disable,
+            memory_doctor,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Kodo");

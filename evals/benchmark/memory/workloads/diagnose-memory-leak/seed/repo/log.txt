@@ -1,0 +1,4 @@
+[2026-10-12T03:14:15Z] rss=4.2GB workers=1 cache_keys=812394
+[2026-10-12T03:14:20Z] rss=4.3GB workers=1 cache_keys=812501
+[2026-10-12T03:14:25Z] rss=4.4GB workers=1 cache_keys=812688
+# (lines truncated; pattern continues until OOM kill)

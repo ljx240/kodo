@@ -27,6 +27,63 @@ pub enum Parsed {
     Help,
     Version,
     Error(String),
+    Memory(MemoryCmd),
+    /// `kodo memory --help` / `kodo memory` with no verb — print subcommand usage.
+    MemoryHelp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryCmd {
+    /// Sub-command; `None` when the user just typed `kodo memory`.
+    pub verb: Option<MemoryVerb>,
+    /// `--project` override; `None` → cwd.
+    pub project: Option<PathBuf>,
+    /// `--limit <n>` for `list` / `search`.
+    pub limit: Option<usize>,
+    /// `--kind <kind>` for `list` (working|episodic|semantic|procedural|rule|evidence_ref).
+    pub kind: Option<String>,
+    /// `--status <status>` for `list` (candidate|active|stale|superseded|quarantined|rejected).
+    pub status: Option<String>,
+    /// Positional query / id argument, depending on the verb.
+    pub value: Option<String>,
+    /// `--apply` for `reindex`; default is dry-run.
+    pub apply: bool,
+    /// `embed <status|warmup|off>` — present when verb == `Embed`.
+    pub embed_verb: Option<EmbedVerb>,
+    /// `--backend <name>` for `embed` (default = `local_bge_small_en`).
+    pub embed_backend: Option<String>,
+    /// `promote <id> --confirm --force` — write the entry as a skill file.
+    /// Default (no `--confirm`) is dry-run.
+    pub promote_confirm: bool,
+    pub promote_force: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryVerb {
+    Status,
+    List,
+    Search,
+    Inspect,
+    Disable,
+    Doctor,
+    Reindex,
+    /// `kodo memory embed <status|warmup|off>` — manage the optional
+    /// local embedding backend (no-op when the `onnx` feature is off).
+    Embed,
+    /// Reserved for the eventual `promote` / `benchmark` verbs; not parsed
+    /// in this revision — see P2 acceptance gate.
+    Promote,
+    Benchmark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedVerb {
+    /// Print the current backend + cache state.
+    Status,
+    /// Download model weights (no-op without `--features onnx`).
+    Warmup,
+    /// Remove cached weights for a backend.
+    Off,
 }
 
 pub const USAGE: &str = "\
@@ -45,6 +102,9 @@ pub const USAGE: &str = "\
   -h, --help              显示本帮助
   -V, --version           显示版本
 
+子命令:
+  kodo memory <verb>      管理 Memory Engine（详见 `kodo memory --help`）
+
 REPL 命令:
   /help                   显示帮助
   /quit                   退出（/exit、/q 同义）
@@ -55,6 +115,12 @@ REPL 命令:
 ";
 
 pub fn parse(argv: &[String]) -> Parsed {
+    // `kodo memory ...` is a sub-tree with its own flag set. Pull it out
+    // before the main parser so a typo there can't take down `kodo` itself.
+    if argv.first().map(String::as_str) == Some("memory") {
+        return parse_memory(&argv[1..]);
+    }
+
     let mut project: Option<PathBuf> = None;
     let mut permission: Option<Permission> = None;
     let mut mode: Option<AgentMode> = None;
@@ -135,6 +201,108 @@ pub fn parse(argv: &[String]) -> Parsed {
     })
 }
 
+fn parse_memory(argv: &[String]) -> Parsed {
+    let mut verb: Option<MemoryVerb> = None;
+    let mut project: Option<PathBuf> = None;
+    let mut limit: Option<usize> = None;
+    let mut kind: Option<String> = None;
+    let mut status: Option<String> = None;
+    let mut value: Option<String> = None;
+    let mut apply = false;
+    let mut embed_verb: Option<EmbedVerb> = None;
+    let mut embed_backend: Option<String> = None;
+    let mut promote_confirm = false;
+    let mut promote_force = false;
+
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        let mut take_value = |flag: &str| -> Result<String, Parsed> {
+            i += 1;
+            argv.get(i)
+                .cloned()
+                .ok_or_else(|| Parsed::Error(format!("{flag} 需要一个值")))
+        };
+        match arg {
+            "-h" | "--help" => return Parsed::MemoryHelp,
+            "--project" => match take_value("--project") {
+                Ok(v) => project = Some(PathBuf::from(v)),
+                Err(e) => return e,
+            },
+            "--limit" => match take_value("--limit") {
+                Ok(v) => match v.parse::<usize>() {
+                    Ok(n) => limit = Some(n),
+                    Err(_) => return Parsed::Error(format!("--limit 需要正整数：{v}")),
+                },
+                Err(e) => return e,
+            },
+            "--kind" => match take_value("--kind") {
+                Ok(v) => kind = Some(v),
+                Err(e) => return e,
+            },
+            "--status" => match take_value("--status") {
+                Ok(v) => status = Some(v),
+                Err(e) => return e,
+            },
+            "--apply" => apply = true,
+            "--backend" => match take_value("--backend") {
+                Ok(v) => embed_backend = Some(v),
+                Err(e) => return e,
+            },
+            "--confirm" => promote_confirm = true,
+            "--force" => promote_force = true,
+            other if other.starts_with('-') => {
+                return Parsed::Error(format!("未知参数：{other}"));
+            }
+            _ => {
+                if verb.is_none() {
+                    verb = match arg {
+                        "status" => Some(MemoryVerb::Status),
+                        "list" => Some(MemoryVerb::List),
+                        "search" => Some(MemoryVerb::Search),
+                        "inspect" => Some(MemoryVerb::Inspect),
+                        "disable" => Some(MemoryVerb::Disable),
+                        "doctor" => Some(MemoryVerb::Doctor),
+                        "reindex" => Some(MemoryVerb::Reindex),
+                        "promote" => Some(MemoryVerb::Promote),
+                        "benchmark" => Some(MemoryVerb::Benchmark),
+                        "embed" => Some(MemoryVerb::Embed),
+                        other => {
+                            return Parsed::Error(format!("未知 memory 子命令：{other}"));
+                        }
+                    };
+                } else if verb == Some(MemoryVerb::Embed) && embed_verb.is_none() {
+                    embed_verb = match arg {
+                        "status" => Some(EmbedVerb::Status),
+                        "warmup" => Some(EmbedVerb::Warmup),
+                        "off" => Some(EmbedVerb::Off),
+                        other => {
+                            return Parsed::Error(format!("未知 memory embed 子命令：{other}"));
+                        }
+                    };
+                } else {
+                    value = Some(arg.to_owned());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    Parsed::Memory(MemoryCmd {
+        verb,
+        project,
+        limit,
+        kind,
+        status,
+        value,
+        apply,
+        embed_verb,
+        embed_backend,
+        promote_confirm,
+        promote_force,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +314,7 @@ mod tests {
             Parsed::Help => panic!("expected Run, got Help"),
             Parsed::Version => panic!("expected Run, got Version"),
             Parsed::Error(error) => panic!("expected Run, got Error: {error}"),
+            Parsed::Memory(_) | Parsed::MemoryHelp => panic!("expected Run, got Memory"),
         }
     }
 

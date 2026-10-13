@@ -1,0 +1,14 @@
+[recall_at_10]
+weight = 0.5
+# This workload specifically tests the multi-snippet case (2 entries
+# in the same observation block); the candidate should not drop one
+# in favor of the other.
+
+[first_turn_tokens]
+weight = 0.1
+
+[end_task_success]
+weight = 0.3
+
+[no_regressions]
+weight = 0.1

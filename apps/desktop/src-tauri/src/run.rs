@@ -15,9 +15,11 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use kodo_agent::{self as agent, SinkEvent, StepKind};
+use kodo_memory::SqliteMemory;
 use kodo_shell::{approval_fingerprint, step_kind_label, Logged, TurnLogger, TurnOutcome};
 
 use crate::view::{ItemView, RunEvent};
+use kodo_memory::MemoryHandle;
 
 pub use kodo_agent::Permission;
 pub use kodo_shell::ApprovalChoice;
@@ -332,11 +334,26 @@ pub fn start(
         let record_id = args.id.clone();
         let record_token = token.clone();
         let record_app = app.clone();
+        // Memory handle for the outbox writer. Opened independently of
+        // the `RunRequest` so the sink can forward started/completed
+        // items without having to thread the request through the
+        // closure capture. Same on-disk file as the agent loop will
+        // see — fail-open if HOME is unset.
+        let memory_handle = open_memory_handle();
         // Envelope writes live in kodo-shell; this sink records first, then
         // emits, so the log stays the source of truth for the GUI.
         let mut logger =
             TurnLogger::new(args.dir.clone(), args.id.clone()).with_capture(args.local_trace);
         let logger_ref = &mut logger;
+        // Track whether the agent loop emitted a terminal `AgentMessage`
+        // with `delivery == "ready"`. If it didn't, the run loop exited
+        // without a final answer — the most common cause in review-style
+        // tasks is context truncation, and the GUI should still see a
+        // synthesized "partial" answer instead of `TurnComplete` with no
+        // body. See `synthesize_fallback_answer` below.
+        let answered: std::sync::Arc<std::sync::atomic::AtomicBool> =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let answered_for_sink = answered.clone();
 
         let mut sink = move |event: SinkEvent| -> bool {
             if !record_token.is_live() {
@@ -393,6 +410,12 @@ pub fn start(
                 }
                 SinkEvent::Started { .. } => {
                     if let Logged::Started(item) = logged {
+                        if let (Some(handle), Some(event)) = (
+                            memory_handle.as_ref(),
+                            kodo_shell::event_for_item(&item, kodo_core::session::Phase::Started),
+                        ) {
+                            kodo_shell::write_event(handle, &event);
+                        }
                         emit_run(
                             &record_app,
                             &record_token,
@@ -405,6 +428,16 @@ pub fn start(
                 }
                 SinkEvent::Finished { .. } => {
                     if let Logged::Finished(item) = logged {
+                        let phase = match item.status {
+                            kodo_core::session::Status::Failed => kodo_core::session::Phase::Failed,
+                            _ => kodo_core::session::Phase::Completed,
+                        };
+                        if let (Some(handle), Some(event)) = (
+                            memory_handle.as_ref(),
+                            kodo_shell::event_for_item(&item, phase),
+                        ) {
+                            kodo_shell::write_event(handle, &event);
+                        }
                         emit_run(
                             &record_app,
                             &record_token,
@@ -453,6 +486,17 @@ pub fn start(
                         },
                     );
                 }
+                SinkEvent::MemoryRecalled { count, ids } => {
+                    emit_run(
+                        &record_app,
+                        &record_token,
+                        RunEvent::MemoryRecalled {
+                            session: record_id.clone(),
+                            count,
+                            ids,
+                        },
+                    );
+                }
                 SinkEvent::AskUser { question, options } => {
                     emit_run(
                         &record_app,
@@ -461,6 +505,36 @@ pub fn start(
                             session: record_id.clone(),
                             question,
                             options,
+                        },
+                    );
+                }
+                SinkEvent::AgentMessage {
+                    text,
+                    delivery,
+                    verification,
+                    plain,
+                    failure_reason,
+                    checks,
+                } => {
+                    // Any terminal `AgentMessage` counts as the agent
+                    // loop's final answer — the post-run fallback only
+                    // fires when zero `AgentMessage` events were emitted
+                    // (the "执行成功但未返回正文" symptom). Delivery
+                    // "failed" still counts: the loop guard (F3-3) uses
+                    // it to surface a forced-terminal body, and the user
+                    // must not see a second synthesised message on top.
+                    answered_for_sink.store(true, std::sync::atomic::Ordering::SeqCst);
+                    emit_run(
+                        &record_app,
+                        &record_token,
+                        RunEvent::AgentMessage {
+                            session: record_id.clone(),
+                            text,
+                            delivery,
+                            verification,
+                            plain,
+                            failure_reason,
+                            checks,
                         },
                     );
                 }
@@ -487,6 +561,7 @@ pub fn start(
             agent_instructions: args.agent_instructions.clone(),
             personas: args.personas.clone(),
             budget_family: args.budget_family.clone(),
+            memory: open_memory_handle(),
         };
 
         let result = agent::run(&request, &alive, &approve, &mut sink);
@@ -499,6 +574,31 @@ pub fn start(
                     notify(RunEvent::Stopped {
                         session: args.id.clone(),
                     });
+                } else if !answered.load(std::sync::atomic::Ordering::SeqCst) {
+                    // The agent loop returned cleanly but never emitted a
+                    // terminal `AgentMessage` (the "执行成功但未返回正文"
+                    // symptom). Synthesize a partial answer so the GUI
+                    // surfaces a body instead of an empty `TurnComplete`.
+                    let fallback = synthesize_fallback_answer(&request.message);
+                    notify(RunEvent::AgentMessage {
+                        session: args.id.clone(),
+                        text: fallback,
+                        delivery: "partial".to_owned(),
+                        verification: "not_run".to_owned(),
+                        plain: false,
+                        failure_reason: "loop_terminated_without_answer".to_owned(),
+                        checks: Vec::new(),
+                    });
+                    if logger.finish(TurnOutcome::Complete).is_err() {
+                        notify(RunEvent::Error {
+                            session: args.id.clone(),
+                            message: "failed to mark the turn complete".to_owned(),
+                        });
+                    } else {
+                        notify(RunEvent::TurnComplete {
+                            session: args.id.clone(),
+                        });
+                    }
                 } else if logger.finish(TurnOutcome::Complete).is_err() {
                     notify(RunEvent::Error {
                         session: args.id.clone(),
@@ -524,6 +624,23 @@ pub fn start(
     });
 
     Ok(())
+}
+
+/// Build a short, honest fallback answer when the agent loop exits
+/// without producing a terminal `AgentMessage`. The text is generic
+/// (not a fabricated review) — the user reads it as "I ran out of
+/// budget before the model could write an answer", and the UI keeps
+/// the live transcript / response-trace links working.
+fn synthesize_fallback_answer(original_message: &str) -> String {
+    let trimmed = original_message.trim();
+    let head = if trimmed.is_empty() {
+        "你".to_owned()
+    } else {
+        format!("「{trimmed}」")
+    };
+    format!(
+        "{head} 这一轮我执行了若干读操作，但模型在生成最终答复前就被截断了 —— 常见原因是上下文窗口耗尽、复合命令被权限策略拒绝后没有 fallback 路径，或可读取文件过多挤掉了正文。\n\n可尝试：\n1. 在「查看响应轨迹」里看执行记录和已读取文件清单；\n2. 在 Settings → 模型中调大「最大输出 tokens」后重试；\n3. 如果是 review / 调研类任务，先把任务拆成更小的子任务再发。",
+    )
 }
 
 #[cfg(test)]
@@ -571,5 +688,27 @@ mod tests {
         .unwrap();
         assert_eq!(encoded["runId"], 7);
         assert_eq!(encoded["type"], "turnStarted");
+    }
+}
+
+/// Open the on-disk memory store at `<state_dir>/memory/v1/memory.sqlite`
+/// and wrap it in a `MemoryHandle`. Returns `None` if the state directory
+/// is unavailable (HOME unset, sandbox restrictions) — fail-open: the
+/// agent loop continues with the memory channel disabled.
+fn open_memory_handle() -> Option<MemoryHandle> {
+    let state_dir = kodo_core::settings::state_dir()?;
+    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match SqliteMemory::open(&path) {
+        Ok(mem) => Some(mem.into()),
+        Err(e) => {
+            eprintln!(
+                "kodo memory: failed to open store at {}: {e}",
+                path.display()
+            );
+            None
+        }
     }
 }

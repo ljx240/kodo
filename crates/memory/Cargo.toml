@@ -1,0 +1,54 @@
+[package]
+name = "kodo-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Optional local-ONNX embedding backend. Off by default so consumers
+# do not pay the build cost of pulling `ort` + `tokenizers` (and the
+# ~120 MB onnxruntime binary) when they only need FTS / RRF recall.
+#
+# Two sub-features, both opt-in:
+# - `download` — adds `ureq` and unlocks the HuggingFace warmup
+#   (HTTP download + sha256 verify + manifest write). Lightweight:
+#   no native dependencies. This is the production path for
+#   `kodo memory embed warmup --backend bge-small-en`.
+# - `onnx-inference` — adds `ort` + `tokenizers`. Compiles the
+#   onnxruntime C++ binary and a tokenizer runtime. Heavy. The CLI
+#   default build does NOT enable this.
+#
+# Common usage:
+#   cargo build -p kodo-memory --features download         # warmup only
+#   cargo build -p kodo-memory --features onnx-inference  # full pipeline
+#   cargo build -p kodo-memory --features "download onnx-inference"
+#
+# When NEITHER feature is enabled, `warmup` returns
+# `IndexUnavailable("build with --features download")` and the
+# embedder is permanently `IndexUnavailable`. This keeps the
+# default `cargo check --workspace` under 5s.
+download = ["dep:ureq"]
+onnx-inference = ["dep:ort", "dep:tokenizers"]
+
+[dependencies]
+# SQLite with bundled C so FTS5 + WAL are guaranteed present on every platform.
+# `bundled` builds SQLite from source; no system sqlite3 dependency.
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+# kodo-core owns the shared secret-redaction helper. kodo-agent and
+# kodo-memory both depend on it; we deliberately do NOT depend on
+# kodo-agent here (that would form a cycle).
+kodo-core = { path = "../core" }
+# Optional embedding deps. Each is gated behind its own feature so
+# the default build stays slim.
+ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
+ort = { version = "2.0.0-rc.14", default-features = false, optional = true }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
