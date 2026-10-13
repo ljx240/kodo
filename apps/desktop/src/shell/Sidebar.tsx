@@ -16,6 +16,7 @@ import {
   Puzzle,
   Settings,
   Sparkles,
+  Timer,
   Trash2,
   X,
 } from "lucide-react";
@@ -36,6 +37,7 @@ import { Menu, MenuItem } from "./Menu";
 const NAV: { name: RouteName; label: string; Icon: typeof Archive; action?: boolean }[] = [
   { name: "conversation", label: T.nav.newTask, Icon: MessageCircle, action: true },
   { name: "plugins", label: T.nav.plugins, Icon: Puzzle },
+  { name: "schedule", label: T.nav.schedule, Icon: Timer },
 ];
 
 /** Conversations shown per group before 「加载全部会话」 takes over. */

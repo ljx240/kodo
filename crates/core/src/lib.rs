@@ -3,6 +3,7 @@
 //! Headless agent runtime. It knows nothing about Tauri, React or transport,
 //! so it stays free of dependencies.
 
+pub mod scheduler;
 pub mod session;
 pub mod settings;
 pub mod traces;

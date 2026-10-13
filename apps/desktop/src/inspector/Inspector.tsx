@@ -71,6 +71,7 @@ const PANEL_TABS: Record<RouteName, { tab: InspectorTab; label: string }[]> = {
   ],
   archive: [{ tab: "summary", label: T.inspector.panel }],
   settings: [{ tab: "help", label: T.inspector.help }],
+  schedule: [{ tab: "summary", label: T.inspector.panel }],
 };
 
 function Tabs({

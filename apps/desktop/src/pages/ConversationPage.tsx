@@ -268,6 +268,19 @@ export function ConversationPage({
   const [queue, setQueueState] = useState<PendingSend[]>([]);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(null);
+  /** Vision-incapable + image-attached: first-time per session banner. The
+   *  user dismisses with `知道了`; subsequent send-with-image calls skip
+   *  the gate. Persisted only for the page session, not across reloads —
+   *  a hard reload reminds the user once (matches the plan: "首次提示，
+   *  之后静默降级"). */
+  const [visionSkipAcked, setVisionSkipAcked] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.sessionStorage.getItem("kodo:vision-img-skip-acked") === "1";
+  });
+  /** The send we are about to dispatch once the user acknowledges the
+   *  vision-skip banner. Held in state so re-renders don't lose the
+   *  payload. `null` means the banner is closed. */
+  const [pendingVisionSend, setPendingVisionSend] = useState<PendingSend | null>(null);
   const [fileDiffs, setFileDiffs] = useState<Record<string, string> | null>(null);
   /** Paths the user had already dirtied / where undo would conflict. */
   const [turnMeta, setTurnMeta] = useState<{ preExisting: string[]; conflicts: string[] }>({
@@ -346,6 +359,18 @@ export function ConversationPage({
     }
     return null;
   }, [demoMode, providers, provider]);
+
+  /** Does the currently-selected model accept image attachments? `undefined`
+   *  means the catalog doesn't know (legacy / user-added id) — treat as
+   *  opt-in and don't gate. `false` means definitely text-only and triggers
+   *  the first-time skip notice. */
+  const activeModelVision = useMemo<boolean | undefined>(() => {
+    if (!provider) return undefined;
+    const target = provider.modelId || provider.model;
+    if (!target) return undefined;
+    const match = provider.models?.find((m) => m.model_id === target);
+    return match?.vision;
+  }, [provider]);
 
   useEffect(() => {
     setApproval(null);
@@ -599,7 +624,43 @@ export function ConversationPage({
       applyQueue([...queueRef.current, { text, context }]);
       return;
     }
+    // Vision-incapable model + image attached: surface a one-time notice
+    // before sending. The message is parked in `pendingVisionSend` and
+    // dispatched only after the user acks. `vision === undefined` means
+    // the catalog doesn't know (legacy entry) — treat as opt-in (no gate).
+    if (
+      !visionSkipAcked &&
+      activeModelVision === false &&
+      context.some((path) => kindFromPath(path) === "image")
+    ) {
+      setPendingVisionSend({ text, context });
+      return;
+    }
     void dispatchSend(text, context);
+  };
+
+  /** Acknowledge the vision-skip notice: persist the flag, dismiss the
+   *  banner, and dispatch the held message if there is one. Idempotent —
+   *  calling with no pending send still flips the session flag. */
+  const ackVisionSkip = () => {
+    if (typeof window !== "undefined") {
+      window.sessionStorage.setItem("kodo:vision-img-skip-acked", "1");
+    }
+    setVisionSkipAcked(true);
+    const held = pendingVisionSend;
+    setPendingVisionSend(null);
+    if (held) void dispatchSend(held.text, held.context);
+  };
+
+  /** Cancel the pending send without acking; the user keeps the draft and
+   *  can re-trigger send (e.g. by switching model). The Composer cleared
+   *  its draft on submit, so re-seed it via `editSeed` to restore the
+   *  typed text — the attachment chip already stays put (page-level
+   *  state). */
+  const dismissVisionSkip = () => {
+    const held = pendingVisionSend;
+    setPendingVisionSend(null);
+    if (held) setEditSeed({ text: held.text, nonce: Date.now() });
   };
 
   const regenerate = () => {
@@ -1387,6 +1448,35 @@ export function ConversationPage({
                     )}
                   </div>
                 </div>
+                {pendingVisionSend && (
+                  <div
+                    className="action-error"
+                    role="alert"
+                    data-testid="vision-skip-notice"
+                  >
+                    <span className="action-error-msg">
+                      {T.composer.visionSkippedNotice}
+                    </span>
+                    <div className="action-error-actions">
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--sm"
+                        data-testid="vision-skip-ack"
+                        onClick={ackVisionSkip}
+                      >
+                        {T.composer.visionSkippedNoticeAck}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--sm"
+                        data-testid="vision-skip-cancel"
+                        onClick={dismissVisionSkip}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {composer}
               </div>
             ) : (
@@ -1581,6 +1671,33 @@ export function ConversationPage({
         <TurnRail items={railItems} activeIndex={activeTurn} onNavigate={navigateToTurn} />
       </div>
 
+      {!showWelcome && pendingVisionSend && (
+        <div
+          className="action-error"
+          role="alert"
+          data-testid="vision-skip-notice"
+        >
+          <span className="action-error-msg">{T.composer.visionSkippedNotice}</span>
+          <div className="action-error-actions">
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              data-testid="vision-skip-ack"
+              onClick={ackVisionSkip}
+            >
+              {T.composer.visionSkippedNoticeAck}
+            </button>
+            <button
+              type="button"
+              className="btn btn--sm"
+              data-testid="vision-skip-cancel"
+              onClick={dismissVisionSkip}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
       {!showWelcome && composer}
     </main>
   );

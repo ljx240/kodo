@@ -30,6 +30,9 @@ pub enum Parsed {
     Memory(MemoryCmd),
     /// `kodo memory --help` / `kodo memory` with no verb — print subcommand usage.
     MemoryHelp,
+    Schedule(ScheduleCmd),
+    /// `kodo schedule --help` / `kodo schedule` with no verb — print subcommand usage.
+    ScheduleHelp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +94,38 @@ pub enum EmbedVerb {
     Off,
 }
 
+/// `kodo schedule <verb>` — terminal surface for the scheduler. The
+/// first version is read + lifecycle only; create / edit / archive
+/// land when the GUI-side modal needs the same shapes (the desktop
+/// drives writes, this CLI is the diagnostic companion).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleCmd {
+    pub verb: Option<ScheduleVerb>,
+    /// Positional task id for `show` / `history` / `run-now` /
+    /// `cancel` / `enable` / `disable` / `archive`.
+    pub task_id: Option<String>,
+    /// Positional run id for `cancel <run_id>`.
+    pub run_id: Option<String>,
+    /// `--limit N` for `list` and `history`.
+    pub limit: Option<usize>,
+    /// `--include-archived` for `list`.
+    pub include_archived: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleVerb {
+    List,
+    Show,
+    History,
+    RunNow,
+    Cancel,
+    Enable,
+    Disable,
+    Archive,
+    /// Print the registered job types the scheduler can dispatch.
+    JobTypes,
+}
+
 pub const USAGE: &str = "\
 用法: kodo [选项] [消息...]
 
@@ -109,6 +144,7 @@ pub const USAGE: &str = "\
 
 子命令:
   kodo memory <verb>      管理 Memory Engine（详见 `kodo memory --help`）
+  kodo schedule <verb>    定时任务：查看、立即执行、取消、暂停、归档（详见 `kodo schedule --help`）
 
 REPL 命令:
   /help                   显示帮助
@@ -124,6 +160,10 @@ pub fn parse(argv: &[String]) -> Parsed {
     // before the main parser so a typo there can't take down `kodo` itself.
     if argv.first().map(String::as_str) == Some("memory") {
         return parse_memory(&argv[1..]);
+    }
+    // Same precedent for `kodo schedule ...`.
+    if argv.first().map(String::as_str) == Some("schedule") {
+        return parse_schedule(&argv[1..]);
     }
 
     let mut project: Option<PathBuf> = None;
@@ -314,6 +354,72 @@ fn parse_memory(argv: &[String]) -> Parsed {
     })
 }
 
+fn parse_schedule(argv: &[String]) -> Parsed {
+    let mut verb: Option<ScheduleVerb> = None;
+    let mut task_id: Option<String> = None;
+    let mut run_id: Option<String> = None;
+    let mut limit: Option<usize> = None;
+    let mut include_archived = false;
+
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        let mut take_value = |flag: &str| -> Result<String, Parsed> {
+            i += 1;
+            argv.get(i)
+                .cloned()
+                .ok_or_else(|| Parsed::Error(format!("{flag} 需要一个值")))
+        };
+        match arg {
+            "-h" | "--help" => return Parsed::ScheduleHelp,
+            "--limit" => match take_value("--limit") {
+                Ok(v) => match v.parse::<usize>() {
+                    Ok(n) => limit = Some(n),
+                    Err(_) => return Parsed::Error(format!("--limit 需要正整数：{v}")),
+                },
+                Err(e) => return e,
+            },
+            "--include-archived" => include_archived = true,
+            other if other.starts_with('-') => {
+                return Parsed::Error(format!("未知参数：{other}"));
+            }
+            _ => {
+                if verb.is_none() {
+                    verb = match arg {
+                        "list" => Some(ScheduleVerb::List),
+                        "show" => Some(ScheduleVerb::Show),
+                        "history" => Some(ScheduleVerb::History),
+                        "run-now" => Some(ScheduleVerb::RunNow),
+                        "cancel" => Some(ScheduleVerb::Cancel),
+                        "enable" => Some(ScheduleVerb::Enable),
+                        "disable" => Some(ScheduleVerb::Disable),
+                        "archive" => Some(ScheduleVerb::Archive),
+                        "job-types" => Some(ScheduleVerb::JobTypes),
+                        other => {
+                            return Parsed::Error(format!("未知 schedule 子命令：{other}"));
+                        }
+                    };
+                } else if task_id.is_none() {
+                    task_id = Some(arg.to_owned());
+                } else if run_id.is_none() {
+                    run_id = Some(arg.to_owned());
+                } else {
+                    return Parsed::Error(format!("多余的位置参数：{arg}"));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    Parsed::Schedule(ScheduleCmd {
+        verb,
+        task_id,
+        run_id,
+        limit,
+        include_archived,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +432,7 @@ mod tests {
             Parsed::Version => panic!("expected Run, got Version"),
             Parsed::Error(error) => panic!("expected Run, got Error: {error}"),
             Parsed::Memory(_) | Parsed::MemoryHelp => panic!("expected Run, got Memory"),
+            Parsed::Schedule(_) | Parsed::ScheduleHelp => panic!("expected Run, got Schedule"),
         }
     }
 
@@ -349,6 +456,22 @@ mod tests {
             Parsed::Help => panic!("expected Memory, got Help"),
             Parsed::Version => panic!("expected Memory, got Version"),
             Parsed::MemoryHelp => panic!("expected Memory, got MemoryHelp"),
+            Parsed::Schedule(_) | Parsed::ScheduleHelp => panic!("expected Memory, got Schedule"),
+        }
+    }
+
+    /// Helper for parsing `kodo schedule ...` argv slices. Panics if
+    /// the result is not a `Schedule(ScheduleCmd)`.
+    fn schedule(argv: &[&str]) -> ScheduleCmd {
+        let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+        match parse(&argv) {
+            Parsed::Schedule(cmd) => cmd,
+            Parsed::Error(e) => panic!("expected Schedule, got Error: {e}"),
+            Parsed::Run(_) => panic!("expected Schedule, got Run"),
+            Parsed::Help => panic!("expected Schedule, got Help"),
+            Parsed::Version => panic!("expected Schedule, got Version"),
+            Parsed::Memory(_) | Parsed::MemoryHelp => panic!("expected Schedule, got Memory"),
+            Parsed::ScheduleHelp => panic!("expected Schedule, got ScheduleHelp"),
         }
     }
 
@@ -481,6 +604,69 @@ mod tests {
             Parsed::Help => panic!("expected Error, got Help"),
             Parsed::Version => panic!("expected Error, got Version"),
             Parsed::MemoryHelp => panic!("expected Error, got MemoryHelp"),
+            Parsed::Schedule(_) | Parsed::ScheduleHelp => {
+                panic!("expected Error, got Schedule")
+            }
         }
+    }
+
+    #[test]
+    fn schedule_list_default_args() {
+        let cmd = schedule(&["schedule", "list"]);
+        assert_eq!(cmd.verb, Some(ScheduleVerb::List));
+        assert_eq!(cmd.task_id, None);
+        assert_eq!(cmd.include_archived, false);
+        assert_eq!(cmd.limit, None);
+    }
+
+    #[test]
+    fn schedule_list_with_include_archived_and_limit() {
+        let cmd = schedule(&["schedule", "list", "--include-archived", "--limit", "20"]);
+        assert_eq!(cmd.verb, Some(ScheduleVerb::List));
+        assert!(cmd.include_archived);
+        assert_eq!(cmd.limit, Some(20));
+    }
+
+    #[test]
+    fn schedule_show_takes_task_id() {
+        let cmd = schedule(&["schedule", "show", "task-1"]);
+        assert_eq!(cmd.verb, Some(ScheduleVerb::Show));
+        assert_eq!(cmd.task_id.as_deref(), Some("task-1"));
+    }
+
+    #[test]
+    fn schedule_cancel_takes_task_and_run_id() {
+        let cmd = schedule(&["schedule", "cancel", "task-1", "run-1"]);
+        assert_eq!(cmd.verb, Some(ScheduleVerb::Cancel));
+        assert_eq!(cmd.task_id.as_deref(), Some("task-1"));
+        assert_eq!(cmd.run_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn schedule_history_with_limit() {
+        let cmd = schedule(&["schedule", "history", "task-1", "--limit", "5"]);
+        assert_eq!(cmd.verb, Some(ScheduleVerb::History));
+        assert_eq!(cmd.task_id.as_deref(), Some("task-1"));
+        assert_eq!(cmd.limit, Some(5));
+    }
+
+    #[test]
+    fn schedule_unknown_verb_is_error() {
+        let argv: Vec<String> = vec!["schedule".into(), "nope".into()];
+        match parse(&argv) {
+            Parsed::Error(msg) => assert!(msg.contains("未知 schedule"), "{msg}"),
+            Parsed::Schedule(_) => panic!("expected Error, got Schedule"),
+            Parsed::Run(_) => panic!("expected Error, got Run"),
+            Parsed::Help => panic!("expected Error, got Help"),
+            Parsed::Version => panic!("expected Error, got Version"),
+            Parsed::Memory(_) | Parsed::MemoryHelp => panic!("expected Error, got Memory"),
+            Parsed::ScheduleHelp => panic!("expected Error, got ScheduleHelp"),
+        }
+    }
+
+    #[test]
+    fn schedule_help_short_circuits() {
+        let argv: Vec<String> = vec!["schedule".into(), "--help".into()];
+        assert!(matches!(parse(&argv), Parsed::ScheduleHelp));
     }
 }

@@ -26,6 +26,7 @@ import type { ArchiveSelection } from "./inspector/ArchiveInspector";
 import { ArchivePage } from "./pages/ArchivePage";
 import { ConversationPage } from "./pages/ConversationPage";
 import { PluginsPage } from "./pages/PluginsPage";
+import { SchedulerPage } from "./pages/SchedulerPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TracePage } from "./pages/TracePage";
 import { TopBar, type ConvActions } from "./shell/TopBar";
@@ -807,6 +808,7 @@ export function App() {
               onOpenArchive={() => navigate(workspace.live ? "/archive" : "/ui-demo/archive")}
             />
           )}
+          {route.name === "schedule" && <SchedulerPage demo={route.demo} />}
 
           {paletteOpen && (
             <CommandPalette

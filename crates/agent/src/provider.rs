@@ -37,6 +37,17 @@ pub struct ProviderCapabilities {
     /// the actual call (the provider owns its real window). Conservative
     /// defaults pick 32k so unknown providers don't claim room they don't have.
     pub context_window_tokens: u32,
+    /// Model accepts image attachments as multimodal content blocks.
+    /// When `false`, image attachments fall back to the path-only descriptor
+    /// (`ContentBlock::Image` is never emitted).
+    ///
+    /// **Why:** Default-false across templates — vision is an opt-in
+    /// capability that the wired provider must confirm; the only place
+    /// turning it on automatically is the `anthropic()` and
+    /// `openai_compatible()` presets (their docs guarantee image input on
+    /// every model we list under them). Per-model overrides live on
+    /// [`ModelSpec::vision_override`].
+    pub vision: bool,
 }
 
 impl ProviderCapabilities {
@@ -48,12 +59,13 @@ impl ProviderCapabilities {
             reasoning: false,
             token_usage: false,
             context_window_tokens: 32_000,
+            vision: false,
         }
     }
 
     /// Conservative defaults for custom / unknown providers: prove each
     /// capability via explicit config (or a probe) before turning it on.
-    /// Never assume `native_tools` / `streaming` / `token_usage`.
+    /// Never assume `native_tools` / `streaming` / `token_usage` / `vision`.
     pub fn conservative() -> Self {
         Self {
             text_chat: true,
@@ -62,6 +74,7 @@ impl ProviderCapabilities {
             reasoning: false,
             token_usage: false,
             context_window_tokens: 32_000,
+            vision: false,
         }
     }
 
@@ -73,6 +86,7 @@ impl ProviderCapabilities {
             reasoning: true,
             token_usage: true,
             context_window_tokens: 200_000,
+            vision: true,
         }
     }
 
@@ -84,6 +98,7 @@ impl ProviderCapabilities {
             reasoning: false,
             token_usage: true,
             context_window_tokens: 128_000,
+            vision: true,
         }
     }
 
@@ -95,7 +110,27 @@ impl ProviderCapabilities {
             reasoning: true,
             token_usage: true,
             context_window_tokens: 128_000,
+            vision: false,
         }
+    }
+}
+
+/// Resolve a template id (the same names `Provider::new` accepts) to the
+/// vision capability of its preset. Returns `false` for unknown templates
+/// — vision is opt-in; never assume.
+///
+/// Wired from the desktop shell when building `ModelOptionView` so the
+/// Composer can render the first-time notice for vision-incapable models.
+pub fn provider_template_vision(template: &str) -> bool {
+    match template.trim().to_ascii_lowercase().as_str() {
+        "anthropic" => ProviderCapabilities::anthropic().vision,
+        "openai" | "openai_compatible" => ProviderCapabilities::openai_compatible().vision,
+        "deepseek" => ProviderCapabilities::deepseek().vision,
+        "text_only" => ProviderCapabilities::text_only().vision,
+        "conservative" | "custom" => false,
+        // Unknown templates default to off (the conservative stance —
+        // prove capability before turning it on).
+        _ => false,
     }
 }
 
@@ -109,6 +144,11 @@ pub struct ModelSpec {
     /// Used only for budget UI / compaction thresholds. `None` falls back to
     /// the provider preset in `ProviderCapabilities::context_window_tokens`.
     pub context_window_override: Option<u32>,
+    /// Per-model override of `ProviderCapabilities::vision`. Wired catalog
+    /// entries use `None` (trust the provider preset); legacy or custom
+    /// records can flip it explicitly when a model id is known to accept
+    /// images on a normally text-only provider or vice versa.
+    pub vision_override: Option<bool>,
 }
 
 /// Catalog entry used **only** for config migration from legacy display labels.
@@ -186,6 +226,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
             model_id: String::new(),
             provider_type: provider_type.to_owned(),
             context_window_override: None,
+            vision_override: None,
         };
     }
     for entry in MODEL_CATALOG {
@@ -197,6 +238,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
                 model_id: entry.model_id.to_owned(),
                 provider_type: provider_type.to_owned(),
                 context_window_override: None,
+                vision_override: None,
             };
         }
     }
@@ -207,6 +249,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
             model_id: raw.to_owned(),
             provider_type: provider_type.to_owned(),
             context_window_override: None,
+            vision_override: None,
         };
     }
     // Unknown display label: keep it visible, but do not invent an API id.
@@ -216,6 +259,7 @@ pub fn resolve_model_identity(provider_type: &str, raw: &str) -> ModelSpec {
         model_id: String::new(),
         provider_type: provider_type.to_owned(),
         context_window_override: None,
+        vision_override: None,
     }
 }
 
@@ -471,6 +515,21 @@ pub enum ContentBlock {
         content: String,
         is_error: bool,
     },
+    /// Image attachment inlined as a multimodal content block (the bytes
+    /// already left the file system at `data_base64` time). The provider
+    /// serializers below emit the OpenAI `image_url` data-URL form and the
+    /// Anthropic `base64-source` form respectively — see [`openai_messages`]
+    /// and [`anthropic_messages`].
+    ///
+    /// **Cap invariants:** the caller (`crates/agent/src/lib.rs` pinned-context
+    /// loop) is responsible for keeping `data_base64` under the active
+    /// provider's input limit and the file's MIME type in the documented
+    /// `png|jpeg|webp|gif` set. Oversized / vision-incapable attachments
+    /// fall back to the path-only descriptor and never reach this block.
+    Image {
+        media_type: String,
+        data_base64: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -552,6 +611,16 @@ impl ProviderMessage {
                     "[tool_result {call_id}{} {content}]",
                     if *is_error { " error" } else { "" }
                 ),
+                // Image blocks never contribute to the legacy text view —
+                // every Provider role branch that calls `text_of()` is already
+                // an arm that does not support multimodal input (tool
+                // messages, system). The legitimate way to look at image
+                // content is the `openai_messages` / `anthropic_messages`
+                // serializers, both of which use the structured `content`
+                // vec directly.
+                ContentBlock::Image { media_type, .. } => {
+                    format!("[image omitted {media_type}]")
+                }
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1257,6 +1326,70 @@ fn openai_tool_payload(tools: &[ToolSchema]) -> Vec<Value> {
 
 /// Serialize IR → OpenAI-compatible Chat Completions `messages` (official
 /// OpenAPI: assistant `tool_calls` + tool-role `tool_call_id`).
+/// Build the OpenAI `content` array form for a user message. Text blocks
+/// fold into the leading text part; image blocks flush out a single
+/// `image_url` part per attachment with the data URL inline. Tool blocks
+/// collapse via `text_of()` semantics — they should never appear inside a
+/// user message today, but matching the legacy text collapse keeps the
+/// serializer total over all variants.
+fn openai_user_content(blocks: &[ContentBlock]) -> Value {
+    let mut parts: Vec<Value> = Vec::new();
+    let mut text_buf = String::new();
+    let flush_text = |buf: &mut String, parts: &mut Vec<Value>| {
+        if !buf.is_empty() {
+            parts.push(json!({ "type": "text", "text": std::mem::take(buf) }));
+        }
+    };
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => {
+                if !text_buf.is_empty() {
+                    text_buf.push('\n');
+                }
+                text_buf.push_str(text);
+            }
+            ContentBlock::Image {
+                media_type,
+                data_base64,
+            } => {
+                flush_text(&mut text_buf, &mut parts);
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{media_type};base64,{data_base64}")
+                    }
+                }));
+            }
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                if !text_buf.is_empty() {
+                    text_buf.push('\n');
+                }
+                text_buf.push_str(&format!("[tool_call {id} {name} {arguments}]"));
+            }
+            ContentBlock::ToolResult {
+                call_id,
+                content,
+                is_error,
+            } => {
+                if !text_buf.is_empty() {
+                    text_buf.push('\n');
+                }
+                let err_tag = if *is_error { " error" } else { "" };
+                text_buf.push_str(&format!("[tool_result {call_id}{err_tag} {content}]"));
+            }
+        }
+    }
+    flush_text(&mut text_buf, &mut parts);
+    if parts.is_empty() {
+        parts.push(json!({ "type": "text", "text": "" }));
+    }
+    Value::Array(parts)
+}
+
 fn openai_messages(messages: &[ProviderMessage]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for message in messages {
@@ -1265,7 +1398,25 @@ fn openai_messages(messages: &[ProviderMessage]) -> Vec<Value> {
                 out.push(json!({ "role": "system", "content": message.text_of() }));
             }
             MessageRole::User => {
-                out.push(json!({ "role": "user", "content": message.text_of() }));
+                // Single-block Text user messages stay as the legacy string
+                // form — byte-stable for every snapshot test and payload
+                // inspector that does not yet understand multimodal turns.
+                // Mixed (Text + Image) user messages emit the array form
+                // Chat Completions expects: text part first, image_url parts
+                // after. Image bytes travel as `data:<mime>;base64,<...>`
+                // inside `image_url.url` (Anthropic-compatible; the official
+                // OpenAI Python SDK serialises this way).
+                if message
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Image { .. }))
+                {
+                    out.push(
+                        json!({ "role": "user", "content": openai_user_content(&message.content) }),
+                    );
+                } else {
+                    out.push(json!({ "role": "user", "content": message.text_of() }));
+                }
             }
             MessageRole::Assistant => {
                 let mut text = String::new();
@@ -1293,6 +1444,12 @@ fn openai_messages(messages: &[ProviderMessage]) -> Vec<Value> {
                             }));
                         }
                         ContentBlock::ToolResult { .. } => {}
+                        // The OpenAI assistant message never carries an
+                        // image — only the user side consumes Image blocks
+                        // today. Future native image output would land here;
+                        // for now silently drop (matches the legacy
+                        // `ToolResult` arm shape).
+                        ContentBlock::Image { .. } => {}
                     }
                 }
                 let mut msg = json!({ "role": "assistant", "content": if text.is_empty() { Value::Null } else { Value::String(text) } });
@@ -1843,6 +2000,25 @@ fn anthropic_messages(messages: &[ProviderMessage]) -> (String, Vec<Value>) {
                                 "is_error": *is_error,
                             }));
                         }
+                        ContentBlock::Image {
+                            media_type,
+                            data_base64,
+                        } => {
+                            // Anthropic image block (verified against the
+                            // Python SDK types in this file's module docs):
+                            // a single `image` block whose source is the
+                            // base64-inline object. We never URL-link in
+                            // Kodo — image attachments must ride the wire
+                            // inline so the request stays self-contained.
+                            blocks.push(json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": data_base64,
+                                }
+                            }));
+                        }
                         ContentBlock::ToolCall { .. } => {}
                     }
                 }
@@ -1888,6 +2064,10 @@ fn anthropic_messages(messages: &[ProviderMessage]) -> (String, Vec<Value>) {
                             }));
                         }
                         ContentBlock::ToolResult { .. } => {}
+                        // Anthropic assistant message does not emit image
+                        // blocks today; future native image output would
+                        // land here. Skip for parity with the OpenAI arm.
+                        ContentBlock::Image { .. } => {}
                     }
                 }
                 if blocks.is_empty() {
@@ -2491,6 +2671,7 @@ pub fn catalog_models(provider_type: &str) -> Vec<ModelSpec> {
             model_id: m.model_id.to_owned(),
             provider_type: m.provider_type.to_owned(),
             context_window_override: None,
+            vision_override: None,
         })
         .collect()
 }
@@ -2579,6 +2760,7 @@ fn parse_openai_models(body: &str, provider_type: &str) -> Result<Vec<ModelSpec>
             model_id: id.to_owned(),
             provider_type: provider_type.to_owned(),
             context_window_override: None,
+            vision_override: None,
         });
     }
     Ok(models)
@@ -2608,6 +2790,7 @@ fn parse_anthropic_models(body: &str, provider_type: &str) -> Result<Vec<ModelSp
             model_id: id.to_owned(),
             provider_type: provider_type.to_owned(),
             context_window_override: None,
+            vision_override: None,
         });
     }
     Ok(models)
@@ -3396,6 +3579,7 @@ mod tests {
                 reasoning: false,
                 token_usage: true,
                 context_window_tokens: 32_000,
+                vision: false,
             }),
             // Force invalid network — we only assert capability path selection
             // via a local override that fails fast on empty key... use validate path.
@@ -4140,5 +4324,85 @@ mod tests {
         let event = a.push_line("").expect("blank line dispatches");
         assert_eq!(event, "x\ny");
         assert!(a.push_line("").is_none(), "empty event ignored");
+    }
+
+    // --- Vision / multimodal wire shape (2026-10-13) ----------------------
+    //
+    // Lock the OpenAI + Anthropic image content block shapes so a backend
+    // request body change never silently drops image bytes again. The
+    // OpenAI Chat Completions shape uses an array form
+    // (`{type:"image_url", image_url:{url:"data:...;base64,..."}}`),
+    // verified against `openai/openai-openapi` referenced in the module
+    // header. The Anthropic Messages shape uses
+    // `{type:"image", source:{type:"base64", media_type, data}}`,
+    // verified against the Python SDK types in the same header.
+
+    #[test]
+    fn openai_messages_text_only_user_stays_string() {
+        // Regression lock: text-only user messages still serialize as a
+        // bare string, so every snapshot test that inspects request bodies
+        // stays byte-stable. Changing this is a wire break.
+        let messages = vec![ProviderMessage::user("hello world")];
+        let out = openai_messages(&messages);
+        assert_eq!(
+            out[0],
+            json!({ "role": "user", "content": "hello world" }),
+            "text-only user messages must stay string content"
+        );
+    }
+
+    #[test]
+    fn openai_messages_emits_image_url_for_image_block() {
+        let mut user = ProviderMessage::user("describe this");
+        user.content.push(ContentBlock::Image {
+            media_type: "image/png".to_owned(),
+            data_base64: "AAAA".to_owned(),
+        });
+        let out = openai_messages(&[user]);
+        let content = out[0]["content"]
+            .as_array()
+            .expect("image turns must serialize as an array");
+        assert_eq!(content.len(), 2, "text part + one image_url part");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "describe this");
+        assert_eq!(content[1]["type"], "image_url");
+        let url = content[1]["image_url"]["url"]
+            .as_str()
+            .expect("image_url.url is the data URL");
+        assert_eq!(url, "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn anthropic_messages_emits_image_base64_source_block() {
+        let mut user = ProviderMessage::user("describe this");
+        user.content.push(ContentBlock::Image {
+            media_type: "image/png".to_owned(),
+            data_base64: "AAAA".to_owned(),
+        });
+        let (_system, out) = anthropic_messages(&[user]);
+        let blocks = out[0]["content"]
+            .as_array()
+            .expect("anthropic user message is always content-block array");
+        assert_eq!(blocks.len(), 2, "text part + one image part");
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn provider_template_vision_anthropic_and_openai_on_deepseek_off() {
+        // The shape the desktop shell relies on for the first-time notice:
+        // vision-capable templates report true; deepseek/conservative
+        // templates report false. A flip here is a wire-visible change.
+        assert!(provider_template_vision("anthropic"));
+        assert!(provider_template_vision("openai"));
+        assert!(provider_template_vision("openai_compatible"));
+        assert!(!provider_template_vision("deepseek"));
+        assert!(!provider_template_vision("text_only"));
+        assert!(!provider_template_vision("custom"));
+        // Unknown templates default off (conservative stance).
+        assert!(!provider_template_vision("mystery-template"));
     }
 }

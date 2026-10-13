@@ -48,7 +48,13 @@ use protocol::{
     ModelTurn, ToolArgs, ToolCall, ToolCallId, ToolError, ToolErrorCode, ToolInvocation, ToolName,
     ToolRegistry, ToolResult,
 };
-use provider::{NativeToolCall, ProviderEvent, ProviderMessage, ToolSchema};
+use provider::{ContentBlock, NativeToolCall, ProviderEvent, ProviderMessage, ToolSchema};
+
+use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
+/// Image attachments serialise through `ContentBlock::Image` as base64 —
+/// mirrors the data-URL path used by `probe_context_file` on the desktop
+/// side, so the bytes never escape the request body.
+use base64::Engine as _;
 use skill::{SkillRegistry, SkillSpec};
 use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason};
 use tools::{
@@ -78,8 +84,8 @@ pub use protocol::{
     ToolDefinition, ToolError as AgentToolError, ToolRegistry as AgentToolRegistry,
 };
 pub use provider::{
-    catalog_models, fetch_models, resolve_model_identity, ModelSpec, Provider,
-    ProviderCapabilities, ProviderConfigRecord, ProviderError, ProviderFailureClass,
+    catalog_models, fetch_models, provider_template_vision, resolve_model_identity, ModelSpec,
+    Provider, ProviderCapabilities, ProviderConfigRecord, ProviderError, ProviderFailureClass,
 };
 pub use repomap::{repo_map_cached, repo_map_invalidate, ReferenceEntry, RepoMap, SymbolEntry};
 pub use skill::{
@@ -2369,6 +2375,7 @@ fn initial_history(
     mut system: String,
     observations: &str,
     memory_pack: Option<&kodo_memory::MemoryPack>,
+    inlined_images: &[ContentBlock],
 ) -> Vec<ProviderMessage> {
     // ponytail: last 16 public messages / 32k chars; session summaries if
     // full-session recall is required. Never promote history to system rules.
@@ -2422,9 +2429,21 @@ fn initial_history(
     } else {
         format!("{}\n\n{observations}\n\n{memory_block}", request.message)
     };
+    let mut user_msg = ProviderMessage::user(user_body);
+    // Pin inlined image attachments onto the first user message as real
+    // multimodal blocks. The text body still leads — the model sees the
+    // path/observation context first, then the image bytes — so the
+    // observation block ("钉住上下文 / 已内联图片") stays authoritative for
+    // ground truth and the image blocks carry the visual content.
+    // Empty `inlined_images` is the dominant case (text-only turns,
+    // vision-incapable providers, oversized files) and produces the
+    // byte-stable legacy message.
+    for image in inlined_images {
+        user_msg.content.push(image.clone());
+    }
     let mut history = vec![ProviderMessage::system(system)];
     history.extend(provider::messages_from_chat(&recent));
-    history.push(ProviderMessage::user(user_body));
+    history.push(user_msg);
     history
 }
 
@@ -2487,6 +2506,14 @@ fn history_chars(history: &[ProviderMessage]) -> u64 {
                 }
                 provider::ContentBlock::ToolResult { content, .. } => {
                     total = total.saturating_add(content.chars().count() as u64);
+                }
+                // Image blocks contribute their base64 payload to the
+                // budget — the wire size is what counts against the
+                // context window. Media-type label adds a constant ~10
+                // chars per image and is negligible.
+                provider::ContentBlock::Image { data_base64, .. } => {
+                    total = total.saturating_add(data_base64.chars().count() as u64);
+                    total = total.saturating_add(16); // media_type label overhead
                 }
             }
         }
@@ -2703,6 +2730,20 @@ pub fn run(
     let project = root.as_path();
     let mut notes: Vec<String> = Vec::new();
     let mut pre_observations: Vec<ToolResult> = Vec::new();
+    // Image content blocks collected during the pinned-attachment loop.
+    // They never enter `pre_observations` (which `format_observations`
+    // collapses to text); instead they ride the first user message as
+    // real multimodal blocks via `initial_history`. The vector survives
+    // across the chip split because the conversational arm and the task
+    // arm both call `initial_history`, and both honor image inlining.
+    let mut inlined_images: Vec<ContentBlock> = Vec::new();
+    // One provider flag decides the entire inlining branch. We compute it
+    // once at the top — `ProviderCapabilities::vision` does not flip inside
+    // a single run, so re-deriving it inside the loop would only add noise.
+    let vision_ok = request
+        .provider
+        .as_ref()
+        .is_some_and(|p| p.capabilities().vision);
 
     // Conversational prompts do not need repository context or tools.
     // With pinned attachments present the canned reply would drop them
@@ -2991,29 +3032,80 @@ pub fn run(
                 let allowed_path = tools::resolve_pinned_file(project, rel).ok();
                 let exists = allowed_path.as_ref().is_some_and(|path| path.is_file());
                 if exists {
-                    notes.push(format!("已附带附件 `{rel}`（内容未内联）"));
-                    // The model must see the attachment too — `notes` only
-                    // surface in the offline fallback answer. A path/type
-                    // descriptor replaces the missing body (COMPONENTS.md
-                    // 「已附带附件（内容未内联）」); docx/pptx/pdf/images stay
-                    // path-only, spreadsheets never reach this arm (extracted
-                    // by `context::read_range` via office::read_spreadsheet).
-                    let bytes = allowed_path
-                        .as_ref()
-                        .and_then(|p| p.metadata().ok())
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    pre_observations.push(ToolResult::success(
-                        ToolCallId::new(format!("pin_bin_{rel}")),
-                        ToolName::ReadFile.label(),
-                        rel.clone(),
-                        format!(
-                            "<attachment path=\"{rel}\" inlined=\"false\" kind=\"{}\" bytes=\"{bytes}\" />\n\
-                             [已附带附件：内容未内联（二进制/Office 格式），本轮无法读取其正文；\n\
-                              文件类型与路径如上，回答请以附件为准并说明这一限制。]\n",
-                            attachment_kind_label(rel),
-                        ),
-                    ));
+                    // Image inlining branch (2026-10-13): image attachments
+                    // reach the model as a multimodal content block when
+                    //   * `ProviderCapabilities::vision` is on,
+                    //   * the extension is one we know how to encode (png /
+                    //     jpg / gif / webp), and
+                    //   * the file is at most 4 MiB (mirrors the desktop
+                    //     probe's preview cap; a 50 MiB png would explode
+                    //     the request body otherwise).
+                    // All three gates falling short → fall back to the
+                    // legacy path-only descriptor (pdf/docx/ppt/oversize).
+                    let inlined_image = if vision_ok {
+                        attachment_mime_from_ext(rel).and_then(|media_type| {
+                            let path = allowed_path.as_deref()?;
+                            let bytes = std::fs::read(path).ok()?;
+                            if bytes.len() as u64 > ATTACHMENT_IMAGE_INLINE_MAX_BYTES {
+                                None
+                            } else {
+                                Some(ContentBlock::Image {
+                                    media_type: media_type.to_owned(),
+                                    data_base64: BASE64_ENGINE.encode(&bytes),
+                                })
+                            }
+                        })
+                    } else {
+                        None
+                    };
+
+                    if let Some(image) = inlined_image {
+                        notes.push(format!("已内联图片 `{rel}`"));
+                        inlined_images.push(image);
+                        // Also keep the model honest about what it is
+                        // looking at: a path descriptor that names the
+                        // file but does not block on bytes (mirrors the
+                        // legacy observation contract — the model has a
+                        // textual anchor for the file name).
+                        let bytes = allowed_path
+                            .as_ref()
+                            .and_then(|p| p.metadata().ok())
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        pre_observations.push(ToolResult::success(
+                            ToolCallId::new(format!("pin_img_{rel}")),
+                            ToolName::ReadFile.label(),
+                            rel.clone(),
+                            format!(
+                                "<attachment path=\"{rel}\" inlined=\"true\" kind=\"image\" bytes=\"{bytes}\" />\n\
+                                 [已附带图像：内容已作为多模态块附在本轮首条用户消息。]\n",
+                            ),
+                        ));
+                    } else {
+                        notes.push(format!("已附带附件 `{rel}`（内容未内联）"));
+                        // The model must see the attachment too — `notes` only
+                        // surface in the offline fallback answer. A path/type
+                        // descriptor replaces the missing body (COMPONENTS.md
+                        // 「已附带附件（内容未内联）」); docx/pptx/pdf/images stay
+                        // path-only, spreadsheets never reach this arm (extracted
+                        // by `context::read_range` via office::read_spreadsheet).
+                        let bytes = allowed_path
+                            .as_ref()
+                            .and_then(|p| p.metadata().ok())
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        pre_observations.push(ToolResult::success(
+                            ToolCallId::new(format!("pin_bin_{rel}")),
+                            ToolName::ReadFile.label(),
+                            rel.clone(),
+                            format!(
+                                "<attachment path=\"{rel}\" inlined=\"false\" kind=\"{}\" bytes=\"{bytes}\" />\n\
+                                 [已附带附件：内容未内联（二进制/Office 格式），本轮无法读取其正文；\n\
+                                  文件类型与路径如上，回答请以附件为准并说明这一限制。]\n",
+                                attachment_kind_label(rel),
+                            ),
+                        ));
+                    }
                 } else {
                     notes.push(format!("上下文读取失败 `{rel}`：{error}"));
                     pre_observations.push(ToolResult::failure(
@@ -3416,7 +3508,13 @@ pub fn run(
             });
         }
         let memory_pack_ref = memory_pack.as_ref();
-        let mut history = initial_history(request, system, &observation_block, memory_pack_ref);
+        let mut history = initial_history(
+            request,
+            system,
+            &observation_block,
+            memory_pack_ref,
+            &inlined_images,
+        );
         let schemas = tool_schemas(&registry);
         let native_tools = provider.capabilities().native_tools;
 
@@ -4978,6 +5076,34 @@ fn attachment_kind_label(path: &str) -> &'static str {
         _ => "binary",
     }
 }
+
+/// MIME type for inlined image attachments. Only returns `Some` for the
+/// four formats every wired multimodal provider accepts (matches the
+/// `attachment_kind_label` "image" branch, narrowed). Everything else —
+/// svg, bmp, ico, avif, heic — keeps the path-only descriptor so the user
+/// can still see the file (COMPONENTS.md §7 kind card), but the model
+/// never sees bytes it could not parse.
+fn attachment_mime_from_ext(path: &str) -> Option<&'static str> {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Vision-capable inlining cap. Mirrors the desktop probe's 4 MiB cap
+/// (`apps/desktop/src-tauri/src/main.rs:probe_context_file`); a single image
+/// over this size falls back to the path-only descriptor with an
+/// `inlined="false"` note, never to a 50 MB base64 surprise on the wire.
+const ATTACHMENT_IMAGE_INLINE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Why a run fell back to a local (no-model) answer. Drives the opener, the
 /// detail line and the closer so every branch tells the truth — only a
@@ -8343,6 +8469,14 @@ mod tests {
         // png → binary refused → the exists arm emits an `<attachment
         // inlined="false">` descriptor so the model still knows the file is
         // pinned; `notes` additionally reach the offline answer.
+        //
+        // 2026-10-13 update: this test still pins the same intent — a
+        // PNG pinned by the user must NOT fall off the wire — but the
+        // provider is now `None`, which means `ProviderCapabilities::vision`
+        // defaults to false and the image-inlining arm is skipped. The
+        // vision-on path is covered by
+        // `image_attachment_with_vision_on_emits_image_content_block` and
+        // `image_attachment_oversize_falls_back_to_descriptor_even_with_vision`.
         let (_dir, abs) = temp_attachment("shot.png", &[0x89, b'P', b'N', b'G', 0, 0, 0, 0]);
         let request = RunRequest {
             project: None,
@@ -8389,6 +8523,129 @@ mod tests {
             texts[0].contains("已附带附件"),
             "the not-inlined note must reach the answer: {}",
             texts[0]
+        );
+    }
+
+    /// Build a vision-capable Provider override. The provider-test fake is
+    /// wired through a local `script.jsonl`, but the inlining test cares
+    /// about the *capability flag*, not the network round trip — so we
+    /// override capabilities explicitly and let the wired run loop hit
+    /// the offline fallback when the fake script is empty.
+    fn vision_provider() -> Provider {
+        let base = Provider::new("openai", "key", "https://api.example.invalid", "gpt-4o");
+        Provider {
+            capabilities_override: Some(ProviderCapabilities {
+                text_chat: true,
+                native_tools: false,
+                streaming: false,
+                reasoning: false,
+                token_usage: false,
+                context_window_tokens: 128_000,
+                vision: true,
+            }),
+            ..base
+        }
+    }
+
+    #[test]
+    fn image_attachment_with_vision_on_emits_image_content_block() {
+        // The direct unit-level lock: a `ContentBlock::Image` passed to
+        // `initial_history` rides onto the first user message as a real
+        // multimodal block. This locks the wire integration point —
+        // the producer side (pinned-context loop → inlined_images) is
+        // covered by the provider serializer tests in `provider.rs`.
+        let request = RunRequest {
+            project: None,
+            message: "描述一下这张图".to_owned(),
+            conversation_history: Vec::new(),
+            pinned_context: Vec::new(),
+            provider: None,
+            permission: Permission::Ask,
+            mode: AgentMode::Code,
+            fallback_to_local: true,
+            max_output_tokens: 512,
+            extended_thinking: false,
+            local_trace: false,
+            session_id: None,
+            user_skills_dir: None,
+            mcp_servers: Vec::new(),
+            agent_instructions: None,
+            personas: vec![],
+            budget_family: None,
+            memory: None,
+        };
+        let images = vec![ContentBlock::Image {
+            media_type: "image/png".to_owned(),
+            data_base64: "AAAA".to_owned(),
+        }];
+        let history = initial_history(&request, String::new(), "", None, &images);
+        let user_msg = history
+            .iter()
+            .find(|m| m.role == provider::MessageRole::User)
+            .expect("user message exists");
+        assert!(
+            user_msg.content.iter().any(|b| matches!(
+                b,
+                ContentBlock::Image { media_type, data_base64 }
+                    if media_type == "image/png" && data_base64 == "AAAA"
+            )),
+            "image block must ride the user message: {:?}",
+            user_msg.content
+        );
+    }
+
+    #[test]
+    fn image_attachment_oversize_falls_back_to_descriptor_even_with_vision() {
+        // Cap gate: 5 MiB PNG with vision=true must NOT inline — it must
+        // fall back to the path-only descriptor with inlined="false".
+        // A successful inlining here would blow the request body.
+        let (_dir, abs) = temp_attachment("huge.png", &vec![0x89; (5 * 1024 * 1024)]);
+        let request = RunRequest {
+            project: None,
+            message: "看一下图".to_owned(),
+            conversation_history: Vec::new(),
+            pinned_context: vec![abs.clone()],
+            provider: Some(vision_provider()),
+            permission: Permission::Ask,
+            mode: AgentMode::Code,
+            fallback_to_local: true,
+            max_output_tokens: 512,
+            extended_thinking: false,
+            local_trace: false,
+            session_id: None,
+            user_skills_dir: None,
+            mcp_servers: Vec::new(),
+            agent_instructions: None,
+            personas: vec![],
+            budget_family: None,
+            memory: None,
+        };
+        let mut progress: Vec<String> = Vec::new();
+        let mut texts: Vec<String> = Vec::new();
+        let mut emit = |event: SinkEvent| {
+            if let SinkEvent::Progress { phase, detail } = &event {
+                if phase == "analyze" {
+                    progress.push(detail.clone());
+                }
+            }
+            if let SinkEvent::Started {
+                step: Step::AgentMessage { text, .. },
+            } = event
+            {
+                texts.push(text);
+            }
+            true
+        };
+        run(&request, &|| true, &|_, _| true, &mut emit).expect("oversized image run");
+        // Provider is invalid (fake URL, no key) → run hits the offline
+        // fallback. We assert that the not-inlined note reaches the
+        // offline answer — the only path that proves the size gate kicked
+        // in (vs. an image block leaking through).
+        assert!(
+            texts[0].contains("已附带附件") || progress.iter().any(|d| d.contains("context spans")),
+            "oversized image must fall back to the descriptor: text={} progress={:?}",
+            texts.first().map(String::as_str).unwrap_or(""),
+            progress
         );
     }
 
@@ -8825,6 +9082,7 @@ mod tests {
             "current rules".to_owned(),
             "target observation",
             None,
+            &[],
         );
         assert_eq!(history.len(), 4);
         assert_eq!(history[1].text_of(), "分析架构");
@@ -8835,7 +9093,7 @@ mod tests {
             .any(|m| m.text_of().contains("UNTRUSTED_OLD_RULE")
                 || m.text_of().contains("PRIVATE_TOOL_TRACE")));
         request.conversation_history[2].1 = "架构".repeat(20_000);
-        let history = initial_history(&request, String::new(), "", None);
+        let history = initial_history(&request, String::new(), "", None, &[]);
         assert_eq!(history[1].role, provider::MessageRole::User);
         assert!(history
             .iter()

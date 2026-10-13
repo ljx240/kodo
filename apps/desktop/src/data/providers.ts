@@ -10,6 +10,13 @@ import { isDesktop, loadProvidersCommand, saveProvidersCommand, setSetting, sett
 export type ModelOption = {
   display_name: string;
   model_id: string;
+  /** Whether the model accepts image attachments as multimodal content
+   *  blocks. Wired from `ProviderCapabilities::vision`; landing on this
+   *  flag with `false` triggers the Composer's first-time image-skip
+   *  notice (ConversationPage). Defaults to `undefined` for legacy
+   *  seeded catalog entries — treat undefined as opt-in (the template
+   *  default kicks in). */
+  vision?: boolean;
 };
 
 export type ProviderTemplate = {
@@ -44,9 +51,9 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     id: "anthropic",
     name: "Anthropic",
     models: [
-      { display_name: "Claude 3.5 Sonnet", model_id: "claude-3-5-sonnet-latest" },
-      { display_name: "Claude Sonnet 5", model_id: "claude-sonnet-4-5" },
-      { display_name: "Claude Opus 5", model_id: "claude-opus-4-1" },
+      { display_name: "Claude 3.5 Sonnet", model_id: "claude-3-5-sonnet-latest", vision: true },
+      { display_name: "Claude Sonnet 5", model_id: "claude-sonnet-4-5", vision: true },
+      { display_name: "Claude Opus 5", model_id: "claude-opus-4-1", vision: true },
     ],
     keyPlaceholder: "sk-ant-...",
     customEndpoint: false,
@@ -55,10 +62,13 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     id: "openai",
     name: "OpenAI",
     models: [
-      { display_name: "GPT-4o", model_id: "gpt-4o" },
-      { display_name: "GPT-4o mini", model_id: "gpt-4o-mini" },
-      { display_name: "o1", model_id: "o1" },
-      { display_name: "o1-mini", model_id: "o1-mini" },
+      // gpt-4o / gpt-4o-mini accept image inputs; the o1 reasoning
+      // family is text-only as of 2026-10 — explicit `vision: false`
+      // wins over the openai_compatible default.
+      { display_name: "GPT-4o", model_id: "gpt-4o", vision: true },
+      { display_name: "GPT-4o mini", model_id: "gpt-4o-mini", vision: true },
+      { display_name: "o1", model_id: "o1", vision: false },
+      { display_name: "o1-mini", model_id: "o1-mini", vision: false },
     ],
     keyPlaceholder: "sk-...",
     customEndpoint: true,
@@ -67,8 +77,12 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     id: "deepseek",
     name: "DeepSeek",
     models: [
-      { display_name: "DeepSeek-V3", model_id: "deepseek-chat" },
-      { display_name: "DeepSeek-R1", model_id: "deepseek-reasoner" },
+      // DeepSeek chat / reasoner endpoints do not accept image inputs
+      // (verified against the public API surface, 2026-10). Catalog
+      // entries pin `vision: false` so the Composer's first-time
+      // image-skip notice fires the same turn the user attaches a PNG.
+      { display_name: "DeepSeek-V3", model_id: "deepseek-chat", vision: false },
+      { display_name: "DeepSeek-R1", model_id: "deepseek-reasoner", vision: false },
     ],
     keyPlaceholder: "sk-...",
     customEndpoint: true,
@@ -88,7 +102,10 @@ export function templateById(id: string): ProviderTemplate {
   return PROVIDER_TEMPLATES.find((t) => t.id === id) ?? PROVIDER_TEMPLATES[0];
 }
 
-/** Dedupe by lowercase id; first entry wins. */
+/** Dedupe by lowercase id; first entry wins. Preserves `vision` so a
+ *  fetched-from-API model that the catalog knows is text-only (e.g. o1)
+ *  keeps its false flag across a round-trip through the user's saved
+ *  provider config. */
 export function dedupeModels(list: ModelOption[]): ModelOption[] {
   const seen = new Set<string>();
   const out: ModelOption[] = [];
@@ -96,7 +113,11 @@ export function dedupeModels(list: ModelOption[]): ModelOption[] {
     const key = m.model_id.trim().toLowerCase();
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    out.push({ display_name: m.display_name.trim() || m.model_id, model_id: m.model_id.trim() });
+    out.push({
+      display_name: m.display_name.trim() || m.model_id,
+      model_id: m.model_id.trim(),
+      vision: m.vision,
+    });
   }
   return out;
 }
@@ -145,9 +166,16 @@ export async function loadProviders(): Promise<ProviderConfig[]> {
   return (list ?? []).map((dto) =>
     migrateProviderConfig({
       ...dto,
-      // wire format is camelCase; internal ModelOption is snake_case
+      // wire format is camelCase; internal ModelOption is snake_case.
+      // `vision` rides both ways (Tauri command returns it on the way
+      // down; undefined entries fall back to the template default at
+      // notice-render time).
       models: dto.models
-        ? dto.models.map((m) => ({ display_name: m.displayName, model_id: m.modelId }))
+        ? dto.models.map((m) => ({
+            display_name: m.displayName,
+            model_id: m.modelId,
+            vision: m.vision,
+          }))
         : undefined,
     }),
   );
@@ -160,9 +188,13 @@ export async function saveProviders(providers: ProviderConfig[]): Promise<void> 
     migrated.map((p) => ({
       ...p,
       model: p.modelId || p.model,
+      // Pass through `vision` when known so the Tauri list_provider_models
+      // recompute agrees with the frontend catalog. `undefined` entries
+      // (e.g. user-added custom model ids) get the template default.
       models: (p.models ?? []).map((m) => ({
         modelId: m.model_id,
         displayName: m.display_name,
+        ...(m.vision === undefined ? {} : { vision: m.vision }),
       })),
     })),
   );

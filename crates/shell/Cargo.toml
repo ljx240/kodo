@@ -10,3 +10,14 @@ kodo-agent = { path = "../agent" }
 kodo-memory = { path = "../memory" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# SQLite for the scheduler's persistent store. Bundled so we never
+# depend on the host sqlite3; same version + features as kodo-memory
+# so behaviour cannot diverge across crates.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# `parking_lot` is what kodo-memory and kodo-agent already pull in
+# transitively; declaring it here keeps the scheduler's locking
+# behaviour identical to the rest of the shell.
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"

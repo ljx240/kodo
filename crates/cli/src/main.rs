@@ -9,6 +9,7 @@ mod interrupt;
 mod memory_cmd;
 mod render;
 mod repl;
+mod schedule_cmd;
 mod turn;
 
 use std::io::{self, Write};
@@ -40,6 +41,11 @@ fn main() {
         Parsed::Memory(cmd) => memory_cmd::run(cmd),
         Parsed::MemoryHelp => {
             println!("{}", memory_cmd::USAGE);
+            0
+        }
+        Parsed::Schedule(cmd) => schedule_cmd::run(cmd),
+        Parsed::ScheduleHelp => {
+            println!("{}", schedule_cmd::USAGE);
             0
         }
     };

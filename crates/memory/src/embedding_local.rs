@@ -112,10 +112,7 @@ impl EmbeddingProvider for LocalOnnxEmbedding {
 ///
 /// Idempotent: when the cache is already populated, returns the
 /// existing `CachedModel` row without re-downloading.
-pub fn warmup(
-    backend: EmbeddingBackend,
-    local_dir: Option<&Path>,
-) -> MemoryResult<CachedModel> {
+pub fn warmup(backend: EmbeddingBackend, local_dir: Option<&Path>) -> MemoryResult<CachedModel> {
     if !backend.requires_warmup() {
         return Err(MemoryError::IndexUnavailable(format!(
             "{backend:?} does not need a warmup"
@@ -185,7 +182,10 @@ mod download {
     /// When `local_dir` is `Some`, copies from the local directory
     /// instead of fetching over the network. The directory must
     /// contain `model.onnx` and `tokenizer.json` at the top level.
-    pub fn warmup(backend: EmbeddingBackend, local_dir: Option<&Path>) -> MemoryResult<CachedModel> {
+    pub fn warmup(
+        backend: EmbeddingBackend,
+        local_dir: Option<&Path>,
+    ) -> MemoryResult<CachedModel> {
         let repo = backend.hf_repo().ok_or_else(|| {
             MemoryError::IndexUnavailable(format!("no HuggingFace repo for {backend:?}"))
         })?;
@@ -205,7 +205,13 @@ mod download {
                     src.display(),
                     dir.display()
                 );
-                local_copy(src, &onnx_path, &tok_path, ONNX_MIN_BYTES, TOKENIZER_MIN_BYTES)?
+                local_copy(
+                    src,
+                    &onnx_path,
+                    &tok_path,
+                    ONNX_MIN_BYTES,
+                    TOKENIZER_MIN_BYTES,
+                )?
             }
             None => {
                 let base = hf_endpoint();
@@ -318,15 +324,15 @@ mod download {
         let mut buf = vec![0u8; 64 * 1024];
         let mut total: u64 = 0;
         loop {
-            let n = reader
-                .read(&mut buf)
-                .map_err(|e| MemoryError::IndexUnavailable(format!("read {}: {e}", src.display())))?;
+            let n = reader.read(&mut buf).map_err(|e| {
+                MemoryError::IndexUnavailable(format!("read {}: {e}", src.display()))
+            })?;
             if n == 0 {
                 break;
             }
-            writer
-                .write_all(&buf[..n])
-                .map_err(|e| MemoryError::IndexUnavailable(format!("write {}: {e}", tmp.display())))?;
+            writer.write_all(&buf[..n]).map_err(|e| {
+                MemoryError::IndexUnavailable(format!("write {}: {e}", tmp.display()))
+            })?;
             hasher.update(&buf[..n]);
             total += n as u64;
         }
@@ -334,8 +340,9 @@ mod download {
             .flush()
             .map_err(|e| MemoryError::IndexUnavailable(format!("flush {}: {e}", tmp.display())))?;
         drop(writer);
-        std::fs::rename(&tmp, dest)
-            .map_err(|e| MemoryError::IndexUnavailable(format!("rename to {}: {e}", dest.display())))?;
+        std::fs::rename(&tmp, dest).map_err(|e| {
+            MemoryError::IndexUnavailable(format!("rename to {}: {e}", dest.display()))
+        })?;
         let _ = total;
         Ok(hex::encode(hasher.finalize()))
     }
@@ -457,7 +464,10 @@ mod tests {
         assert!(row.onnx_sha256.as_ref().unwrap().len() == 64);
         assert!(row.tokenizer_sha256.as_ref().unwrap().len() == 64);
 
-        assert!(backend_dir.join("model.onnx").is_file(), "model.onnx copied");
+        assert!(
+            backend_dir.join("model.onnx").is_file(),
+            "model.onnx copied"
+        );
         assert!(
             backend_dir.join("tokenizer.json").is_file(),
             "tokenizer.json copied"

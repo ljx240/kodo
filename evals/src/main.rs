@@ -537,6 +537,7 @@ fn run_deterministic(report: &mut EvalReport) {
                 reasoning: false,
                 token_usage: true,
                 context_window_tokens: 32_000,
+                vision: false,
             }),
             api_key: String::new(),
             ..Provider::new("openai", "", "", "gpt-4o")
@@ -867,6 +868,7 @@ fn run_deterministic(report: &mut EvalReport) {
                 reasoning: false,
                 token_usage: true,
                 context_window_tokens: 32_000,
+                vision: false,
             }),
             api_key: String::new(),
             ..Provider::new("openai", "", "", "gpt-4o")

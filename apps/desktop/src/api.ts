@@ -538,8 +538,11 @@ export type ProviderDto = {
   modelId?: string;
   /** UI display label. */
   displayName?: string;
-  /** Configured model list; `null`/absent on legacy records. */
-  models?: Array<{ modelId: string; displayName: string }> | null;
+  /** Configured model list; `null`/absent on legacy records.
+   *  `vision` rides the wire too — Tauri seeds it from the template +
+   *  `ModelSpec::vision_override` and the composer reads it to gate
+   *  the first-time image-skip notice. Undefined for legacy records. */
+  models?: Array<{ modelId: string; displayName: string; vision?: boolean }> | null;
   hasKey?: boolean;
 };
 
@@ -558,14 +561,17 @@ export function listProviderModels(
   endpoint: string,
   apiKey: string,
   providerId?: string,
-): Promise<Array<{ modelId: string; displayName: string }>> {
+): Promise<Array<{ modelId: string; displayName: string; vision: boolean }>> {
   if (!isDesktop()) return Promise.resolve([]);
-  return invoke<Array<{ modelId: string; displayName: string }>>("list_provider_models", {
-    template,
-    endpoint,
-    apiKey,
-    providerId: providerId ?? null,
-  });
+  return invoke<Array<{ modelId: string; displayName: string; vision: boolean }>>(
+    "list_provider_models",
+    {
+      template,
+      endpoint,
+      apiKey,
+      providerId: providerId ?? null,
+    },
+  );
 }
 
 /** One configured MCP server (a `mcp-servers` entry in settings.log).
@@ -1048,3 +1054,142 @@ export function memoryDisable(id: string): Promise<void> {
 export function memoryDoctor(apply: boolean): Promise<MemoryDoctorDto> {
   return invoke<MemoryDoctorDto>("memory_doctor", { apply });
 }
+
+// ---------------------------------------------------------------------------
+// Scheduled tasks
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `kodo_core::scheduler::Schedule` from the Tauri command
+ * payload. Only the first version is exposed; advanced Cron does not
+ * ship until the second version per docs/design/SCHEDULED_TASKS_IMPLEMENTATION.md.
+ */
+export type ScheduleDto =
+  | { kind: "once"; fireAt: number }
+  | { kind: "interval"; anchor: number; intervalSeconds: number }
+  | { kind: "daily"; hour: number; minute: number; tzName: string }
+  | { kind: "weekly"; weekdays: number[]; hour: number; minute: number; tzName: string };
+
+export type TaskStateDto = "enabled" | "paused" | "finished" | "archived";
+export type MisfirePolicyDto = "latestOnce" | "skip" | "coalesce";
+export type OverlapPolicyDto = "skip" | "queueLatest" | "allow";
+export type TriggerSourceDto = "scheduled" | "manual";
+export type LifecycleDto = "queued" | "running" | "cancelling" | "finished";
+export type OutcomeDto =
+  | "succeeded"
+  | "partial"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "timedOut"
+  | "interrupted"
+  | "skipped";
+
+/** Mirrors `kodo_core::scheduler::TaskKind` (Agent / Job). */
+export type TaskKindDto =
+  | {
+      kind: "agent";
+      project: string;
+      message: string;
+      personas: string[];
+      budgetFamily: string | null;
+      resourceKey: string | null;
+    }
+  | {
+      kind: "job";
+      jobType: string;
+      params: unknown;
+      resources: string[];
+    };
+
+/** Mirrors `kodo_core::scheduler::ScheduledTask` from the Tauri command payload. */
+export type ScheduledTaskDto = {
+  id: string;
+  title: string;
+  state: TaskStateDto;
+  revision: number;
+  scheduleGeneration: number;
+  schedule: ScheduleDto;
+  task: TaskKindDto;
+  timezone: string;
+  misfirePolicy: MisfirePolicyDto;
+  graceSeconds: number;
+  overlapPolicy: OverlapPolicyDto;
+  timeoutSeconds: number | null;
+  createdAt: number;
+  updatedAt: number;
+  nextFireAt: number | null;
+  archived: boolean;
+};
+
+/** Mirrors `kodo_core::scheduler::TaskRun` from the Tauri command payload. */
+export type TaskRunDto = {
+  id: string;
+  taskId: string;
+  occurrenceKey: string;
+  triggerSource: TriggerSourceDto;
+  scheduleGeneration: number;
+  scheduledFor: number;
+  queuedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  configRevision: number;
+  configSnapshot: TaskKindDto;
+  lifecycle: LifecycleDto;
+  outcome: OutcomeDto | null;
+  delivery: string | null;
+  verification: string | null;
+  sessionId: string | null;
+  reportRef: string | null;
+  reasonCode: string | null;
+  errorSummary: string | null;
+  skippedCount: number;
+};
+
+export function listScheduledTasks(includeArchived = false): Promise<ScheduledTaskDto[]> {
+  return invoke<ScheduledTaskDto[]>("list_scheduled_tasks", { includeArchived });
+}
+
+export function getScheduledTask(id: string): Promise<ScheduledTaskDto | null> {
+  return invoke<ScheduledTaskDto | null>("get_scheduled_task", { id });
+}
+
+export function createScheduledTask(task: ScheduledTaskDto): Promise<ScheduledTaskDto> {
+  return invoke<ScheduledTaskDto>("create_scheduled_task", { task });
+}
+
+export function updateScheduledTask(
+  expectedRevision: number,
+  task: ScheduledTaskDto,
+): Promise<ScheduledTaskDto> {
+  return invoke<ScheduledTaskDto>("update_scheduled_task", { expectedRevision, task });
+}
+
+export function setScheduledTaskEnabled(id: string, enabled: boolean): Promise<ScheduledTaskDto> {
+  return invoke<ScheduledTaskDto>("set_scheduled_task_enabled", { id, enabled });
+}
+
+export function archiveScheduledTask(id: string): Promise<void> {
+  return invoke<void>("archive_scheduled_task", { id });
+}
+
+export function previewSchedule(schedule: ScheduleDto, after?: number): Promise<number[]> {
+  return invoke<number[]>("preview_schedule", { schedule, after });
+}
+
+export function runScheduledTaskNow(id: string): Promise<TaskRunDto> {
+  return invoke<TaskRunDto>("run_scheduled_task_now", { id });
+}
+
+export function listTaskRuns(taskId: string, limit = 50): Promise<TaskRunDto[]> {
+  return invoke<TaskRunDto[]>("list_task_runs", { taskId, limit });
+}
+
+export function cancelTaskRun(id: string): Promise<boolean> {
+  return invoke<boolean>("cancel_task_run", { id });
+}
+
+export function listJobTypes(): Promise<string[]> {
+  return invoke<string[]>("list_job_types");
+}
+

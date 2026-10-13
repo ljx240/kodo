@@ -630,6 +630,14 @@ small preview (image data URL or text snippet); binary attachments attach
 fine and are noted as 「已附带附件（内容未内联）」 at send time instead of
 failing the turn.
 
+Image attachments (2026-10-13) ride the multimodal path when the active
+model supports it: ≤ 4 MiB images inline as a `ContentBlock::Image` on the
+first user message (read through `tools::resolve_pinned_file` so sensitive
+paths and project-base validation still apply); > 4 MiB or vision-incapable
+model fall back to the path-only descriptor above. Selection is driven by
+`ProviderCapabilities::vision` (template default) plus
+`ModelSpec::vision_override` (per-model).
+
 Sent messages render the same card in the bubble (2026-09-29): one shared
 `ContextCard` component for both sites — the bubble variant is static (no
 remove control), keeps `data-context-path` and the full path in `title`, and

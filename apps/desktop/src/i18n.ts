@@ -11,6 +11,7 @@ export const T = {
     projects: "项目",
     settings: "设置",
     newProject: "新建项目",
+    schedule: "定时任务",
     /** Space wordmarks — sidebar trigger + welcome stage. English like `Kodo` (DESIGN §10). */
     brandWork: "Kodo Work",
     brandCode: "Kodo Code",
@@ -54,6 +55,14 @@ export const T = {
     stop: "停止",
     agentNone: "无智能体",
     agentAria: "选择智能体",
+    /** First-time banner when the active model is text-only and the user
+     *  attached an image. Visible until the user dismisses with
+     *  `visionSkippedNoticeAck`; the click writes
+     *  `kodo:vision-img-skip-acked` to sessionStorage so subsequent
+     *  send-with-image attempts skip straight through. */
+    visionSkippedNotice:
+      "当前模型不支持图像。附件将以文件名代替发送，模型不会看到画面内容。",
+    visionSkippedNoticeAck: "知道了",
     /** Skill chip prefix when the skill is seeded by the persona's defaults
      *  (visible on the chip so the user knows where it came from). */
     personaSkillLabel: "智能体技能",
@@ -866,6 +875,76 @@ export const T = {
         `${percent}% 已用（剩余 ${remaining}%）`,
         `已用 ${usedLabel} 标记, 共 ${windowLabel}`,
       ].join("\n");
+    },
+  },
+  /**
+   * Short inline tooltip strings for transparency-step rows. The learner's UI
+   * shows a small ⓘ icon next to each concept; hovering surfaces the matching
+   * `T.explain.<key>` text. Keep entries under one short sentence.
+   */
+  schedule: {
+    title: "定时任务",
+    subtitle: "查看、暂停、归档所有定时任务。创建与编辑请在桌面端使用完整表单。",
+    list: {
+      title: "任务",
+      empty: "还没有定时任务。",
+      emptyHint: "在桌面端 Kodo 的「定时任务」页面里创建第一个任务。",
+      headers: {
+        title: "名称",
+        kind: "类型",
+        project: "项目",
+        schedule: "时间规则",
+        next: "下一次",
+        state: "状态",
+      },
+      kindAgent: "Agent",
+      kindJob: "后台作业",
+      stateEnabled: "启用",
+      statePaused: "暂停",
+      stateFinished: "已结束",
+      stateArchived: "已归档",
+      filterAll: "全部",
+      filterEnabled: "启用",
+      filterPaused: "暂停",
+    },
+    actions: {
+      runNow: "立即执行",
+      pause: "暂停",
+      resume: "恢复",
+      archive: "归档",
+      history: "运行历史",
+      refresh: "刷新",
+    },
+    history: {
+      title: (id: string) => `运行历史 · ${id}`,
+      empty: "该任务还没有运行记录。",
+      headers: {
+        runId: "运行 id",
+        lifecycle: "状态",
+        outcome: "结果",
+        scheduledFor: "原计划",
+        startedAt: "开始",
+        finishedAt: "结束",
+        reason: "原因",
+      },
+      cancel: "取消",
+      cancelled: "已请求取消",
+      cancelFinished: "运行已结束",
+    },
+    errors: {
+      storage_unavailable: "存储不可用，请稍后重试。",
+      invalid_schedule: "时间规则不合法。",
+      revision_conflict: "配置已被修改，请刷新后重试。",
+      unknown_task: "任务不存在或已归档。",
+      resource_busy: "资源被占用，无法执行。",
+      unknown_job: "未注册的 job_type。",
+      already_finished: "本次运行已结束。",
+      no_live_run: "没有正在执行的运行。",
+      unknown: "操作失败，请稍后重试。",
+    },
+    jobTypes: {
+      title: "已注册 job_type",
+      empty: "还没有注册任何作业。",
     },
   },
   /**

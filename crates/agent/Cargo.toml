@@ -11,6 +11,9 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2", features = ["json"] }
+# Image attachments serialise through `ContentBlock::Image` as base64 (matches
+# the data-URL path used by `probe_context_file` on the desktop side).
+base64 = "0.22"
 kodo-core = { path = "../core" }
 # Long-term memory engine. Default-None in `RunRequest` so existing
 # callers and tests stay untouched.

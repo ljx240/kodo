@@ -27,6 +27,16 @@ use memory::{
     memory_disable, memory_doctor, memory_inspect, memory_list, memory_search, memory_status,
 };
 
+mod scheduler;
+use scheduler::SchedulerService;
+
+mod scheduler_cmds;
+use scheduler_cmds::{
+    archive_scheduled_task, cancel_task_run, create_scheduled_task, get_scheduled_task,
+    list_job_types, list_scheduled_tasks, list_task_runs, preview_schedule, run_scheduled_task_now,
+    set_scheduled_task_enabled, update_scheduled_task,
+};
+
 use view::{
     agent_view, skill_view, AgentView, ArchivedItemView, ModelOptionView, ProjectView,
     ProviderView, SessionRefView, SessionView, SkillView, Workspace,
@@ -988,11 +998,16 @@ fn list_provider_models(
         incoming.to_owned()
     };
     let models = kodo_agent::fetch_models(&template, &endpoint, &key)?;
+    let vision_default = kodo_agent::provider_template_vision(&template);
     Ok(models
         .into_iter()
-        .map(|m| ModelOptionView {
-            model_id: m.model_id,
-            display_name: m.display_name,
+        .map(|m| {
+            let vision = m.vision_override.unwrap_or(vision_default);
+            ModelOptionView {
+                model_id: m.model_id,
+                display_name: m.display_name,
+                vision,
+            }
         })
         .collect())
 }
@@ -1521,6 +1536,35 @@ fn main() {
         .manage(Runs::default())
         .manage(Approvals::default())
         .manage(BrowseWebview::default())
+        .setup(|app| {
+            // The scheduler needs a typed `AppHandle` to install the tick
+            // thread and a `state_dir` to write its store under. Both
+            // come from the desktop's `kodo_core::settings` module; the
+            // Tauri binding has nothing to add to the path.
+            let runs: tauri::State<'_, Runs> = app.state();
+            let approvals: tauri::State<'_, Approvals> = app.state();
+            let state_dir = match settings::state_dir() {
+                Some(dir) => dir,
+                None => {
+                    eprintln!("kodo scheduler: state_dir unavailable, scheduler is disabled");
+                    return Ok(());
+                }
+            };
+            let service = match SchedulerService::boot(
+                app.handle().clone(),
+                state_dir,
+                runs.inner().clone(),
+                approvals.inner().clone(),
+            ) {
+                Ok(service) => service,
+                Err(error) => {
+                    eprintln!("kodo scheduler: boot failed: {error}");
+                    return Ok(());
+                }
+            };
+            app.manage(service);
+            Ok(())
+        })
         // The completion marker from `task_feedback` clears as soon as the
         // window is back in front — focus lives on the native side, so the
         // webview could never reset the title itself.
@@ -1591,6 +1635,17 @@ fn main() {
             memory_inspect,
             memory_disable,
             memory_doctor,
+            list_scheduled_tasks,
+            get_scheduled_task,
+            create_scheduled_task,
+            update_scheduled_task,
+            set_scheduled_task_enabled,
+            archive_scheduled_task,
+            preview_schedule,
+            run_scheduled_task_now,
+            list_task_runs,
+            cancel_task_run,
+            list_job_types,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Kodo");

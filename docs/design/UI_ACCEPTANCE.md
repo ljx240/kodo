@@ -333,6 +333,12 @@ These are asserted in `apps/desktop/tests/visual/behaviour.spec.ts` and
 - [ ] image / PDF / Office / binary files never surface 读取失败 — images
       inline (or a kind card when oversized), CSV as a table, and the kind
       card's 用系统应用打开 hands the path to the OS;
+- [ ] image attachments ≤ 4 MiB reach the model as multimodal content when
+      the selected model is vision-capable (`ProviderCapabilities::vision` +
+      `ModelSpec::vision_override`); oversize or vision-incapable models
+      fall back to the path-only descriptor, and the first vision-incapable
+      + image send shows a one-time banner before dispatching (subsequent
+      sends in the same session are silent);
 - [ ] trace and Inspector diffs render +/− colored rows with file headers
       stripped (no raw `--- a/` / `+++ b/` lines);
 - [ ] the project file tree still shows the project's real content on

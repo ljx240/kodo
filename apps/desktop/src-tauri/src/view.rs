@@ -989,6 +989,13 @@ impl From<traces::FileSpanCapture> for FileSpanView {
 pub struct ModelOptionView {
     pub model_id: String,
     pub display_name: String,
+    /// Whether the model accepts image attachments as multimodal content
+    /// blocks. False → Composer falls back to the path-only descriptor
+    /// and (once) shows the user a notice that images will be skipped.
+    /// Mirrors `ProviderCapabilities::vision` with a per-model
+    /// `vision_override` applied (`crates/agent/src/provider.rs`).
+    #[serde(default)]
+    pub vision: bool,
 }
 
 /// A provider as the settings screen edits it. `api_key` is a mask when

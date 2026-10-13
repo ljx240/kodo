@@ -1397,3 +1397,235 @@
      class — explicit override here so future row variants don't
      silently inherit a different tint. */
 }
+
+/* Scheduled tasks page */
+.page-schedule {
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.page-schedule .page-head {
+  align-items: flex-end;
+}
+
+.page-schedule .page-head-titles h1 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.page-schedule .page-subtitle {
+  color: var(--kodo-text-secondary);
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.page-error {
+  background: var(--kodo-error-bg, #fdecec);
+  border: 1px solid var(--kodo-error-border, #f3b9b9);
+  color: var(--kodo-error-text, #7a1f1f);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  margin: 0;
+}
+
+.page-empty {
+  color: var(--kodo-text-secondary);
+  font-size: 13px;
+  margin: 0;
+  padding: 12px 0;
+}
+
+.schedule-filter {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--kodo-border, rgba(0, 0, 0, 0.08));
+  padding-bottom: 0;
+}
+
+.schedule-filter-pill {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--kodo-text-secondary);
+  font-size: 13px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.schedule-filter-pill--active {
+  color: var(--kodo-text);
+  border-bottom-color: var(--kodo-accent, #4a6cf7);
+}
+
+.schedule-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.schedule-row {
+  border: 1px solid var(--kodo-border, rgba(0, 0, 0, 0.08));
+  border-radius: 8px;
+  background: var(--kodo-bg-elevated, #fff);
+  padding: 10px 12px;
+}
+
+.schedule-row--open {
+  border-color: var(--kodo-accent, #4a6cf7);
+}
+
+.schedule-row-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.schedule-row-toggle {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--kodo-text-secondary);
+  padding: 2px;
+  margin-top: 2px;
+}
+
+.schedule-row-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.schedule-row-title {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0 0 4px;
+  color: var(--kodo-text);
+}
+
+.schedule-row-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.schedule-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--kodo-bg-muted, rgba(0, 0, 0, 0.04));
+  color: var(--kodo-text-secondary);
+  border: 1px solid var(--kodo-border, rgba(0, 0, 0, 0.06));
+}
+
+.schedule-pill--kind {
+  background: var(--kodo-accent-bg-soft, rgba(74, 108, 247, 0.12));
+  color: var(--kodo-accent, #4a6cf7);
+  border-color: transparent;
+}
+
+.schedule-pill--state {
+  font-weight: 500;
+}
+
+.schedule-pill--state-enabled {
+  background: var(--kodo-success-bg-soft, rgba(38, 154, 95, 0.12));
+  color: var(--kodo-success-text, #1f7a47);
+}
+
+.schedule-pill--state-paused {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--kodo-text-secondary);
+}
+
+.schedule-pill--state-archived {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--kodo-text-secondary);
+}
+
+.schedule-row-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.schedule-row-history {
+  margin-top: 12px;
+  border-top: 1px solid var(--kodo-border, rgba(0, 0, 0, 0.06));
+  padding-top: 12px;
+  overflow-x: auto;
+}
+
+.schedule-row-history h3 {
+  font-size: 13px;
+  font-weight: 500;
+  margin: 0 0 8px;
+  color: var(--kodo-text);
+}
+
+.schedule-runs {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.schedule-runs th,
+.schedule-runs td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--kodo-border, rgba(0, 0, 0, 0.04));
+  color: var(--kodo-text);
+  vertical-align: top;
+}
+
+.schedule-runs th {
+  color: var(--kodo-text-secondary);
+  font-weight: 500;
+  background: var(--kodo-bg-muted, rgba(0, 0, 0, 0.02));
+}
+
+.schedule-runs-id {
+  font-family: var(--kodo-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.schedule-job-types {
+  border-top: 1px solid var(--kodo-border, rgba(0, 0, 0, 0.08));
+  padding-top: 12px;
+}
+
+.schedule-job-types h2 {
+  font-size: 13px;
+  font-weight: 500;
+  margin: 0 0 6px;
+  color: var(--kodo-text);
+}
+
+.schedule-job-types ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.schedule-job-types li {
+  font-family: var(--kodo-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--kodo-bg-muted, rgba(0, 0, 0, 0.04));
+  color: var(--kodo-text-secondary);
+}

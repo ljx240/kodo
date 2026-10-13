@@ -7,9 +7,19 @@
 pub mod approve;
 pub mod config;
 pub mod memory_outbox;
+pub mod scheduler;
+pub mod scheduler_jobs;
 pub mod turn;
 
 pub use approve::{approval_fingerprint, step_kind_label, ApprovalChoice};
 pub use config::{permission_from_settings, Overrides, ShellConfig};
 pub use memory_outbox::{event_for_item, open_default_handle, write_event};
+pub use scheduler::{
+    recover_inflight, AdmissionLimits, DispatchedRun, DispatcherConfig, Job, JobCancellation,
+    JobContext, JobOutcome, JobRegistry, JobReport, ResourceGuard, ResourceHandle, Scheduler,
+    SchedulerError, SchedulerStore, TaskSummary,
+};
+pub use scheduler_jobs::{
+    default_job_registry, default_job_registry_handlers, memory_outbox_replay, workspace_refresh,
+};
 pub use turn::{Logged, TurnLogger, TurnOutcome};

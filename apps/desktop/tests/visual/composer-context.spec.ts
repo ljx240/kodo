@@ -442,3 +442,157 @@ test("approval response failure surfaces recovery", async ({ page }) => {
   await expect(page.locator('[data-testid="approval-error"]')).toBeVisible();
   await expect(page.locator('[data-testid="approval-error"]')).toContainText("审批响应失败");
 });
+
+/** Build a `liveCore`-shaped core with a vision-incapable model selected.
+ *  Image attachments on this provider should trigger the first-time
+ *  vision-skip notice. */
+function liveCoreTextOnlyModel(extra: Record<string, unknown> = {}) {
+  return liveCore({
+    providers: [
+      {
+        id: "p1",
+        name: "Local",
+        // `template: "openai"` gives `modelId` a known catalog seed; the
+        // `models` list overrides it with a text-only entry (`vision: false`)
+        // so the composer's vision gate trips.
+        template: "openai",
+        apiKey: "••••dead",
+        endpoint: "",
+        modelId: "deepseek-reasoner",
+        model: "deepseek-reasoner",
+        displayName: "DeepSeek-R1",
+        models: [{ modelId: "deepseek-reasoner", displayName: "DeepSeek-R1", vision: false }],
+      },
+    ],
+    ...extra,
+  });
+}
+
+test("vision-incapable model + image attachment shows the first-time skip notice", async ({ page }) => {
+  await stubShell(
+    page,
+    liveCoreTextOnlyModel({
+      pickFiles: ["/tmp/shot.png"],
+      externalFiles: ["/tmp/shot.png"],
+    }),
+  );
+  await openLiveConversation(page);
+
+  await attachFiles(page);
+  await expect(page.locator('[data-context-path="/tmp/shot.png"]')).toBeVisible();
+
+  // First send attempt: the notice gates the dispatch — nothing should reach
+  // the core yet, the banner is visible, and the ack button is wired.
+  await page.locator(".composer-input").fill("看看这张图");
+  await page.locator(".composer-input").press("Enter");
+
+  const banner = page.locator('[data-testid="vision-skip-notice"]');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("当前模型不支持图像");
+
+  // No send landed yet — no assistant reply, sendLog stays empty.
+  let log = await page.evaluate(
+    () => (window as unknown as { __sendLog?: Array<{ text: string; context: string[] }> }).__sendLog ?? [],
+  );
+  expect(log).toHaveLength(0);
+
+  // Ack the notice: send dispatches with the original text + image path.
+  await page.locator('[data-testid="vision-skip-ack"]').click();
+  await expect(banner).toHaveCount(0);
+  log = await page.evaluate(
+    () => (window as unknown as { __sendLog?: Array<{ text: string; context: string[] }> }).__sendLog ?? [],
+  );
+  expect(log).toHaveLength(1);
+  expect(log[0].text).toBe("看看这张图");
+  expect(log[0].context).toEqual(["/tmp/shot.png"]);
+
+  // sessionStorage flag persisted for the page session.
+  const acked = await page.evaluate(() =>
+    window.sessionStorage.getItem("kodo:vision-img-skip-acked"),
+  );
+  expect(acked).toBe("1");
+});
+
+test("vision-skip notice stays silent once acked (same session)", async ({ page }) => {
+  // sessionStorage is per-origin and survives the navigation to "/"; set it
+  // before the React tree mounts so the initial state picks up the flag.
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem("kodo:vision-img-skip-acked", "1");
+  });
+  await stubShell(
+    page,
+    liveCoreTextOnlyModel({
+      pickFiles: ["/tmp/shot.png"],
+      externalFiles: ["/tmp/shot.png"],
+    }),
+  );
+  await openLiveConversation(page);
+
+  await attachFiles(page);
+  await page.locator(".composer-input").fill("看图");
+  await page.locator(".composer-input").press("Enter");
+
+  // Banner never appears; send goes straight through.
+  await expect(page.locator('[data-testid="vision-skip-notice"]')).toHaveCount(0);
+  const log = await page.evaluate(
+    () => (window as unknown as { __sendLog?: Array<{ text: string; context: string[] }> }).__sendLog ?? [],
+  );
+  expect(log).toHaveLength(1);
+  expect(log[0].text).toBe("看图");
+  expect(log[0].context).toEqual(["/tmp/shot.png"]);
+});
+
+test("vision-skip notice does not fire on text-only attachments (e.g. .ts files)", async ({ page }) => {
+  await stubShell(page, liveCoreTextOnlyModel({ pickFiles: ["src/app.ts"] }));
+  await openLiveConversation(page);
+
+  await attachFiles(page);
+  await page.locator(".composer-input").fill("看这个文件");
+  await page.locator(".composer-input").press("Enter");
+
+  // The vision-skip gate keys on `kindFromPath(path) === "image"`, so
+  // text files sail through even with a text-only model selected.
+  await expect(page.locator('[data-testid="vision-skip-notice"]')).toHaveCount(0);
+  const log = await page.evaluate(
+    () => (window as unknown as { __sendLog?: Array<{ text: string; context: string[] }> }).__sendLog ?? [],
+  );
+  expect(log).toHaveLength(1);
+  expect(log[0].context).toEqual(["src/app.ts"]);
+});
+
+test("vision-skip notice cancel keeps the draft in the composer", async ({ page }) => {
+  await stubShell(
+    page,
+    liveCoreTextOnlyModel({
+      pickFiles: ["/tmp/shot.png"],
+      externalFiles: ["/tmp/shot.png"],
+    }),
+  );
+  await openLiveConversation(page);
+
+  await attachFiles(page);
+  await page.locator(".composer-input").fill("看看");
+  await page.locator(".composer-input").press("Enter");
+
+  const banner = page.locator('[data-testid="vision-skip-notice"]');
+  await expect(banner).toBeVisible();
+
+  // Cancel: banner closes, no send dispatches, the draft + chip stay put so
+  // the user can re-trigger (e.g. after switching to a vision-capable model).
+  await page.locator('[data-testid="vision-skip-cancel"]').click();
+  await expect(banner).toHaveCount(0);
+  await expect(page.locator('[data-context-path="/tmp/shot.png"]')).toBeVisible();
+  await expect(page.locator(".composer-input")).toHaveValue("看看");
+
+  const log = await page.evaluate(
+    () => (window as unknown as { __sendLog?: Array<{ text: string; context: string[] }> }).__sendLog ?? [],
+  );
+  expect(log).toHaveLength(0);
+
+  // Cancel must not have armed the ack flag — the next send should still see
+  // the banner (the user didn't actually choose to remember).
+  const acked = await page.evaluate(() =>
+    window.sessionStorage.getItem("kodo:vision-img-skip-acked"),
+  );
+  expect(acked).not.toBe("1");
+});

@@ -21,6 +21,10 @@ tauri = { version = "2", features = [] }
 # adding `@tauri-apps/plugin-dialog` to package.json.
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+# `parking_lot` is what `kodo-shell` already uses for the in-process
+# resource guard and job-cancel registry; pulling it directly here
+# avoids a second std::sync::Mutex layer in the Tauri binding.
+parking_lot = "0.12"
 
 [dev-dependencies]
 # Only to assert the exact JSON the GUI receives. The shape of a flattened,

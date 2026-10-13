@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# IANA timezone + DST arithmetic for the scheduler. `std` is required
+# for the timezone database to load; `tzdb-bundle-platform` ships the
+# tzdata inside the binary so we never depend on the host's
+# `/usr/share/zoneinfo`.
+jiff = { version = "0.2", features = ["serde", "tzdb-bundle-platform"] }

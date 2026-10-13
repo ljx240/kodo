@@ -6,7 +6,13 @@ import { isDesktop } from "./api";
  * Plain `location` reads keep this dependency-free; the app never needs a
  * router for four static screens.
  */
-export type RouteName = "conversation" | "plugins" | "trace" | "archive" | "settings";
+export type RouteName =
+  | "conversation"
+  | "plugins"
+  | "trace"
+  | "archive"
+  | "settings"
+  | "schedule";
 
 /** The active tab of the 插件 page — `?type=`, default `skills`. */
 export type PluginType = "skills" | "mcp" | "agents";
@@ -30,6 +36,7 @@ const NAMES: Record<string, RouteName> = {
   trace: "trace",
   archive: "archive",
   settings: "settings",
+  schedule: "schedule",
 };
 
 /**

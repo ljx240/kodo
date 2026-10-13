@@ -295,6 +295,13 @@ fn render_middle(messages: &[ProviderMessage]) -> String {
                     let tag = if *is_error { "[error]" } else { "[ok]" };
                     out.push_str(&format!("{tag} {content}\n"));
                 }
+                // Compaction summarizes history to a future-session
+                // observer; image bytes are noise in that summary. Note
+                // the media type so the recap still shows *which* images
+                // rode the prior turn.
+                provider::ContentBlock::Image { media_type, .. } => {
+                    out.push_str(&format!("[image omitted {media_type}]\n"));
+                }
             }
         }
         out.push('\n');

@@ -2165,6 +2165,7 @@ dependencies = [
 name = "kodo-agent"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "calamine",
  "kodo-core",
  "kodo-memory",
@@ -2193,6 +2194,7 @@ dependencies = [
 name = "kodo-core"
 version = "0.0.1"
 dependencies = [
+ "jiff",
  "serde",
  "serde_json",
 ]
@@ -2205,6 +2207,7 @@ dependencies = [
  "kodo-core",
  "kodo-memory",
  "kodo-shell",
+ "parking_lot",
  "serde",
  "serde_json",
  "tauri",
@@ -2247,8 +2250,11 @@ dependencies = [
  "kodo-agent",
  "kodo-core",
  "kodo-memory",
+ "parking_lot",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
