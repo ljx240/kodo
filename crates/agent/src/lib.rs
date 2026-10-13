@@ -48,7 +48,10 @@ use protocol::{
     ModelTurn, ToolArgs, ToolCall, ToolCallId, ToolError, ToolErrorCode, ToolInvocation, ToolName,
     ToolRegistry, ToolResult,
 };
-use provider::{ContentBlock, NativeToolCall, ProviderEvent, ProviderMessage, ToolSchema};
+use provider::{
+    looks_like_preview_channel, ContentBlock, NativeToolCall, ProviderEvent, ProviderMessage,
+    ToolSchema,
+};
 
 use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 /// Image attachments serialise through `ContentBlock::Image` as base64 —
@@ -56,7 +59,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 /// side, so the bytes never escape the request body.
 use base64::Engine as _;
 use skill::{SkillRegistry, SkillSpec};
-use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason};
+use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason, Transition};
 use tools::{
     classify_command_risk, command_run, search_files, write_project_file, CommandOutcomeKind,
 };
@@ -3350,6 +3353,11 @@ pub fn run(
     // Why the last final-answer attempt produced no usable text — feeds the
     // honest offline-fallback detail instead of blaming provider config.
     let mut model_gap: Option<String> = None;
+    // Track the most recent attempt's finish reason + reasoning flag at the
+    // loop scope so the final failure_reason classification can distinguish
+    // truncation / empty / state-machine errors without re-parsing the
+    // attempt struct.
+    let mut last_attempt_finish = String::new();
     let mut changeset = if has_project {
         TurnChangeSet::capture_baseline(project)
     } else {
@@ -3365,6 +3373,24 @@ pub fn run(
     let mut truncated_output = false;
     let mut partial_output = false;
     let mut pending_question = false;
+    // 2026-10-13 finalization: counts "no usable answer" recovery calls so a
+    // silent model never burns the whole budget. Bounded by
+    // `MAX_FINAL_ONLY_RETRIES` (currently 2). The first retry is allowed
+    // even when `saw_reasoning=false` — the previous gate mistakenly
+    // required the model to have produced reasoning, but the failure mode
+    // (model returns stop + empty text + no usage trace) is exactly what a
+    // fresh final-ask is meant to detect.
+    let mut final_only_retries: u32 = 0;
+    // Last-handle failure captured for the final `Step::AgentMessage`
+    // failure_reason. Distinct from `provider_error` and from a model_gap:
+    // a state-machine Rejected is a programmer bug or a misrouted event,
+    // never an honest model answer.
+    let mut last_state_rejection: Option<String> = None;
+    // True while the loop is in "final only" territory, regardless of
+    // whether the run was originally conversational. When set, the next
+    // `call_model` sends an empty tool schema so the model can only emit
+    // prose, not a new tool batch.
+    let mut final_only_requested = false;
     // One bounded lift; iteration and batch preflight share this flag.
     let mut budget_lifted = false;
     // Wrap-up hint: pushed once per turn when either cap is within 20% so
@@ -3908,11 +3934,16 @@ pub fn run(
                 });
                 wrap_up_pushed = true;
             }
-            let call_schemas = if finalize_answer {
+            let call_schemas = if finalize_answer || final_only_requested {
                 &[][..]
             } else {
                 schemas.as_slice()
             };
+            // Reset the one-shot flag so a single final-only retry stays
+            // single: if the recovery answer is itself empty, the counter
+            // (`final_only_retries`) blocks another attempt and the loop
+            // exits through the no_answer branch.
+            final_only_requested = false;
             match call_model(&provider, &history, call_schemas, request, alive, emit) {
                 Ok(Some(attempt)) => {
                     // Charge the budget with the reported input tokens and
@@ -3972,6 +4003,10 @@ pub fn run(
                     let native_calls = attempt.native_calls;
                     let attempt_finish = attempt.finish_reason;
                     let attempt_saw_reasoning = attempt.saw_reasoning;
+                    // Mirror to the loop scope so the final failure_reason
+                    // taxonomy can distinguish "truncated" from "empty
+                    // answer" without re-walking the attempt struct.
+                    last_attempt_finish = attempt_finish.clone();
                     if !alive() {
                         machine.handle(AgentEvent::Cancel);
                         break;
@@ -4192,10 +4227,75 @@ pub fn run(
                         answer = strip_tool_artifacts(&assistant_text);
                         checks = checks_from(&assistant_text);
                         if answer.trim().is_empty() {
+                            // Plan-level final-answer gate: read-only review
+                            // skills set `requires_final_answer = true` so the
+                            // loop gets one extra final-only retry before
+                            // giving up. The 2026-10-13 incident landed on a
+                            // model that returned `finish_reason=stop` with
+                            // an empty `text` block and no `reasoning_content`
+                            // trace, so `saw_reasoning` is **not** part of
+                            // the trigger — the gate is the broader
+                            // "needs final report AND no usable text AND
+                            // budget allows AND retries not exhausted". Output
+                            // truncation keeps the original one-shot path so
+                            // we don't suggest "extend output" when the
+                            // signal is "truncated".
+                            let burned_reasoning_only = !output_was_truncated(&attempt_finish);
+                            // 2026-10-13 follow-up: the final-only retry must
+                            // not be gated by `rounds_exhausted()`. final-only
+                            // IS the bypass of the normal round budget — the
+                            // whole point is to give the model one more shot
+                            // at landing a final report when the regular round
+                            // budget has run out and the last call came back
+                            // empty. Without this carve-out, the tmu34a-6disnc-0
+                            // re-run hit rounds_used==max_rounds, the gate
+                            // closed, the loop broke with `final_only_retries=0`,
+                            // and the failure_reason classifier fell through to
+                            // the generic `provider_error` shape even though we
+                            // never actually attempted a final-only recovery.
+                            if machine.plan().requires_final_answer
+                                && burned_reasoning_only
+                                && final_only_retries < MAX_FINAL_ONLY_RETRIES
+                            {
+                                // Channel hint: tell the trace / the next
+                                // user-ask that this is a preview channel
+                                // so the same model id doesn't get blamed
+                                // for the lost final later. `provider` is
+                                // the post-failover local (the move from
+                                // `attempt.provider` already happened).
+                                let id = provider.resolved_model_id();
+                                if !id.is_empty() && looks_like_preview_channel(&id) {
+                                    notes.push(format!(
+                                        "preview channel `{id}` returned an empty final; retrying with a direct final-ask"
+                                    ));
+                                }
+                                notes.push(format!(
+                                    "final-only retry {}/{} (finish_reason={}, saw_reasoning={}): empty answer, asking model to land the report in prose",
+                                    final_only_retries + 1,
+                                    MAX_FINAL_ONLY_RETRIES,
+                                    attempt_finish,
+                                    attempt_saw_reasoning
+                                ));
+                                final_only_retries = final_only_retries.saturating_add(1);
+                                final_only_requested = true;
+                                history.push(ProviderMessage::user(
+                                    "上一轮没有返回可用正文。请直接以 final 消息给出报告（评分 / 关键要素 / 优化建议），\
+                                     不再发起新工具调用，reasoning 请压缩到最少。\
+                                     如需引用代码，必须给出具体的文件:行号。"
+                                        .to_owned(),
+                                ));
+                                continue;
+                            }
                             model_gap = Some(
                                 empty_answer_detail(&attempt_finish, attempt_saw_reasoning)
                                     .to_owned(),
                             );
+                            if final_only_retries >= MAX_FINAL_ONLY_RETRIES {
+                                notes.push(format!(
+                                    "final-only retry budget exhausted ({} attempts); classifying as no_answer",
+                                    final_only_retries
+                                ));
+                            }
                             break;
                         }
                         model_gap = None;
@@ -4205,7 +4305,18 @@ pub fn run(
                         if let Some(evidence) = machine.evidence_mut() {
                             evidence.deliverable_errors = Some(errors);
                         }
-                        machine.handle(AgentEvent::ModelClaimedDone);
+                        if let Transition::Rejected { reason, .. } =
+                            machine.handle(AgentEvent::ModelClaimedDone)
+                        {
+                            // Acceptance gate refused the claim — the model
+                            // wanted to finish without satisfying the plan.
+                            // Don't continue silently: surface the gap and
+                            // let the loop ask for the missing evidence.
+                            notes.push(format!(
+                                "model claimed done but acceptance gate rejected: {reason}"
+                            ));
+                            last_state_rejection = Some(reason);
+                        }
                         // Conversational runs gate nothing: the prose answer
                         // IS the delivery — never the "criteria not met"
                         // bounce that starves plain Q&A into a failed run.
@@ -4243,7 +4354,17 @@ pub fn run(
                         machine.handle(AgentEvent::ModelRequestedTools { count: 0 });
                         continue;
                     }
-                    machine.handle(AgentEvent::ModelRequestedTools { count: calls.len() });
+                    let req_transition =
+                        machine.handle(AgentEvent::ModelRequestedTools { count: calls.len() });
+                    if let Transition::Rejected { reason, .. } = req_transition {
+                        notes.push(format!(
+                            "state machine rejected ModelRequestedTools ({} calls): {reason}",
+                            calls.len()
+                        ));
+                        last_state_rejection = Some(reason);
+                        machine.handle(AgentEvent::Cancel);
+                        break;
+                    }
                     if machine.state().is_terminal() {
                         break;
                     }
@@ -4327,11 +4448,21 @@ pub fn run(
                         }
                     }
 
-                    machine.handle(AgentEvent::ToolsFinished {
-                        results: results.clone(),
-                    });
-                    if let Some(evidence) = machine.evidence_mut() {
-                        evidence.absorb_results(&results);
+                    // Single source of truth for tool-result absorption: the
+                    // state machine's `absorb()` already updates the evidence
+                    // bag, the plan's subtask ledger, and the budget counters.
+                    // A second `evidence.absorb_results()` call here used to
+                    // double every denial in the audit log
+                    // (2026-10-13 incident: 8 denials counted as 16).
+                    if let Transition::Rejected { reason, .. } =
+                        machine.handle(AgentEvent::ToolsFinished {
+                            results: results.clone(),
+                        })
+                    {
+                        notes.push(format!("state machine rejected ToolsFinished: {reason}"));
+                        last_state_rejection = Some(reason);
+                        machine.handle(AgentEvent::Cancel);
+                        break;
                     }
                     if let Some(question) = results
                         .iter()
@@ -4633,19 +4764,57 @@ pub fn run(
         // "budget_exhausted"` so it surfaces on a budget trip even when no
         // file was written (delivery == "failed"). Empty for any non-failed
         // delivery so the success path stays quiet.
-        let failure_reason: &str = match machine.state() {
-            AgentState::Failed {
-                reason: FailReason::BudgetExhausted,
-            } => "budget_exhausted",
-            AgentState::Failed {
-                reason: FailReason::AcceptanceUnmet,
-            } => "acceptance_unmet",
-            AgentState::Failed {
-                reason: FailReason::Unrecoverable,
-            } => "unrecoverable",
-            _ if provider_ready && model_gap.is_some() => "provider_error",
-            _ if delivery == "failed" => "unknown",
-            _ => "",
+        //
+        // 2026-10-13: the previous taxonomy lumped five distinct failure
+        // shapes into `provider_error` (model_gap) and the catch-all `unknown`.
+        // The UI cannot tell the difference between "truncated" vs "empty
+        // answer" vs "permission blocked" vs "state machine bug" — so it
+        // surfaces the same generic "增加输出 tokens" hint for all of them.
+        // Each distinct failure now carries its own tag, ordered most specific
+        // first.
+        let failure_reason: &str = if truncated_output
+            && output_was_truncated(&last_attempt_finish)
+            && delivery == "failed"
+        {
+            "output_truncated"
+        } else if last_state_rejection.is_some()
+            && matches!(
+                machine.state(),
+                AgentState::Failed { .. } | AgentState::Cancelled
+            )
+        {
+            "state_machine_error"
+        } else if !machine.evidence().denied_tools.is_empty()
+            && matches!(machine.state(), AgentState::Failed { .. })
+        {
+            "permission_blocked"
+        } else {
+            match machine.state() {
+                AgentState::Failed {
+                    reason: FailReason::BudgetExhausted,
+                } => "budget_exhausted",
+                AgentState::Failed {
+                    reason: FailReason::AcceptanceUnmet,
+                } => "acceptance_unmet",
+                AgentState::Failed {
+                    reason: FailReason::Unrecoverable,
+                } => "unrecoverable",
+                _ if provider_ready && model_gap.is_some() && final_only_retries >= 1 => {
+                    // 2026-10-13 follow-up: any final-only attempt that came
+                    // back empty is a `no_answer` shape (the model couldn't
+                    // land a final in prose). The previous gate required
+                    // `final_only_retries >= MAX_FINAL_ONLY_RETRIES` (2), but
+                    // `MAX` is the cap for *retry attempts*, not the gate for
+                    // the taxonomy. The semantic "we tried a final-only and
+                    // it was empty" fires on the first miss already, so the
+                    // classifier must follow. The cap still bounds the loop;
+                    // this only changes which tag UI sees.
+                    "no_answer"
+                }
+                _ if provider_ready && model_gap.is_some() => "provider_error",
+                _ if delivery == "failed" => "unknown",
+                _ => "",
+            }
         };
         simple_step(
             Step::AgentMessage {
@@ -5131,6 +5300,14 @@ fn empty_answer_detail(finish_reason: &str, saw_reasoning: bool) -> &'static str
         (false, false) => "模型调用成功但未返回正文",
     }
 }
+
+/// Maximum number of "final only" recovery calls for a single turn. The
+/// 2026-10-13 incident showed a stuck model can keep returning empty
+/// stop responses forever; without a hard cap the loop burns the entire
+/// budget. One retry catches the common preview-channel reasoning-only
+/// case; a second retry catches the rarer scenario where the first retry's
+/// answer also arrived empty. Anything beyond two is a no-answer failure.
+const MAX_FINAL_ONLY_RETRIES: u32 = 2;
 
 fn output_was_truncated(finish_reason: &str) -> bool {
     matches!(finish_reason, "length" | "max_tokens")
@@ -6645,6 +6822,19 @@ mod tests {
         assert_eq!(
             empty_answer_detail("stop", false),
             "模型调用成功但未返回正文"
+        );
+    }
+
+    /// 2026-10-13 regression: the tmu34a-6disnc-0 re-run was hitting
+    /// `rounds_exhausted` on the *normal* round budget but the empty-final
+    /// gate was checking that as a precondition, so the final-only retry
+    /// never actually fired. The constant is now >= 1 (allows at least one
+    /// bypass) and the gate does not depend on `rounds_exhausted()`.
+    #[test]
+    fn max_final_only_retries_allows_at_least_one_bypass() {
+        assert!(
+            MAX_FINAL_ONLY_RETRIES >= 1,
+            "at least one final-only retry must be allowed"
         );
     }
 

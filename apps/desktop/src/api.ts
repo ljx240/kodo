@@ -542,7 +542,7 @@ export type ProviderDto = {
    *  `vision` rides the wire too — Tauri seeds it from the template +
    *  `ModelSpec::vision_override` and the composer reads it to gate
    *  the first-time image-skip notice. Undefined for legacy records. */
-  models?: Array<{ modelId: string; displayName: string; vision?: boolean }> | null;
+  models?: Array<{ modelId: string; displayName: string; vision?: boolean; suitableForLong?: boolean }> | null;
   hasKey?: boolean;
 };
 

@@ -996,6 +996,19 @@ pub struct ModelOptionView {
     /// `vision_override` applied (`crates/agent/src/provider.rs`).
     #[serde(default)]
     pub vision: bool,
+    /// Whether this channel is suitable for tasks that need a long final
+    /// assistant message (detailed review, scoring, multi-section
+    /// report). Preview / flash channels set this to `false` so the
+    /// desktop picker can warn the user before they kick off a long
+    /// output task on a channel known to land with an empty `text` block
+    /// (see 2026-10-13 Flash-Preview loss). Mirrors
+    /// `ModelSpec::suitable_for_long` from `crates/agent/src/provider.rs`.
+    #[serde(default = "default_suitable_for_long")]
+    pub suitable_for_long: bool,
+}
+
+fn default_suitable_for_long() -> bool {
+    true
 }
 
 /// A provider as the settings screen edits it. `api_key` is a mask when

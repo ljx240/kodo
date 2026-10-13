@@ -183,6 +183,13 @@ pub struct TaskPlan {
     pub deliverable_bar: bool,
     pub expected_outputs: Vec<String>,
     pub requires_file_output: bool,
+    /// Plan-level contract: the run must produce a final assistant message
+    /// before it can leave the loop. Set by `code-review` / `review-only`
+    /// skills so a long reasoning run that ends with an empty `text` block
+    /// is given one extra user-ask before the loop falls back to
+    /// `model_gap`. Off by default — conversational / work / bug-fix runs
+    /// keep the original one-shot semantics.
+    pub requires_final_answer: bool,
 }
 
 impl TaskPlan {
@@ -343,6 +350,7 @@ impl TaskPlan {
             deliverable_bar: true,
             expected_outputs: Vec::new(),
             requires_file_output: false,
+            requires_final_answer: false,
         }
     }
 
@@ -473,6 +481,7 @@ impl TaskPlan {
             deliverable_bar: false,
             expected_outputs: Vec::new(),
             requires_file_output: false,
+            requires_final_answer: false,
         }
     }
 
@@ -531,6 +540,7 @@ impl TaskPlan {
             deliverable_bar: true,
             expected_outputs: Vec::new(),
             requires_file_output: false,
+            requires_final_answer: false,
         }
     }
 
@@ -573,6 +583,11 @@ impl TaskPlan {
         plan.deliverable_bar = skill
             .applicable_task_types
             .contains(&crate::classify::TaskType::Work);
+        // Plan-level final-answer gate (read-only review skills): the run
+        // may not exit until a final assistant message has been emitted.
+        // Wired from `SkillSpec::requires_final_answer` — see skill.rs and
+        // the lib.rs empty-final branch in `attempt_finish` handling.
+        plan.requires_final_answer = skill.requires_final_answer;
         plan.set_output_contract(message);
         plan.constraints = vec![
             "Paths stay inside the project".to_owned(),
@@ -668,6 +683,7 @@ impl TaskPlan {
             deliverable_bar: false,
             expected_outputs: Vec::new(),
             requires_file_output: false,
+            requires_final_answer: false,
         })
     }
 
@@ -676,6 +692,11 @@ impl TaskPlan {
         let mut out = String::from("## Current plan\n");
         if self.requires_file_output {
             out.push_str(&format!("- File delivery requires nonempty, valid files and readback; expected outputs: {:?}\n", self.expected_outputs));
+        }
+        if self.requires_final_answer {
+            out.push_str(
+                "- This plan requires a final assistant message before exit. Do not end the run on tool calls alone; the final answer (评分 / 关键要素 / 优化建议 for code review) must be emitted as the assistant's `text` block, not buried in reasoning.\n",
+            );
         }
 
         out.push_str(&format!("- goal: {}\n", self.goal));
@@ -1579,6 +1600,48 @@ mod tests {
         assert!(plan.requires_verify);
         assert!(plan.subtasks.iter().any(|s| s.kind == SubtaskKind::Edit));
         assert!(plan.subtasks.iter().any(|s| s.kind == SubtaskKind::Verify));
+    }
+
+    /// Plan-level final-answer gate (2026-10-13): read-only review skills
+    /// flip `requires_final_answer = true` so the agent loop keeps the
+    /// run alive on `text == "" + saw_reasoning` and asks once more for a
+    /// final message. Other skills keep `false` — the original one-shot
+    /// path on empty final. The plan prompt must also surface the gate
+    /// so the model itself knows "this run must end on a final message"
+    /// before it ever sees the empty-final branch.
+    #[test]
+    fn code_review_plan_sets_requires_final_answer_and_surfaces_it_in_prompt() {
+        use crate::classify::TaskType;
+        use crate::skill::SkillRegistry;
+
+        let reg = SkillRegistry::builtin();
+        let review = reg
+            .select(TaskType::CodeReview)
+            .expect("code-review skill must be present")
+            .clone();
+        let plan = TaskPlan::from_skill(&review, "review this PR");
+        assert!(
+            plan.requires_final_answer,
+            "code-review plan must require a final assistant message"
+        );
+        let prompt = plan.to_prompt_block();
+        assert!(
+            prompt.contains("final assistant message"),
+            "plan prompt must surface the final-answer gate; got: {prompt}"
+        );
+
+        // A skill that doesn't opt in (work) keeps the gate off and the
+        // plan prompt quiet — confirms the gate is opt-in per skill, not
+        // a global plan default.
+        let work = reg
+            .select(TaskType::Work)
+            .expect("work skill must be present")
+            .clone();
+        let work_plan = TaskPlan::from_skill(&work, "write a quick note");
+        assert!(!work_plan.requires_final_answer);
+        assert!(!work_plan
+            .to_prompt_block()
+            .contains("final assistant message"));
     }
 
     #[test]

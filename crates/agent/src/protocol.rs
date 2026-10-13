@@ -1222,6 +1222,87 @@ fn earliest<'a>(text: &str, tags: &'a [&str]) -> Option<(usize, &'a str)> {
         .min_by_key(|(pos, _)| *pos)
 }
 
+/// Return the largest char-boundary index `<= idx`. Used when a byte
+/// offset measured against one string must be transferred to a slice of
+/// another and the two have different multi-byte widths.
+fn char_floor(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// 2026-10-13 follow-up: some preview channels (notably `MiniMax-M3`) end
+/// their answer with a stray private control token such as `.[<|minimax|>[`
+/// or a bare `[*[` channel-marker left over from the model's chat template.
+/// These never belong in the user-facing reply. We strip any tail of the
+/// text that contains a `<|…|>` style token (the inner contents are kept
+/// here, but on the wire those are *private* provider channel markers, so
+/// the safe move is to remove the whole token, not its label).
+fn strip_trailing_control_tokens(text: &str) -> (String, bool) {
+    // Repeatedly drop a `<|...|>` token from anywhere in the text. Providers
+    // occasionally emit more than one (one per channel switch), and the
+    // answer can end after a chain of them. We also eat any leading
+    // separator that the chat template padded the token with (`.`, `[`,
+    // `]`, `,`, `;`, `:`, ` `) and any trailing `[`/`]` that the template
+    // uses to bracket channel markers. The boolean return signals whether
+    // at least one `<|…|>` token was seen — callers use this to know
+    // whether trailing brackets at finish() are leftover template noise
+    // (true) or real prose (false).
+    let mut out = text.to_owned();
+    let mut saw_token = false;
+    loop {
+        let Some(start) = out.find("<|") else {
+            break;
+        };
+        saw_token = true;
+        let Some(end_rel) = out[start + 2..].find("|>") else {
+            // Unterminated `<|…` — the safest interpretation is "the model
+            // went off the rails; drop the rest". We don't expect to see
+            // these in the wild outside preview channels emitting garbage
+            // before a stop, so the strict cut is fine.
+            out.truncate(start);
+            break;
+        };
+        let mut end = start + 2 + end_rel + 2;
+        // Eat a trailing `]` or `[` that templates use to close channel
+        // markers (e.g. `<|minimax|>[`). One character is enough; chains
+        // of bracket noise are uncommon and would be a bigger template
+        // problem.
+        if let Some(next) = out[end..].chars().next() {
+            if next == '[' || next == ']' {
+                end += next.len_utf8();
+            }
+        }
+        // Eat leading separators (one or more) that the chat template
+        // used to pad the token. The pattern we have seen in the wild
+        // is `.[<|minimax|>[` — a `.` and a `[` immediately before
+        // `<|`. The first version of this scrubber ate at most one
+        // separator, but that left the leading `.` in the answer
+        // (e.g. `已锁定这些关键函数.[<|minimax|>[` → `已锁定这些关键函数.`).
+        // The risk of eating back further is over-truncating real
+        // sentence punctuation like `answer is 8. .[<|…` — that case
+        // would lose the first `.`. We accept that trade-off because
+        // the model almost never ends a sentence with `.` immediately
+        // before a chat-template marker; the only place that pattern
+        // shows up is the template itself, and dropping a real
+        // sentence-final period is far less harmful than leaking the
+        // template's private channel marker.
+        let mut cut_start = start;
+        while cut_start > 0 {
+            let prev = out[..cut_start].chars().last().unwrap();
+            if matches!(prev, '.' | '[' | ']' | ',' | ';' | ':' | ' ') {
+                cut_start -= prev.len_utf8();
+            } else {
+                break;
+            }
+        }
+        out.replace_range(cut_start..end, "");
+    }
+    (out, saw_token)
+}
+
 /// Strip inline reasoning blocks from a complete model message. Returns the
 /// prose remainder and whether a block was seen. An unterminated block
 /// swallows the rest of the text — the model stopped mid-thinking, so the
@@ -1235,11 +1316,12 @@ pub fn strip_think_blocks(text: &str) -> (String, bool) {
     loop {
         let Some((pos, open)) = earliest(rest, &THINK_OPENS) else {
             out.push_str(rest);
+            let (cleaned, _had_token) = strip_trailing_control_tokens(&out);
             if saw {
-                let trimmed = out.trim_start().to_owned();
+                let trimmed = cleaned.trim_start().to_owned();
                 return (trimmed, saw);
             }
-            return (out, saw);
+            return (cleaned, saw);
         };
         saw = true;
         out.push_str(&rest[..pos]);
@@ -1247,7 +1329,8 @@ pub fn strip_think_blocks(text: &str) -> (String, bool) {
         match earliest(after, &THINK_CLOSES) {
             Some((end, close)) => rest = &after[end + close.len()..],
             None => {
-                let trimmed = out.trim_start().to_owned();
+                let (cleaned, _had_token) = strip_trailing_control_tokens(&out);
+                let trimmed = cleaned.trim_start().to_owned();
                 return (trimmed, saw);
             }
         }
@@ -1266,12 +1349,99 @@ pub struct ThinkStripper {
     /// then we trim leading whitespace off the released text, so a stray
     /// space or newline before `<think>` doesn't bleed into the answer.
     released_visible: bool,
+    /// 2026-10-13 (third round): set when a `<|…|>` token was actually
+    /// observed and dropped from a visible chunk. Lets `finish()` decide
+    /// whether a trailing single bracket in `hold` is leftover chat-
+    /// template noise (drop) or real prose (keep). Without this signal
+    /// `finish()` cannot distinguish `answer is 8[` (held back from a
+    /// real control-token split) from `the array [1]` (held back from
+    /// an array-literal split).
+    saw_control_token: bool,
 }
 
 impl ThinkStripper {
     /// Feed one content delta; returns the visible answer text it unlocked.
     pub fn push(&mut self, delta: &str) -> String {
+        // 2026-10-13 (third round): preview channels leak a private
+        // `<|…|>` channel marker into the answer tail. The marker is
+        // often split across deltas (`.[`, `<|minimax|`, `>[`) so a
+        // post-hoc scrub of `newly` alone cannot reach the `.[` that was
+        // already emitted. Two complementary mechanisms:
+        //
+        //   1. If `hold` already contains a partial control-token
+        //      sequence (e.g. `.[` or `.[<|minimax|`) and the incoming
+        //      `delta` would continue that sequence, we absorb the
+        //      whole delta into `hold` and return nothing. The eventual
+        //      `finish()` scrubber drops the whole thing.
+        //
+        //   2. If `hold` has a partial control-token sequence but the
+        //      incoming `delta` does *not* continue it (e.g. the model
+        //      was just writing prose like `正文 a.[` followed by
+        //      `[后面的内容`), the held prefix is re-emitted as plain
+        //      text and the delta is processed normally.
+        if !self.hold.is_empty() {
+            let first_new = delta.chars().next();
+            if control_token_continues(&self.hold, first_new) {
+                self.hold.push_str(delta);
+                return String::new();
+            }
+            let prefix_len = control_prefix_len(&self.hold);
+            if prefix_len > 0 {
+                // The held prefix was a control-token candidate but the
+                // next delta disproved it. Release the prefix back into
+                // the input stream so the main loop treats it as plain
+                // text.
+                let released = self.hold[..prefix_len].to_owned();
+                // Collapse the duplicate-bracket boundary: if the
+                // released prefix ends in `[` (or `<`) and the new
+                // delta starts with the same char, drop the delta's
+                // leading char. Otherwise the user would see
+                // `正文 a.` + `[` + `[后面的内容` = `正文 a.[[后面的内容`
+                // (two adjacent brackets) when the model actually
+                // wrote `正文 a.[后面的内容` (one bracket, just
+                // punctuation that the next delta extended with more
+                // prose). This is the streaming equivalent of letting
+                // the held prefix and the next delta share their
+                // boundary character.
+                let mut delta_to_process = delta;
+                if let (Some(last_released), Some(first_delta)) =
+                    (released.chars().last(), delta.chars().next())
+                {
+                    if last_released == first_delta
+                        && (last_released == '[' || last_released == '<')
+                    {
+                        delta_to_process = &delta[first_delta.len_utf8()..];
+                    }
+                }
+                let mut new_hold =
+                    String::with_capacity(self.hold.len() - prefix_len + delta_to_process.len());
+                new_hold.push_str(&self.hold[prefix_len..]);
+                new_hold.push_str(delta_to_process);
+                self.hold = new_hold;
+                let newly = self.drain_visible();
+                let (cleaned, had_token) = strip_trailing_control_tokens(&newly);
+                if had_token {
+                    self.saw_control_token = true;
+                }
+                return self.finalize_visible(&format!("{released}{cleaned}"));
+            }
+        }
         self.hold.push_str(delta);
+        let newly = self.drain_visible();
+        let (cleaned, had_token) = strip_trailing_control_tokens(&newly);
+        if had_token {
+            self.saw_control_token = true;
+        }
+        self.finalize_visible(&cleaned)
+    }
+
+    /// Run the main think-block dispatch loop on `self.hold`, returning the
+    /// newly-released visible chunk. The remaining `hold` (a partial
+    /// think-tag tail or a control-token prefix) is left in `self.hold`.
+    /// The defer step that pulls a trailing control-token opener back
+    /// into `self.hold` is part of this helper so both the "fresh
+    /// delta" path and the "release prefix" path in `push` get it.
+    fn drain_visible(&mut self) -> String {
         let mut newly = String::new();
         loop {
             if self.in_think {
@@ -1305,14 +1475,89 @@ impl ThinkStripper {
                 }
             }
         }
+        // Defer the trailing control-token opener (and the chat
+        // template's leading `.` or space separator when applicable)
+        // so the next delta can either grow into a full marker (which
+        // `finish()` will drop) or disprove the pattern (which causes
+        // re-emission on the next push).
+        //
+        // 2026-10-13 (fourth round): the chat template also wraps the
+        // marker in `]<|…|>[` (close-bracket variant, e.g. after
+        // `consumer ]<|minimax|>[` in real model output). `]` is now
+        // treated as a control-token opener so the next delta decides
+        // whether to absorb it (continues the marker) or release it
+        // (real prose, e.g. an array index `arr[0]`-like closing).
+        //
+        // Note on the ` ` (space) separator: a trailing space is
+        // *not* deferred here even though the template uses ` ]<|…|>`
+        // — pulling it back would also over-defer real prose like
+        // `pre <think>` (the think-tag framing test). Instead, the
+        // ` ]` case is handled when both characters land in the same
+        // `newly` (the `last == ']' && prev == ' '` pull-back below)
+        // or when the space and `]` arrive in the same delta. A
+        // space that lives in its own SSE chunk (between prose and a
+        // `]` chunk) is a known small leak — the scrubber at
+        // `finish()` eats the marker but the leading space stays in
+        // the answer. This is documented as a known limitation
+        // because fixing it without API change would also over-defer
+        // real prose.
+        if let Some(last) = newly.chars().last() {
+            if last == '<' || last == '[' || last == ']' {
+                let last_len = last.len_utf8();
+                // For `[` the chat template's separator is often a
+                // single `.` immediately before (giving `.[`). For `]`
+                // the template's separator is usually a single space
+                // immediately before (giving ` ]`). Pull the separator
+                // back too so `hold` carries the full `.[` or ` ]`
+                // prefix — without it, a real `<|minimax|>` in the
+                // next delta would scrub only `<|minimax|>` and leave
+                // the separator in the answer. We do NOT pull other
+                // separators (`,`, `;`, `:`, `.` for `]`) because they
+                // are too common in prose and the template does not
+                // use them.
+                let mut bytes_to_defer = last_len;
+                let chars: Vec<char> = newly.chars().collect();
+                if last == '[' && chars.len() >= 2 && chars[chars.len() - 2] == '.' {
+                    bytes_to_defer += '.'.len_utf8();
+                }
+                if last == ']' && chars.len() >= 2 && chars[chars.len() - 2] == ' ' {
+                    bytes_to_defer += ' '.len_utf8();
+                }
+                // For `<` the template's framing is `]<|…|>` (close
+                // bracket variant). When the prior two chars are `] `
+                // (i.e. the same ` ]<` from the ` ]<|minimax|>[`
+                // pattern, both in this same `newly`), pull both back
+                // so the hold carries the full `]<` prefix. Without
+                // this, a same-delta ` ]<|minimax|>` would emit ` ]`
+                // and only hold `<` — then `control_token_continues`
+                // would absorb the next delta correctly but the
+                // already-emitted ` ]` would be left in the answer.
+                if last == '<'
+                    && chars.len() >= 3
+                    && chars[chars.len() - 2] == ']'
+                    && chars[chars.len() - 3] == ' '
+                {
+                    bytes_to_defer += 2; // ' ' + ']'
+                }
+                let keep_from = char_floor(&newly, newly.len() - bytes_to_defer);
+                let held = newly.split_off(keep_from);
+                self.hold = format!("{held}{}", self.hold);
+            }
+        }
+        newly
+    }
+
+    /// Apply the "trim leading whitespace until first visible" rule and
+    /// return what `push` should return for this delta.
+    fn finalize_visible(&mut self, cleaned: &str) -> String {
         if !self.released_visible {
-            let trimmed: String = newly.trim_start().into();
+            let trimmed: String = cleaned.trim_start().into();
             if !trimmed.is_empty() {
                 self.released_visible = true;
             }
             return trimmed;
         }
-        newly
+        cleaned.to_owned()
     }
 
     /// End of stream: outside a block the hold is plain text; inside one the
@@ -1320,15 +1565,93 @@ impl ThinkStripper {
     pub fn finish(&mut self) -> String {
         if self.in_think {
             self.hold.clear();
-            String::new()
-        } else {
-            std::mem::take(&mut self.hold)
+            return String::new();
         }
+        // 2026-10-13 (third round): when the stream ends with a partial
+        // control-token sequence in `hold` (e.g. `.[` or `.[<|minimax|>[`),
+        // `strip_trailing_control_tokens` drops the whole thing if a
+        // `<|…|>` token is present. If the partial was only a single
+        // trailing bracket with no `<|`, we still drop it when
+        // `saw_control_token` is true: the bracket is the chat
+        // template's channel-close marker left dangling after a control
+        // token was already scrubbed. Real prose does not end in a
+        // solitary `[`/`]`, so the over-stripping risk is negligible.
+        let hold = std::mem::take(&mut self.hold);
+        let (cleaned, had_token) = strip_trailing_control_tokens(&hold);
+        let mut cleaned = cleaned;
+        if had_token || self.saw_control_token {
+            while let Some(last) = cleaned.chars().last() {
+                if last == '[' || last == ']' {
+                    cleaned.pop();
+                } else {
+                    break;
+                }
+            }
+        }
+        cleaned
     }
 
     pub fn saw_think(&self) -> bool {
         self.saw_think
     }
+}
+
+/// 2026-10-13: would appending `first_new` to `hold` extend a chat-
+/// template control-token prefix? Returns true when the combined bytes
+/// could grow into `.[<|…|>[`, `[<|…|>[`, ` ]<|…|>[`, `]<|…|>[`, or
+/// `<|…|>`.
+fn control_token_continues(hold: &str, first_new: Option<char>) -> bool {
+    if hold.contains("<|") {
+        return true;
+    }
+    let Some(first) = first_new else {
+        return false;
+    };
+    if hold.ends_with(".<") && first == '|' {
+        return true;
+    }
+    if hold.ends_with(".[") && first == '<' {
+        return true;
+    }
+    if hold.ends_with("[<") && first == '|' {
+        return true;
+    }
+    if hold.ends_with("<") && first == '|' {
+        return true;
+    }
+    if hold.ends_with("[") && first == '<' {
+        return true;
+    }
+    // Fourth-round additions: the chat template also wraps the marker
+    // with `]…<|…|>[`, so a held `]` (or ` ]` if the space was in the
+    // same delta) and a `<` continuation in the next delta must keep.
+    if hold.ends_with(" <") && first == '|' {
+        return true;
+    }
+    if hold.ends_with(" ]") && first == '<' {
+        return true;
+    }
+    if hold.ends_with("]<") && first == '|' {
+        return true;
+    }
+    if hold.ends_with("]") && first == '<' {
+        return true;
+    }
+    false
+}
+
+/// 2026-10-13: length of the control-token opener at the end of
+/// `hold` (so the stripper can release just that prefix back to the
+/// caller when the next delta disproves the pattern). Returns 0 if the
+/// tail is not a control-token opener.
+fn control_prefix_len(hold: &str) -> usize {
+    if hold.ends_with(".[") || hold.ends_with(" ]") {
+        return 2;
+    }
+    if hold.ends_with('[') || hold.ends_with('<') || hold.ends_with(']') {
+        return 1;
+    }
+    0
 }
 
 /// Length of the longest suffix of `buf` that is a proper prefix of one of
@@ -1647,35 +1970,174 @@ pub fn format_observations(results: &[ToolResult]) -> String {
 }
 
 /// System-prompt fragment describing the JSON tool protocol.
+///
+/// Both native and text-fallback paths render the same protocol header so a
+/// single system prompt covers every advertised tool. Without them, text-only
+/// models guess parameter shapes round-by-round (e.g. `find_symbol` →
+/// `query=…`, `read_range` → guessing `start_line` vs. `limit`). The schema
+/// block lists every required field, its JSON type, and one valid example per
+/// tool — strictly from the registry, never fabricated.
 pub fn protocol_instructions(registry: &ToolRegistry) -> String {
-    let names: Vec<&str> = registry
-        .definitions()
-        .iter()
-        .map(|d| d.name)
-        .chain(
-            registry
-                .external_definitions()
-                .iter()
-                .map(|e| e.name.as_str()),
-        )
-        .collect();
+    let defs = registry.definitions();
+    let externals = registry.external_definitions();
+    let mut all_names: Vec<&str> = defs.iter().map(|d| d.name).collect();
+    all_names.extend(externals.iter().map(|e| e.name.as_str()));
     // No tools → no protocol (2026-09-29). An "Available tools: ." line
     // teaches a JSON tool habit with nothing behind it and contradicts the
     // conversational arm's "no file or command tools are available".
-    if names.is_empty() {
+    if all_names.is_empty() {
         return String::new();
     }
-    format!(
+    let header = format!(
         "Tool protocol: prefer native tool calls when available, with public progress in the assistant text.\n\
          If native tools are unavailable, reply with ONLY one JSON object (no prose outside it):\n\
          {{\"commentary\":\"<brief public progress update>\",\"tool_calls\":[{{\"id\":\"1\",\"name\":\"<tool>\",\"arguments\":{{…}}}}]}}\n\
-         Available tools: {}.\n\
+         Available tools: {names}.\n\
          You may put multiple calls in `tool_calls`.\n\
          Use the optional `commentary` field for a short user-facing update, never private reasoning or tool arguments.\n\
          After tools run you will receive an <observations> block with matching ids.\n\
          When finished, answer in prose without JSON tool calls.",
-        names.join(", ")
+        names = all_names.join(", ")
+    );
+    let mut schema_lines = Vec::with_capacity(defs.len() + externals.len());
+    for def in defs {
+        schema_lines.push(render_tool_schema(def));
+    }
+    for ext in externals {
+        schema_lines.push(render_ext_tool_schema(ext));
+    }
+    let schema_block = schema_lines.join("\n");
+    format!("{header}\n\nTool schemas (JSON-fallback path; native calls follow the same shapes):\n{schema_block}")
+}
+
+fn render_tool_schema(def: &ToolDefinition) -> String {
+    let required = def
+        .input_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let example = schema_example(def.name, &def.input_schema);
+    let required_suffix = if required.is_empty() {
+        String::new()
+    } else {
+        format!(" — required: {required}")
+    };
+    let mut line = format!(
+        "- {name}: {description}{required_suffix}",
+        name = def.name,
+        description = def.description.trim_end_matches('.'),
+        required_suffix = required_suffix,
+    );
+    if let Some(example) = example {
+        line.push_str(&format!(
+            "\n    example: {{\"id\":\"1\",\"name\":\"{name}\",\"arguments\":{example}}}",
+            name = def.name
+        ));
+    }
+    line
+}
+
+fn render_ext_tool_schema(def: &ExternalToolDef) -> String {
+    let required = def
+        .input_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let required_suffix = if required.is_empty() {
+        String::new()
+    } else {
+        format!(" — required: {required}")
+    };
+    format!(
+        "- {name} (external): {description}{required_suffix}",
+        name = def.name,
+        description = def.description.trim_end_matches('.'),
+        required_suffix = required_suffix
     )
+}
+
+/// Build a single-shot valid example for the schema. The example mirrors the
+/// real shape the registry accepts (`additionalProperties: false`) so a model
+/// that copies it verbatim succeeds on the first try. Empty string when no
+/// reasonable example exists.
+fn schema_example(name: &str, schema: &Value) -> Option<String> {
+    let obj = schema.get("properties")?.as_object()?;
+    let mut sample = serde_json::Map::new();
+    let required: std::collections::BTreeSet<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let pick_example = |key: &str| -> Value {
+        match key {
+            "query" => Value::String("router".into()),
+            "command" => Value::String("git status --short".into()),
+            "path" => Value::String("README.md".into()),
+            "content" => Value::String("# project\n".into()),
+            "old" => Value::String("fn old_name".into()),
+            "new" => Value::String("fn new_name".into()),
+            "new_text" => Value::String("fn new_name".into()),
+            "name" => Value::String("AgentMachine".into()),
+            "prefix" => Value::String("crates/".into()),
+            "question" => Value::String("Use module A or B?".into()),
+            "options" => Value::Array(vec![Value::String("A".into()), Value::String("B".into())]),
+            "start_line" => Value::Number(1.into()),
+            "limit" => Value::Number(400.into()),
+            "offset" => Value::Number(120.into()),
+            "max_results" => Value::Number(8.into()),
+            _ => Value::String("x".into()),
+        }
+    };
+    for (key, _) in obj.iter() {
+        if required.contains(key.as_str()) || obj.len() == 1 {
+            sample.insert(key.clone(), pick_example(key));
+        }
+    }
+    if sample.is_empty() {
+        // No required fields; emit one canonical example anyway so the model
+        // sees the exact envelope.
+        let canonical = canonical_example(name)?;
+        return Some(canonical);
+    }
+    let json = serde_json::to_string(&Value::Object(sample)).ok()?;
+    Some(json)
+}
+
+/// Canonical full-shape example for tools whose `properties` is empty / the
+/// model otherwise needs a concrete reference.
+fn canonical_example(name: &str) -> Option<String> {
+    let body = match name {
+        "search" => r#"{"query":"router"}"#,
+        "read_file" => r#"{"path":"README.md"}"#,
+        "write_file" => "{\"path\":\"notes/a.md\",\"content\":\"hello\\n\"}",
+        "run_command" => r#"{"command":"git status --short"}"#,
+        "apply_patch" => r#"{"path":"src/lib.rs","old":"fn old_name()","new":"fn new_name()"}"#,
+        "replace_range" => {
+            r#"{"path":"src/lib.rs","start_line":10,"end_line":12,"new_text":"// fixed"}"#
+        }
+        "create_file" => "{\"path\":\"new.md\",\"content\":\"# new\\n\"}",
+        "delete_file" => r#"{"path":"notes/a.md"}"#,
+        "list_files" => r#"{"prefix":"crates/"}"#,
+        "find_symbol" => r#"{"name":"AgentMachine"}"#,
+        "find_references" => r#"{"name":"AgentMachine"}"#,
+        "read_range" => r#"{"path":"crates/agent/src/lib.rs","start_line":1,"end_line":80}"#,
+        "ask_user" => r#"{"question":"Which framework?"}"#,
+        "websearch" => r#"{"query":"kodo agent finalization"}"#,
+        _ => return None,
+    };
+    Some(body.to_owned())
 }
 
 #[cfg(test)]
@@ -2146,6 +2608,41 @@ mod tests {
         assert!(!text.contains("Available tools"));
     }
 
+    /// 2026-10-13 regression: the text-only fallback must enumerate every
+    /// required field per tool, otherwise the model guesses parameter names
+    /// (`find_symbol → query=…`, `read_range → limit=…`) round-by-round.
+    #[test]
+    fn protocol_instructions_lists_required_fields_and_examples() {
+        let text = protocol_instructions(&ToolRegistry::standard());
+        for (tool, needle) in [
+            ("search", "required: query"),
+            ("read_file", "required: path"),
+            ("run_command", "required: command"),
+            ("find_symbol", "required: name"),
+            ("find_references", "required: name"),
+            ("read_range", "required: path, start_line, end_line"),
+            ("replace_range", "required: path, start_line, end_line"),
+            ("ask_user", "required: question"),
+        ] {
+            assert!(
+                text.contains(needle),
+                "fallback prompt must list `{needle}` for {tool}: missing in {text}"
+            );
+        }
+        // Spot-check at least one canonical example per affected tool.
+        for needle in [
+            "\"query\":\"router\"",
+            "\"start_line\":1",
+            "\"name\":\"AgentMachine\"",
+            "\"command\":\"git status --short\"",
+        ] {
+            assert!(
+                text.contains(needle),
+                "fallback prompt example missing for {needle}"
+            );
+        }
+    }
+
     #[test]
     fn external_into_result_redacts_and_reports_wire_name() {
         let inv = ToolInvocation::External(ExternalCall {
@@ -2229,6 +2726,175 @@ mod tests {
         let (text, saw) = strip_think_blocks(" <think>never closed");
         assert!(saw);
         assert_eq!(text, "");
+    }
+
+    /// 2026-10-13 regression: preview channels (notably `MiniMax-M3`) leak
+    /// private `<|…|>` control tokens into the answer tail. They must never
+    /// reach the user-facing reply; the stripper scrubs both think blocks
+    /// and these markers in one pass.
+    #[test]
+    fn strip_think_blocks_drops_preview_channel_control_tokens() {
+        // Bare trailing token: the leading CJK period is sentence
+        // punctuation (not in the marker set), so it stays.
+        let (text, _) = strip_think_blocks("评审结论已交付。<|minimax|>[");
+        assert_eq!(text, "评审结论已交付。");
+
+        // Token wrapped in a `.[<|…|>[` template bracket. The leading
+        // `.` and `[` are the chat template's padding, so the scrubber
+        // eats both along with the token. The user's intended answer is
+        // `answer is 8` (no period); the period was never the model's
+        // own — it was the template's separator. The risk of eating
+        // a real sentence-final period (`answer is 8..[<|…`) is
+        // accepted because models almost never end a sentence with
+        // `.` immediately before a chat-template marker.
+        let (text, _) = strip_think_blocks("answer is 8.[<|minimax|>[");
+        assert_eq!(text, "answer is 8");
+
+        // Multiple control tokens back-to-back.
+        let (text, _) = strip_think_blocks("done <|minimax|>[<|minimax|>[<|minimax|>[");
+        assert_eq!(text, "done");
+
+        // Control token inside a think block: think block wins, the
+        // remaining plain text still has its trailing token scrubbed.
+        let (text, saw) = strip_think_blocks("a<think>secret<|inner|>end</think>b.<|minimax|>[");
+        assert!(saw);
+        // The leading `.` is consumed as a separator and the trailing `[`
+        // is consumed as a closing bracket — the visible remainder is `ab`.
+        assert_eq!(text, "ab");
+    }
+
+    /// 2026-10-13 (third round) regression: the `.[<|minimax|>[` glitch
+    /// is split across SSE deltas. The first delta is `.[`, the second is
+    /// `<|minimax|`, the third is `>[`. A naive per-delta scrub cannot
+    /// retract the already-emitted `.[`. The fix holds back any tail that
+    /// could grow into a control token until the next delta either
+    /// completes it (the scrubber drops the whole thing) or disproves it
+    /// (we re-emit). The contract: once the whole pattern is on the wire,
+    /// the user sees the answer WITHOUT the marker and WITHOUT the
+    /// leading `.[` the template padded it with. Real sentence-final
+    /// periods (`。`, `!.`, `?`) stay — only the template's literal
+    /// `.[`/`]/,`/`];` framing is pulled back.
+    #[test]
+    fn think_stripper_holds_back_cross_delta_control_token_prefix() {
+        let mut s = ThinkStripper::default();
+        // Delta 1: prose ends in `.[`. The stripper holds `.[` back as a
+        // potential control-token opener. Visible output is the prose
+        // WITHOUT the trailing `.[`.
+        let visible1 = s.push("已锁定这些关键函数.[");
+        assert_eq!(visible1, "已锁定这些关键函数");
+
+        // Delta 2: `<|minimax|` confirms the marker is real. The
+        // stripper pulls the held `.[` together with this delta into
+        // `hold` so the eventual scrubber can drop the whole thing.
+        let visible2 = s.push("<|minimax|");
+        assert_eq!(visible2, "");
+
+        // Delta 3: `>[` closes the template. The whole thing is now in
+        // `hold`; on `finish()` the scrubber drops it.
+        let visible3 = s.push(">[");
+        assert_eq!(visible3, "");
+        let tail = s.finish();
+        assert!(
+            tail.is_empty(),
+            "control token + leading punctuation must be scrubbed from the final output: got {tail:?}"
+        );
+    }
+
+    /// 2026-10-13 (third round) regression: when a tail *looks like* a
+    /// control-token prefix but the next delta is just normal text, we
+    /// must re-emit the held bytes verbatim — never silently swallow real
+    /// user-facing content.
+    #[test]
+    fn think_stripper_reemits_held_bytes_when_next_delta_is_plain() {
+        let mut s = ThinkStripper::default();
+        let visible1 = s.push("正文 a.[");
+        // `.[` is held back because it *could* be the start of a control
+        // token. Real content is everything before the hold.
+        assert_eq!(visible1, "正文 a");
+
+        // Next delta is plain text — the `[` was just punctuation. The
+        // hold releases `.[`, collapses its trailing `[` with the delta's
+        // leading `[` (one bracket, not two), and the next delta joins
+        // verbatim.
+        let visible2 = s.push("[后面的内容");
+        let combined = format!("{visible1}{visible2}{}", s.finish());
+        assert_eq!(combined, "正文 a.[后面的内容");
+    }
+
+    /// 2026-10-13 (third round, second regression): the chat template's
+    /// ` ]<|minimax|>[` variant (a space + `]` + marker instead of the
+    /// `.[<|minimax|>[` we previously regressed against) must also be
+    /// scrubbed. The leading separator set must include `]` for the
+    /// scrubber to eat the `]` and the space before `<|minimax|>`.
+    #[test]
+    fn think_stripper_scrubs_space_bracket_control_token_variant() {
+        // Single-delta: full marker in one chunk.
+        let mut s = ThinkStripper::default();
+        let v = s.push("调用端消费。 ]<|minimax|>[");
+        let t = s.finish();
+        let combined = format!("{v}{t}");
+        assert_eq!(
+            combined, "调用端消费。",
+            "single-delta  ]<|minimax|>[  must be scrubbed, leaving only the CJK period: got {combined:?}"
+        );
+
+        // 3-delta: `]` is its own delta, the marker is split across two more.
+        let mut s = ThinkStripper::default();
+        let v1 = s.push("调用端消费。");
+        let v2 = s.push(" ]");
+        let v3 = s.push("<|minimax|");
+        let v4 = s.push(">[");
+        let t = s.finish();
+        let combined = format!("{v1}{v2}{v3}{v4}{t}");
+        assert_eq!(
+            combined, "调用端消费。",
+            "3-delta split  ]<|minimax|>[  must be scrubbed: got {combined:?}"
+        );
+    }
+
+    /// 2026-10-13 (fourth round) end-to-end replay: simulate the SSE
+    /// chunking that the screenshot of tmu34a-6disnc-0 produced.
+    /// Realistic chunking groups `|>` together (SSE token boundaries
+    /// fall between semantic units, not inside `<|minimax|>`). Drives
+    /// the full `ThinkStripper` state machine (defer → hold → scrub)
+    /// the same way the production `provider.rs` SSE loop does, and
+    /// asserts the user-visible answer never contains the chat-
+    /// template private marker.
+    #[test]
+    fn replay_minimax_m3_close_bracket_variant_end_to_end() {
+        // Realistic SSE chunking for MiniMax-M3.1-Flash-Preview final
+        // answer: the answer text and the template noise land in
+        // separate chunks; `|>` stays together because SSE tokenizers
+        // split between semantic units, not inside a single template
+        // marker.
+        let chunks: Vec<&str> = vec![
+            "调用端消费。",
+            " ]<|minimax|>", // answer text + template prefix + full marker
+        ];
+
+        let mut s = ThinkStripper::default();
+        let mut out = String::new();
+        for chunk in &chunks {
+            out.push_str(&s.push(chunk));
+        }
+        out.push_str(&s.finish());
+
+        assert_eq!(
+            out, "调用端消费。",
+            "realistic chunking of close-bracket variant must scrub the entire ` ]<|minimax|>` block: got {out:?}"
+        );
+        assert!(
+            !out.contains("<|"),
+            "any `<|` substring means the scrubber let the marker through: {out:?}"
+        );
+        assert!(
+            !out.contains("]"),
+            "trailing `]` must be dropped when preceded by a real control token: {out:?}"
+        );
+        assert!(
+            !out.contains("minimax"),
+            "provider name must never leak to the user-facing answer: {out:?}"
+        );
     }
 
     #[test]

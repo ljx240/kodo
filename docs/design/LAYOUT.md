@@ -544,12 +544,18 @@ Inspector may show Help / Information.
 ### >= 1500px
 - Sidebar 260
 - Main flex
-- Inspector 330 default, resizable from 320px to the available width (640 by default for 文件)
+- Inspector **closed by default** (2026-10-13): the right column is hidden
+  until the user opens it from the rail. When opened, Inspector is 330,
+  resizable from 320px to the available width (640 by default for 文件).
+  Explicit `?inspector=open` in the URL wins so a sticky user choice
+  (or a Playwright assertion that needs the panel) is preserved.
 - **Focus mode available**: drag past the conversation's 400px minimum → hide conversation, Inspector fills workspace
 
 ### 1200–1499px
 - Sidebar 240
-- Inspector 330 default, resizable from 320px to the available width (640 by default for 文件)
+- Inspector **closed by default** (2026-10-13). When opened, 330 default,
+  resizable from 320px to the available width (640 by default for 文件).
+  Same `?inspector=open` override as the wide viewport.
 - slightly tighter content spacing
 - **Focus mode available** — Inspector is clamped to whatever room is left so it never overflows the window
 

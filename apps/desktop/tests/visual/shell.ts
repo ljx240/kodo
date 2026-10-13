@@ -97,6 +97,15 @@ export type Core = {
  */
 export async function stubShell(page: Page, core: Core = {}): Promise<void> {
   await page.addInitScript((config: Core) => {
+    // E2E / visual-regression flag (2026-10-13): when the production
+    // Inspector default was flipped to "closed on every viewport",
+    // `routes.ts` started honoring `__KODO_INSPECTOR_AUTOPEN__` as the
+    // carve-out that keeps the wide-viewport autopen behavior the
+    // visual suite was already asserting. The desktop / web paths
+    // never set this flag, so production users see the new default
+    // (rail only) and the test suite keeps its existing geometry
+    // assertions. Mirrored in `routes.ts::parse`.
+    (window as unknown as { __KODO_INSPECTOR_AUTOPEN__?: boolean }).__KODO_INSPECTOR_AUTOPEN__ = true;
     const callbacks: Record<number, (event: unknown) => void> = {};
     /** plugin:event|listen eventId → transformCallback handler id. */
     const listenerByEventId: Record<number, number> = {};

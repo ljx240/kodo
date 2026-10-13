@@ -137,6 +137,13 @@ pub struct SkillSpec {
     pub workflow: Vec<WorkflowStep>,
     pub completion_criteria: Vec<String>,
     pub verification_policy: VerificationPolicy,
+    /// Plan-level gate: the run must end with a final assistant message
+    /// before the loop falls back to `model_gap`. Read-only review skills
+    /// (`code-review`) opt in so that a long reasoning pass that lands
+    /// with an empty `text` block gets one extra user-ask instead of a
+    /// hard `provider_error`. Default `false` — one-shot semantics
+    /// preserved for conversational / work / bug-fix runs.
+    pub requires_final_answer: bool,
     /// Short human-readable description (from the SKILL.md `## description`
     /// section). Optional — older built-ins (bug-fix, feature, …) didn't
     /// ship one. Reaches the system prompt via `skill_prompt_block`.
@@ -246,6 +253,22 @@ pub fn single_line(body: &[&str]) -> String {
         .to_owned()
 }
 
+/// Parse a single-line `true` / `false` flag. Empty input → `default`;
+/// anything else must be exactly `true` or `false` (case-insensitive) to
+/// return `Some`. `None` signals a parse error so the caller can fail
+/// loudly instead of silently flipping a skill-level gate.
+fn parse_bool_flag(raw: &str, default: bool) -> Option<bool> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(default);
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" => Some(true),
+        "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 fn parse_workflow(body: &[&str]) -> Result<Vec<WorkflowStep>, String> {
     let mut steps = Vec::new();
     for raw in bullets(body) {
@@ -313,6 +336,12 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
     let verification_policy = VerificationPolicy::parse(&policy_raw)
         .ok_or_else(|| format!("unknown verification_policy `{policy_raw}`"))?;
 
+    let requires_final_answer = parse_bool_flag(
+        &single_line(&section_body(&lines, "requires_final_answer")),
+        false,
+    )
+    .ok_or_else(|| "`requires_final_answer` must be `true` or `false` (single line)".to_owned())?;
+
     let workflow = parse_workflow(&section_body(&lines, "workflow"))?;
     if workflow.is_empty() {
         return Err(format!("skill `{name}` has an empty workflow"));
@@ -349,6 +378,7 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
         workflow,
         completion_criteria,
         verification_policy,
+        requires_final_answer,
         description,
         guidance,
     })
@@ -571,6 +601,57 @@ mod tests {
                 skill.name
             );
         }
+    }
+
+    /// code-review is the only built-in that opts into the final-answer
+    /// gate. Other skills (work / bug-fix / feature) keep the original
+    /// one-shot semantics — a long reasoning pass with an empty `text`
+    /// block still falls back to `model_gap` on them. This test pins the
+    /// distinction so a future edit to SKILL.md can't silently flip the
+    /// gate on or off without the test catching it.
+    #[test]
+    fn code_review_is_the_only_skill_with_requires_final_answer() {
+        let reg = registry();
+        let review = skill_of(TaskType::CodeReview);
+        assert!(
+            review.requires_final_answer,
+            "code-review must require a final assistant message"
+        );
+        for skill in reg.skills() {
+            if skill.name == "code-review" {
+                continue;
+            }
+            assert!(
+                !skill.requires_final_answer,
+                "{} must keep the one-shot empty-final path",
+                skill.name
+            );
+        }
+    }
+
+    /// Parser round-trip: a SKILL.md with `## requires_final_answer` set
+    /// to `true` / `false` / absent behaves the way plan.rs expects. An
+    /// invalid value is a hard parse error so a typo never silently flips
+    /// the gate.
+    #[test]
+    fn requires_final_answer_parses_and_validates() {
+        let on = "# Skill: x\n## applicable_task_types\n- code-review\n## context_strategy\nreview-only\n## allowed_tools\n- read_file\n## verification_policy\nnone\n## requires_final_answer\ntrue\n## workflow\n- s1 | read | gather\n## completion_criteria\n- done\n## guidance\nx\n";
+        let off = on.replace(
+            "## requires_final_answer\ntrue",
+            "## requires_final_answer\nfalse",
+        );
+        let missing = on.replace(
+            "## verification_policy\nnone\n## requires_final_answer\ntrue\n",
+            "## verification_policy\nnone\n",
+        );
+        let bogus = on.replace(
+            "## requires_final_answer\ntrue",
+            "## requires_final_answer\nmaybe",
+        );
+        assert!(parse_skill(&on).unwrap().requires_final_answer);
+        assert!(!parse_skill(&off).unwrap().requires_final_answer);
+        assert!(!parse_skill(&missing).unwrap().requires_final_answer);
+        assert!(parse_skill(&bogus).is_err());
     }
 
     #[test]

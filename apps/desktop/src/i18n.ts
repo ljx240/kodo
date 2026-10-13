@@ -335,6 +335,11 @@ export const T = {
         maxOutputTokens: "最大输出 tokens",
         contextWindow: "上下文窗口 tokens",
         contextWindowAuto: "自动（服务商预设）",
+        // Long-final task warning (2026-10-13): preview / flash channels
+        // are known to land with an empty `text` block on tasks that need
+        // a long final report. The desktop picker shows this hint when the
+        // active model has `suitable_for_long = false`.
+        previewChannelWarning: "预览通道：长 final 任务（详细代码评审 / 评分 / 多段报告）易丢答复，建议切回主线。",
         autoGitBranch: "自动识别 Git 分支",
         template: "模板",
         displayName: "显示名称",
