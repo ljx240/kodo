@@ -844,52 +844,54 @@ export function App() {
             </div>
           )}
 
-          <Inspector
-            route={route.name}
-            open={route.inspectorOpen}
-            tab={inspectorTab}
-            onSelectTab={selectInspectorTab}
-            onOpen={() => setInspectorOpen(true)}
-            onClose={() => setInspectorOpen(false)}
-            demo={route.demo}
-            demoState={demoState}
-            live={liveSnapshot}
-            project={activeProject ? { name: activeProject.name, path: activeProject.path ?? "" } : null}
-            pluginType={route.pluginType}
-            archiveSelection={archiveSelection}
-            onArchiveRestore={() => {
-              if (!archiveSelection) return;
-              void restoreArchive(archiveSelection.id);
-            }}
-            onOpenTrace={openTrace}
-            filePanel={
-              fileRequest && activeProject?.path ? (
-                <FileViewer
-                  projectPath={activeProject.path}
-                  diffs={fileDiffs}
-                  changed={fileRequest.changes}
-                  initialPath={fileRequest.path}
-                  initialTab={fileRequest.tab}
-                  nonce={fileRequest.nonce}
-                  compact={!wide || appliedWidth < 560}
-                  onClose={() => setInspectorTab("summary")}
-                />
-              ) : null
-            }
-            browsePanel={<BrowsePanel onClose={() => setInspectorTab("summary")} />}
-            resizer={
-              wide ? (
-                <PanelResizer
-                  value={appliedWidth}
-                  onDrag={setDragWidth}
-                  onCommit={commitInspectorWidth}
-                  max={route.name === "conversation" ? panelMaxWidth : restoreWidth}
-                  restoreWidth={restoreWidth}
-                  onToggleFocus={toggleInspectorFocus}
-                />
-              ) : null
-            }
-          />
+          {route.name !== "schedule" && (
+            <Inspector
+              route={route.name}
+              open={route.inspectorOpen}
+              tab={inspectorTab}
+              onSelectTab={selectInspectorTab}
+              onOpen={() => setInspectorOpen(true)}
+              onClose={() => setInspectorOpen(false)}
+              demo={route.demo}
+              demoState={demoState}
+              live={liveSnapshot}
+              project={activeProject ? { name: activeProject.name, path: activeProject.path ?? "" } : null}
+              pluginType={route.pluginType}
+              archiveSelection={archiveSelection}
+              onArchiveRestore={() => {
+                if (!archiveSelection) return;
+                void restoreArchive(archiveSelection.id);
+              }}
+              onOpenTrace={openTrace}
+              filePanel={
+                fileRequest && activeProject?.path ? (
+                  <FileViewer
+                    projectPath={activeProject.path}
+                    diffs={fileDiffs}
+                    changed={fileRequest.changes}
+                    initialPath={fileRequest.path}
+                    initialTab={fileRequest.tab}
+                    nonce={fileRequest.nonce}
+                    compact={!wide || appliedWidth < 560}
+                    onClose={() => setInspectorTab("summary")}
+                  />
+                ) : null
+              }
+              browsePanel={<BrowsePanel onClose={() => setInspectorTab("summary")} />}
+              resizer={
+                wide ? (
+                  <PanelResizer
+                    value={appliedWidth}
+                    onDrag={setDragWidth}
+                    onCommit={commitInspectorWidth}
+                    max={route.name === "conversation" ? panelMaxWidth : restoreWidth}
+                    restoreWidth={restoreWidth}
+                    onToggleFocus={toggleInspectorFocus}
+                  />
+                ) : null
+              }
+            />
+          )}
         </div>
       </div>
 

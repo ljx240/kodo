@@ -71,6 +71,10 @@ const PANEL_TABS: Record<RouteName, { tab: InspectorTab; label: string }[]> = {
   ],
   archive: [{ tab: "summary", label: T.inspector.panel }],
   settings: [{ tab: "help", label: T.inspector.help }],
+  // `schedule` is a self-contained page; App.tsx skips the Inspector entirely
+  // on that route. The summary tab is here only to satisfy
+  // `Record<RouteName, …>` and to guard `panelTabs[0].tab` if the route ever
+  // re-enables the Inspector.
   schedule: [{ tab: "summary", label: T.inspector.panel }],
 };
 
