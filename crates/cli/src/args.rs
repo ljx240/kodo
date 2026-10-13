@@ -52,6 +52,11 @@ pub struct MemoryCmd {
     pub embed_verb: Option<EmbedVerb>,
     /// `--backend <name>` for `embed` (default = `local_bge_small_en`).
     pub embed_backend: Option<String>,
+    /// `--from <dir>` for `embed warmup` — offline warmup: copy
+    /// `model.onnx` and `tokenizer.json` from this local directory
+    /// instead of fetching over the network. Used when
+    /// `huggingface.co` is unreachable from the user's network.
+    pub embed_from: Option<PathBuf>,
     /// `promote <id> --confirm --force` — write the entry as a skill file.
     /// Default (no `--confirm`) is dry-run.
     pub promote_confirm: bool,
@@ -211,6 +216,7 @@ fn parse_memory(argv: &[String]) -> Parsed {
     let mut apply = false;
     let mut embed_verb: Option<EmbedVerb> = None;
     let mut embed_backend: Option<String> = None;
+    let mut embed_from: Option<PathBuf> = None;
     let mut promote_confirm = false;
     let mut promote_force = false;
 
@@ -247,6 +253,10 @@ fn parse_memory(argv: &[String]) -> Parsed {
             "--apply" => apply = true,
             "--backend" => match take_value("--backend") {
                 Ok(v) => embed_backend = Some(v),
+                Err(e) => return e,
+            },
+            "--from" => match take_value("--from") {
+                Ok(v) => embed_from = Some(PathBuf::from(v)),
                 Err(e) => return e,
             },
             "--confirm" => promote_confirm = true,
@@ -298,6 +308,7 @@ fn parse_memory(argv: &[String]) -> Parsed {
         apply,
         embed_verb,
         embed_backend,
+        embed_from,
         promote_confirm,
         promote_force,
     })
@@ -323,6 +334,21 @@ mod tests {
         match parse(&argv) {
             Parsed::Error(error) => error,
             _ => panic!("expected Error"),
+        }
+    }
+
+    /// Helper for parsing `kodo memory ...` argv slices. Panics if the
+    /// result is not a `Memory(MemoryCmd)` so tests can `.field`
+    /// directly.
+    fn memory(argv: &[&str]) -> MemoryCmd {
+        let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+        match parse(&argv) {
+            Parsed::Memory(cmd) => cmd,
+            Parsed::Error(e) => panic!("expected Memory, got Error: {e}"),
+            Parsed::Run(_) => panic!("expected Memory, got Run"),
+            Parsed::Help => panic!("expected Memory, got Help"),
+            Parsed::Version => panic!("expected Memory, got Version"),
+            Parsed::MemoryHelp => panic!("expected Memory, got MemoryHelp"),
         }
     }
 
@@ -408,5 +434,53 @@ mod tests {
     fn continue_and_session_conflict() {
         let message = error(&["-c", "--session", "abc"]);
         assert!(message.contains("不能同时"), "{message}");
+    }
+
+    /// `kodo memory embed warmup --from <dir>` parses: `--from` lands
+    /// in `embed_from` as a `PathBuf`. The downstream `run_embed` is
+    /// what actually copies the files.
+    #[test]
+    fn memory_embed_warmup_from_parses() {
+        let cmd = memory(&["memory", "embed", "warmup", "--from", "/tmp/my-bge"]);
+        assert_eq!(cmd.verb, Some(MemoryVerb::Embed));
+        assert_eq!(cmd.embed_verb, Some(EmbedVerb::Warmup));
+        assert_eq!(cmd.embed_from, Some(PathBuf::from("/tmp/my-bge")));
+    }
+
+    /// `--from` combined with `--backend` parses both into the right
+    /// fields without interfering.
+    #[test]
+    fn memory_embed_warmup_from_and_backend_combine() {
+        let cmd = memory(&[
+            "memory",
+            "embed",
+            "warmup",
+            "--backend",
+            "bge-small-en",
+            "--from",
+            "/tmp/bge-fixture",
+        ]);
+        assert_eq!(cmd.embed_backend.as_deref(), Some("bge-small-en"));
+        assert_eq!(cmd.embed_from, Some(PathBuf::from("/tmp/bge-fixture")));
+    }
+
+    /// `--from` with no value is an error (matches the existing
+    /// `take_value` pattern used for `--project`, `--backend`, etc.).
+    #[test]
+    fn memory_embed_warmup_from_missing_value_is_error() {
+        let argv: Vec<String> = vec![
+            "memory".into(),
+            "embed".into(),
+            "warmup".into(),
+            "--from".into(),
+        ];
+        match parse(&argv) {
+            Parsed::Error(msg) => assert!(msg.contains("--from"), "{msg}"),
+            Parsed::Memory(_) => panic!("expected Error, got Memory"),
+            Parsed::Run(_) => panic!("expected Error, got Run"),
+            Parsed::Help => panic!("expected Error, got Help"),
+            Parsed::Version => panic!("expected Error, got Version"),
+            Parsed::MemoryHelp => panic!("expected Error, got MemoryHelp"),
+        }
     }
 }

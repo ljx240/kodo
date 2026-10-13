@@ -32,6 +32,7 @@ pub const USAGE: &str = "\
   reindex [--apply]               重建 FTS 索引（默认 dry-run，仅报告）
   embed <status|warmup|off>       管理本地 embedding 缓存（需 --features download）
         [--backend <name>]
+        [--from <dir>]              离线 warmup：从本地目录复制 model.onnx + tokenizer.json
   promote <id> [--confirm]        把 procedural 记忆提升为 skill 文件
         [--force]                   默认 dry-run；--confirm 才会写盘
   benchmark                       性能基准（目前仅占位 — 见 P2-3）
@@ -86,7 +87,11 @@ pub fn run(cmd: MemoryCmd) -> i32 {
         },
         MemoryVerb::Doctor => run_doctor(sqlite_ref, cmd.apply),
         MemoryVerb::Reindex => run_doctor(sqlite_ref, cmd.apply),
-        MemoryVerb::Embed => run_embed(cmd.embed_verb, cmd.embed_backend.as_deref()),
+        MemoryVerb::Embed => run_embed(
+            cmd.embed_verb,
+            cmd.embed_backend.as_deref(),
+            cmd.embed_from.as_deref(),
+        ),
         MemoryVerb::Promote => match cmd.value.as_deref() {
             Some(id) => run_promote(store, id, cmd.promote_confirm, cmd.promote_force),
             None => {
@@ -377,7 +382,7 @@ fn format_value(v: &serde_json::Value, indent: usize) -> String {
     }
 }
 
-fn run_embed(verb: Option<EmbedVerb>, backend: Option<&str>) -> i32 {
+fn run_embed(verb: Option<EmbedVerb>, backend: Option<&str>, from: Option<&Path>) -> i32 {
     let Some(verb) = verb else {
         eprintln!("embed 需要一个子命令：status | warmup | off");
         return 2;
@@ -428,7 +433,7 @@ fn run_embed(verb: Option<EmbedVerb>, backend: Option<&str>) -> i32 {
                 1
             }
         },
-        EmbedVerb::Warmup => match model_store::warmup(backend) {
+        EmbedVerb::Warmup => match model_store::warmup(backend, from) {
             Ok(row) => {
                 println!(
                     "warmup ok: backend={} bytes={}",

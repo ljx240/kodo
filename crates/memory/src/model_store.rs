@@ -42,6 +42,25 @@ impl CachedModel {
 use std::sync::Mutex;
 static TEST_STATE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
+/// Process-wide test lock. Any test that mutates `TEST_STATE_DIR`
+/// (via `override_state_dir_for_tests`) must acquire this guard at
+/// the top and hold it for the entire test. Without it, two tests
+/// can race: A sets override, B clears it, A's next read hits the
+/// wrong cache dir.
+///
+/// Usage:
+/// ```ignore
+/// let _guard = crate::model_store::test_lock();
+/// // ... test body that touches override_state_dir_for_tests ...
+/// ```
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static M: Mutex<()> = Mutex::new(());
+    // `lock()` returns a `LockResult`; if the mutex was poisoned by
+    // a panicking test, take the guard anyway so the next test can
+    // still proceed.
+    M.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Test-only: install a fake `state_dir()` for the rest of the process.
 /// Pair every call with `restore_for_tests()`. Process-global, not
 /// per-thread — tests in this module must not run concurrently with
@@ -60,12 +79,21 @@ fn effective_cache_dir() -> MemoryResult<PathBuf> {
     if let Some(override_dir) = TEST_STATE_DIR.lock().unwrap().clone() {
         return Ok(override_dir.join("memory").join("models").join("v1"));
     }
-    cache_dir()
+    cache_dir_uncached()
 }
 
 /// Local on-disk directory that holds the optional embedding model
-/// weights. Always returns a path under the platform `state_dir()`.
+/// weights. Always returns a path under the platform `state_dir()`,
+/// unless a test has installed an override via
+/// `override_state_dir_for_tests` (then it points under the override).
 pub fn cache_dir() -> MemoryResult<PathBuf> {
+    effective_cache_dir()
+}
+
+/// Internal helper that ignores the test override. Used as the
+/// fallback inside `effective_cache_dir` and by `manifest_path` so
+/// the two stay in lockstep.
+fn cache_dir_uncached() -> MemoryResult<PathBuf> {
     let base = kodo_core::settings::state_dir().ok_or(MemoryError::IndexUnavailable(
         "no state dir; HOME is unset".to_owned(),
     ))?;
@@ -185,8 +213,12 @@ fn scan_size(dir: &Path) -> u64 {
 /// feature this is a no-op that reports the feature as disabled —
 /// callers decide what to do (SettingsPage shows "feature off" chip,
 /// CLI prints an explanation).
+///
+/// `local_dir` is the optional offline warmup path: when set, the
+/// model + tokenizer are copied from this directory instead of being
+/// fetched. Useful when the network is unreachable or blocked.
 #[cfg(not(feature = "download"))]
-pub fn warmup(_backend: EmbeddingBackend) -> MemoryResult<CachedModel> {
+pub fn warmup(_backend: EmbeddingBackend, _local_dir: Option<&Path>) -> MemoryResult<CachedModel> {
     Err(MemoryError::IndexUnavailable(
         "embedding warmup unavailable: build with `--features download`".to_owned(),
     ))
@@ -196,8 +228,8 @@ pub fn warmup(_backend: EmbeddingBackend) -> MemoryResult<CachedModel> {
 /// feature the real implementation lives in `embedding_local::warmup`
 /// and re-exports through this module so the call site is one line.
 #[cfg(feature = "download")]
-pub fn warmup(backend: EmbeddingBackend) -> MemoryResult<CachedModel> {
-    crate::embedding_local::warmup(backend)
+pub fn warmup(backend: EmbeddingBackend, local_dir: Option<&Path>) -> MemoryResult<CachedModel> {
+    crate::embedding_local::warmup(backend, local_dir)
 }
 
 #[cfg(test)]
@@ -213,6 +245,7 @@ mod tests {
 
     #[test]
     fn manifest_round_trip() {
+        let _guard = test_lock();
         let dir = fresh_dir("rt");
         override_state_dir_for_tests(&dir);
         let row = CachedModel {
@@ -233,6 +266,7 @@ mod tests {
 
     #[test]
     fn status_missing_backend_is_synthetic() {
+        let _guard = test_lock();
         let dir = fresh_dir("synthetic");
         override_state_dir_for_tests(&dir);
         let got = status(EmbeddingBackend::LocalMiniLmL6).unwrap();
@@ -244,6 +278,7 @@ mod tests {
 
     #[test]
     fn clear_off_is_noop() {
+        let _guard = test_lock();
         let dir = fresh_dir("noop");
         override_state_dir_for_tests(&dir);
         clear(EmbeddingBackend::Off).unwrap();
