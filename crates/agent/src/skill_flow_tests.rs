@@ -22,6 +22,7 @@ enum Reply {
     Tools(Vec<serde_json::Value>),
     /// Prose claim of completion (acceptance stays structural).
     Claim,
+    Report(&'static str),
 }
 
 struct Outcome {
@@ -209,6 +210,11 @@ fn run_scenario_with_verify(
                         machine.handle(AgentEvent::ToolsFinished { results });
                     }
                     Reply::Claim => {
+                        machine.handle(AgentEvent::ModelClaimedDone);
+                    }
+                    Reply::Report(text) => {
+                        let errors = machine.plan().validate_final_answer(text);
+                        machine.evidence_mut().unwrap().final_answer_errors = Some(errors);
                         machine.handle(AgentEvent::ModelClaimedDone);
                     }
                 }
@@ -556,7 +562,7 @@ fn code_review_fake_provider_1_read_only_plan_finishes_without_writes() {
             tools(serde_json::json!([read_call("r1", "src/lib.rs")])),
             tools(serde_json::json!([read_call("r2", "src/plan.rs")])),
             tools(serde_json::json!([command_call("c1", "git diff --stat")])),
-            Reply::Claim,
+            Reply::Report("评分项目：权限边界。评分：80/100。\n问题：src/lib.rs:1 的边界说明不足。\n优化建议：补充说明和验证。"),
         ],
     );
     assert_eq!(out.task_type, TaskType::CodeReview);
@@ -603,7 +609,7 @@ fn code_review_fake_provider_2_write_attempt_is_gated_and_review_still_completes
                 "c1",
                 "git status --short"
             )])),
-            Reply::Claim,
+            Reply::Report("评分项目：只读权限。评分：80/100。\n问题：src/lib.rs:1 的只读限制需要说明。\n解决方案：补充限制说明和用例。"),
         ],
     );
     assert_eq!(out.task_type, TaskType::CodeReview);

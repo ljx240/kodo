@@ -1250,7 +1250,8 @@ fn strip_trailing_control_tokens(text: &str) -> (String, bool) {
     // at least one `<|…|>` token was seen — callers use this to know
     // whether trailing brackets at finish() are leftover template noise
     // (true) or real prose (false).
-    let mut out = text.to_owned();
+    // MiniMax also emits bracket delimiters instead of pipes (tmue47-61aehc-0).
+    let mut out = text.replace("<]minimax[", "<|minimax|");
     let mut saw_token = false;
     loop {
         let Some(start) = out.find("<|") else {
@@ -1475,6 +1476,19 @@ impl ThinkStripper {
                 }
             }
         }
+        if let Some(start) = newly.rfind("<]") {
+            let tail = &newly[start..];
+            if "<]minimax[>".starts_with(tail) || tail.starts_with("<]minimax[>") {
+                let mut cut = start;
+                while cut > 0 && matches!(newly[..cut].chars().last(), Some(']' | '[' | ' ' | '.'))
+                {
+                    cut -= 1;
+                }
+                let held = newly.split_off(cut);
+                self.hold = format!("{held}{}", self.hold);
+                return newly;
+            }
+        }
         // Defer the trailing control-token opener (and the chat
         // template's leading `.` or space separator when applicable)
         // so the next delta can either grow into a full marker (which
@@ -1532,12 +1546,11 @@ impl ThinkStripper {
                 // and only hold `<` — then `control_token_continues`
                 // would absorb the next delta correctly but the
                 // already-emitted ` ]` would be left in the answer.
-                if last == '<'
-                    && chars.len() >= 3
-                    && chars[chars.len() - 2] == ']'
-                    && chars[chars.len() - 3] == ' '
-                {
-                    bytes_to_defer += 2; // ' ' + ']'
+                if last == '<' && chars.len() >= 2 && chars[chars.len() - 2] == ']' {
+                    bytes_to_defer += 1;
+                    if chars.len() >= 3 && chars[chars.len() - 3] == ' ' {
+                        bytes_to_defer += 1;
+                    }
                 }
                 let keep_from = char_floor(&newly, newly.len() - bytes_to_defer);
                 let held = newly.split_off(keep_from);
@@ -1601,12 +1614,15 @@ impl ThinkStripper {
 /// could grow into `.[<|…|>[`, `[<|…|>[`, ` ]<|…|>[`, `]<|…|>[`, or
 /// `<|…|>`.
 fn control_token_continues(hold: &str, first_new: Option<char>) -> bool {
-    if hold.contains("<|") {
+    if hold.contains("<|") || hold.contains("<]") {
         return true;
     }
     let Some(first) = first_new else {
         return false;
     };
+    if hold.ends_with('<') && first == ']' {
+        return true;
+    }
     if hold.ends_with(".<") && first == '|' {
         return true;
     }
@@ -2761,6 +2777,28 @@ mod tests {
         // The leading `.` is consumed as a separator and the trailing `[`
         // is consumed as a closing bracket — the visible remainder is `ab`.
         assert_eq!(text, "ab");
+    }
+
+    #[test]
+    fn minimax_bracket_marker_is_removed_at_every_stream_boundary() {
+        let wire = "下一步聚焦这些信任边界。]<]minimax[>[";
+        assert_eq!(strip_think_blocks(wire).0, "下一步聚焦这些信任边界。");
+        for split in (0..=wire.len()).filter(|&split| wire.is_char_boundary(split)) {
+            let mut stripper = ThinkStripper::default();
+            let mut out = stripper.push(&wire[..split]);
+            out.push_str(&stripper.push(&wire[split..]));
+            out.push_str(&stripper.finish());
+            assert_eq!(out, "下一步聚焦这些信任边界。", "split={split}");
+        }
+        let mut stripper = ThinkStripper::default();
+        let mut out = String::new();
+        for ch in wire.chars() {
+            out.push_str(&stripper.push(&ch.to_string()));
+        }
+        out.push_str(&stripper.finish());
+        assert_eq!(out, "下一步聚焦这些信任边界。");
+        let literal = "数组 arr[0] 和 <]other[> 示例";
+        assert_eq!(strip_think_blocks(literal).0, literal);
     }
 
     /// 2026-10-13 (third round) regression: the `.[<|minimax|>[` glitch
