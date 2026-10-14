@@ -159,9 +159,13 @@ export const COLUMN_WIDTH: Record<ColumnKey, string> = {
   updated: "92px",
 };
 
-/** The list's grid: the checkbox, the title, whichever columns are on, 操作. */
+/** The list's grid: the checkbox, the title, whichever columns are on, 操作.
+ *  The 84px tail is the bare minimum: the head needs the "操作" label + the
+ *  24px 自定义列 gear, the body needs the 24px 完成 + 24px 编辑. 60px clipped
+ *  the gear; 84px leaves the head breathing room without crowding the
+ *  `updated` column. */
 export function listTemplate(columns: ColumnKey[]): string {
-  return ["26px", "minmax(220px, 2fr)", ...columns.map((key) => COLUMN_WIDTH[key]), "60px"].join(
+  return ["26px", "minmax(220px, 2fr)", ...columns.map((key) => COLUMN_WIDTH[key]), "84px"].join(
     " ",
   );
 }
