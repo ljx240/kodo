@@ -232,20 +232,29 @@ fn _arc_marker() -> Arc<dyn Job> {
     Arc::new(WorkspaceRefresh)
 }
 
-/// Build a [`JobRegistry`] with the two production handlers registered.
-/// Tests can call this and add their own fakes on top.
+/// Build a [`JobRegistry`] with the production handlers registered, the
+/// workbench app actions included. Tests can call this and add their own
+/// fakes on top.
 pub fn default_job_registry() -> JobRegistry {
     let registry = JobRegistry::new();
-    registry.register(Arc::new(WorkspaceRefresh));
-    registry.register(Arc::new(MemoryOutboxReplay));
+    for handler in default_job_registry_handlers() {
+        registry.register(handler);
+    }
     registry
 }
 
 /// Standalone factory used by the Tauri binding: the `Scheduler` is
 /// already constructed with an empty registry, so the binding asks for
 /// the handlers it should `register` on it.
+///
+/// The app actions come last: they exist so a workbench app can be driven by
+/// an ordinary scheduled task, and they are skipped unless the app is enabled
+/// and its scheduler link is on.
 pub fn default_job_registry_handlers() -> Vec<Arc<dyn Job>> {
-    vec![Arc::new(WorkspaceRefresh), Arc::new(MemoryOutboxReplay)]
+    let mut handlers: Vec<Arc<dyn Job>> =
+        vec![Arc::new(WorkspaceRefresh), Arc::new(MemoryOutboxReplay)];
+    handlers.extend(crate::apps::app_job_handlers());
+    handlers
 }
 
 /// Re-exported constructors so callers don't have to name the structs.

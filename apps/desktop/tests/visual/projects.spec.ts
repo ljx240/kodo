@@ -18,7 +18,10 @@ test("a live shell renders the projects the core listed", async ({ page }) => {
 
   await expect(page.locator(".tree-project-name")).toHaveText(["alpha", "beta"]);
   // The shell navigates the live routes, so every screen it reaches stays real.
-  await expect(page.locator(".nav-item").first()).toHaveAttribute("href", "/conversation");
+  await expect(page.getByRole("link", { name: "新建任务" })).toHaveAttribute(
+    "href",
+    /^\/conversation(\?|$)/,
+  );
   // With no remembered project, a fresh task starts bare; the branch becomes
   // available after the user chooses one in the top-bar project menu.
   await expect(page.locator('[data-testid="topbar-project-name"]')).toHaveText("未选择项目");
@@ -108,8 +111,14 @@ test("Kodo has no account row, and Settings sits at the foot", async ({ page }) 
 
   await expect(page.locator(".account")).toHaveCount(0);
   await expect(page.locator(".sidebar-foot .nav-item")).toHaveText("设置");
-  // New Task and Plugins stay above the tree; Settings is a modal.
-  await expect(page.locator(".nav .nav-item")).toHaveText(["新建任务", "插件"]);
+  // The first-level order is 工作台 → 新建任务 → 插件 → 定时任务; Settings is a
+  // modal at the foot. 待办/日历/成果中心 open inside 工作台, never here.
+  await expect(page.locator(".nav .nav-item")).toHaveText([
+    "工作台",
+    "新建任务",
+    "插件",
+    "定时任务",
+  ]);
 });
 
 test("Plugins is available directly below New Task", async ({ page }) => {
@@ -400,7 +409,10 @@ test("the demo routes keep the deterministic fixture", async ({ page }) => {
     "完善监控告警规则",
   ]);
   // The browser keeps the demo family, which is what the snapshots load.
-  await expect(page.locator(".nav-item").first()).toHaveAttribute("href", "/ui-demo/conversation");
+  await expect(page.getByRole("link", { name: "新建任务" })).toHaveAttribute(
+    "href",
+    /^\/ui-demo\/conversation(\?|$)/,
+  );
 });
 
 test("expanding a project reveals its conversations", async ({ page }) => {

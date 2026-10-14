@@ -198,11 +198,17 @@ Conversation screen must satisfy all:
 > + `插件`. 技能, MCP and the new 智能体 are tabs on the one 插件 page
 > (`/plugins`, `?type=skills|mcp|agents`; the old `/skills` and `/mcp` paths
 > are permanent aliases of that route). See §5i and `COMPONENTS.md` §13d/§14.
+>
+> Updated 2026-10-13: `工作台` and `定时任务` joined the rows, so the order above
+> the tree is `工作台` → `新建任务` → `插件` → `定时任务` (`LAYOUT.md` §2). The
+> workbench's apps (待办 / 日历 / 成果中心) open inside `/workbench` and are not
+> nav rows; the sidebar keeps one `工作台` row while an app is on screen.
 
 - [ ] no account row, avatar or sign-out anywhere in the sidebar;
-- [ ] `新建任务` and `插件` are the only nav rows above the tree, in that
-      order; the 插件 page itself shows the three tabs 技能 / MCP / 智能体
-      (技能 selected by default, no `?type=` on the default URL);
+- [ ] `工作台`, `新建任务`, `插件` and `定时任务` are the only nav rows above
+      the tree, in that order; the 插件 page itself shows the three tabs
+      技能 / MCP / 智能体 (技能 selected by default, no `?type=` on the default
+      URL);
 - [ ] `新建任务` is an action and never renders as the active destination;
 - [ ] `Settings` (`设置`) sits at the foot, below the scrollable tree;
 - [ ] `Archive` (`归档`) is reached via Settings → 归档与存储 → 查看归档, never as a permanent nav row;
@@ -571,6 +577,55 @@ These are asserted in `apps/desktop/tests/visual/behaviour.spec.ts` and
       draft's choice was carried into its created session, and applies to the
       very next send (the send payload carries the agent name; a `null`
       agent reaches the backend as no persona block).
+
+---
+
+## 5j. Workbench & app checks
+
+> Added 2026-10-13 with the 工作台 (`LAYOUT.md` §2): it is the app collection and
+> the only home for its apps. Covered by `tests/visual/workbench.spec.ts`
+> (behaviour) and the `workbench*` entries in `tests/visual/pages.spec.ts`
+> (snapshots at the reference viewport).
+
+- [ ] `/workbench` is reached from the sidebar's `工作台` row; the head is
+      `工作台` + its subtitle, with `应用管理` as the only head action;
+- [ ] the collection is **rows** (`.wb-app-row`, 38px) — an icon, the app name,
+      a one-line description and a compact `打开` button. It is not a tile grid:
+      the MCP connector catalog stays the only documented tiling exception
+      (§6 above);
+- [ ] sections are `收藏` (only when non-empty) then `全部应用`; a disabled app
+      keeps its data but leaves the collection, and its `?app=` URL lands back
+      on the collection with an `已停用` notice instead of a dead screen;
+- [ ] search filters by app name/description; `应用管理` carries enable,
+      favorite, ↑/↓ order, the AI and 调度 integration switches and the 今日概览
+      switch, and every one of them persists (a reload shows the stored value);
+- [ ] opening an app keeps the sidebar at one `工作台` row (no app row appears),
+      the app's own head carries `返回工作台`, and 今日概览's two headings open
+      待办 / 日历 respectively;
+- [ ] 今日概览 lists today's **open** 待办 (due today) and today's 日历 events,
+      each with a `· n` count, and disappears entirely when its switch is off;
+- [ ] 待办: three fixed columns 待处理 / 进行中 / 已完成 with a per-column count
+      and `+`; board and list are two views of one dataset, so a filter, a
+      status change or 完成/恢复 is visible in both, in the column counts, in
+      今日概览 and in the 日历 待办截止 overlay;
+- [ ] 待办 card rows show title, 截止/无截止日期, priority and status; a
+      sub-item renders under its parent (never as a column card of its own);
+      drag starts from the handle only, the target column shows the drop state,
+      and Escape or a drop outside a column leaves the status unchanged;
+- [ ] 日历: 周 / 月 views over real dates (no fixture dates outside the demo
+      route), events carry their own IANA zone, and the editor validates
+      标题必填 → 结束时间必须晚于开始时间; delete is two-step (`确认删除？`);
+- [ ] a 周 block renders whole lines only — never a line squeezed to a sliver of
+      its glyphs. It carries the title, the start time once it is an hour tall,
+      and the event's zone once it is 1.5 hours tall (below that the zone stays
+      in the block's `title` tooltip). Editing an event never re-zones it to the
+      calendar's own zone;
+- [ ] 成果中心: rows of title + kind + category + file status, a text artifact
+      previews as text and a file reference shows its path with `打开文件` /
+      `在 Finder 中显示`; a moved or replaced file reads `文件缺失` / `文件已更改`
+      with the record kept, and deleting the record never deletes the file;
+- [ ] light and dark themes both render every workbench surface (no hard-coded
+      colour), and the board falls back to a single column below 820px.
 
 ---
 

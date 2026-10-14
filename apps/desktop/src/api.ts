@@ -6,6 +6,15 @@ import { listen } from "@tauri-apps/api/event";
 import { DEMO_AGENTS } from "./data/agents";
 import { DEMO_MCP_SERVERS, DEMO_MCP_TOOLS } from "./data/demo";
 import { DEMO_PROJECT_SKILLS, DEMO_USER_SKILLS } from "./data/skills";
+import {
+  DEMO_CALENDAR_EVENTS,
+  DEMO_RESULTS,
+  DEMO_TODAY,
+  DEMO_TODOS,
+  DEMO_WORKBENCH_APPS,
+  DEMO_WORKBENCH_PREFS,
+  DEMO_TIMEZONE,
+} from "./data/workbench";
 
 /** Mirrors the `CoreInfo` command payload returned by the Tauri shell. */
 export type CoreInfo = {
@@ -1193,3 +1202,566 @@ export function listJobTypes(): Promise<string[]> {
   return invoke<string[]>("list_job_types");
 }
 
+
+// ---------------------------------------------------------------------------
+// 工作台 (workbench) — the first-party apps
+// ---------------------------------------------------------------------------
+//
+// Every command returns the stable `AppError` code as a plain string, so the
+// GUI keys on the code (`revision_conflict`) and never on a message. Unlike
+// `read()` above these must not swallow a failure into a plausible-looking
+// `null`: a rejected write has to surface as an error the caller can show.
+
+/** Stable codes from `kodo_core::apps::AppError::code`. */
+export type WorkbenchErrorCode =
+  | "invalid_input"
+  | "not_found"
+  | "revision_conflict"
+  | "unknown_app"
+  | "app_disabled"
+  | "storage_unavailable";
+
+/** A workbench command that failed; `code` is `unknown` for anything else. */
+export class WorkbenchError extends Error {
+  readonly code: WorkbenchErrorCode | "unknown";
+
+  constructor(code: WorkbenchErrorCode | "unknown") {
+    super(code);
+    this.name = "WorkbenchError";
+    this.code = code;
+  }
+}
+
+const WORKBENCH_CODES: WorkbenchErrorCode[] = [
+  "invalid_input",
+  "not_found",
+  "revision_conflict",
+  "unknown_app",
+  "app_disabled",
+  "storage_unavailable",
+];
+
+export function workbenchCode(error: unknown): WorkbenchErrorCode | "unknown" {
+  if (error instanceof WorkbenchError) return error.code;
+  const raw = typeof error === "string" ? error : String((error as Error)?.message ?? error);
+  const match = WORKBENCH_CODES.find((code) => raw.includes(code));
+  return match ?? "unknown";
+}
+
+function wbRead<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return invoke<T>(command, args).catch((error: unknown) => {
+    throw new WorkbenchError(workbenchCode(error));
+  });
+}
+
+function wbWrite<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return wbRead<T>(command, args);
+}
+
+/** `kodo_core::apps::AppCapabilities`. */
+export type AppCapabilitiesDto = {
+  ai: boolean;
+  scheduler: boolean;
+  /** The app contributes a 今日概览 line on the workbench. */
+  summary: boolean;
+};
+
+export type AppManifestDto = {
+  appId: string;
+  name: string;
+  description: string;
+  version: string;
+  apiVersion: string;
+  /** lucide-react icon name; the GUI maps it to a component. */
+  icon: string;
+  builtin: boolean;
+  capabilities: AppCapabilitiesDto;
+};
+
+export type AppPreferenceDto = {
+  appId: string;
+  enabled: boolean;
+  favorite: boolean;
+  sortOrder: number;
+  aiEnabled: boolean;
+  scheduleEnabled: boolean;
+  updatedAt: number;
+};
+
+export type AppViewDto = {
+  manifest: AppManifestDto;
+  preference: AppPreferenceDto;
+};
+
+export type TodoStatusDto = "todo" | "doing" | "done";
+export type TodoPriorityDto = "low" | "normal" | "high";
+
+export type TodoDto = {
+  id: string;
+  title: string;
+  notes: string;
+  status: TodoStatusDto;
+  priority: TodoPriorityDto;
+  /** Local `YYYY-MM-DD`; `null` puts the todo in the inbox. */
+  dueDate: string | null;
+  parentId: string | null;
+  archived: boolean;
+  completedAt: number | null;
+  sortOrder: number;
+  /** `manual` | `scheduled` | `ai`. */
+  source: string;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TodoDraftDto = {
+  title: string;
+  notes?: string | null;
+  status?: TodoStatusDto | null;
+  priority?: TodoPriorityDto | null;
+  dueDate?: string | null;
+  parentId?: string | null;
+  source?: string | null;
+  /** Idempotency key: the same value never creates a second todo. */
+  requestId?: string | null;
+};
+
+export type CalendarEventDto = {
+  id: string;
+  title: string;
+  notes: string;
+  date: string;
+  /** `HH:MM` in `timezone`; `null` for an all-day event. */
+  startTime: string | null;
+  endTime: string | null;
+  allDay: boolean;
+  timezone: string;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type CalendarEventDraftDto = {
+  title: string;
+  notes?: string | null;
+  date: string;
+  startTime?: string | null;
+  endTime?: string | null;
+  allDay?: boolean | null;
+  timezone?: string | null;
+  requestId?: string | null;
+};
+
+export type ArtifactKindDto = "text" | "file";
+export type ArtifactFileStatusDto = "notApplicable" | "ok" | "missing" | "changed";
+
+export type ArtifactDto = {
+  id: string;
+  title: string;
+  kind: ArtifactKindDto;
+  body: string | null;
+  filePath: string | null;
+  fileSize: number | null;
+  fileModifiedAt: number | null;
+  source: string;
+  category: string;
+  favorite: boolean;
+  archived: boolean;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ArtifactViewDto = {
+  artifact: ArtifactDto;
+  /** Recomputed from disk on every read; text artifacts are `notApplicable`. */
+  fileStatus: ArtifactFileStatusDto;
+  currentSize: number | null;
+  currentModifiedAt: number | null;
+};
+
+export type ArtifactDraftDto = {
+  title: string;
+  kind: ArtifactKindDto;
+  body?: string | null;
+  filePath?: string | null;
+  source?: string | null;
+  category?: string | null;
+  requestId?: string | null;
+};
+
+// --- demo store (browser only; the desktop shell never touches it) ----------
+//
+// A mutable in-memory copy, reset on reload. The visual suite stubs `invoke`
+// instead, so this path exists for `vite dev` — but it runs the same version
+// and idempotency checks, so the conflict path is exercisable there too.
+
+const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+const demoApps: AppViewDto[] = DEMO_WORKBENCH_APPS.map(clone);
+let demoTodos: TodoDto[] = DEMO_TODOS.map(clone);
+let demoEvents: CalendarEventDto[] = DEMO_CALENDAR_EVENTS.map(clone);
+let demoResults: ArtifactViewDto[] = DEMO_RESULTS.map(clone);
+const demoPrefs: Record<string, string> = { ...DEMO_WORKBENCH_PREFS };
+const demoRequests = new Map<string, string>();
+let demoSeq = 0;
+
+const demoNow = (): number => Math.floor(Date.parse(`${DEMO_TODAY}T10:24:32Z`) / 1000);
+const demoId = (prefix: string): string => `${prefix}-demo-${(demoSeq += 1)}`;
+
+function stamp<T extends { version: number; updatedAt: number }>(row: T): T {
+  row.version += 1;
+  row.updatedAt = demoNow();
+  return row;
+}
+
+function conflictIfStale(actual: number, expected: number): void {
+  if (actual !== expected) throw new WorkbenchError("revision_conflict");
+}
+
+/** The same code the store returns for an unknown or disabled app. */
+function demoApp(appId: string): AppViewDto {
+  const view = demoApps.find((app) => app.manifest.appId === appId);
+  if (!view) throw new WorkbenchError("unknown_app");
+  return view;
+}
+
+// --- apps ------------------------------------------------------------------
+
+export function listApps(): Promise<AppViewDto[]> {
+  if (!isDesktop()) return Promise.resolve(clone(demoApps));
+  return wbRead<AppViewDto[]>("list_apps");
+}
+
+export function setAppEnabled(appId: string, enabled: boolean): Promise<AppViewDto> {
+  if (!isDesktop()) {
+    const view = demoApp(appId);
+    view.preference.enabled = enabled;
+    view.preference.updatedAt = demoNow();
+    return Promise.resolve(clone(view));
+  }
+  return wbWrite<AppViewDto>("set_app_enabled", { appId, enabled });
+}
+
+export function setAppFavorite(appId: string, favorite: boolean): Promise<AppViewDto> {
+  if (!isDesktop()) {
+    const view = demoApp(appId);
+    view.preference.favorite = favorite;
+    view.preference.updatedAt = demoNow();
+    return Promise.resolve(clone(view));
+  }
+  return wbWrite<AppViewDto>("set_app_favorite", { appId, favorite });
+}
+
+/** Every id the caller knows about, in the wanted order. */
+export function setAppOrder(appIds: string[]): Promise<AppViewDto[]> {
+  if (!isDesktop()) {
+    appIds.forEach((appId, index) => {
+      demoApp(appId).preference.sortOrder = index;
+    });
+    return Promise.resolve(clone(sortApps(demoApps)));
+  }
+  return wbWrite<AppViewDto[]>("set_app_order", { appIds });
+}
+
+/** The grid's order: favorites first, then `sortOrder`, then id. */
+export function sortApps(apps: AppViewDto[]): AppViewDto[] {
+  return [...apps].sort((a, b) => {
+    const star = Number(b.preference.favorite) - Number(a.preference.favorite);
+    if (star !== 0) return star;
+    const order = a.preference.sortOrder - b.preference.sortOrder;
+    if (order !== 0) return order;
+    return a.manifest.appId.localeCompare(b.manifest.appId);
+  });
+}
+
+export function setAppLinks(
+  appId: string,
+  aiEnabled: boolean,
+  scheduleEnabled: boolean,
+): Promise<AppViewDto> {
+  if (!isDesktop()) {
+    const view = demoApp(appId);
+    const caps = view.manifest.capabilities;
+    if (aiEnabled && !caps.ai) throw new WorkbenchError("invalid_input");
+    if (scheduleEnabled && !caps.scheduler) throw new WorkbenchError("invalid_input");
+    view.preference.aiEnabled = aiEnabled;
+    view.preference.scheduleEnabled = scheduleEnabled;
+    view.preference.updatedAt = demoNow();
+    return Promise.resolve(clone(view));
+  }
+  return wbWrite<AppViewDto>("set_app_links", { appId, aiEnabled, scheduleEnabled });
+}
+
+export function getWorkbenchPrefs(): Promise<Record<string, string>> {
+  if (!isDesktop()) return Promise.resolve({ ...demoPrefs });
+  return wbRead<Record<string, string>>("get_workbench_prefs");
+}
+
+export function setWorkbenchPref(key: string, value: string): Promise<void> {
+  if (!isDesktop()) {
+    demoPrefs[key] = value;
+    return Promise.resolve();
+  }
+  return wbWrite<void>("set_workbench_pref", { key, value });
+}
+
+// --- 待办 ------------------------------------------------------------------
+
+export function listTodos(includeArchived = false): Promise<TodoDto[]> {
+  if (!isDesktop()) {
+    const rows = demoTodos.filter((todo) => includeArchived || !todo.archived);
+    return Promise.resolve(clone(rows));
+  }
+  return wbRead<TodoDto[]>("list_todos", { includeArchived });
+}
+
+export function createTodo(draft: TodoDraftDto): Promise<TodoDto> {
+  if (!isDesktop()) {
+    const replay = draft.requestId ? demoRequests.get(draft.requestId) : undefined;
+    const seen = replay && demoTodos.find((todo) => todo.id === replay);
+    if (seen) return Promise.resolve(clone(seen));
+    const title = draft.title.trim();
+    if (!title) throw new WorkbenchError("invalid_input");
+    const todo: TodoDto = {
+      id: demoId("todo"),
+      title,
+      notes: draft.notes ?? "",
+      status: draft.status ?? "todo",
+      priority: draft.priority ?? "normal",
+      dueDate: draft.dueDate ?? null,
+      parentId: draft.parentId ?? null,
+      archived: false,
+      completedAt: null,
+      sortOrder: demoTodos.filter((row) => row.status === (draft.status ?? "todo")).length,
+      source: draft.source ?? "manual",
+      version: 1,
+      createdAt: demoNow(),
+      updatedAt: demoNow(),
+    };
+    demoTodos = [...demoTodos, todo];
+    if (draft.requestId) demoRequests.set(draft.requestId, todo.id);
+    return Promise.resolve(clone(todo));
+  }
+  return wbWrite<TodoDto>("create_todo", { draft });
+}
+
+export function updateTodo(expectedVersion: number, todo: TodoDto): Promise<TodoDto> {
+  if (!isDesktop()) {
+    const current = demoTodos.find((row) => row.id === todo.id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    if (!todo.title.trim()) throw new WorkbenchError("invalid_input");
+    if (todo.parentId === todo.id) throw new WorkbenchError("invalid_input");
+    const next: TodoDto = stamp({
+      ...current,
+      title: todo.title.trim(),
+      notes: todo.notes,
+      status: todo.status,
+      priority: todo.priority,
+      dueDate: todo.dueDate,
+      parentId: todo.parentId,
+    });
+    return Promise.resolve(clone(next));
+  }
+  return wbWrite<TodoDto>("update_todo", { expectedVersion, todo });
+}
+
+/** The one write path behind drag, the status select and 完成 / 恢复. */
+export function setTodoStatus(
+  id: string,
+  expectedVersion: number,
+  status: TodoStatusDto,
+): Promise<TodoDto> {
+  if (!isDesktop()) {
+    const current = demoTodos.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    current.status = status;
+    current.completedAt = status === "done" ? demoNow() : null;
+    stamp(current);
+    return Promise.resolve(clone(current));
+  }
+  return wbWrite<TodoDto>("set_todo_status", { id, expectedVersion, status });
+}
+
+export function setTodoArchived(
+  id: string,
+  expectedVersion: number,
+  archived: boolean,
+): Promise<TodoDto> {
+  if (!isDesktop()) {
+    const current = demoTodos.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    current.archived = archived;
+    stamp(current);
+    return Promise.resolve(clone(current));
+  }
+  return wbWrite<TodoDto>("set_todo_archived", { id, expectedVersion, archived });
+}
+
+// --- 日历 ------------------------------------------------------------------
+
+export function listCalendarEvents(): Promise<CalendarEventDto[]> {
+  if (!isDesktop()) return Promise.resolve(clone(demoEvents));
+  return wbRead<CalendarEventDto[]>("list_calendar_events");
+}
+
+export function createCalendarEvent(draft: CalendarEventDraftDto): Promise<CalendarEventDto> {
+  if (!isDesktop()) {
+    const title = draft.title.trim();
+    if (!title) throw new WorkbenchError("invalid_input");
+    const allDay = draft.allDay ?? false;
+    const event: CalendarEventDto = {
+      id: demoId("event"),
+      title,
+      notes: draft.notes ?? "",
+      date: draft.date,
+      startTime: allDay ? null : draft.startTime ?? null,
+      endTime: allDay ? null : draft.endTime ?? null,
+      allDay,
+      timezone: draft.timezone ?? DEMO_TIMEZONE,
+      version: 1,
+      createdAt: demoNow(),
+      updatedAt: demoNow(),
+    };
+    demoEvents = [...demoEvents, event];
+    return Promise.resolve(clone(event));
+  }
+  return wbWrite<CalendarEventDto>("create_calendar_event", { draft });
+}
+
+export function updateCalendarEvent(
+  expectedVersion: number,
+  event: CalendarEventDto,
+): Promise<CalendarEventDto> {
+  if (!isDesktop()) {
+    const current = demoEvents.find((row) => row.id === event.id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    if (!event.title.trim()) throw new WorkbenchError("invalid_input");
+    return Promise.resolve(clone(stamp({ ...current, ...event })));
+  }
+  return wbWrite<CalendarEventDto>("update_calendar_event", { expectedVersion, event });
+}
+
+export function deleteCalendarEvent(id: string, expectedVersion: number): Promise<void> {
+  if (!isDesktop()) {
+    const current = demoEvents.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    demoEvents = demoEvents.filter((row) => row.id !== id);
+    return Promise.resolve();
+  }
+  return wbWrite<void>("delete_calendar_event", { id, expectedVersion });
+}
+
+// --- 成果中心 --------------------------------------------------------------
+
+export function listResults(includeArchived = false): Promise<ArtifactViewDto[]> {
+  if (!isDesktop()) {
+    const rows = demoResults.filter((row) => includeArchived || !row.artifact.archived);
+    return Promise.resolve(clone(rows));
+  }
+  return wbRead<ArtifactViewDto[]>("list_results", { includeArchived });
+}
+
+export function createResult(draft: ArtifactDraftDto): Promise<ArtifactDto> {
+  if (!isDesktop()) {
+    const title = draft.title.trim();
+    if (!title) throw new WorkbenchError("invalid_input");
+    const body = draft.body?.trim() ?? "";
+    const path = draft.filePath?.trim() ?? "";
+    if (draft.kind === "text" && !body) throw new WorkbenchError("invalid_input");
+    if (draft.kind === "file" && !path) throw new WorkbenchError("invalid_input");
+    const artifact: ArtifactDto = {
+      id: demoId("result"),
+      title,
+      kind: draft.kind,
+      body: draft.kind === "text" ? body : null,
+      filePath: draft.kind === "file" ? path : null,
+      fileSize: null,
+      fileModifiedAt: null,
+      source: draft.source ?? "manual",
+      category: draft.category ?? "",
+      favorite: false,
+      archived: false,
+      version: 1,
+      createdAt: demoNow(),
+      updatedAt: demoNow(),
+    };
+    // The demo cannot read the disk, so a new reference reports as present
+    // until the fingerprint is captured — the same `ok` the store records on
+    // a path that exists.
+    demoResults = [...demoResults, {
+      artifact,
+      fileStatus: draft.kind === "file" ? "ok" : "notApplicable",
+      currentSize: null,
+      currentModifiedAt: null,
+    }];
+    return Promise.resolve(clone(artifact));
+  }
+  return wbWrite<ArtifactDto>("create_result", { draft });
+}
+
+export function updateResult(expectedVersion: number, artifact: ArtifactDto): Promise<ArtifactDto> {
+  if (!isDesktop()) {
+    const row = demoResults.find((entry) => entry.artifact.id === artifact.id);
+    if (!row) throw new WorkbenchError("not_found");
+    conflictIfStale(row.artifact.version, expectedVersion);
+    if (!artifact.title.trim()) throw new WorkbenchError("invalid_input");
+    row.artifact = stamp({ ...row.artifact, ...artifact });
+    return Promise.resolve(clone(row.artifact));
+  }
+  return wbWrite<ArtifactDto>("update_result", { expectedVersion, artifact });
+}
+
+export function setResultFlags(
+  id: string,
+  expectedVersion: number,
+  flags: { favorite?: boolean; archived?: boolean },
+): Promise<ArtifactDto> {
+  if (!isDesktop()) {
+    const row = demoResults.find((entry) => entry.artifact.id === id);
+    if (!row) throw new WorkbenchError("not_found");
+    conflictIfStale(row.artifact.version, expectedVersion);
+    if (flags.favorite !== undefined) row.artifact.favorite = flags.favorite;
+    if (flags.archived !== undefined) row.artifact.archived = flags.archived;
+    stamp(row.artifact);
+    return Promise.resolve(clone(row.artifact));
+  }
+  return wbWrite<ArtifactDto>("set_result_flags", {
+    id,
+    expectedVersion,
+    favorite: flags.favorite ?? null,
+    archived: flags.archived ?? null,
+  });
+}
+
+/** Remove the record only — the file on disk is never touched. */
+export function deleteResult(id: string, expectedVersion: number): Promise<void> {
+  if (!isDesktop()) {
+    const row = demoResults.find((entry) => entry.artifact.id === id);
+    if (!row) throw new WorkbenchError("not_found");
+    conflictIfStale(row.artifact.version, expectedVersion);
+    demoResults = demoResults.filter((entry) => entry.artifact.id !== id);
+    return Promise.resolve();
+  }
+  return wbWrite<void>("delete_result", { id, expectedVersion });
+}
+
+/**
+ * Hand a registered file reference to the OS. The record is the allow-list:
+ * the GUI names an id, never a path. Both are no-ops in the browser.
+ */
+export function openResultFile(id: string): Promise<void> {
+  if (!isDesktop()) return Promise.resolve();
+  return wbWrite<void>("open_result_file", { id });
+}
+
+export function revealResultFile(id: string): Promise<void> {
+  if (!isDesktop()) return Promise.resolve();
+  return wbWrite<void>("reveal_result_file", { id });
+}

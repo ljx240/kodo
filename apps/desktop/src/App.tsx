@@ -28,6 +28,7 @@ import { ConversationPage } from "./pages/ConversationPage";
 import { PluginsPage } from "./pages/PluginsPage";
 import { SchedulerPage } from "./pages/SchedulerPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { WorkbenchPage } from "./pages/WorkbenchPage";
 import { TracePage } from "./pages/TracePage";
 import { TopBar, type ConvActions } from "./shell/TopBar";
 
@@ -588,8 +589,10 @@ export function App() {
   });
 
   const paletteActions: PaletteAction[] = [
+    { id: "workbench", label: T.nav.workbench, run: () => navigate(hrefTo("workbench", route.inspectorOpen)) },
     { id: "new-task", label: T.nav.newTask, run: () => void newChat() },
     { id: "plugins", label: T.nav.plugins, run: () => navigate(hrefTo("plugins", route.inspectorOpen)) },
+    { id: "schedule", label: T.nav.schedule, run: () => navigate(hrefTo("schedule", route.inspectorOpen)) },
     { id: "archive", label: T.page.archive.title, run: () => navigate(hrefTo("archive", route.inspectorOpen)) },
     { id: "settings", label: T.nav.settings, run: () => setSettingsOpen(true) },
   ];
@@ -809,6 +812,9 @@ export function App() {
             />
           )}
           {route.name === "schedule" && <SchedulerPage demo={route.demo} />}
+          {/* 工作台 and its apps are self-contained pages: the Inspector rail
+              has nothing to add to them, so the route is excluded below too. */}
+          {route.name === "workbench" && <WorkbenchPage route={route} />}
 
           {paletteOpen && (
             <CommandPalette
@@ -844,7 +850,7 @@ export function App() {
             </div>
           )}
 
-          {route.name !== "schedule" && (
+          {route.name !== "schedule" && route.name !== "workbench" && (
             <Inspector
               route={route.name}
               open={route.inspectorOpen}

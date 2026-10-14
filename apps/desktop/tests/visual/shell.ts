@@ -1,4 +1,102 @@
 import type { Page } from "@playwright/test";
+import {
+  DEMO_CALENDAR_EVENTS,
+  DEMO_RESULTS,
+  DEMO_TIMEZONE,
+  DEMO_TODOS,
+  DEMO_WORKBENCH_APPS,
+  DEMO_WORKBENCH_PREFS,
+} from "../../src/data/workbench";
+
+/**
+ * The workbench rows the stub keeps in memory. Deliberately loose: the stub
+ * re-implements the store's *behavior* (versions, idempotency, archive), not
+ * its types — those live in `src/api.ts` and are checked there.
+ */
+type WbApp = {
+  manifest: {
+    appId: string;
+    name: string;
+    description: string;
+    version: string;
+    apiVersion: string;
+    icon: string;
+    builtin: boolean;
+    capabilities: { ai: boolean; scheduler: boolean; summary: boolean };
+  };
+  preference: {
+    appId: string;
+    enabled: boolean;
+    favorite: boolean;
+    sortOrder: number;
+    aiEnabled: boolean;
+    scheduleEnabled: boolean;
+    updatedAt: number;
+  };
+};
+
+type WbTodo = {
+  id: string;
+  title: string;
+  notes: string;
+  status: string;
+  priority: string;
+  dueDate: string | null;
+  parentId: string | null;
+  archived: boolean;
+  completedAt: number | null;
+  sortOrder: number;
+  source: string;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type WbEvent = {
+  id: string;
+  title: string;
+  notes: string;
+  date: string;
+  startTime: string | null;
+  endTime: string | null;
+  allDay: boolean;
+  timezone: string;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type WbResult = {
+  artifact: {
+    id: string;
+    title: string;
+    kind: string;
+    body: string | null;
+    filePath: string | null;
+    fileSize: number | null;
+    fileModifiedAt: number | null;
+    source: string;
+    category: string;
+    favorite: boolean;
+    archived: boolean;
+    version: number;
+    createdAt: number;
+    updatedAt: number;
+  };
+  fileStatus: string;
+  currentSize: number | null;
+  currentModifiedAt: number | null;
+};
+
+/** What the workbench commands are seeded with; overridable per test. */
+type WorkbenchSeed = {
+  apps: WbApp[];
+  todos: WbTodo[];
+  events: WbEvent[];
+  results: WbResult[];
+  prefs: Record<string, string>;
+  timezone: string;
+};
 
 /** What the stand-in core answers. Anything omitted gets an inert default. */
 export type Core = {
@@ -54,16 +152,31 @@ export type Core = {
    */
   autoRun?: { answer: string; plain?: boolean };
   /** Captured `respond_approval` payloads. */
-  approvalLog?: Array<{ id: string; step: number; approved: boolean; sessionWide: boolean; runId?: number }>;
+  approvalLog?: Array<{
+    id: string;
+    step: number;
+    approved: boolean;
+    sessionWide: boolean;
+    runId?: number;
+  }>;
   /** `turn_changes` payload for inline diffs. */
-  turnChanges?: Array<{ path: string; diff: string; userPreexisting?: boolean; undoState?: string; conflict?: boolean }>;
+  turnChanges?: Array<{
+    path: string;
+    diff: string;
+    userPreexisting?: boolean;
+    undoState?: string;
+    conflict?: boolean;
+  }>;
   /** Full file bodies for the file viewer (`read_project_file`). */
   fileBodies?: Record<string, string>;
   /** Image paths the stub treats as >4MB — `probe_context_file` then returns
    *  `preview: null`, like the Rust cap on inline image previews. */
   oversizedImages?: string[];
   /** `undo_turn` payload; default is an empty (nothing-to-undo) report. */
-  undoReport?: { restored: string[]; conflicts: Array<{ path: string; reason: string; message: string }> };
+  undoReport?: {
+    restored: string[];
+    conflicts: Array<{ path: string; reason: string; message: string }>;
+  };
   /** When true, `undo_turn` rejects. */
   failUndo?: boolean;
   /** `list_provider_models` payload by template id. */
@@ -86,6 +199,18 @@ export type Core = {
   mcpTools?: Record<string, unknown[]>;
   /** When set, `mcp_list_tools` rejects with this reason. */
   failMcpTools?: string;
+  /** 工作台 app views; defaults to the frozen `DEMO_WORKBENCH_APPS`. */
+  workbenchApps?: WbApp[];
+  /** 待办 rows; defaults to the frozen `DEMO_TODOS`. */
+  todos?: WbTodo[];
+  /** 日历 events; defaults to the frozen `DEMO_CALENDAR_EVENTS`. */
+  calendarEvents?: WbEvent[];
+  /** 成果中心 rows; defaults to the frozen `DEMO_RESULTS`. */
+  results?: WbResult[];
+  /** 工作台 key/value preferences; defaults to `DEMO_WORKBENCH_PREFS`. */
+  workbenchPrefs?: Record<string, string>;
+  /** IANA zone a new event defaults to; defaults to `DEMO_TIMEZONE`. */
+  calendarTimezone?: string;
 };
 
 /**
@@ -96,7 +221,21 @@ export type Core = {
  * `isDesktop()` only checks that the key exists.
  */
 export async function stubShell(page: Page, core: Core = {}): Promise<void> {
-  await page.addInitScript((config: Core) => {
+  // The workbench fixtures ride in the same payload as the rest of the stub:
+  // `addInitScript` serializes the function alone, so nothing can be imported
+  // inside it and every default has to travel in as data.
+  const seeded: Core & { workbench: WorkbenchSeed } = {
+    ...core,
+    workbench: {
+      apps: core.workbenchApps ?? DEMO_WORKBENCH_APPS,
+      todos: core.todos ?? DEMO_TODOS,
+      events: core.calendarEvents ?? DEMO_CALENDAR_EVENTS,
+      results: core.results ?? DEMO_RESULTS,
+      prefs: core.workbenchPrefs ?? DEMO_WORKBENCH_PREFS,
+      timezone: core.calendarTimezone ?? DEMO_TIMEZONE,
+    },
+  };
+  await page.addInitScript((config: Core & { workbench: WorkbenchSeed }) => {
     // E2E / visual-regression flag (2026-10-13): when the production
     // Inspector default was flipped to "closed on every viewport",
     // `routes.ts` started honoring `__KODO_INSPECTOR_AUTOPEN__` as the
@@ -105,7 +244,8 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     // never set this flag, so production users see the new default
     // (rail only) and the test suite keeps its existing geometry
     // assertions. Mirrored in `routes.ts::parse`.
-    (window as unknown as { __KODO_INSPECTOR_AUTOPEN__?: boolean }).__KODO_INSPECTOR_AUTOPEN__ = true;
+    (window as unknown as { __KODO_INSPECTOR_AUTOPEN__?: boolean }).__KODO_INSPECTOR_AUTOPEN__ =
+      true;
     const callbacks: Record<number, (event: unknown) => void> = {};
     /** plugin:event|listen eventId → transformCallback handler id. */
     const listenerByEventId: Record<number, number> = {};
@@ -131,7 +271,13 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
       budgetFamily?: string | null;
     }> = [];
     (window as unknown as { __sendLog?: unknown }).__sendLog = sendLog;
-    const approvalLog: Array<{ id: string; step: number; approved: boolean; sessionWide: boolean; runId?: number }> = [];
+    const approvalLog: Array<{
+      id: string;
+      step: number;
+      approved: boolean;
+      sessionWide: boolean;
+      runId?: number;
+    }> = [];
     (window as unknown as { __approvalLog?: unknown }).__approvalLog = approvalLog;
     const listModelCalls: Array<{ template: string; endpoint: string; providerId?: string }> = [];
     (window as unknown as { __listModelCalls?: unknown }).__listModelCalls = listModelCalls;
@@ -187,6 +333,66 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     const mcpToolsCalls: string[] = [];
     (window as unknown as { __mcpToolsCalls?: unknown }).__mcpToolsCalls = mcpToolsCalls;
 
+    // ── 工作台 ─────────────────────────────────────────────────────────────
+    // Stateful like `kodo_shell::apps::AppStore`: versions advance on every
+    // write, an unknown id is `not_found`, a stale `expectedVersion` is
+    // `revision_conflict`, and a repeated `requestId` replays the first row.
+    // The whole state is JSON round-tripped so nothing the page does can reach
+    // back into the payload Playwright handed over.
+    const deepCopy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+    const seedWb = config.workbench;
+    let wbApps = deepCopy(seedWb.apps);
+    let wbTodos = deepCopy(seedWb.todos);
+    let wbEvents = deepCopy(seedWb.events);
+    let wbResults = deepCopy(seedWb.results);
+    const wbPrefs = { ...seedWb.prefs };
+    const wbRequests = new Map<string, string>();
+    let wbSeq = 0;
+    // The fixture's clock, so `completedAt` / `updatedAt` are reproducible.
+    const wbNow = (): number => Math.floor(Date.parse("2026-09-30T10:24:32Z") / 1000);
+    const wbId = (prefix: string): string => `${prefix}-stub-${(wbSeq += 1)}`;
+    /** Every workbench command the page sent, for order/arguments assertions. */
+    const wbLog: Array<{ command: string; args: Record<string, unknown> }> = [];
+    (window as unknown as { __wbLog?: unknown }).__wbLog = wbLog;
+
+    const wbStale = (actual: number, expected: number): void => {
+      if (actual !== expected) throw "revision_conflict";
+    };
+    const wbStamp = <T extends { version: number; updatedAt: number }>(row: T): T => {
+      row.version += 1;
+      row.updatedAt = wbNow();
+      return row;
+    };
+    const wbApp = (appId: string): WbApp => {
+      const view = wbApps.find((app) => app.manifest.appId === appId);
+      if (!view) throw "unknown_app";
+      return view;
+    };
+    const wbTodo = (id: string): WbTodo => {
+      const row = wbTodos.find((todo) => todo.id === id);
+      if (!row) throw "not_found";
+      return row;
+    };
+    const wbEvent = (id: string): WbEvent => {
+      const row = wbEvents.find((event) => event.id === id);
+      if (!row) throw "not_found";
+      return row;
+    };
+    const wbResult = (id: string): WbResult => {
+      const row = wbResults.find((entry) => entry.artifact.id === id);
+      if (!row) throw "not_found";
+      return row;
+    };
+    /** Favorites first, then `sortOrder`, then id — the grid's order. */
+    const wbSort = (apps: WbApp[]): WbApp[] =>
+      [...apps].sort((a, b) => {
+        const star = Number(b.preference.favorite) - Number(a.preference.favorite);
+        if (star !== 0) return star;
+        const order = a.preference.sortOrder - b.preference.sortOrder;
+        if (order !== 0) return order;
+        return a.manifest.appId.localeCompare(b.manifest.appId);
+      });
+
     (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
       transformCallback: (callback: (event: unknown) => void) => {
         const id = next++;
@@ -209,10 +415,14 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
           case "core_info":
             return { name: "kodo-core", version: "0.0.1" };
           case "workspace":
-            if (config.workspace === null) throw "HOME is not set, so there is nowhere to keep the project list";
+            if (config.workspace === null)
+              throw "HOME is not set, so there is nowhere to keep the project list";
             return workspace;
           case "load_session":
-            return (config.sessions as Record<string, unknown> | undefined)?.[String(args?.id ?? "")] ?? session;
+            return (
+              (config.sessions as Record<string, unknown> | undefined)?.[String(args?.id ?? "")] ??
+              session
+            );
           case "git_branch":
             return config.branch ?? null;
           case "pick_folder":
@@ -220,10 +430,17 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
           case "add_project": {
             const path = String(args?.path ?? "");
             const current = workspace as { projects?: Array<{ path: string; name: string }> };
-            if (path && Array.isArray(current.projects) && !current.projects.some((item) => item.path === path)) {
+            if (
+              path &&
+              Array.isArray(current.projects) &&
+              !current.projects.some((item) => item.path === path)
+            ) {
               const segments = path.split("/").filter(Boolean);
               const name = segments[segments.length - 1] ?? path;
-              workspace = { ...(workspace as Record<string, unknown>), projects: [...current.projects, { path, name }] };
+              workspace = {
+                ...(workspace as Record<string, unknown>),
+                projects: [...current.projects, { path, name }],
+              };
             }
             return workspace;
           }
@@ -413,22 +630,77 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             // Mirrors Rust `context_kind` (main.rs): unknown extensions land
             // here only after the stub's stand-in sniff hits — treated as
             // binary, exactly like Rust's NUL outcome.
-            const kind =
-              ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "avif", "heic"].includes(ext)
-                ? "image"
-                : ext === "pdf"
-                  ? "pdf"
-                  : ["doc", "docx", "rtf", "odt", "xls", "xlsx", "ods", "ppt", "pptx", "odp"].includes(ext)
-                    ? "office"
-                    : ["txt", "md", "markdown", "json", "jsonl", "yml", "yaml", "toml", "xml", "html",
-                       "css", "js", "jsx", "ts", "tsx", "rs", "py", "go", "java", "kt", "c", "h",
-                       "cpp", "hpp", "sh", "zsh", "bash", "sql", "log", "csv", "tsv", "ini", "cfg",
-                       "conf"].includes(ext)
-                      ? "text"
-                      : "other";
+            const kind = [
+              "png",
+              "jpg",
+              "jpeg",
+              "gif",
+              "webp",
+              "bmp",
+              "svg",
+              "ico",
+              "avif",
+              "heic",
+            ].includes(ext)
+              ? "image"
+              : ext === "pdf"
+                ? "pdf"
+                : [
+                      "doc",
+                      "docx",
+                      "rtf",
+                      "odt",
+                      "xls",
+                      "xlsx",
+                      "ods",
+                      "ppt",
+                      "pptx",
+                      "odp",
+                    ].includes(ext)
+                  ? "office"
+                  : [
+                        "txt",
+                        "md",
+                        "markdown",
+                        "json",
+                        "jsonl",
+                        "yml",
+                        "yaml",
+                        "toml",
+                        "xml",
+                        "html",
+                        "css",
+                        "js",
+                        "jsx",
+                        "ts",
+                        "tsx",
+                        "rs",
+                        "py",
+                        "go",
+                        "java",
+                        "kt",
+                        "c",
+                        "h",
+                        "cpp",
+                        "hpp",
+                        "sh",
+                        "zsh",
+                        "bash",
+                        "sql",
+                        "log",
+                        "csv",
+                        "tsv",
+                        "ini",
+                        "cfg",
+                        "conf",
+                      ].includes(ext)
+                    ? "text"
+                    : "other";
             // Rust only inlines image data URLs (≤4MB); oversized images and
             // every other kind carry no preview.
-            const oversized = ((config as { oversizedImages?: string[] }).oversizedImages ?? []).includes(path);
+            const oversized = (
+              (config as { oversizedImages?: string[] }).oversizedImages ?? []
+            ).includes(path);
             const preview =
               kind === "image" && !oversized
                 ? // 1×1 PNG so image cards render a real thumbnail in tests.
@@ -443,7 +715,10 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             const contextPaths = Array.isArray(args?.context) ? (args.context as string[]) : [];
             for (const p of contextPaths) {
               if (!p || p.includes("..")) throw `invalid context path: ${p}`;
-              if (p.startsWith("/") && !(config as { externalFiles?: string[] }).externalFiles?.includes(p)) {
+              if (
+                p.startsWith("/") &&
+                !(config as { externalFiles?: string[] }).externalFiles?.includes(p)
+              ) {
                 throw `context file not found: ${p}`;
               }
             }
@@ -458,9 +733,10 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
               // (§2.6): length 1 = single persona, length > 1 = chain. We mirror
               // the head into `agent` for legacy single-selection assertions.
               agents: Array.isArray(args?.agents) ? (args.agents as string[]) : [],
-              agent: Array.isArray(args?.agents) && args.agents.length > 0
-                ? String(args.agents[0])
-                : null,
+              agent:
+                Array.isArray(args?.agents) && args.agents.length > 0
+                  ? String(args.agents[0])
+                  : null,
             });
             const sessionId = String(args?.id ?? "") || "created-session";
             // The real core opens the session file before send resolves, so a
@@ -486,7 +762,8 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
               // Emit synchronously, before the promise resolves — the runner's
               // thread can complete the whole turn this fast.
               const emitToAll = (payload: unknown) => {
-                for (const callback of Object.values(callbacks)) callback({ event: "run:event", id: 1, payload });
+                for (const callback of Object.values(callbacks))
+                  callback({ event: "run:event", id: 1, payload });
               };
               emitToAll({ type: "turnStarted", session: sessionId });
               emitToAll({
@@ -526,9 +803,7 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             const markdown = String(args?.markdown ?? "");
             // Derive the fields list/filter rely on, the way parse_skill would.
             const section = (heading: string) => {
-              const match = markdown.match(
-                new RegExp(`## ${heading}\\n([\\s\\S]*?)(?=\\n## |$)`),
-              );
+              const match = markdown.match(new RegExp(`## ${heading}\\n([\\s\\S]*?)(?=\\n## |$)`));
               return match ? match[1] : "";
             };
             const taskTypes = section("applicable_task_types")
@@ -580,9 +855,7 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             const markdown = String(args?.markdown ?? "");
             // Derive the two sections the way parse_agent would.
             const section = (heading: string) => {
-              const match = markdown.match(
-                new RegExp(`## ${heading}\\n([\\s\\S]*?)(?=\\n## |$)`),
-              );
+              const match = markdown.match(new RegExp(`## ${heading}\\n([\\s\\S]*?)(?=\\n## |$)`));
               return match ? match[1].trim() : "";
             };
             const view = {
@@ -613,6 +886,241 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
           case "browse_set_position":
             browseLog.push({ command, args });
             return null;
+
+          // ── 工作台 ───────────────────────────────────────────────────────
+          case "list_apps":
+            wbLog.push({ command, args: args ?? {} });
+            return deepCopy(wbSort(wbApps));
+          case "set_app_enabled": {
+            wbLog.push({ command, args: args ?? {} });
+            const view = wbApp(String(args?.appId ?? ""));
+            view.preference.enabled = Boolean(args?.enabled);
+            view.preference.updatedAt = wbNow();
+            return deepCopy(view);
+          }
+          case "set_app_favorite": {
+            wbLog.push({ command, args: args ?? {} });
+            const view = wbApp(String(args?.appId ?? ""));
+            view.preference.favorite = Boolean(args?.favorite);
+            view.preference.updatedAt = wbNow();
+            return deepCopy(view);
+          }
+          case "set_app_order": {
+            wbLog.push({ command, args: args ?? {} });
+            const ids = Array.isArray(args?.appIds) ? (args.appIds as string[]) : [];
+            ids.forEach((appId, index) => {
+              wbApp(appId).preference.sortOrder = index;
+            });
+            return deepCopy(wbSort(wbApps));
+          }
+          case "set_app_links": {
+            wbLog.push({ command, args: args ?? {} });
+            const view = wbApp(String(args?.appId ?? ""));
+            const caps = view.manifest.capabilities;
+            // The store refuses a link the manifest never declared.
+            if (args?.aiEnabled && !caps.ai) throw "invalid_input";
+            if (args?.scheduleEnabled && !caps.scheduler) throw "invalid_input";
+            view.preference.aiEnabled = Boolean(args?.aiEnabled);
+            view.preference.scheduleEnabled = Boolean(args?.scheduleEnabled);
+            view.preference.updatedAt = wbNow();
+            return deepCopy(view);
+          }
+          case "get_workbench_prefs":
+            wbLog.push({ command, args: args ?? {} });
+            return { ...wbPrefs };
+          case "set_workbench_pref":
+            wbLog.push({ command, args: args ?? {} });
+            wbPrefs[String(args?.key ?? "")] = String(args?.value ?? "");
+            return null;
+          case "list_todos": {
+            wbLog.push({ command, args: args ?? {} });
+            const includeArchived = Boolean(args?.includeArchived);
+            return deepCopy(wbTodos.filter((todo) => includeArchived || !todo.archived));
+          }
+          case "create_todo": {
+            wbLog.push({ command, args: args ?? {} });
+            const draft = (args?.draft ?? {}) as Record<string, unknown>;
+            const requestId = draft.requestId ? String(draft.requestId) : "";
+            const replay = requestId ? wbRequests.get(requestId) : undefined;
+            const seen = replay ? wbTodos.find((todo) => todo.id === replay) : undefined;
+            // A repeated request replays the first row instead of adding one.
+            if (seen) return deepCopy(seen);
+            const title = String(draft.title ?? "").trim();
+            if (!title) throw "invalid_input";
+            const status = String(draft.status ?? "todo");
+            const todo: WbTodo = {
+              id: wbId("todo"),
+              title,
+              notes: String(draft.notes ?? ""),
+              status,
+              priority: String(draft.priority ?? "normal"),
+              dueDate: draft.dueDate ? String(draft.dueDate) : null,
+              parentId: draft.parentId ? String(draft.parentId) : null,
+              archived: false,
+              completedAt: null,
+              sortOrder: wbTodos.filter((row) => row.status === status).length,
+              source: String(draft.source ?? "manual"),
+              version: 1,
+              createdAt: wbNow(),
+              updatedAt: wbNow(),
+            };
+            wbTodos = [...wbTodos, todo];
+            if (requestId) wbRequests.set(requestId, todo.id);
+            return deepCopy(todo);
+          }
+          case "update_todo": {
+            wbLog.push({ command, args: args ?? {} });
+            const incoming = (args?.todo ?? {}) as WbTodo;
+            const row = wbTodo(String(incoming.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            const title = String(incoming.title ?? "").trim();
+            if (!title) throw "invalid_input";
+            if (incoming.parentId && incoming.parentId === row.id) throw "invalid_input";
+            Object.assign(row, {
+              title,
+              notes: incoming.notes ?? "",
+              status: incoming.status,
+              priority: incoming.priority,
+              dueDate: incoming.dueDate ?? null,
+              parentId: incoming.parentId ?? null,
+            });
+            return deepCopy(wbStamp(row));
+          }
+          case "set_todo_status": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbTodo(String(args?.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            const status = String(args?.status ?? "todo");
+            row.status = status;
+            row.completedAt = status === "done" ? wbNow() : null;
+            return deepCopy(wbStamp(row));
+          }
+          case "set_todo_archived": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbTodo(String(args?.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            row.archived = Boolean(args?.archived);
+            return deepCopy(wbStamp(row));
+          }
+          case "list_calendar_events":
+            wbLog.push({ command, args: args ?? {} });
+            return deepCopy(wbEvents);
+          case "create_calendar_event": {
+            wbLog.push({ command, args: args ?? {} });
+            const draft = (args?.draft ?? {}) as Record<string, unknown>;
+            const title = String(draft.title ?? "").trim();
+            if (!title) throw "invalid_input";
+            const allDay = Boolean(draft.allDay);
+            const event: WbEvent = {
+              id: wbId("event"),
+              title,
+              notes: String(draft.notes ?? ""),
+              date: String(draft.date ?? ""),
+              startTime: allDay ? null : draft.startTime ? String(draft.startTime) : null,
+              endTime: allDay ? null : draft.endTime ? String(draft.endTime) : null,
+              allDay,
+              timezone: String(draft.timezone ?? seedWb.timezone),
+              version: 1,
+              createdAt: wbNow(),
+              updatedAt: wbNow(),
+            };
+            wbEvents = [...wbEvents, event];
+            return deepCopy(event);
+          }
+          case "update_calendar_event": {
+            wbLog.push({ command, args: args ?? {} });
+            const incoming = (args?.event ?? {}) as WbEvent;
+            const row = wbEvent(String(incoming.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            if (!String(incoming.title ?? "").trim()) throw "invalid_input";
+            Object.assign(row, incoming);
+            return deepCopy(wbStamp(row));
+          }
+          case "delete_calendar_event": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbEvent(String(args?.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            wbEvents = wbEvents.filter((event) => event.id !== row.id);
+            return null;
+          }
+          case "list_results": {
+            wbLog.push({ command, args: args ?? {} });
+            const includeArchived = Boolean(args?.includeArchived);
+            return deepCopy(wbResults.filter((row) => includeArchived || !row.artifact.archived));
+          }
+          case "create_result": {
+            wbLog.push({ command, args: args ?? {} });
+            const draft = (args?.draft ?? {}) as Record<string, unknown>;
+            const title = String(draft.title ?? "").trim();
+            if (!title) throw "invalid_input";
+            const kind = String(draft.kind ?? "text");
+            const body = String(draft.body ?? "").trim();
+            const path = String(draft.filePath ?? "").trim();
+            if (kind === "text" && !body) throw "invalid_input";
+            if (kind === "file" && !path) throw "invalid_input";
+            const artifact = {
+              id: wbId("result"),
+              title,
+              kind,
+              body: kind === "text" ? body : null,
+              filePath: kind === "file" ? path : null,
+              fileSize: null,
+              fileModifiedAt: null,
+              source: String(draft.source ?? "manual"),
+              category: String(draft.category ?? ""),
+              favorite: false,
+              archived: false,
+              version: 1,
+              createdAt: wbNow(),
+              updatedAt: wbNow(),
+            };
+            // No disk in the browser: a fresh reference reports as present.
+            wbResults = [
+              ...wbResults,
+              {
+                artifact,
+                fileStatus: kind === "file" ? "ok" : "notApplicable",
+                currentSize: null,
+                currentModifiedAt: null,
+              },
+            ];
+            return deepCopy(artifact);
+          }
+          case "update_result": {
+            wbLog.push({ command, args: args ?? {} });
+            const incoming = (args?.artifact ?? {}) as WbResult["artifact"];
+            const row = wbResult(String(incoming.id ?? ""));
+            wbStale(row.artifact.version, Number(args?.expectedVersion ?? 0));
+            if (!String(incoming.title ?? "").trim()) throw "invalid_input";
+            Object.assign(row.artifact, incoming);
+            return deepCopy(wbStamp(row.artifact));
+          }
+          case "set_result_flags": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbResult(String(args?.id ?? ""));
+            wbStale(row.artifact.version, Number(args?.expectedVersion ?? 0));
+            if (args?.favorite !== null && args?.favorite !== undefined) {
+              row.artifact.favorite = Boolean(args.favorite);
+            }
+            if (args?.archived !== null && args?.archived !== undefined) {
+              row.artifact.archived = Boolean(args.archived);
+            }
+            return deepCopy(wbStamp(row.artifact));
+          }
+          case "delete_result": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbResult(String(args?.id ?? ""));
+            wbStale(row.artifact.version, Number(args?.expectedVersion ?? 0));
+            // The record only — the referenced file is never touched.
+            wbResults = wbResults.filter((entry) => entry.artifact.id !== row.artifact.id);
+            return null;
+          }
+          case "open_result_file":
+          case "reveal_result_file":
+            // The record is the allow-list; the GUI never names a path.
+            wbLog.push({ command, args: args ?? {} });
+            wbResult(String(args?.id ?? ""));
+            return null;
           default:
             return null;
         }
@@ -620,13 +1128,16 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     };
 
     (window as unknown as { __emit: unknown }).__emit = (payload: unknown) => {
-      for (const callback of Object.values(callbacks)) callback({ event: "run:event", id: 1, payload });
+      for (const callback of Object.values(callbacks))
+        callback({ event: "run:event", id: 1, payload });
     };
 
     // The event plugin's local registry — `listen`'s unlisten calls this before
     // its invoke. Without it StrictMode's double-mount leaves two live handlers
     // and every event applies twice.
-    (window as unknown as { __TAURI_EVENT_PLUGIN_INTERNALS__: unknown }).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+    (
+      window as unknown as { __TAURI_EVENT_PLUGIN_INTERNALS__: unknown }
+    ).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
       registerListener: () => {},
       unregisterListener: (_event: string, eventId: number) => {
         const handlerId = listenerByEventId[eventId];
@@ -634,7 +1145,7 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
         delete listenerByEventId[eventId];
       },
     };
-  }, core);
+  }, seeded);
 }
 
 /** Pushes one `run:event`, the way the runner's emitter would. */

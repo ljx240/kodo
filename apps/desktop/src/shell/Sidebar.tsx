@@ -8,6 +8,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  LayoutGrid,
   MessageCircle,
   MoreHorizontal,
   PanelLeft,
@@ -30,11 +31,13 @@ import { hrefTo, navigate, type RouteName } from "../routes";
 import { Menu, MenuItem } from "./Menu";
 
 /**
- * The entries above the project tree. New Task is an action (it starts a
- * conversation), so it never shows the selected-destination treatment;
- * 插件 (skills / MCP / agents tabs) is a destination and does.
+ * The entries above the project tree, in the order the first-level menu keeps:
+ * 工作台 → 新建任务 → 插件 → 定时任务. New Task is an action (it starts a
+ * conversation), so it never shows the selected-destination treatment; the
+ * other three are destinations and do.
  */
 const NAV: { name: RouteName; label: string; Icon: typeof Archive; action?: boolean }[] = [
+  { name: "workbench", label: T.nav.workbench, Icon: LayoutGrid },
   { name: "conversation", label: T.nav.newTask, Icon: MessageCircle, action: true },
   { name: "plugins", label: T.nav.plugins, Icon: Puzzle },
   { name: "schedule", label: T.nav.schedule, Icon: Timer },

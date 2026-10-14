@@ -1800,10 +1800,15 @@ test("the sidebar lists 插件 and navigates to its MCP tab", async ({ page }) =
   await page.goto("/");
 
   const nav = page.locator(".nav .nav-item");
-  await expect(nav.nth(0)).toContainText("新建任务");
-  await expect(nav.nth(1)).toContainText("插件");
+  // First-level order per the product spec: 工作台 leads, then the three
+  // existing entries keep their behavior. 待办/日历/成果中心 open *inside* the
+  // workbench and never appear here.
+  await expect(nav.nth(0)).toContainText("工作台");
+  await expect(nav.nth(1)).toContainText("新建任务");
+  await expect(nav.nth(2)).toContainText("插件");
+  await expect(nav.nth(3)).toContainText("定时任务");
 
-  await nav.nth(1).click();
+  await nav.nth(2).click();
   await expect(page.locator(".page-head h1")).toHaveText("插件");
   await expect(page.locator(".page-head p")).not.toContainText("mcp__服务器__工具名");
 

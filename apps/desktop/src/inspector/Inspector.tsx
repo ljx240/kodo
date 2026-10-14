@@ -76,6 +76,10 @@ const PANEL_TABS: Record<RouteName, { tab: InspectorTab; label: string }[]> = {
   // `Record<RouteName, …>` and to guard `panelTabs[0].tab` if the route ever
   // re-enables the Inspector.
   schedule: [{ tab: "summary", label: T.inspector.panel }],
+  // Same as `schedule`: the workbench and its apps are self-contained pages
+  // and App.tsx skips the Inspector on that route. The key exists only to
+  // satisfy `Record<RouteName, …>`.
+  workbench: [{ tab: "summary", label: T.inspector.panel }],
 };
 
 function Tabs({

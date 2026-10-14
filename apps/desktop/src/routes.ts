@@ -7,6 +7,7 @@ import { isDesktop } from "./api";
  * router for four static screens.
  */
 export type RouteName =
+  | "workbench"
   | "conversation"
   | "plugins"
   | "trace"
@@ -17,10 +18,24 @@ export type RouteName =
 /** The active tab of the 插件 page — `?type=`, default `skills`. */
 export type PluginType = "skills" | "mcp" | "agents";
 
+/**
+ * The apps the workbench can open — `?app=`. The ids are the ones the backend
+ * manifests declare ([`kodo_core::apps::builtin_apps`]); 待办 / 日历 /
+ * 成果中心 open *inside* the workbench and never become first-level entries.
+ */
+export type AppId = "todo" | "calendar" | "artifacts";
+
+const APP_IDS: AppId[] = ["todo", "calendar", "artifacts"];
+
 export type Route = {
   name: RouteName;
   /** Tab of the 插件 page; meaningful only when `name === "plugins"`. */
   pluginType: PluginType;
+  /**
+   * Open app inside the workbench; meaningful only when
+   * `name === "workbench"`. `null` shows the app collection.
+   */
+  appId: AppId | null;
   inspectorOpen: boolean;
   /**
    * True under `/ui-demo`. Those routes are the deterministic screenshot states
@@ -31,6 +46,7 @@ export type Route = {
 };
 
 const NAMES: Record<string, RouteName> = {
+  workbench: "workbench",
   conversation: "conversation",
   plugins: "plugins",
   trace: "trace",
@@ -96,13 +112,23 @@ function parse(): Route {
   if (key === "plugins" || key === "skills" || key === "mcp") {
     const rawType = key === "plugins" ? params.get("type") ?? "skills" : key;
     const pluginType: PluginType = rawType === "mcp" || rawType === "agents" ? rawType : "skills";
-    return { name: "plugins", pluginType, inspectorOpen, demo };
+    return { name: "plugins", pluginType, appId: null, inspectorOpen, demo };
+  }
+
+  // The open app lives on the workbench route, so the sidebar keeps a single
+  // 工作台 entry while an app is on screen. An unknown `?app=` shows the
+  // collection rather than guessing.
+  if (key === "workbench") {
+    const rawApp = params.get("app");
+    const appId = APP_IDS.find((id) => id === rawApp) ?? null;
+    return { name: "workbench", pluginType: "skills", appId, inspectorOpen, demo };
   }
 
   return {
     // An unknown path is the live conversation, which is also where `/` lands.
     name: NAMES[key] ?? "conversation",
     pluginType: "skills",
+    appId: null,
     inspectorOpen,
     demo,
   };
@@ -132,12 +158,20 @@ export function useRoute(): Route {
  * real data; the browser keeps the demo family, which is what the visual
  * regression suite loads.
  */
-export function hrefTo(name: RouteName, inspectorOpen: boolean, type?: PluginType): string {
+export function hrefTo(
+  name: RouteName,
+  inspectorOpen: boolean,
+  type?: PluginType,
+  appId?: AppId | null,
+): string {
   const path = `${isDesktop() ? "" : DEMO_PREFIX}/${name}`;
   const params = new URLSearchParams();
   // The default tab emits no param, so wide-viewport screenshots stay
   // query-free; only a non-default tab asks for `?type=`.
   if (type && type !== "skills") params.set("type", type);
+  // Same rule for the workbench: the collection is the default and stays
+  // query-free, only an open app spells out `?app=`.
+  if (appId) params.set("app", appId);
   // Inspector default flipped to "closed on every viewport" in 2026-10-13
   // for the production path (see `parse()` above for the E2E / autopen
   // carve-out). The href only needs to spell out the state when the

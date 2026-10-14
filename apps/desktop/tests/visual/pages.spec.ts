@@ -34,6 +34,38 @@ const PAGES: Array<{ name: string; url: string; setup?: (page: Page) => Promise<
     },
   },
   { name: "settings", url: "/ui-demo/settings" },
+  // The workbench collection and the three apps it hosts. An open app is the
+  // same route with `?app=`, so the sidebar keeps its single 工作台 entry.
+  { name: "workbench", url: "/ui-demo/workbench" },
+  { name: "workbench-todo", url: "/ui-demo/workbench?app=todo" },
+  {
+    name: "workbench-todo-list",
+    url: "/ui-demo/workbench?app=todo",
+    setup: async (page) => {
+      await page.locator('[data-testid="todo-view-list"]').click();
+      await expect(page.locator('[data-testid="todo-list"]')).toBeVisible();
+    },
+  },
+  { name: "workbench-calendar", url: "/ui-demo/workbench?app=calendar" },
+  {
+    name: "workbench-calendar-month",
+    url: "/ui-demo/workbench?app=calendar",
+    setup: async (page) => {
+      await page.locator('[data-testid="cal-view-month"]').click();
+      await expect(page.locator('[data-testid="cal-month"]')).toBeVisible();
+    },
+  },
+  {
+    name: "workbench-results",
+    url: "/ui-demo/workbench?app=artifacts",
+    setup: async (page) => {
+      // The file checks are on the expanded detail, which is collapsed by
+      // default — open the first row so the missing/changed states are in the
+      // frame.
+      await page.locator(".result-title").first().click();
+      await expect(page.locator(".result-detail").first()).toBeVisible();
+    },
+  },
 ];
 
 for (const { name, url, setup } of PAGES) {

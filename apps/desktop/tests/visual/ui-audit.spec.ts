@@ -96,7 +96,13 @@ for (const type of ["skills", "agents"]) {
 test("all page families render in both themes without page errors", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  const routes = ["conversation", "plugins", "plugins?type=agents", "plugins?type=mcp", "archive", "trace", "settings"];
+  // The workbench collection and each app it hosts are their own page families,
+  // and share the same tokens as the rest.
+  const routes = [
+    "conversation", "plugins", "plugins?type=agents", "plugins?type=mcp",
+    "archive", "trace", "settings",
+    "workbench", "workbench?app=todo", "workbench?app=calendar", "workbench?app=artifacts",
+  ];
   for (const theme of ["light", "dark"]) {
     for (const [index, route] of routes.entries()) {
       await page.goto(`/ui-demo/${route}`);

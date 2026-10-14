@@ -5,6 +5,7 @@
 //! approval rendezvous) stays in each client.
 
 pub mod approve;
+pub mod apps;
 pub mod config;
 pub mod memory_outbox;
 pub mod scheduler;
@@ -12,6 +13,7 @@ pub mod scheduler_jobs;
 pub mod turn;
 
 pub use approve::{approval_fingerprint, step_kind_label, ApprovalChoice};
+pub use apps::AppStore;
 pub use config::{permission_from_settings, Overrides, ShellConfig};
 pub use memory_outbox::{event_for_item, open_default_handle, write_event};
 pub use scheduler::{

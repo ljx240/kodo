@@ -27,6 +27,15 @@ use memory::{
     memory_disable, memory_doctor, memory_inspect, memory_list, memory_search, memory_status,
 };
 
+mod apps;
+use apps::{
+    create_calendar_event, create_result, create_todo, delete_calendar_event, delete_result,
+    get_workbench_prefs, list_apps, list_calendar_events, list_results, list_todos,
+    open_result_file, reveal_result_file, set_app_enabled, set_app_favorite, set_app_links,
+    set_app_order, set_result_flags, set_todo_archived, set_todo_status, set_workbench_pref,
+    update_calendar_event, update_result, update_todo, AppService,
+};
+
 mod scheduler;
 use scheduler::SchedulerService;
 
@@ -1564,6 +1573,10 @@ fn main() {
                 }
             };
             app.manage(service);
+            // The workbench is independent of the scheduler: a failure to
+            // open its database leaves the scheduler running and makes the
+            // workbench commands answer `storage_unavailable`.
+            app.manage(AppService::boot());
             Ok(())
         })
         // The completion marker from `task_feedback` clears as soon as the
@@ -1647,6 +1660,29 @@ fn main() {
             list_task_runs,
             cancel_task_run,
             list_job_types,
+            list_apps,
+            set_app_enabled,
+            set_app_favorite,
+            set_app_order,
+            set_app_links,
+            get_workbench_prefs,
+            set_workbench_pref,
+            list_todos,
+            create_todo,
+            update_todo,
+            set_todo_status,
+            set_todo_archived,
+            list_calendar_events,
+            create_calendar_event,
+            update_calendar_event,
+            delete_calendar_event,
+            list_results,
+            create_result,
+            update_result,
+            set_result_flags,
+            delete_result,
+            open_result_file,
+            reveal_result_file,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Kodo");

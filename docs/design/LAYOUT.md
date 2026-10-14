@@ -53,8 +53,10 @@ Structure (labels as rendered, zh-CN from `apps/desktop/src/i18n.ts`):
 Kodo Code ˅                   ← brand dropdown = Work/Code switcher; the label
                                  names the current space (Kodo Work in Work)
 
+工作台          ← app collection; an app opens inside it, never as its own row
 新建任务          ← action, never active
 插件
+定时任务
 
 项目                          +
 ├─ project A
@@ -85,6 +87,14 @@ space's project-less sessions only.
 > they are tabs on the single `插件` destination alongside the new 智能体 tab
 > (COMPONENTS.md §13d/§14). The sidebar above the tree is therefore exactly
 > `新建任务` + `插件`.
+>
+> Structure update 2026-10-13: `工作台` leads the first-level rows and `定时任务`
+> closes them, so the four rows above the tree are `工作台` → `新建任务` → `插件`
+> → `定时任务`. `工作台` is the app collection and the only home for the apps:
+> 待办 / 日历 / 成果中心 open *inside* it (`/workbench?app=todo|calendar|artifacts`)
+> and never take a row of their own — the sidebar keeps its single `工作台` entry
+> while an app is on screen, so the core layout rule above still holds. 新建任务,
+> 插件 and 定时任务 keep their existing behavior unchanged.
 
 There is **no account row**. Kodo has no login, so the sidebar does not name a
 user and does not offer a sign-out.
