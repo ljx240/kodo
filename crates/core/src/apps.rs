@@ -39,6 +39,10 @@ pub enum AppError {
     UnknownApp,
     /// The app is disabled, so it may not accept writes right now.
     AppDisabled,
+    /// A status in the todo catalog still has todos in it, and the caller did
+    /// not name a status to move them to. The GUI turns this into "该状态仍有
+    /// n 个事项" plus a transfer picker rather than a dead end.
+    StatusInUse,
     /// Underlying storage failed.
     StorageUnavailable,
 }
@@ -52,6 +56,7 @@ impl AppError {
             AppError::RevisionConflict => "revision_conflict",
             AppError::UnknownApp => "unknown_app",
             AppError::AppDisabled => "app_disabled",
+            AppError::StatusInUse => "status_in_use",
             AppError::StorageUnavailable => "storage_unavailable",
         }
     }
@@ -146,7 +151,7 @@ pub fn builtin_apps() -> Vec<AppManifest> {
         AppManifest {
             app_id: "todo".into(),
             name: "待办".into(),
-            description: "记录事项，管理优先级与截止时间".into(),
+            description: "记录事项，管理优先级与截止时间，支持自定义状态与视图".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             api_version: APP_API_VERSION.into(),
             icon: "list-todo".into(),
@@ -210,34 +215,184 @@ pub fn app_job_types(app_id: &str) -> &'static [&'static str] {
 // Todos (待办)
 // ---------------------------------------------------------------------------
 
-/// The single source of truth for a todo's business state. "Board column",
-/// "completed" and "today overview" are all derived from this field — there
-/// is no second completion flag to keep in sync.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The status a new todo starts in when the caller names none. Its id is one
+/// of the three built-in catalog rows the v2 migration seeds.
+pub const DEFAULT_TODO_STATUS: &str = "todo";
+
+/// A todo's status is an id into the per-install catalog (`todo_statuses`),
+/// not an enum — the user can rename, recolour, add and reorder statuses. The
+/// built-in three keep the ids the pre-catalog build stored, so no existing
+/// row had to be rewritten.
+///
+/// "Done" is read from the catalog row's `is_done`, never inferred from an id:
+/// the user may rename 已完成, and a status id is theirs to choose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum TodoStatus {
-    Todo,
-    Doing,
-    Done,
+pub struct TodoStatusDef {
+    pub id: String,
+    pub name: String,
+    /// Palette key, not a colour value — see [`STATUS_COLORS`].
+    pub color: String,
+    /// The catalog's single "this todo is done" flag.
+    pub is_done: bool,
+    /// Built-in statuses cannot be deleted.
+    pub builtin: bool,
+    pub sort_order: i64,
+    pub version: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
-impl TodoStatus {
+/// Caller-supplied fields for a new status. `name` is required.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoStatusDraft {
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub is_done: Option<bool>,
+}
+
+/// A person a todo can be assigned to. Local only: Kodo has no accounts, so
+/// this list is built by hand and the avatar is the name's first character.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoPerson {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoTag {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub sort_order: i64,
+    pub version: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoTagDraft {
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+/// A file reference attached to a todo. Removing the record never deletes
+/// the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoAttachment {
+    pub id: String,
+    pub todo_id: String,
+    pub name: String,
+    pub path: String,
+    pub size: Option<i64>,
+    pub mime: String,
+    pub version: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoAttachmentDraft {
+    pub todo_id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub size: Option<i64>,
+    #[serde(default)]
+    pub mime: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+/// When a reminder fires. `due_before` counts back from the todo's due moment;
+/// `status_change` fires when the todo's status changes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TodoReminderKind {
+    #[default]
+    DueBefore,
+    StatusChange,
+}
+
+impl TodoReminderKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            TodoStatus::Todo => "todo",
-            TodoStatus::Doing => "doing",
-            TodoStatus::Done => "done",
+            TodoReminderKind::DueBefore => "due_before",
+            TodoReminderKind::StatusChange => "status_change",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
-            "todo" => Some(TodoStatus::Todo),
-            "doing" => Some(TodoStatus::Doing),
-            "done" => Some(TodoStatus::Done),
+            "due_before" => Some(TodoReminderKind::DueBefore),
+            "status_change" => Some(TodoReminderKind::StatusChange),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoReminder {
+    pub id: String,
+    pub todo_id: String,
+    pub kind: TodoReminderKind,
+    /// Minutes before the due moment; only meaningful for `due_before`.
+    pub offset_minutes: Option<i64>,
+    pub message: String,
+    pub enabled: bool,
+    pub version: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoReminderDraft {
+    pub todo_id: String,
+    pub kind: TodoReminderKind,
+    #[serde(default)]
+    pub offset_minutes: Option<i64>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+/// One entry in a todo's activity log: a comment, or a generated note such as
+/// "created" / "status changed". `meta` carries an opaque JSON blob the UI
+/// reads for the entries it understands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoActivity {
+    pub id: String,
+    pub todo_id: String,
+    pub kind: String,
+    pub author_id: Option<String>,
+    pub body: String,
+    pub meta: String,
+    pub created_at: i64,
+}
+
+/// A batch action over a set of todos, applied in one transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "op")]
+pub enum TodoBulkOp {
+    SetStatus { status: String },
+    SetPriority { priority: TodoPriority },
+    Archive { archived: bool },
+    Delete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,23 +424,36 @@ impl TodoPriority {
 
 /// One todo. Only `title` is required; everything else can be filled in
 /// later, and the board renders whatever is set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Eq` is deliberately absent: `estimate_hours` / `actual_hours` are floats.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Todo {
     pub id: String,
     pub title: String,
     pub notes: String,
-    pub status: TodoStatus,
+    /// An id into the `todo_statuses` catalog — see [`TodoStatusDef`].
+    pub status: String,
     pub priority: TodoPriority,
     /// Local due date, `YYYY-MM-DD`. `None` puts the todo in the inbox.
     pub due_date: Option<String>,
+    /// Local due time, `HH:MM`. Only meaningful alongside `due_date`.
+    pub due_time: Option<String>,
     /// Parent todo id for a sub-item. One level of nesting is what the UI
     /// shows; the column does not enforce depth beyond that.
     pub parent_id: Option<String>,
+    /// Who the todo is on. Ids into `todo_people` — see [`TodoPerson`].
+    pub assignee_id: Option<String>,
+    /// The editor's 事项类型: `task` / `bug` / `story` / `chore`.
+    pub item_type: String,
+    /// The editor's 所属模块, free-form.
+    pub module: String,
+    pub estimate_hours: Option<f64>,
+    pub actual_hours: Option<f64>,
     /// Archived todos are hidden from the board and list but keep their data.
     pub archived: bool,
-    /// Set when the todo entered `Done`; cleared when it leaves. Purely
-    /// informational — `status` decides what the UI shows.
+    /// Set when the todo entered a status whose `is_done` is true; cleared when
+    /// it leaves. Purely informational — the catalog decides what the UI shows.
     pub completed_at: Option<i64>,
     /// Manual ordering inside a column, ascending. Board columns sort by
     /// this, then by `created_at`.
@@ -295,23 +463,48 @@ pub struct Todo {
     pub version: u64,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Joined from `todo_tag_links`.
+    pub tag_ids: Vec<String>,
+    /// Joined from `todo_links`, both stored directions folded into one list.
+    pub link_ids: Vec<String>,
+    /// Derived at read time from the todo's status row and returned with the
+    /// todo so no consumer has to resolve a status id itself. Never stored.
+    pub is_done: bool,
 }
 
 /// Caller-supplied fields for a new todo. `title` is the only required one.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Every field but `title` carries `#[serde(default)]`: the `app.todo.create`
+/// scheduled job and any payload written before a field existed must keep
+/// deserialising.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoDraft {
     pub title: String,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
-    pub status: Option<TodoStatus>,
+    pub status: Option<String>,
     #[serde(default)]
     pub priority: Option<TodoPriority>,
     #[serde(default)]
     pub due_date: Option<String>,
     #[serde(default)]
+    pub due_time: Option<String>,
+    #[serde(default)]
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub assignee_id: Option<String>,
+    #[serde(default)]
+    pub item_type: Option<String>,
+    #[serde(default)]
+    pub module: Option<String>,
+    #[serde(default)]
+    pub estimate_hours: Option<f64>,
+    #[serde(default)]
+    pub actual_hours: Option<f64>,
+    #[serde(default)]
+    pub tag_ids: Option<Vec<String>>,
     #[serde(default)]
     pub source: Option<String>,
     /// Client-generated idempotency key: repeating the same create returns
@@ -540,6 +733,95 @@ pub fn time_le(start: &str, end: &str) -> bool {
     start <= end
 }
 
+/// The palette a status, tag or person colour may name. Keys only — never a
+/// hex value: the frontend owns the actual colours, so a theme swap stays
+/// CSS-only and a user-created status needs no new stylesheet rule.
+pub const STATUS_COLORS: [&str; 8] = [
+    "gray", "blue", "amber", "green", "purple", "teal", "pink", "red",
+];
+
+/// How many tags one todo may carry.
+pub const MAX_TODO_TAGS: usize = 12;
+
+/// How many ids one call may name — a batch action or a whole id list.
+pub const MAX_ID_LIST: usize = 500;
+
+/// The editor's 事项类型 options. Free-form values are rejected so the field
+/// stays groupable.
+pub const ITEM_TYPES: [&str; 4] = ["task", "bug", "story", "chore"];
+
+/// Upper bound for `estimate_hours` / `actual_hours` — a sanity ceiling, not a
+/// business rule.
+pub const MAX_HOURS: f64 = 100_000.0;
+
+/// Trim and bound an id used by the todo sub-tables (statuses, tags, people,
+/// attachments). Ids are generated locally, so this is a shape check rather
+/// than a security boundary.
+pub fn clean_id(raw: &str) -> Result<String, AppError> {
+    let value = raw.trim();
+    if value.is_empty() || value.chars().count() > 64 {
+        return Err(AppError::InvalidInput);
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::InvalidInput);
+    }
+    Ok(value.to_owned())
+}
+
+/// Accept a [`STATUS_COLORS`] key, falling back when the caller named none.
+pub fn clean_color(raw: Option<&str>, fallback: &str) -> Result<String, AppError> {
+    let Some(raw) = raw else {
+        return Ok(fallback.to_owned());
+    };
+    let value = raw.trim();
+    if !STATUS_COLORS.contains(&value) {
+        return Err(AppError::InvalidInput);
+    }
+    Ok(value.to_owned())
+}
+
+/// Bound an optional hour count. Non-finite values (NaN, ±inf) and negatives
+/// are rejected — they would sort and sum nonsensically in the UI.
+pub fn validate_hours(value: Option<f64>) -> Result<Option<f64>, AppError> {
+    match value {
+        None => Ok(None),
+        Some(hours) if hours.is_finite() && (0.0..=MAX_HOURS).contains(&hours) => Ok(Some(hours)),
+        Some(_) => Err(AppError::InvalidInput),
+    }
+}
+
+/// Accept an [`ITEM_TYPES`] value, defaulting to `task`.
+pub fn clean_item_type(raw: Option<&str>) -> Result<String, AppError> {
+    let Some(raw) = raw else {
+        return Ok("task".to_owned());
+    };
+    let value = raw.trim();
+    if !ITEM_TYPES.contains(&value) {
+        return Err(AppError::InvalidInput);
+    }
+    Ok(value.to_owned())
+}
+
+/// Validate a list of ids — a todo's tags, its related items, a batch target
+/// set. Each must be well formed, duplicates collapse, and the list is
+/// bounded. Order is preserved: it is the caller's.
+pub fn clean_id_list(ids: &[String], max: usize) -> Result<Vec<String>, AppError> {
+    let mut seen: Vec<String> = Vec::new();
+    for raw in ids {
+        let id = clean_id(raw)?;
+        if !seen.contains(&id) {
+            seen.push(id);
+        }
+    }
+    if seen.len() > max {
+        return Err(AppError::InvalidInput);
+    }
+    Ok(seen)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,10 +848,84 @@ mod tests {
 
     #[test]
     fn todo_status_and_priority_use_stable_codes() {
-        assert_eq!(serde_json::to_value(TodoStatus::Doing).unwrap(), "doing");
         assert_eq!(serde_json::to_value(TodoPriority::High).unwrap(), "high");
-        assert_eq!(TodoStatus::parse("done"), Some(TodoStatus::Done));
         assert_eq!(TodoPriority::parse("urgent"), None);
+        // A new todo starts in the status whose id the pre-catalog enum used,
+        // which is what lets migration 0002 rewrite no existing row.
+        assert_eq!(DEFAULT_TODO_STATUS, "todo");
+        assert_eq!(TodoReminderKind::DueBefore.as_str(), "due_before");
+        assert_eq!(TodoReminderKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn a_draft_needs_only_a_title() {
+        // The `app.todo.create` job and any payload written before a field
+        // existed must keep deserialising — every other field is defaulted.
+        let draft: TodoDraft = serde_json::from_str(r#"{"title":"买牛奶"}"#).unwrap();
+        assert_eq!(draft.title, "买牛奶");
+        assert!(draft.status.is_none() && draft.tag_ids.is_none());
+        assert!(draft.estimate_hours.is_none() && draft.due_time.is_none());
+    }
+
+    #[test]
+    fn bulk_ops_round_trip_tagged() {
+        let op = TodoBulkOp::Archive { archived: true };
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(json["op"], "archive");
+        assert_eq!(json["archived"], true);
+        let back: TodoBulkOp = serde_json::from_value(json).unwrap();
+        assert_eq!(back, op);
+    }
+
+    #[test]
+    fn ids_are_shape_checked() {
+        assert_eq!(clean_id(" st-1 ").unwrap(), "st-1");
+        assert_eq!(clean_id(""), Err(AppError::InvalidInput));
+        assert_eq!(clean_id("a/b"), Err(AppError::InvalidInput));
+        assert_eq!(clean_id(&"x".repeat(65)), Err(AppError::InvalidInput));
+    }
+
+    #[test]
+    fn colours_are_palette_keys_not_hex() {
+        assert_eq!(clean_color(Some("amber"), "gray").unwrap(), "amber");
+        assert_eq!(clean_color(None, "gray").unwrap(), "gray");
+        assert_eq!(
+            clean_color(Some("#ff0000"), "gray"),
+            Err(AppError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn hours_are_finite_and_bounded() {
+        assert_eq!(validate_hours(None).unwrap(), None);
+        assert_eq!(validate_hours(Some(3.5)).unwrap(), Some(3.5));
+        assert_eq!(validate_hours(Some(-1.0)), Err(AppError::InvalidInput));
+        assert_eq!(validate_hours(Some(f64::NAN)), Err(AppError::InvalidInput));
+        assert_eq!(
+            validate_hours(Some(MAX_HOURS + 1.0)),
+            Err(AppError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn item_types_are_closed_and_default_to_task() {
+        assert_eq!(clean_item_type(None).unwrap(), "task");
+        assert_eq!(clean_item_type(Some("bug")).unwrap(), "bug");
+        assert_eq!(
+            clean_item_type(Some("epic")),
+            Err(AppError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn id_lists_dedupe_and_stay_bounded() {
+        let ids = vec!["t1".to_owned(), "t2".to_owned(), "t1".to_owned()];
+        assert_eq!(clean_id_list(&ids, MAX_TODO_TAGS).unwrap(), vec!["t1", "t2"]);
+        let too_many: Vec<String> = (0..MAX_TODO_TAGS + 1).map(|n| format!("t{n}")).collect();
+        assert_eq!(
+            clean_id_list(&too_many, MAX_TODO_TAGS),
+            Err(AppError::InvalidInput)
+        );
     }
 
     #[test]
@@ -621,6 +977,7 @@ mod tests {
     #[test]
     fn error_codes_are_stable_strings() {
         assert_eq!(AppError::RevisionConflict.code(), "revision_conflict");
+        assert_eq!(AppError::StatusInUse.code(), "status_in_use");
         assert_eq!(AppError::AppDisabled.to_string(), "app_disabled");
     }
 }

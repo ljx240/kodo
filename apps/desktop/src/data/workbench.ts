@@ -10,7 +10,18 @@
  * literal for the same reason.
  */
 
-import type { AppViewDto, ArtifactViewDto, CalendarEventDto, TodoDto } from "../api";
+import type {
+  AppViewDto,
+  ArtifactViewDto,
+  CalendarEventDto,
+  TodoActivityDto,
+  TodoAttachmentDto,
+  TodoDto,
+  TodoPersonDto,
+  TodoReminderDto,
+  TodoStatusDefDto,
+  TodoTagDto,
+} from "../api";
 
 /** The workbench's "today" on demo routes — a Wednesday, fixed by the suite. */
 export const DEMO_TODAY = "2026-09-30";
@@ -19,8 +30,10 @@ export const DEMO_TODAY = "2026-09-30";
 export const DEMO_WEEK_START = "2026-09-28";
 
 function at(hour: number, minute = 0): number {
-  // Deterministic: `Date.parse` on a literal, never `Date.now()`.
-  return Math.floor(Date.parse(`${DEMO_TODAY}T00:00:00Z`) / 1000) + hour * 3600 + minute * 60;
+  // Deterministic: `Date.parse` on a literal, never `Date.now()`. Epoch
+  // **milliseconds** — every consumer (`W.updatedOn`, `stampOf`) builds a
+  // `Date` from this, and they all expect ms.
+  return Date.parse(`${DEMO_TODAY}T00:00:00Z`) + hour * 3_600_000 + minute * 60_000;
 }
 
 export const DEMO_WORKBENCH_APPS: AppViewDto[] = [
@@ -28,7 +41,7 @@ export const DEMO_WORKBENCH_APPS: AppViewDto[] = [
     manifest: {
       appId: "todo",
       name: "待办",
-      description: "看板与列表管理事项、子项、优先级和截止日期。",
+      description: "记录事项，管理优先级与截止时间，支持自定义状态与视图",
       version: "1.0.0",
       apiVersion: "1",
       icon: "list-todo",
@@ -89,15 +102,176 @@ export const DEMO_WORKBENCH_APPS: AppViewDto[] = [
   },
 ];
 
+/**
+ * The board's columns. `todo` / `doing` / `done` are the ids migration 0002
+ * seeds, so a demo row means the same thing on a real install; `review` is the
+ * design's 待确认 and exists only here.
+ */
+export const DEMO_TODO_STATUSES: TodoStatusDefDto[] = [
+  {
+    id: "todo",
+    name: "待处理",
+    color: "gray",
+    isDone: false,
+    builtin: true,
+    sortOrder: 0,
+    version: 1,
+    createdAt: 0,
+    updatedAt: 0,
+  },
+  {
+    id: "doing",
+    name: "进行中",
+    color: "blue",
+    isDone: false,
+    builtin: true,
+    sortOrder: 1,
+    version: 4,
+    createdAt: 0,
+    updatedAt: at(11, 5),
+  },
+  {
+    id: "review",
+    name: "待确认",
+    color: "amber",
+    isDone: false,
+    builtin: false,
+    sortOrder: 2,
+    version: 2,
+    createdAt: at(9, 0),
+    updatedAt: at(9, 30),
+  },
+  {
+    id: "done",
+    name: "已完成",
+    color: "green",
+    isDone: true,
+    builtin: true,
+    sortOrder: 3,
+    version: 1,
+    createdAt: 0,
+    updatedAt: 0,
+  },
+];
+
+export const DEMO_TODO_TAGS: TodoTagDto[] = [
+  { id: "tag-lakehouse", name: "实时数仓", color: "blue", sortOrder: 0, version: 1, createdAt: 0, updatedAt: 0 },
+  { id: "tag-k2k", name: "k2k-rust", color: "purple", sortOrder: 1, version: 1, createdAt: 0, updatedAt: 0 },
+  { id: "tag-flink", name: "Flink", color: "teal", sortOrder: 2, version: 1, createdAt: 0, updatedAt: 0 },
+  { id: "tag-sync", name: "数据同步", color: "amber", sortOrder: 3, version: 1, createdAt: 0, updatedAt: 0 },
+  { id: "tag-docs", name: "文档", color: "pink", sortOrder: 4, version: 1, createdAt: 0, updatedAt: 0 },
+  { id: "tag-perf", name: "性能", color: "red", sortOrder: 5, version: 1, createdAt: 0, updatedAt: 0 },
+];
+
+/** Local people. The avatar is the first character of `name` — no images. */
+export const DEMO_TODO_PEOPLE: TodoPersonDto[] = [
+  { id: "person-me", name: "我", color: "blue", createdAt: 0 },
+  { id: "person-zhang", name: "张三", color: "teal", createdAt: 0 },
+  { id: "person-li", name: "李四", color: "purple", createdAt: 0 },
+  { id: "person-wang", name: "王五", color: "amber", createdAt: 0 },
+];
+
+export const DEMO_TODO_ATTACHMENTS: TodoAttachmentDto[] = [
+  {
+    id: "att-1",
+    todoId: "todo-1",
+    name: "route-trace.log",
+    path: "/Users/demo/logs/route-trace.log",
+    size: 184_320,
+    mime: "text/plain",
+    version: 1,
+    createdAt: at(9, 40),
+    updatedAt: at(9, 40),
+  },
+  {
+    id: "att-2",
+    todoId: "todo-1",
+    name: "延迟基线对比.xlsx",
+    path: "/Users/demo/报表/延迟基线对比.xlsx",
+    size: 47_616,
+    mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    version: 1,
+    createdAt: at(10, 15),
+    updatedAt: at(10, 15),
+  },
+];
+
+export const DEMO_TODO_REMINDERS: TodoReminderDto[] = [
+  {
+    id: "rem-1",
+    todoId: "todo-1",
+    kind: "dueBefore",
+    offsetMinutes: 1440,
+    message: "",
+    enabled: true,
+    version: 1,
+    createdAt: at(9, 21),
+    updatedAt: at(9, 21),
+  },
+  {
+    id: "rem-2",
+    todoId: "todo-1",
+    kind: "statusChange",
+    offsetMinutes: null,
+    message: "",
+    enabled: false,
+    version: 1,
+    createdAt: at(9, 22),
+    updatedAt: at(9, 22),
+  },
+];
+
+export const DEMO_TODO_ACTIVITY: TodoActivityDto[] = [
+  {
+    id: "act-1",
+    todoId: "todo-1",
+    kind: "created",
+    authorId: "person-me",
+    body: "创建了事项",
+    meta: "",
+    createdAt: at(9, 20),
+  },
+  {
+    id: "act-2",
+    todoId: "todo-1",
+    kind: "status",
+    authorId: "person-me",
+    body: "状态从 待处理 变为 进行中",
+    meta: '{"from":"todo","to":"doing"}',
+    createdAt: at(10, 5),
+  },
+  {
+    id: "act-3",
+    todoId: "todo-1",
+    kind: "comment",
+    authorId: "person-me",
+    body: "@张三 兜底分支的日志我贴在附件里了，明天上午一起过一遍。",
+    meta: "",
+    createdAt: at(11, 5),
+  },
+];
+
+/**
+ * Seven top-level rows — two 待处理, two 进行中, one 待确认, one 已完成 and one
+ * archived — plus two sub-item lists (2/5 and 4/4). Sub-items are rows with a
+ * `parentId`, so they never render as cards of their own; they only feed the
+ * progress bar.
+ */
 export const DEMO_TODOS: TodoDto[] = [
   {
     id: "todo-1",
     title: "复核 k2k-rust 未知表路由的兜底分支",
-    notes: "对照 registry 的注册顺序确认 fallback 不会吞掉显式路由。",
+    notes: "对照 registry 的注册顺序确认 fallback 不会吞掉显式路由，并把结论写进排查记录。",
     status: "doing",
     priority: "high",
     dueDate: DEMO_TODAY,
+    dueTime: "12:00",
     parentId: null,
+    assigneeId: "person-me",
+    itemType: "task",
+    module: "实时数仓",
+    estimateHours: 8,
+    actualHours: 3.5,
     archived: false,
     completedAt: null,
     sortOrder: 0,
@@ -105,6 +279,9 @@ export const DEMO_TODOS: TodoDto[] = [
     version: 3,
     createdAt: at(9, 20),
     updatedAt: at(11, 5),
+    tagIds: ["tag-k2k", "tag-lakehouse"],
+    linkIds: ["todo-3"],
+    isDone: false,
   },
   {
     id: "todo-2",
@@ -113,7 +290,13 @@ export const DEMO_TODOS: TodoDto[] = [
     status: "todo",
     priority: "normal",
     dueDate: "2026-10-02",
+    dueTime: null,
     parentId: null,
+    assigneeId: "person-zhang",
+    itemType: "story",
+    module: "文档",
+    estimateHours: 4,
+    actualHours: null,
     archived: false,
     completedAt: null,
     sortOrder: 0,
@@ -121,6 +304,9 @@ export const DEMO_TODOS: TodoDto[] = [
     version: 1,
     createdAt: at(9, 24),
     updatedAt: at(9, 24),
+    tagIds: ["tag-docs", "tag-lakehouse"],
+    linkIds: [],
+    isDone: false,
   },
   {
     id: "todo-3",
@@ -129,7 +315,13 @@ export const DEMO_TODOS: TodoDto[] = [
     status: "todo",
     priority: "high",
     dueDate: "2026-09-28",
+    dueTime: null,
     parentId: null,
+    assigneeId: "person-wang",
+    itemType: "task",
+    module: "实时数仓",
+    estimateHours: 2,
+    actualHours: 2,
     archived: false,
     completedAt: null,
     sortOrder: 1,
@@ -137,38 +329,59 @@ export const DEMO_TODOS: TodoDto[] = [
     version: 2,
     createdAt: at(9, 26),
     updatedAt: at(10, 40),
+    tagIds: ["tag-flink"],
+    linkIds: ["todo-1"],
+    isDone: false,
   },
   {
     id: "todo-4",
     title: "补齐 k2k-rust 的回归用例",
     notes: "",
-    status: "todo",
+    status: "doing",
     priority: "normal",
     dueDate: null,
-    parentId: "todo-1",
+    dueTime: null,
+    parentId: null,
+    assigneeId: "person-li",
+    itemType: "bug",
+    module: "k2k-rust",
+    estimateHours: 6,
+    actualHours: 6,
     archived: false,
     completedAt: null,
-    sortOrder: 2,
+    sortOrder: 1,
     source: "manual",
-    version: 1,
+    version: 5,
     createdAt: at(11, 8),
-    updatedAt: at(11, 8),
+    updatedAt: at(14, 30),
+    tagIds: ["tag-k2k"],
+    linkIds: [],
+    isDone: false,
   },
   {
     id: "todo-5",
     title: "更新发布说明里的 v1.2 段落",
     notes: "",
-    status: "todo",
-    priority: "low",
-    dueDate: null,
+    status: "review",
+    priority: "normal",
+    dueDate: DEMO_TODAY,
+    dueTime: "18:00",
     parentId: null,
+    assigneeId: "person-me",
+    itemType: "chore",
+    module: "发布",
+    estimateHours: 1,
+    actualHours: null,
     archived: false,
     completedAt: null,
-    sortOrder: 3,
+    sortOrder: 0,
     source: "scheduled",
     version: 1,
     createdAt: at(8, 30),
     updatedAt: at(8, 30),
+    tagIds: ["tag-docs"],
+    linkIds: [],
+    isDone: false,
   },
   {
     id: "todo-6",
@@ -177,7 +390,13 @@ export const DEMO_TODOS: TodoDto[] = [
     status: "done",
     priority: "normal",
     dueDate: null,
+    dueTime: null,
     parentId: null,
+    assigneeId: "person-me",
+    itemType: "task",
+    module: "k2k-rust",
+    estimateHours: 1,
+    actualHours: 1,
     archived: false,
     completedAt: at(10, 2),
     sortOrder: 0,
@@ -185,6 +404,9 @@ export const DEMO_TODOS: TodoDto[] = [
     version: 4,
     createdAt: at(8, 0),
     updatedAt: at(10, 2),
+    tagIds: [],
+    linkIds: [],
+    isDone: true,
   },
   {
     id: "todo-7",
@@ -193,15 +415,37 @@ export const DEMO_TODOS: TodoDto[] = [
     status: "todo",
     priority: "low",
     dueDate: "2026-09-20",
+    dueTime: null,
     parentId: null,
+    assigneeId: null,
+    itemType: "chore",
+    module: "运维",
+    estimateHours: null,
+    actualHours: null,
     archived: true,
     completedAt: null,
-    sortOrder: 4,
+    sortOrder: 2,
     source: "manual",
     version: 2,
     createdAt: at(7, 40),
     updatedAt: at(7, 40),
+    tagIds: [],
+    linkIds: [],
+    isDone: false,
   },
+
+  // 子项 — todo-1 的 2/5
+  { id: "todo-1a", title: "核对 catalog 的注册顺序", notes: "", status: "done", priority: "normal", dueDate: null, dueTime: null, parentId: "todo-1", assigneeId: null, itemType: "task", module: "", estimateHours: null, actualHours: null, archived: false, completedAt: at(10, 10), sortOrder: 0, source: "manual", version: 1, createdAt: at(9, 30), updatedAt: at(10, 10), tagIds: [], linkIds: [], isDone: true },
+  { id: "todo-1b", title: "补一条 fallback 单测", notes: "", status: "done", priority: "normal", dueDate: null, dueTime: null, parentId: "todo-1", assigneeId: null, itemType: "task", module: "", estimateHours: null, actualHours: null, archived: false, completedAt: at(10, 35), sortOrder: 1, source: "manual", version: 1, createdAt: at(9, 32), updatedAt: at(10, 35), tagIds: [], linkIds: [], isDone: true },
+  { id: "todo-1c", title: "确认显式路由优先于兜底", notes: "", status: "doing", priority: "normal", dueDate: null, dueTime: null, parentId: "todo-1", assigneeId: null, itemType: "task", module: "", estimateHours: null, actualHours: null, archived: false, completedAt: null, sortOrder: 2, source: "manual", version: 1, createdAt: at(9, 34), updatedAt: at(10, 50), tagIds: [], linkIds: [], isDone: false },
+  { id: "todo-1d", title: "补充日志埋点", notes: "", status: "todo", priority: "normal", dueDate: null, dueTime: null, parentId: "todo-1", assigneeId: null, itemType: "task", module: "", estimateHours: null, actualHours: null, archived: false, completedAt: null, sortOrder: 3, source: "manual", version: 1, createdAt: at(9, 36), updatedAt: at(9, 36), tagIds: [], linkIds: [], isDone: false },
+  { id: "todo-1e", title: "更新 README 的路由说明", notes: "", status: "todo", priority: "normal", dueDate: null, dueTime: null, parentId: "todo-1", assigneeId: null, itemType: "task", module: "", estimateHours: null, actualHours: null, archived: false, completedAt: null, sortOrder: 4, source: "manual", version: 1, createdAt: at(9, 38), updatedAt: at(9, 38), tagIds: [], linkIds: [], isDone: false },
+
+  // 子项 — todo-4 的 4/4
+  { id: "todo-4a", title: "未知表落到兜底分支", notes: "", status: "done", priority: "normal", dueDate: null, dueTime: null, parentId: "todo-4", assigneeId: null, itemType: "task", module: "", estimateHours: null, actualHours: null, archived: false, completedAt: at(11, 30), sortOrder: 0, source: "manual", version: 1, createdAt: at(11, 10), updatedAt: at(11, 30), tagIds: [], linkIds: [], isDone: true },
+  { id: "todo-4b", title: "显式路由不被覆盖", notes: "", status: "done", priority: "normal", dueDate: null, dueTime: null, parentId: "todo-4", assigneeId: null, itemType: "task", module: "", estimateHours: null, actualHours: null, archived: false, completedAt: at(12, 10), sortOrder: 1, source: "manual", version: 1, createdAt: at(11, 12), updatedAt: at(12, 10), tagIds: [], linkIds: [], isDone: true },
+  { id: "todo-4c", title: "并发注册同一条路由", notes: "", status: "done", priority: "normal", dueDate: null, dueTime: null, parentId: "todo-4", assigneeId: null, itemType: "task", module: "", estimateHours: null, actualHours: null, archived: false, completedAt: at(13, 5), sortOrder: 2, source: "manual", version: 1, createdAt: at(11, 14), updatedAt: at(13, 5), tagIds: [], linkIds: [], isDone: true },
+  { id: "todo-4d", title: "空 registry 的边界", notes: "", status: "done", priority: "normal", dueDate: null, dueTime: null, parentId: "todo-4", assigneeId: null, itemType: "task", module: "", estimateHours: null, actualHours: null, archived: false, completedAt: at(14, 30), sortOrder: 3, source: "manual", version: 1, createdAt: at(11, 16), updatedAt: at(14, 30), tagIds: [], linkIds: [], isDone: true },
 ];
 
 /** IANA name of the machine the fixture pretends to run on. */

@@ -1,0 +1,1555 @@
+/* ── 待办 (Todo) — scoped visual language ──────────────────────────────────
+   DESIGN.md §2a records this as the one *approved scoped exception* to the
+   house density and shape language: the 待办 app follows its own design
+   reference (28px page title, 10–12px radii, pills, avatars, progress bars,
+   a sticky stats bar) while every other surface in Kodo keeps §3/§4.
+
+   The exception is contained by this file alone. Two rules make it
+   auditable:
+
+     1. every selector in this file is rooted at `.todo-app`, and `.todo-app`
+        only ever renders on the 待办 `<main>`. Every block-opening line
+        (column 0, ending in `{`) must start with `.todo-app`, the dark-theme
+        form `[data-theme="dark"] .todo-app`, or `@media` — so this returns
+        nothing:
+
+          grep -nE '^[^[:space:]].*\{\s*$' todo.css \
+            | grep -vE ':(\.todo-app|\[data-theme="dark"\] \.todo-app|@media)'
+
+     2. `.todo-notes` is deliberately NOT here — 日历 and 成果中心 reuse it, so
+        it stays in pages.css with the rest of the shared primitives.
+
+   Colour is data-driven: a status, a tag or a person carries the palette key
+   the store gave it (`data-color="blue"`), the mapping block below turns that
+   key into two custom properties, and every chip reads those two. A colour
+   the user invents needs no new rule here.
+
+   Imported from main.tsx *after* pages.css so these rules win at equal
+   specificity.
+   ──────────────────────────────────────────────────────────────────────── */
+
+.todo-app {
+  /* Shape — the exception's own scale, never the house 5/6/8px. */
+  --todo-radius-card: 12px;
+  --todo-radius-well: 10px;
+  --todo-radius-pill: 999px;
+  --todo-radius-chip: 6px;
+  --todo-radius-control: 8px;
+
+  /* Type — one larger title, everything else stays at house sizes. */
+  --todo-title-size: 28px;
+  --todo-card-title-size: 15px;
+  --todo-column-name-size: 15px;
+  --todo-font-row-title: 15px;
+
+  /* Geometry */
+  --todo-card-pad: 14px;
+  --todo-column-pad: 12px;
+  --todo-column-min: 244px;
+  --todo-gap: 14px;
+  --todo-avatar-size: 28px;
+  --todo-control-height: 32px;
+  --todo-chip-height: 22px;
+
+  /* Status palette (catalog `color` keys). `-fg` is AA on `-bg`. */
+  --todo-st-gray: #475467;
+  --todo-st-gray-bg: #f2f4f7;
+  --todo-st-blue: #1d4ed8;
+  --todo-st-blue-bg: #eef5ff;
+  --todo-st-amber: #b45309;
+  --todo-st-amber-bg: #fef6e7;
+  --todo-st-green: #15803d;
+  --todo-st-green-bg: #e9f7ef;
+  --todo-st-purple: #7c3aed;
+  --todo-st-purple-bg: #f4f0ff;
+  --todo-st-teal: #0f766e;
+  --todo-st-teal-bg: #e6f6f4;
+  --todo-st-pink: #be185d;
+  --todo-st-pink-bg: #fdf0f6;
+  --todo-st-red: #b91c1c;
+  --todo-st-red-bg: #fef2f2;
+
+  /* Priority reuses the status hues: 高 red / 中 blue / 低 green. */
+  --todo-prio-high: var(--todo-st-red);
+  --todo-prio-high-bg: var(--todo-st-red-bg);
+  --todo-prio-normal: var(--todo-st-blue);
+  --todo-prio-normal-bg: var(--todo-st-blue-bg);
+  --todo-prio-low: var(--todo-st-green);
+  --todo-prio-low-bg: var(--todo-st-green-bg);
+
+  /* Board column well — a shade quieter than the card it holds. */
+  --todo-col-bg: var(--kodo-canvas);
+  --todo-card-bg: var(--kodo-canvas);
+  --todo-card-shadow: 0 1px 2px rgb(23 32 51 / 5%);
+  --todo-bar-track: var(--kodo-border);
+  --todo-selected-bg: var(--kodo-selected);
+  --todo-group-bg: var(--kodo-surface);
+  --todo-chip-active-bg: var(--kodo-selected);
+  --todo-chip-active-border: var(--kodo-selected);
+  --todo-check-ink: #ffffff;
+}
+
+/* Dark theme remaps every pill hue. A missing key here shows up as a bright
+   light-mode chip on a dark surface, so the block is complete by design. */
+[data-theme="dark"] .todo-app {
+  --todo-st-gray: #a7b0c0;
+  --todo-st-gray-bg: #1e2633;
+  --todo-st-blue: #7aa2ff;
+  --todo-st-blue-bg: #17253f;
+  --todo-st-amber: #fbbf24;
+  --todo-st-amber-bg: #2a2010;
+  --todo-st-green: #4ade80;
+  --todo-st-green-bg: #10251c;
+  --todo-st-purple: #c4a5ff;
+  --todo-st-purple-bg: #241a3d;
+  --todo-st-teal: #5eead4;
+  --todo-st-teal-bg: #0f2a28;
+  --todo-st-pink: #f9a8d4;
+  --todo-st-pink-bg: #311524;
+  --todo-st-red: #f87171;
+  --todo-st-red-bg: #2a1515;
+
+  --todo-card-shadow: none;
+  --todo-bar-track: var(--kodo-border-strong);
+  --todo-check-ink: var(--kodo-canvas);
+}
+
+/* ── palette keys → chip colours ─────────────────────────────────────────
+   One mapping for every `data-color` carrier: the status pill, the column
+   dot, a tag chip, an avatar. Consumers only ever read `--todo-chip` and
+   `--todo-chip-bg`, so a ninth colour is one line here and nothing else. */
+
+.todo-app [data-color="gray"] { --todo-chip: var(--todo-st-gray); --todo-chip-bg: var(--todo-st-gray-bg); }
+.todo-app [data-color="blue"] { --todo-chip: var(--todo-st-blue); --todo-chip-bg: var(--todo-st-blue-bg); }
+.todo-app [data-color="amber"] { --todo-chip: var(--todo-st-amber); --todo-chip-bg: var(--todo-st-amber-bg); }
+.todo-app [data-color="green"] { --todo-chip: var(--todo-st-green); --todo-chip-bg: var(--todo-st-green-bg); }
+.todo-app [data-color="purple"] { --todo-chip: var(--todo-st-purple); --todo-chip-bg: var(--todo-st-purple-bg); }
+.todo-app [data-color="teal"] { --todo-chip: var(--todo-st-teal); --todo-chip-bg: var(--todo-st-teal-bg); }
+.todo-app [data-color="pink"] { --todo-chip: var(--todo-st-pink); --todo-chip-bg: var(--todo-st-pink-bg); }
+.todo-app [data-color="red"] { --todo-chip: var(--todo-st-red); --todo-chip-bg: var(--todo-st-red-bg); }
+
+/* ── page shell ─────────────────────────────────────────────────────────── */
+
+.todo-app .page-head h1 {
+  font-size: var(--todo-title-size);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* The stats bar is flush to the bottom of the scrollport, so the scroller
+   gives up its own bottom padding and lets the bar carry it. */
+.todo-app .app-body {
+  padding-bottom: 0;
+}
+
+/* ── the board ──────────────────────────────────────────────────────────── */
+
+.todo-app .todo-board {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(var(--todo-column-min), 1fr);
+  gap: var(--todo-gap);
+  align-items: start;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.todo-app .todo-column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: var(--todo-column-pad);
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-card);
+  background: var(--todo-col-bg);
+}
+
+.todo-app .todo-column-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+}
+
+.todo-app .todo-column-name {
+  color: var(--kodo-text);
+  font-size: var(--todo-column-name-size);
+  font-weight: 600;
+}
+
+.todo-app .todo-column-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--todo-radius-chip);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The status dot: the column's colour in the head, and inside a status pill.
+   Both read the two variables `data-color` set, so a dot needs no key of its
+   own — the head sets `data-color` on the dot, a pill on its wrapper. */
+.todo-app .todo-status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--todo-chip, var(--kodo-text-muted));
+}
+
+/* The full-width add row under the head — the design's second way into the
+   same inline draft the head's `+` opens. */
+.todo-app .todo-column-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: var(--todo-control-height);
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-control);
+  background: var(--todo-card-bg);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  cursor: pointer;
+}
+
+.todo-app .todo-column-add:hover {
+  border-color: var(--kodo-border-strong);
+  color: var(--kodo-text);
+}
+
+/* The body is the drop target, so it keeps a floor height even when empty —
+   otherwise an empty column has nothing to release over. */
+.todo-app .todo-column-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 96px;
+  border-radius: var(--todo-radius-well);
+}
+
+.todo-app .todo-column-body--over {
+  background: var(--kodo-selected);
+  outline: 1px dashed var(--kodo-accent);
+  outline-offset: -2px;
+}
+
+/* The dashed drop target of a column that is not finished yet. */
+.todo-app .todo-drop-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 148px;
+  padding: 16px;
+  border: 1px dashed var(--kodo-border-strong);
+  border-radius: var(--todo-radius-well);
+  background: transparent;
+  cursor: pointer;
+}
+
+.todo-app .todo-drop-zone:hover {
+  border-color: var(--kodo-accent);
+}
+
+.todo-app .todo-drop-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 2px;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: var(--todo-radius-chip);
+  color: var(--kodo-text-secondary);
+}
+
+.todo-app .todo-drop-title {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+}
+
+.todo-app .todo-drop-hint {
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-sm);
+}
+
+/* The 太棒了 state: a finished column says so rather than inviting a drop. */
+.todo-app .todo-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 148px;
+  padding: 16px;
+  color: var(--kodo-text-muted);
+  text-align: center;
+}
+
+.todo-app .todo-empty-art {
+  margin-bottom: 6px;
+  color: var(--kodo-border-strong);
+}
+
+.todo-app .todo-empty-title {
+  margin: 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  font-weight: 500;
+}
+
+.todo-app .todo-empty-hint {
+  margin: 0;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-sm);
+}
+
+/* ── chips ──────────────────────────────────────────────────────────────── */
+
+.todo-app .todo-priority,
+.todo-app .todo-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--todo-chip-height);
+  padding: 0 8px;
+  border-radius: var(--todo-radius-chip);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.todo-app .todo-tag {
+  background: var(--todo-chip-bg);
+  color: var(--todo-chip);
+  font-weight: 400;
+}
+
+.todo-app .todo-priority {
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+}
+
+.todo-app .todo-priority--high {
+  background: var(--todo-prio-high-bg);
+  color: var(--todo-prio-high);
+}
+
+.todo-app .todo-priority--normal {
+  background: var(--todo-prio-normal-bg);
+  color: var(--todo-prio-normal);
+}
+
+.todo-app .todo-priority--low {
+  background: var(--todo-prio-low-bg);
+  color: var(--todo-prio-low);
+}
+
+.todo-app .todo-due {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  white-space: nowrap;
+}
+
+.todo-app .todo-due--late {
+  color: var(--kodo-error);
+}
+
+.todo-app .todo-due--none {
+  color: var(--kodo-text-muted);
+}
+
+.todo-app .todo-source {
+  padding: 1px 6px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-chip);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+}
+
+/* ── avatars ────────────────────────────────────────────────────────────── */
+
+.todo-app .todo-avatar {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--todo-avatar-size);
+  height: var(--todo-avatar-size);
+  border-radius: 50%;
+  background: var(--todo-chip-bg, var(--kodo-surface));
+  color: var(--todo-chip, var(--kodo-text-secondary));
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+  user-select: none;
+}
+
+/* ── progress ───────────────────────────────────────────────────────────── */
+
+.todo-app .todo-subcount {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.todo-app .todo-progress {
+  display: inline-block;
+  width: 56px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--todo-bar-track);
+  overflow: hidden;
+}
+
+.todo-app .todo-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--kodo-accent);
+}
+
+.todo-app .todo-progress--full .todo-progress-fill {
+  background: var(--kodo-success);
+}
+
+/* ── the board card ─────────────────────────────────────────────────────── */
+
+.todo-app .todo-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: var(--todo-card-pad);
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-card);
+  background: var(--todo-card-bg);
+  box-shadow: var(--todo-card-shadow);
+}
+
+.todo-app .todo-card--dragging {
+  opacity: 0.45;
+}
+
+.todo-app .todo-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* The handle owns the gesture: `touch-action: none` is what stops a touch
+   drag from scrolling the column, while the rest of the card scrolls
+   normally. */
+.todo-app .todo-handle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 22px;
+  margin-left: -4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kodo-text-muted);
+  cursor: grab;
+  touch-action: none;
+}
+
+.todo-app .todo-handle:hover {
+  color: var(--kodo-text-secondary);
+}
+
+.todo-app .todo-card-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--kodo-text);
+  font-size: var(--todo-card-title-size);
+  font-weight: 600;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.todo-app .todo-card-notes {
+  margin: 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  line-height: 1.5;
+  /* Two lines, the way the design reads a card: enough to identify the work,
+     never enough to push the chips off the card. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.todo-app .todo-card-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.todo-app .todo-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--todo-avatar-size);
+}
+
+.todo-app .todo-card-meta .todo-due {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The foot is present on every card — the complete and edit buttons live
+   here — but the sub-item progress only appears once there is one. */
+.todo-app .todo-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  margin-top: 2px;
+}
+
+/* ── quiet icon buttons (card foot, column head) ────────────────────────── */
+
+.todo-app .todo-more,
+.todo-app .todo-check {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--todo-radius-chip);
+  background: transparent;
+  color: var(--kodo-text-muted);
+  cursor: pointer;
+}
+
+.todo-app .todo-more:hover,
+.todo-app .todo-check:hover {
+  background: var(--kodo-hover);
+  color: var(--kodo-text);
+}
+
+.todo-app .todo-check:hover {
+  color: var(--kodo-success-text);
+}
+
+.todo-app .todo-more:disabled,
+.todo-app .todo-check:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── the status select, dressed as a pill ────────────────────────────────
+   A native `<select>` keeps the keyboard path and the `todo-status-*` hook;
+   the skin is what makes it read as the design's status pill. */
+
+/* The dot rides at the select's left, over the padding reserved for it — a
+   `<select>` cannot hold markup, and the colour is what names a status the
+   user made themselves. */
+.todo-app .todo-status-field {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.todo-app .todo-status-field .todo-status-dot {
+  position: absolute;
+  left: 9px;
+  width: 7px;
+  height: 7px;
+  pointer-events: none;
+}
+
+.todo-app .todo-status {
+  flex: none;
+  height: 24px;
+  padding: 0 20px 0 22px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-pill);
+  background-color: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}
+
+.todo-app .todo-card-foot .todo-status {
+  max-width: 104px;
+}
+
+/* ── sub-items ──────────────────────────────────────────────────────────── */
+
+.todo-app .todo-children {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 10px;
+  border-left: 2px solid var(--kodo-border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.todo-app .todo-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--kodo-font-md);
+}
+
+.todo-app .todo-child-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--kodo-text);
+}
+
+.todo-app .todo-child-title--done {
+  color: var(--kodo-text-muted);
+  text-decoration: line-through;
+}
+
+.todo-app .todo-child .todo-status {
+  max-width: 88px;
+}
+
+/* ── the list view ──────────────────────────────────────────────────────── */
+
+/* The header and the rows share one grid template, set as `--todo-cols` on
+   `.todo-table` and inherited by every row — so hiding a column moves both at
+   once and they cannot drift apart. */
+.todo-app .todo-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-card);
+  background: var(--todo-card-bg);
+  overflow: hidden;
+}
+
+.todo-app .todo-list-head {
+  display: grid;
+  grid-template-columns: var(--todo-cols);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--kodo-border);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+}
+
+.todo-app .todo-head-cell {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.todo-app .todo-head-cell--actions {
+  justify-content: flex-end;
+}
+
+.todo-app .todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.todo-app .todo-list-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.todo-app .todo-list-item + .todo-list-item > .todo-row {
+  border-top: 1px solid var(--kodo-border-subtle);
+}
+
+.todo-app .todo-row {
+  display: grid;
+  grid-template-columns: var(--todo-cols);
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 7px 14px;
+}
+
+.todo-app .todo-row--selected {
+  background: var(--todo-selected-bg);
+}
+
+.todo-app .todo-row--selected .todo-row-title {
+  color: var(--kodo-accent);
+}
+
+.todo-app .todo-cell {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.todo-app .todo-cell--title {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+}
+
+.todo-app .todo-cell--actions {
+  justify-content: flex-end;
+}
+
+.todo-app .todo-cell--tags {
+  overflow: visible;
+  flex-wrap: nowrap;
+}
+
+.todo-app .todo-cell--progress .todo-subcount {
+  gap: 5px;
+}
+
+.todo-app .todo-row-title {
+  color: var(--kodo-text);
+  font-size: var(--todo-font-row-title);
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.todo-app .todo-row-title--done {
+  color: var(--kodo-text-muted);
+  text-decoration: line-through;
+}
+
+.todo-app .todo-row-notes {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.todo-app .todo-updated {
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  white-space: nowrap;
+}
+
+/* ── the selection box ──────────────────────────────────────────────────── */
+
+/* A real checkbox, kept for the keyboard and the tests, drawn as the design's
+   square: the input is transparent and the span behind it is the box. */
+.todo-app .todo-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.todo-app .todo-select input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.todo-app .todo-select-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: 4px;
+  background: var(--kodo-surface);
+  color: transparent;
+}
+
+.todo-app .todo-select input:checked + .todo-select-box {
+  border-color: var(--kodo-accent);
+  background: var(--kodo-accent);
+  color: var(--todo-check-ink);
+}
+
+.todo-app .todo-select input:focus-visible + .todo-select-box {
+  outline: 2px solid var(--kodo-accent);
+  outline-offset: 1px;
+}
+
+/* ── grouping and the 已归档 group ──────────────────────────────────────── */
+
+.todo-app .todo-group-head,
+.todo-app .todo-archived-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 0;
+  background: var(--todo-group-bg);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+  text-align: left;
+}
+
+.todo-app .todo-archived-head {
+  width: 100%;
+  border-radius: var(--kodo-radius-sm);
+  cursor: pointer;
+}
+
+.todo-app .todo-group-count {
+  padding: 0 6px;
+  border-radius: var(--todo-radius-pill);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  font-weight: 500;
+}
+
+.todo-app .todo-archived {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 0 8px;
+}
+
+/* The list's own empty line — a single row of text, not the board's art. */
+.todo-app .todo-column-empty {
+  margin: 0;
+  padding: 20px 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  text-align: center;
+}
+
+/* ── the toolbar ────────────────────────────────────────────────────────── */
+
+.todo-app .todo-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.todo-app .todo-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.todo-app .todo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-control);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  cursor: pointer;
+}
+
+.todo-app .todo-chip:hover {
+  border-color: var(--kodo-border-strong);
+  color: var(--kodo-text);
+}
+
+.todo-app .todo-chip--active {
+  border-color: var(--todo-chip-active-border);
+  background: var(--todo-chip-active-bg);
+  color: var(--kodo-accent);
+  font-weight: 600;
+}
+
+.todo-app .todo-chip-count {
+  color: var(--kodo-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.todo-app .todo-chip--active .todo-chip-count {
+  color: var(--kodo-accent);
+}
+
+/* The outlined control the design uses for 筛选 / 排序 / 分组 and the bulk
+   actions — one shape, so the two rows read as the same kind of thing. */
+.todo-app .todo-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-control);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.todo-app .todo-pill:hover,
+.todo-app .todo-pill--open {
+  border-color: var(--kodo-border-strong);
+  color: var(--kodo-text);
+}
+
+.todo-app .todo-pill--danger:hover {
+  border-color: var(--kodo-error);
+  color: var(--kodo-error);
+}
+
+.todo-app .todo-new-btn {
+  gap: 6px;
+}
+
+/* ── the search field in the header ─────────────────────────────────────── */
+
+.todo-app .todo-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.todo-app .todo-search .input {
+  width: 240px;
+  max-width: 100%;
+  height: 32px;
+  padding-right: 46px;
+}
+
+.todo-app .todo-search-key {
+  position: absolute;
+  right: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--kodo-border);
+  border-radius: 4px;
+  color: var(--kodo-text-muted);
+  font-size: var(--kodo-font-xs);
+}
+
+/* ── the selection bar ──────────────────────────────────────────────────── */
+
+.todo-app .todo-selection {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 34px;
+}
+
+.todo-app .todo-selection-count {
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--kodo-accent);
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* ── inline create ──────────────────────────────────────────────────────── */
+
+.todo-app .todo-inline {
+  display: flex;
+}
+
+.todo-app .todo-inline .input {
+  height: 30px;
+}
+
+/* ── the sticky stats bar ───────────────────────────────────────────────── */
+
+.todo-app .todo-stats {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: auto -28px 0;
+  padding: 12px 28px;
+  border-top: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-md);
+}
+
+.todo-app .todo-stat {
+  font-variant-numeric: tabular-nums;
+}
+
+.todo-app .todo-stat-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--kodo-border-strong);
+}
+
+.todo-app .todo-stats-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--kodo-text-secondary);
+}
+
+/* ── editor ─────────────────────────────────────────────────────────────── */
+
+/* The body is a two-column grid: a flexible main column for the editable
+   fields, and a fixed-width rail for the catalog-derived sections (assignee,
+   tags, related, attachments, reminders, activity). The rail is allowed to
+   scroll independently so an active field on the left never gets pushed off
+   the top by an overflowing activity log. */
+.todo-app .todo-editor-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 24px;
+  min-height: 0;
+  flex: 1;
+  padding: 20px 24px;
+  overflow: auto;
+}
+
+.todo-app .todo-editor-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.todo-app .todo-editor-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+.todo-app .todo-editor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.todo-app .todo-editor-section-title {
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+  color: var(--kodo-text-secondary);
+  margin: 0;
+}
+
+.todo-app .todo-editor-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.todo-app .todo-editor-row--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.todo-app .todo-editor-title-input {
+  font-size: var(--kodo-font-lg);
+  font-weight: 600;
+}
+
+.todo-app .todo-editor-textarea {
+  min-height: 96px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.55;
+}
+
+.todo-app .todo-editor-children {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Tag chips inside the editor — picking is a one-shot toggle, so the
+   affordance is the chip itself, not a hidden <select>. */
+.todo-app .todo-tag-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.todo-app .todo-tag-pick {
+  border: 1px solid var(--kodo-border);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  padding: 4px 10px;
+  border-radius: var(--todo-radius-chip);
+  font-size: var(--kodo-font-sm);
+  cursor: pointer;
+}
+
+.todo-app .todo-tag-pick--on {
+  background: var(--kodo-accent-soft);
+  color: var(--kodo-accent);
+  border-color: var(--kodo-accent);
+}
+
+.todo-app .todo-chip-empty {
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text-secondary);
+}
+
+/* The activity list is a small log; each row is a one-line comment with the
+   author avatar and a relative timestamp. */
+.todo-app .todo-activity {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.todo-app .todo-activity-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.todo-app .todo-activity-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.todo-app .todo-activity-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+}
+
+.todo-app .todo-activity-text {
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+  color: var(--kodo-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.todo-app .todo-comment {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.todo-app .todo-comment-input {
+  flex: 1;
+  resize: none;
+  min-height: 36px;
+  max-height: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-pill);
+  background: var(--kodo-surface);
+  font: inherit;
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+}
+
+.todo-app .todo-comment-send {
+  flex-shrink: 0;
+  align-self: stretch;
+  border: 0;
+  background: transparent;
+  color: var(--kodo-accent);
+  padding: 0 10px;
+  cursor: pointer;
+  font-size: var(--kodo-font-sm);
+  font-weight: 600;
+}
+
+.todo-app .todo-comment-send:disabled {
+  color: var(--kodo-text-secondary);
+  cursor: default;
+}
+
+.todo-app .todo-attach-list,
+.todo-app .todo-reminder-list,
+.todo-app .todo-related-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.todo-app .todo-attach-row,
+.todo-app .todo-reminder-row,
+.todo-app .todo-related-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-pill);
+  background: var(--kodo-surface);
+  font-size: var(--kodo-font-sm);
+}
+
+.todo-app .todo-attach-name,
+.todo-app .todo-reminder-text,
+.todo-app .todo-related-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.todo-app .todo-attach-meta,
+.todo-app .todo-reminder-meta,
+.todo-app .todo-related-meta {
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+}
+
+.todo-app .todo-remove-btn {
+  border: 0;
+  background: transparent;
+  color: var(--kodo-text-secondary);
+  cursor: pointer;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.todo-app .todo-remove-btn:hover {
+  color: var(--kodo-text);
+}
+
+.todo-app .todo-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px dashed var(--kodo-border);
+  background: transparent;
+  color: var(--kodo-text-secondary);
+  padding: 6px 10px;
+  border-radius: var(--todo-radius-pill);
+  font-size: var(--kodo-font-sm);
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.todo-app .todo-add-btn:hover {
+  color: var(--kodo-text);
+  border-color: var(--kodo-text-secondary);
+}
+
+.todo-app .todo-related-pick {
+  position: relative;
+}
+
+.todo-app .todo-related-menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 200px;
+  overflow: auto;
+  background: var(--kodo-canvas);
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgb(23 32 51 / 12%);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.todo-app .todo-related-option {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-text);
+  cursor: pointer;
+}
+
+.todo-app .todo-related-option:hover {
+  background: var(--kodo-surface);
+}
+
+.todo-app .todo-related-option--on {
+  color: var(--kodo-accent);
+  font-weight: 600;
+}
+
+/* The ghost follows the pointer above everything and must never swallow the
+   pointer events that drive the drag itself. */
+.todo-app .todo-drag-ghost {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  padding: 6px 10px;
+  border: 1px solid var(--kodo-border-strong);
+  border-radius: var(--todo-radius-chip);
+  background: var(--todo-card-bg);
+  box-shadow: 0 8px 24px rgb(23 32 51 / 16%);
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+}
+
+/* ── responsive ─────────────────────────────────────────────────────────── */
+
+/* Below the reference width the board stacks rather than scrolling sideways:
+   a column is a list of cards, and a 244px one is unreadable. */
+@media (max-width: 820px) {
+  .todo-app .todo-board {
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    overflow-x: visible;
+  }
+
+  .todo-app .todo-stats-hint {
+    display: none;
+  }
+
+  /* The editor collapses to one column, with the rail underneath. The body
+     can still scroll because the modal's `min(720px, 100%)` keeps the height
+     bounded. */
+  .todo-app .todo-editor-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* --- 状态管理 modal ------------------------------------------------------ */
+
+.todo-app .todo-status-modal {
+  width: min(720px, 100%);
+}
+
+.todo-app .todo-status-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px 24px;
+  overflow: auto;
+}
+
+.todo-app .todo-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.todo-app .todo-status-row {
+  display: grid;
+  grid-template-columns: 18px 28px minmax(120px, 1fr) auto auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--todo-radius-well);
+  background: var(--kodo-surface);
+}
+
+.todo-app .todo-status-grip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 28px;
+  color: var(--kodo-fg-muted);
+  cursor: grab;
+  border-radius: 4px;
+}
+
+.todo-app .todo-status-grip:hover,
+.todo-app .todo-status-grip:focus-visible {
+  background: var(--kodo-surface-hover, var(--kodo-surface));
+  outline: none;
+}
+
+.todo-app .todo-status-grip:active {
+  cursor: grabbing;
+}
+
+.todo-app .todo-status-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: var(--todo-radius-pill);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--todo-st-gray, currentColor);
+  background: var(--todo-st-gray-bg, transparent);
+}
+
+.todo-app .todo-status-chip[data-color="blue"] { color: var(--todo-st-blue); background: var(--todo-st-blue-bg); }
+.todo-app .todo-status-chip[data-color="amber"] { color: var(--todo-st-amber); background: var(--todo-st-amber-bg); }
+.todo-app .todo-status-chip[data-color="green"] { color: var(--todo-st-green); background: var(--todo-st-green-bg); }
+.todo-app .todo-status-chip[data-color="purple"] { color: var(--todo-st-purple); background: var(--todo-st-purple-bg); }
+.todo-app .todo-status-chip[data-color="teal"] { color: var(--todo-st-teal); background: var(--todo-st-teal-bg); }
+.todo-app .todo-status-chip[data-color="pink"] { color: var(--todo-st-pink); background: var(--todo-st-pink-bg); }
+.todo-app .todo-status-chip[data-color="red"] { color: var(--todo-st-red); background: var(--todo-st-red-bg); }
+
+.todo-app .todo-status-name {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.todo-app .todo-status-name:disabled {
+  background: transparent;
+  border-color: transparent;
+  color: var(--kodo-fg);
+  padding-left: 0;
+}
+
+.todo-app .todo-status-color {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 22px 0 6px;
+  border: 1px solid var(--kodo-border);
+  border-radius: 6px;
+  background: var(--kodo-surface);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.todo-app .todo-status-color select {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  outline: none;
+}
+
+.todo-app .todo-status-color-current {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--todo-st-gray);
+}
+
+.todo-app .todo-status-color-current[data-color="blue"] { background: var(--todo-st-blue); }
+.todo-app .todo-status-color-current[data-color="amber"] { background: var(--todo-st-amber); }
+.todo-app .todo-status-color-current[data-color="green"] { background: var(--todo-st-green); }
+.todo-app .todo-status-color-current[data-color="purple"] { background: var(--todo-st-purple); }
+.todo-app .todo-status-color-current[data-color="teal"] { background: var(--todo-st-teal); }
+.todo-app .todo-status-color-current[data-color="pink"] { background: var(--todo-st-pink); }
+.todo-app .todo-status-color-current[data-color="red"] { background: var(--todo-st-red); }
+
+.todo-app .todo-status-color > svg {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--kodo-fg-muted);
+}
+
+.todo-app .todo-status-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--kodo-fg-muted);
+  white-space: nowrap;
+}
+
+.todo-app .todo-status-builtin {
+  font-size: 11px;
+  color: var(--kodo-fg-muted);
+  padding: 2px 6px;
+  border: 1px solid var(--kodo-border);
+  border-radius: 999px;
+}
+
+.todo-app .todo-status-reassign {
+  height: 28px;
+  font-size: 12px;
+}
+
+.todo-app .todo-status-delete {
+  height: 28px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--kodo-fg-muted);
+}
+
+.todo-app .todo-status-delete:hover:not(:disabled) {
+  color: var(--todo-st-red);
+}
+
+.todo-app .todo-status-new {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--kodo-border);
+  border-radius: var(--todo-radius-well);
+  background: var(--kodo-surface);
+}
+
+.todo-app .todo-status-new .input {
+  flex: 1;
+  height: 28px;
+  font-size: 13px;
+}

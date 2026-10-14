@@ -322,7 +322,7 @@ export function CalendarApp({ manifest, demo, onBack }: Props) {
         {due.slice(0, 2).map((todo) => (
           <li
             key={todo.id}
-            className={`cal-due-item${todo.status === "done" ? " cal-due-item--done" : ""}`}
+            className={`cal-due-item${todo.isDone ? " cal-due-item--done" : ""}`}
           >
             {W.dueLabel} · {todo.title}
           </li>

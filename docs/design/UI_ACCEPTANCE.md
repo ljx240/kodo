@@ -604,14 +604,40 @@ These are asserted in `apps/desktop/tests/visual/behaviour.spec.ts` and
       待办 / 日历 respectively;
 - [ ] 今日概览 lists today's **open** 待办 (due today) and today's 日历 events,
       each with a `· n` count, and disappears entirely when its switch is off;
-- [ ] 待办: three fixed columns 待处理 / 进行中 / 已完成 with a per-column count
-      and `+`; board and list are two views of one dataset, so a filter, a
-      status change or 完成/恢复 is visible in both, in the column counts, in
-      今日概览 and in the 日历 待办截止 overlay;
-- [ ] 待办 card rows show title, 截止/无截止日期, priority and status; a
-      sub-item renders under its parent (never as a column card of its own);
-      drag starts from the handle only, the target column shows the drop state,
-      and Escape or a drop outside a column leaves the status unchanged;
+- [ ] 待办: columns are driven by the `todo_statuses` catalog (not a fixed
+      three), in `sort_order`, each column head carries a status dot + name +
+      count and a `+`. A new status added through the status manager becomes
+      a column of its own on the board, in the list, and in 今日概览. A built-in
+      status cannot be deleted, and a non-builtin one that still holds rows
+      must be reassigned to a target first;
+- [ ] 待办 board and list are two views of one dataset, so a filter, a status
+      change, a 归档 toggle or 完成/恢复 is visible in both, in the column
+      counts, in 今日概览 and in the 日历 待办截止 overlay;
+- [ ] 待办 card rows show title, priority, tags, due, assignee, and sub-item
+      progress (only when there are sub-items). A sub-item renders under its
+      parent (never as a column card of its own). Drag starts from the handle
+      only; a cross-column drop shows the `todo-column-body--over` state, an
+      in-column drop rewrites `sort_order` via `reorder_todo` and keeps the
+      status, and Escape or a drop outside a column leaves the row alone;
+- [ ] 待办 editor is a two-column modal: the main column carries title,
+      status, priority, due date/time, description, sub-items, related rows;
+      the rail carries tags, assignee, the four custom fields, attachments,
+      reminders and the activity log. The save button is labelled `保存并关闭`,
+      not `保存`. Reopening reads the same data back: the rail values match
+      the row, the new fields appear in `update_todo`'s payload, and a version
+      conflict surfaces as a message instead of a silent overwrite;
+- [ ] 待办 status manager (toolbar's `状态管理`) adds, renames, recolours,
+      reorders (drag grip or `↑`/`↓` keys) and deletes statuses. Deleting a
+      status that still holds rows surfaces a `该状态仍有 n 个事项` notice with a
+      `转移到…` picker; the `status_in_use` error renders inside the modal. A
+      new status' `color` is a palette key (`gray|blue|amber|green|purple|teal|pink|red`),
+      never a hex;
+- [ ] 待办 filter chip counts (`all/open/today/week/high/archived`) come from the
+      same `listTodos` snapshot the board reads, so a chip never promises a
+      number the board cannot deliver. The search box narrows rows *and* counts
+      in the same render. The status select, the drag-and-drop and the
+      `完成`/`恢复` button all share one write path (`set_todo_status`), so the
+      board, the list, the column counts and 今日概览 can never disagree.
 - [ ] 日历: 周 / 月 views over real dates (no fixture dates outside the demo
       route), events carry their own IANA zone, and the editor validates
       标题必填 → 结束时间必须晚于开始时间; delete is two-step (`确认删除？`);
@@ -625,7 +651,49 @@ These are asserted in `apps/desktop/tests/visual/behaviour.spec.ts` and
       `在 Finder 中显示`; a moved or replaced file reads `文件缺失` / `文件已更改`
       with the record kept, and deleting the record never deletes the file;
 - [ ] light and dark themes both render every workbench surface (no hard-coded
-      colour), and the board falls back to a single column below 820px.
+      colour), and the board falls back to a single column below 820px. The
+      待办 visual language lives entirely in `apps/desktop/src/styles/todo.css`,
+      every selector there begins with `.todo-app`, and the file imports
+      after `pages.css` in `main.tsx`; no other surface picks up `--todo-*`
+      tokens. The two `workbench-todo*` baselines in
+      `tests/visual/pages.spec.ts-snapshots/` are the post-refactor
+      references, regenerated at the reference viewport; the behaviour suite
+      lives in `tests/visual/workbench.spec.ts` and runs the cross-column
+      drag, the in-column `reorder_todo`, the status manager, the
+      reassignment picker, the editor round-trip and the version conflict.
+
+---
+
+## 5k. Platform shell checks (manual — macOS)
+
+The menu bar and the status item are OS surfaces: they are outside the webview,
+so Playwright cannot see them and **no screenshot covers them**
+(`COMPONENTS.md` §17). These are hand-checked on every change that touches
+`platform.rs`, `run.rs`'s `emit_run`, or the `menu:action` bridge — and on any
+change to the theme, sidebar or Inspector toggles, which the menu mirrors.
+
+- [ ] the menu bar reads `Kodo 文件 编辑 显示 窗口 帮助` and every entry is a
+      Kodo function (not Tauri's near-empty default);
+- [ ] **⌘C / ⌘V / ⌘A still work in the composer and in a text field** — the
+      regression that a custom menu causes when the Edit roles are dropped;
+- [ ] ⌘N starts a new task, ⌘O adds a project, ⌘, opens settings, ⌘W closes
+      (hides) the window;
+- [ ] 关于 Kodo shows name, the workspace version, the copyright and the
+      credits block; the version equals the workspace `Cargo.toml`'s
+      `CARGO_PKG_VERSION` — the one `kodo_core::info()` also reports, since
+      `tauri.conf.json` no longer carries a copy;
+- [ ] the status item renders as a **black silhouette** that inverts against a
+      dark menu bar (a coloured or muddy icon means `iconAsTemplate` was lost);
+- [ ] left-clicking the status item toggles the window; right-clicking opens
+      the tray menu;
+- [ ] closing the window leaves the process alive and a run in flight still
+      finishes; **clicking the dock icon brings the window back**;
+- [ ] starting a run flips the tooltip and the 运行状态 row to 运行中, and the
+      end of the run (complete, stopped or failed) flips them back;
+- [ ] toggling the sidebar, the Inspector, or the theme from **inside the app**
+      moves the menu's ✓ accordingly;
+- [ ] 打开状态目录 opens the state directory, and 退出 Kodo really exits
+      (rather than hiding).
 
 ---
 

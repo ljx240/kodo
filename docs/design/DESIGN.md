@@ -91,6 +91,29 @@ Kodo uses compact IDE density.
 
 ---
 
+## 2a. Scoped exception: 待办 (approved 2026-10-14)
+
+The 待办 app inside 工作台 follows its own design reference and is the **only**
+surface exempt from §2 type scale, §3 density and §4 shape language. It uses a
+28px page title, 10–12px card radii, pill-shaped status/priority/tag chips,
+letter avatars, progress bars and a sticky bottom stats bar. Its header carries
+a search field; its toolbar is two rows (filter chips with counts, then view /
+sort / group / new).
+
+The exception is **contained**, not a new house style:
+
+- every rule lives in `apps/desktop/src/styles/todo.css` and every selector in
+  that file begins with `.todo-app`;
+- `.todo-app` renders only on the 待办 `<main>`, so no other page can match;
+- the app's tokens (`--todo-*`) are declared on `.todo-app`, never on `:root`,
+  and `tokens.css` / `TOKENS.css` are untouched;
+- §10 copy policy still holds — every string comes from `i18n.ts`.
+
+Nothing outside 待办 adopts this language. A second surface wanting pills or a
+28px title is a new decision, not an application of §2a.
+
+---
+
 ## 3. Density
 
 Primary reference viewport:
@@ -129,7 +152,8 @@ Panel                       6px
 Popover                     8px
 ```
 
-Avoid frequent 12–20px rounded cards.
+Avoid frequent 12–20px rounded cards. The 待办 app is the one exception — its
+rounded cards are scoped to `.todo-app` (§2a).
 
 Borders:
 - 1px subtle separators;
@@ -258,6 +282,17 @@ Recorded English exceptions — keep as-is:
 - product nouns that are names, not sentences: `Inspector`, `AI Provider`;
 - model names, commands, file paths, file names, code chips;
 - fixture data recorded in English (see `DEMO_DATA.md`).
+
+Recorded structural exception — keep as-is:
+
+- the **macOS menu bar and the status item** (`COMPONENTS.md` §17). Their
+  labels are written in Rust, not `i18n.ts`, because a native menu cannot read
+  a JS dictionary. The rule still holds in substance: the renderer never
+  renders a menu label and never receives one — only an opaque action id
+  (`new-task`, `toggle-sidebar`, …). There is exactly one copy of every label,
+  in `platform.rs`, and no second one to drift.
+  Predefined roles (撤销 / 复制 / 粘贴 / 全选 …) carry no label at all and are
+  localized by macOS itself.
 
 Fixture and legacy tool names arrive in English (`Search codebase`,
 `Model call #2`, `Finalize answer`). The UI maps them to zh labels through

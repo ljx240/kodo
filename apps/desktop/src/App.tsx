@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { coreInfo, gitBranch, listAgents, pickFolder, setting, setSetting } from "./api";
+import {
+  coreInfo,
+  gitBranch,
+  listAgents,
+  onMenuAction,
+  pickFolder,
+  setMenuState,
+  setting,
+  setSetting,
+  type MenuAction,
+} from "./api";
 import { loadDemoState, type DemoState } from "./data/demoState";
 import { T } from "./i18n";
 import { DEFAULT_MODEL, MODEL_SETTING } from "./data/models";
@@ -216,7 +226,7 @@ export function App() {
   const [density] = useSetting("density", "compact");
   const [lineNumbers] = useSetting("show-line-numbers", "true");
   const [systemFont] = useSetting("use-system-font", "true");
-  const [theme] = useSetting("theme", "light");
+  const [theme, setTheme] = useSetting("theme", "light");
 
   const onSnapshot = useCallback((snapshot: LiveSnapshot | null) => {
     setLiveSnapshot(snapshot);
@@ -470,6 +480,14 @@ export function App() {
     if (projectPath) window.localStorage.setItem(LAST_PROJECT_KEY, projectPath);
   };
 
+  /** Shared by the sidebar's 添加项目 entry point and the File menu's ⌘O. */
+  const addProject = async () => {
+    const picked = await pickFolder();
+    if (!picked) return;
+    await workspace.add(picked);
+    newChat(picked);
+  };
+
   /** Listing-only removal: drop selection state the removed project owned. */
   const removeProject = async (path: string) => {
     await workspace.remove(path);
@@ -588,6 +606,68 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
+  // The macOS menu bar and status item are built in Rust (`platform.rs`) and
+  // send action ids here. This is the whole bridge: no label crosses over, and
+  // every action lands on a handle the app already had for its own UI. The
+  // handler goes through a ref so the subscription is made once — `listen` is
+  // an IPC round trip, not something to redo on every render.
+  const menuActionRef = useRef<(action: MenuAction) => void>(() => {});
+  menuActionRef.current = (action) => {
+    switch (action) {
+      case "new-task":
+        newChat();
+        break;
+      case "add-project":
+        if (workspace.live) void addProject();
+        break;
+      case "open-settings":
+        setSettingsOpen(true);
+        break;
+      case "toggle-sidebar":
+        setSidebarVisible((value) => !value);
+        break;
+      case "toggle-inspector":
+        setInspectorOpen(!route.inspectorOpen);
+        break;
+      case "theme-light":
+        setTheme("light");
+        break;
+      case "theme-dark":
+        setTheme("dark");
+        break;
+      case "theme-system":
+        setTheme("system");
+        break;
+      // The 快捷键 card lives on the settings route's Help tab, so this is the
+      // same destination the sidebar link uses.
+      case "shortcuts":
+        navigate(hrefTo("settings", true));
+        break;
+    }
+  };
+
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let alive = true;
+    // `listen` resolves asynchronously, so an effect that is torn down before
+    // it settles has to unsubscribe on arrival — otherwise the first mount's
+    // listener is never released (React's StrictMode does exactly this).
+    void onMenuAction((action) => menuActionRef.current(action)).then((off) => {
+      if (alive) dispose = off;
+      else off();
+    });
+    return () => {
+      alive = false;
+      dispose?.();
+    };
+  }, []);
+
+  // Keep the native menu's check marks level with the window. The app owns this
+  // state; the menu only ever mirrors it, never the other way round.
+  useEffect(() => {
+    void setMenuState({ sidebar: sidebarVisible, inspector: route.inspectorOpen, theme });
+  }, [sidebarVisible, route.inspectorOpen, theme]);
+
   const paletteActions: PaletteAction[] = [
     { id: "workbench", label: T.nav.workbench, run: () => navigate(hrefTo("workbench", route.inspectorOpen)) },
     { id: "new-task", label: T.nav.newTask, run: () => void newChat() },
@@ -699,12 +779,7 @@ export function App() {
             }
             projectOptions={workspace.projects.filter((project) => Boolean(project.path))}
             onSelectProject={activeConversationId === null && !liveSnapshot?.running ? newChat : undefined}
-            onAddProject={workspace.live ? async () => {
-              const picked = await pickFolder();
-              if (!picked) return;
-              await workspace.add(picked);
-              newChat(picked);
-            } : undefined}
+            onAddProject={workspace.live ? addProject : undefined}
             crumbTitle={
               demoState?.conversation.title ??
               workspace.projects

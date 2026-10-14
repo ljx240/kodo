@@ -1,7 +1,11 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
-import type { CalendarEventDto, TodoDto } from "../../src/api";
-import { DEMO_CALENDAR_EVENTS, DEMO_TODOS } from "../../src/data/workbench";
+import type { CalendarEventDto, TodoDto, TodoStatusDefDto } from "../../src/api";
+import {
+  DEMO_CALENDAR_EVENTS,
+  DEMO_TODO_STATUSES,
+  DEMO_TODOS,
+} from "../../src/data/workbench";
 import { stubShell, type Core } from "./shell";
 
 /**
@@ -251,40 +255,191 @@ test("今日概览 opens the apps it summarizes", async ({ page }) => {
   await expect(page.locator(".page-head h1")).toHaveText("日历");
 });
 
-test("the board splits the fixture across the three fixed columns", async ({ page }) => {
+test("the board renders one column per status, not a fixed three", async ({ page }) => {
   await openTodo(page);
 
-  await expect(page.locator(".todo-column-name")).toHaveText(["待处理", "进行中", "已完成"]);
-  await expect(page.locator('[data-testid="todo-column-todo"] .todo-card')).toHaveCount(3);
-  await expect(page.locator('[data-testid="todo-column-doing"] .todo-card')).toHaveCount(1);
+  // The column set is the status catalog — 待确认 only exists because the
+  // fixture's catalog has it.
+  await expect(page.locator(".todo-column-name")).toHaveText([
+    "待处理",
+    "进行中",
+    "待确认",
+    "已完成",
+  ]);
+  await expect(page.locator('[data-testid="todo-column-todo"] .todo-card')).toHaveCount(2);
+  await expect(page.locator('[data-testid="todo-column-doing"] .todo-card')).toHaveCount(2);
+  await expect(page.locator('[data-testid="todo-column-review"] .todo-card')).toHaveCount(1);
   await expect(page.locator('[data-testid="todo-column-done"] .todo-card')).toHaveCount(1);
 
   // A card carries its title, due date, priority and status.
   const card = page.getByTestId("todo-card-todo-1");
   await expect(card.locator(".todo-priority").first()).toHaveText("高");
-  await expect(card.locator(".todo-due").first()).toContainText("09-30");
+  await expect(card.locator(".todo-due").first()).toContainText("09/30");
   await expect(page.getByTestId("todo-status-todo-1")).toHaveValue("doing");
   // Sub-items are counted on the parent and never float into a column.
-  await expect(card.locator(".todo-subcount")).toHaveText("1 个子项");
-  // The sub-item is listed under its parent and is not a column card of its own.
-  await expect(page.getByTestId("todo-card-todo-4")).toHaveCount(0);
-  await expect(card.getByTestId("todo-child-todo-4")).toContainText("补齐 k2k-rust 的回归用例");
+  await expect(card.locator(".todo-subcount")).toHaveText("2/5 子项");
+  // The design keeps a card to its progress line; the sub-items themselves
+  // live in the editor's 子项清单, so neither the board nor the list expands
+  // them. `todo-1a` is a child, never a card.
+  await expect(page.getByTestId("todo-card-todo-1a")).toHaveCount(0);
+  await expect(card.getByTestId("todo-child-todo-1a")).toHaveCount(0);
+  await page.getByTestId("todo-edit-todo-1").click();
+  await expect(page.getByTestId("todo-child-todo-1a")).toContainText(
+    "核对 catalog 的注册顺序",
+  );
+});
+
+test("a card wears the catalog's own chips, and its due chip reddens only when due", async ({
+  page,
+}) => {
+  // Seeded against the real clock rather than the frozen fixture, so all four
+  // due-date branches are on screen at once.
+  await openTodo(page, {
+    todos: [
+      todo({
+        id: "t-chips",
+        title: "带标签的事项",
+        status: "todo",
+        priority: "high",
+        dueDate: TODAY,
+        dueTime: "12:00",
+        assigneeId: "person-me",
+        tagIds: ["tag-k2k", "tag-lakehouse"],
+      }),
+      todo({ id: "t-late", title: "已经逾期的事项", status: "todo", dueDate: isoDate(-3) }),
+      todo({ id: "t-soon", title: "还没到期的事项", status: "todo", dueDate: isoDate(3) }),
+      todo({ id: "t-none", title: "没有截止的事项", status: "todo", dueDate: null }),
+    ],
+  });
+
+  const card = page.getByTestId("todo-card-t-chips");
+  // Priority and tags are the catalog's names and colours, read off the row.
+  await expect(card.locator(".todo-priority")).toHaveText("高");
+  await expect(card.locator(".todo-tag")).toHaveText(["k2k-rust", "实时数仓"]);
+  // The assignee is their own name's first character, not a photo.
+  await expect(card.locator(".todo-avatar")).toHaveText("我");
+
+  // Today reads as 今天 plus the time, and it is red.
+  await expect(card.locator(".todo-due")).toHaveText("今天 12:00");
+  await expect(card.locator(".todo-due")).toHaveClass(/todo-due--late/);
+
+  // So is a date already behind us…
+  await expect(page.getByTestId("todo-card-t-late").locator(".todo-due")).toHaveClass(
+    /todo-due--late/,
+  );
+  // …but a date still ahead is plain, and none at all says so.
+  await expect(page.getByTestId("todo-card-t-soon").locator(".todo-due")).not.toHaveClass(
+    /todo-due--late/,
+  );
+  await expect(page.getByTestId("todo-card-t-none").locator(".todo-due")).toHaveText(
+    "无截止日期",
+  );
+  await expect(page.getByTestId("todo-card-t-none").locator(".todo-due")).toHaveClass(
+    /todo-due--none/,
+  );
+});
+
+test("a card's foot is its sub-item progress, and only when it has sub-items", async ({
+  page,
+}) => {
+  await openTodo(page);
+
+  const withKids = page.getByTestId("todo-card-todo-1");
+  await expect(withKids.locator(".todo-subcount")).toHaveText("2/5 子项");
+  await expect(withKids.locator(".todo-progress-fill")).toHaveAttribute(
+    "style",
+    /width:\s*40%/,
+  );
+
+  // A row with none carries no foot at all — not a `0/0 子项` line.
+  const noKids = page.getByTestId("todo-card-todo-2");
+  await expect(noKids.locator(".todo-subcount")).toHaveCount(0);
+  await expect(noKids.locator(".todo-progress")).toHaveCount(0);
+});
+
+test("a column ends in a drop zone, and a 已完成 one in 太棒了", async ({ page }) => {
+  await openTodo(page, {
+    todos: [
+      todo({ id: "t-todo", title: "还在待处理", status: "todo" }),
+      todo({ id: "t-done", title: "已经做完", status: "done" }),
+    ],
+  });
+
+  // A column that cannot complete anything invites a drop…
+  const drop = page.getByTestId("todo-drop-todo");
+  await expect(drop).toContainText("拖拽事项到此");
+  await expect(drop).toContainText("或点击上方按钮添加");
+  await expect(page.getByTestId("todo-empty-todo")).toHaveCount(0);
+  // …and clicking it opens the same draft the column head's ＋ does.
+  await drop.click();
+  await expect(page.getByRole("textbox", { name: "在「待处理」中新建" })).toBeFocused();
+
+  // The one that means "done" celebrates instead — even with a card in it.
+  await expect(page.getByTestId("todo-column-done").locator(".todo-card")).toHaveCount(1);
+  await expect(page.getByTestId("todo-empty-done")).toContainText("太棒了！");
+  await expect(page.getByTestId("todo-empty-done")).toContainText("该状态下没有更多事项了");
+  await expect(page.getByTestId("todo-drop-done")).toHaveCount(0);
+});
+
+test("the stats bar counts the top level and never the sub-items", async ({ page }) => {
+  await openTodo(page);
+
+  // Seven top-level rows: five open, one done, one archived. The nine
+  // sub-items are rows too, and none of them is counted.
+  const stats = page.getByTestId("todo-stats");
+  await expect(stats).toContainText("共 7 个事项");
+  await expect(stats).toContainText("未完成 5");
+  await expect(stats).toContainText("已完成 1");
+  await expect(stats).toContainText("已归档 1");
+  await expect(stats).toContainText("支持拖拽调整顺序，自定义列状态，提升团队协作效率");
+
+  // Creating a row moves the total, and 未完成 with it — one source of truth.
+  await page.getByTestId("todo-new").click();
+  await page.getByTestId("todo-edit-title").fill("再加一条");
+  await page.getByTestId("todo-edit-save").click();
+  await expect(stats).toContainText("共 8 个事项");
+  await expect(stats).toContainText("未完成 6");
+});
+
+test("a status added to the catalog becomes a column of its own", async ({ page }) => {
+  const statuses: TodoStatusDefDto[] = [
+    ...DEMO_TODO_STATUSES.slice(0, 2),
+    {
+      ...DEMO_TODO_STATUSES[0],
+      id: "blocked",
+      name: "被阻塞",
+      color: "red",
+      builtin: false,
+      sortOrder: 2,
+    },
+  ];
+  await openTodo(page, {
+    todoStatuses: statuses,
+    todos: [todo({ id: "t-blocked", title: "等上游修复", status: "blocked" })],
+  });
+
+  await expect(page.locator(".todo-column-name")).toHaveText(["待处理", "进行中", "被阻塞"]);
+  // The card landed in the new column and kept its status id.
+  await expect(page.locator('[data-testid="todo-column-blocked"] .todo-card')).toHaveCount(1);
+  await expect(page.getByTestId("todo-status-t-blocked")).toHaveValue("blocked");
 });
 
 test("board and list are two views of one dataset", async ({ page }) => {
   await openTodo(page);
 
   await page.getByTestId("todo-view-list").click();
-  await expect(page.getByTestId("todo-list").locator(".todo-row")).toHaveCount(5);
+  await expect(page.getByTestId("todo-list").locator(".todo-row")).toHaveCount(6);
 
   // The filter applies to both views from the same rows.
   await page.getByTestId("todo-filter-open").click();
-  await expect(page.getByTestId("todo-list").locator(".todo-row")).toHaveCount(4);
+  await expect(page.getByTestId("todo-list").locator(".todo-row")).toHaveCount(5);
 
-  await page.getByTestId("todo-filter-done").click();
-  await expect(page.getByTestId("todo-list").locator(".todo-row")).toHaveCount(1);
-  await expect(page.getByTestId("todo-row-todo-6")).toContainText("归档 09-25 的路由排查记录");
+  await page.getByTestId("todo-filter-high").click();
+  await expect(page.getByTestId("todo-list").locator(".todo-row")).toHaveCount(2);
+  await expect(page.getByTestId("todo-row-todo-1")).toBeVisible();
+  await expect(page.getByTestId("todo-row-todo-3")).toBeVisible();
 
+  await page.getByTestId("todo-filter-all").click();
   await page.getByTestId("todo-view-board").click();
   const done = page.locator('[data-testid="todo-column-done"] .todo-card');
   await expect(done).toHaveCount(1);
@@ -296,38 +451,53 @@ test("今天 filters on the record's own due date, whatever its status", async (
     todos: [
       todo({ id: "t-open", title: "今天要做的事", status: "todo", dueDate: TODAY }),
       todo({ id: "t-done", title: "今天已完成的事", status: "done", dueDate: TODAY }),
-      todo({ id: "t-later", title: "之后的事", status: "todo", dueDate: isoDate(2) }),
+      todo({ id: "t-far", title: "很久以后的事", status: "todo", dueDate: isoDate(30) }),
+      todo({ id: "t-past", title: "很久以前的事", status: "todo", dueDate: isoDate(-30) }),
     ],
   });
 
   await page.getByTestId("todo-filter-today").click();
   // Both of today's rows show — 今天 is a due-date filter, not a status one.
   await expect(page.locator(".todo-column-body .todo-card")).toHaveCount(2);
-  await expect(page.getByTestId("todo-card-t-later")).toHaveCount(0);
+  await expect(page.getByTestId("todo-filter-today").locator(".todo-chip-count")).toHaveText("2");
+  await expect(page.getByTestId("todo-card-t-far")).toHaveCount(0);
 
-  await page.getByTestId("todo-filter-inbox").click();
-  // 收集箱 is the other half of the same rule: no due date at all.
-  await expect(page.locator(".todo-column-body .todo-card")).toHaveCount(0);
+  // 本周 is the same rule one week wide: it still holds today's rows and still
+  // excludes both dates a month away, whatever weekday today happens to be.
+  await page.getByTestId("todo-filter-week").click();
+  const scheduled = await page.locator(".todo-column-body .todo-card").count();
+  expect(scheduled).toBeGreaterThanOrEqual(2);
+  await expect(page.getByTestId("todo-card-t-far")).toHaveCount(0);
+  await expect(page.getByTestId("todo-card-t-past")).toHaveCount(0);
+  // The chip's count is the number clicking it reveals — one source of truth.
+  await expect(page.getByTestId("todo-filter-week").locator(".todo-chip-count")).toHaveText(
+    String(scheduled),
+  );
 });
 
-test("creating needs only a title, and the column decides the status", async ({ page }) => {
+test("creating needs only a title, and the status decides the column", async ({ page }) => {
   await openTodo(page);
 
-  // Top-level create lands in 待处理.
-  await page.getByTestId("todo-new-input").fill("写一条巡检结论");
-  await page.getByTestId("todo-new-submit").click();
-  await expect(page.locator('[data-testid="todo-column-todo"] .todo-card')).toHaveCount(4);
+  // 新建事项 opens the editor on a blank draft; the title is the only required
+  // field, and the status it carries is where the row lands.
+  await page.getByTestId("todo-new").click();
+  await expect(page.getByTestId("todo-edit-title")).toHaveValue("");
+  await page.getByTestId("todo-edit-title").fill("写一条巡检结论");
+  await page.getByTestId("todo-edit-status").selectOption("doing");
+  await page.getByTestId("todo-edit-save").click();
+  await expect(page.locator('[data-testid="todo-column-doing"] .todo-card')).toHaveCount(3);
+  await expect(page.locator('[data-testid="todo-column-todo"] .todo-card')).toHaveCount(2);
 
-  // Per-column create lands in that column.
-  await page.getByTestId("todo-add-doing").click();
-  await page.getByRole("textbox", { name: "在「进行中」中新建" }).fill("补一条回归用例");
+  // Per-column create stays the quick path: a title and Enter, in that column.
+  await page.getByTestId("todo-add-review").click();
+  await page.getByRole("textbox", { name: "在「待确认」中新建" }).fill("补一条回归用例");
   await page.keyboard.press("Enter");
-  await expect(page.locator('[data-testid="todo-column-doing"] .todo-card')).toHaveCount(2);
+  await expect(page.locator('[data-testid="todo-column-review"] .todo-card')).toHaveCount(2);
 
   const created = (await wbLog(page)).filter((row) => row.command === "create_todo");
   expect(created.map((row) => (row.args.draft as { status: string }).status)).toEqual([
-    "todo",
     "doing",
+    "review",
   ]);
   // A create is idempotent: the client sends a request id with every draft.
   expect((created[0].args.draft as { requestId?: string }).requestId).toBeTruthy();
@@ -346,15 +516,19 @@ test("完成 moves a card to 已完成 and 恢复 brings it back to 待处理", 
     page.locator('[data-testid="todo-column-todo"] [data-testid="todo-card-todo-2"]'),
   ).toHaveCount(0);
 
-  // The list view agrees, because both read the one status field.
+  // The list view agrees, because both read the one status field: the row is
+  // still there, and it wears the done styling.
   await page.getByTestId("todo-view-list").click();
-  await page.getByTestId("todo-filter-done").click();
+  await page.getByTestId("todo-filter-all").click();
   await expect(page.getByTestId("todo-row-todo-2").locator(".todo-row-title--done")).toBeVisible();
 
-  await page.getByTestId("todo-toggle-todo-2").click();
-  await expect(page.getByTestId("todo-row-todo-2")).toHaveCount(0);
+  // 未完成 is the chip that parts the two out.
   await page.getByTestId("todo-filter-open").click();
-  await expect(page.getByTestId("todo-row-todo-2")).toBeVisible();
+  await expect(page.getByTestId("todo-row-todo-2")).toHaveCount(0);
+
+  await page.getByTestId("todo-filter-all").click();
+  await page.getByTestId("todo-toggle-todo-2").click();
+  await expect(page.getByTestId("todo-row-todo-2").locator(".todo-row-title--done")).toHaveCount(0);
 
   // 恢复 goes back to 待处理, not to 进行中.
   await page.getByTestId("todo-view-board").click();
@@ -394,7 +568,7 @@ test("dragging a card across columns writes the status once", async ({ page }) =
   await expect(page.getByTestId("todo-column-doing")).toHaveClass(/todo-column-body--over/);
   await page.mouse.up();
 
-  await expect(page.locator('[data-testid="todo-column-doing"] .todo-card')).toHaveCount(2);
+  await expect(page.locator('[data-testid="todo-column-doing"] .todo-card')).toHaveCount(3);
   await expect(
     page.locator('[data-testid="todo-column-doing"] [data-testid="todo-card-todo-2"]'),
   ).toBeVisible();
@@ -416,7 +590,7 @@ test("a cancelled drag leaves the status alone", async ({ page }) => {
   await expect(page.locator(".todo-drag-ghost")).toHaveCount(0);
   await page.mouse.up();
 
-  await expect(page.locator('[data-testid="todo-column-todo"] .todo-card')).toHaveCount(3);
+  await expect(page.locator('[data-testid="todo-column-todo"] .todo-card')).toHaveCount(2);
   expect((await commands(page)).filter((name) => name === "set_todo_status")).toHaveLength(0);
 });
 
@@ -435,29 +609,444 @@ test("editing a card updates the record and its sub-items", async ({ page }) => 
   const card = page.getByTestId("todo-card-todo-5");
   await expect(card.locator(".todo-card-title")).toHaveText("更新发布说明里的 v1.2 与 v1.3 段落");
   await expect(card.locator(".todo-priority")).toHaveText("高");
-  await expect(card.locator(".todo-due")).toContainText("10-05");
-  await expect(card.locator(".todo-subcount")).toHaveText("1 个子项");
+  await expect(card.locator(".todo-due")).toContainText("10/05");
+  await expect(card.locator(".todo-subcount")).toHaveText("0/1 子项");
   expect(await commands(page)).toContain("update_todo");
   // The sub-item was created, not saved as part of the parent's row.
   const subtask = (await wbLog(page)).filter((row) => row.command === "create_todo");
   expect((subtask[0].args.draft as { parentId?: string }).parentId).toBe("todo-5");
 });
 
-test("archiving hides a row from the board until the archived toggle is on", async ({ page }) => {
+test("the two-column editor round-trips every new field on save", async ({ page }) => {
   await openTodo(page);
 
+  await page.getByTestId("todo-edit-todo-5").click();
+  // The two columns are visible — main + rail — and the rail carries the
+  // catalog-derived sections.
+  await expect(page.locator(".todo-editor-main")).toBeVisible();
+  await expect(page.locator(".todo-editor-rail")).toBeVisible();
+  await expect(page.getByTestId("todo-edit-assignee")).toBeVisible();
+  await expect(page.getByTestId("todo-add-attachment")).toBeVisible();
+  await expect(page.getByTestId("todo-add-reminder")).toBeVisible();
+  await expect(page.getByTestId("todo-comment-input")).toBeVisible();
+
+  // The new fields all carry their values to the save.
+  await page.getByTestId("todo-edit-title").fill("更新发布说明里的 v1.2 段落");
+  await page.getByTestId("todo-edit-due").fill("2026-10-15");
+  await page.getByTestId("todo-edit-due-time").fill("18:00");
+  await page.getByTestId("todo-edit-item-type").selectOption("story");
+  await page.getByTestId("todo-edit-module").fill("docs/release-notes");
+  await page.getByTestId("todo-edit-estimate").fill("2.5");
+  await page.getByTestId("todo-edit-assignee").selectOption("person-zhang");
+  // Add a tag the row doesn't already carry — the picker toggles, so the
+  // chip's `aria-pressed` flips on. todo-5's fixture carries `tag-docs` only.
+  await page.getByTestId("todo-edit-tag-tag-lakehouse").click();
+  await page.getByTestId("todo-edit-save").click();
+
+  // The card reflects the new title.
+  const card = page.getByTestId("todo-card-todo-5");
+  await expect(card.locator(".todo-card-title")).toHaveText(
+    "更新发布说明里的 v1.2 段落",
+  );
+
+  // Reopen and confirm: the rail reads the same data back, not a stale copy.
+  await page.getByTestId("todo-edit-todo-5").click();
+  await expect(page.getByTestId("todo-edit-due-time")).toHaveValue("18:00");
+  await expect(page.getByTestId("todo-edit-item-type")).toHaveValue("story");
+  await expect(page.getByTestId("todo-edit-module")).toHaveValue("docs/release-notes");
+  await expect(page.getByTestId("todo-edit-estimate")).toHaveValue("2.5");
+  await expect(page.getByTestId("todo-edit-assignee")).toHaveValue("person-zhang");
+  await expect(page.getByTestId("todo-edit-tag-tag-lakehouse")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  // The save and close button is the one labelled "保存并关闭", not the
+  // short "保存" any more.
+  await expect(page.getByTestId("todo-edit-save")).toHaveText("保存并关闭");
+  await page.getByTestId("todo-edit-save").click();
+
+  // The wire carried every new field — `update_todo`'s `todo` payload has them.
+  const update = (await wbLog(page)).find((row) => row.command === "update_todo");
+  const payload = update?.args.todo as Record<string, unknown>;
+  expect(payload.itemType).toBe("story");
+  expect(payload.module).toBe("docs/release-notes");
+  expect(payload.dueTime).toBe("18:00");
+  expect(payload.assigneeId).toBe("person-zhang");
+  expect(payload.tagIds).toEqual(["tag-docs", "tag-lakehouse"]);
+  expect(payload.estimateHours).toBe(2.5);
+});
+
+test("the status manager adds, renames and recolours statuses", async ({ page }) => {
+  await openTodo(page);
+
+  // The four built-in + custom statuses seed the modal's rows.
+  await page.getByTestId("todo-manage-statuses").click();
+  const rows = page.locator(".todo-status-modal .todo-status-row");
+  await expect(rows).toHaveCount(4);
+
+  // A new status becomes a column on the board once the modal closes.
+  await page.getByTestId("todo-status-new-name").fill("已搁置");
+  await page.getByTestId("todo-status-new-color").selectOption("purple");
+  await page.getByTestId("todo-status-new").click();
+  await expect(rows).toHaveCount(5);
+  expect(await commands(page)).toContain("create_todo_status");
+  await page.getByTestId("todo-status-close").click();
+  await expect(page.locator(".todo-column-name")).toHaveText([
+    "待处理",
+    "进行中",
+    "待确认",
+    "已完成",
+    "已搁置",
+  ]);
+
+  // Renaming a status flips the column header in the same render.
+  await page.getByTestId("todo-manage-statuses").click();
+  const nameInput = page.getByTestId("todo-status-name-review");
+  await nameInput.fill("待评审");
+  await nameInput.blur();
+  expect(
+    (await wbLog(page))
+      .filter((row) => row.command === "update_todo_status")
+      .map((row) => (row.args.status as { name: string }).name),
+  ).toContain("待评审");
+  await page.getByTestId("todo-status-close").click();
+  await expect(page.getByTestId("todo-col-review").locator(".todo-column-name")).toHaveText("待评审");
+
+  // Recolouring writes the change, the chip picks it up.
+  await page.getByTestId("todo-manage-statuses").click();
+  await page.getByTestId("todo-status-color-select-review").selectOption("teal");
+  expect(
+    (await wbLog(page))
+      .filter((row) => row.command === "update_todo_status")
+      .map((row) => (row.args.status as { color: string }).color),
+  ).toContain("teal");
+  await page.getByTestId("todo-status-close").click();
+  await expect(
+    page.getByTestId("todo-col-review").locator(".todo-column-head .todo-status-dot"),
+  ).toHaveAttribute("data-color", "teal");
+});
+
+test("an empty user status can be deleted with no reassignment target", async ({ page }) => {
+  await openTodo(page);
+
+  // Create a brand-new status with no todos attached, then delete it.
+  await page.getByTestId("todo-manage-statuses").click();
+  await page.getByTestId("todo-status-new-name").fill("已搁置");
+  await page.getByTestId("todo-status-new").click();
+  expect(await commands(page)).toContain("create_todo_status");
+  // The delete is straight: nothing in this column, no picker surfaces.
+  // The stub assigns `st-stub-N` for new statuses, so we click the matching
+  // row without depending on the exact id.
+  const created = page.locator('[data-testid^="todo-status-delete-st-stub-"]').first();
+  await created.click({ force: true });
+  expect(await commands(page)).toContain("delete_todo_status");
+  await page.getByTestId("todo-status-close").click();
+  await expect(page.locator(".todo-column-name")).toHaveText([
+    "待处理",
+    "进行中",
+    "待确认",
+    "已完成",
+  ]);
+});
+
+test("a status with rows can only be deleted after a reassignment", async ({ page }) => {
+  // Add a non-builtin status that actually holds a todo, so the delete
+  // path has to ask for a target rather than going through.
+  const blocked: TodoStatusDefDto = {
+    ...DEMO_TODO_STATUSES[2],
+    id: "blocked",
+    name: "被阻塞",
+    color: "red",
+    builtin: false,
+    sortOrder: 4,
+  };
+  await openTodo(page, {
+    todoStatuses: [...DEMO_TODO_STATUSES, blocked],
+    todos: [todo({ id: "t-blocked", title: "等上游修复", status: "blocked" })],
+  });
+
+  await page.getByTestId("todo-manage-statuses").click();
+  await page.getByTestId("todo-status-delete-blocked").click();
+  // The reassign selector appears because the column is non-empty.
+  await expect(page.getByTestId("todo-status-reassign-blocked")).toBeVisible();
+  // Picking a target commits the move in one call, not two.
+  await page.getByTestId("todo-status-reassign-blocked").selectOption("todo");
+  const deletes = (await wbLog(page)).filter(
+    (row) => row.command === "delete_todo_status",
+  );
+  expect(deletes).toHaveLength(1);
+  const args = deletes[0].args as { reassignTo: string | null };
+  expect(args.reassignTo).toBe("todo");
+  await page.getByTestId("todo-status-close").click();
+  // The card that used to live under 被阻塞 is now under 待处理.
+  await expect(page.getByTestId("todo-col-todo").locator(".todo-card")).toHaveCount(1);
+  await expect(page.locator(".todo-column-name")).toHaveText([
+    "待处理",
+    "进行中",
+    "待确认",
+    "已完成",
+  ]);
+});
+
+test("a built-in status cannot be deleted and the buttons are honest about it", async ({ page }) => {
+  await openTodo(page);
+  await page.getByTestId("todo-manage-statuses").click();
+  await expect(page.getByTestId("todo-status-delete-todo")).toBeDisabled();
+  await expect(page.getByTestId("todo-status-delete-doing")).toBeDisabled();
+  await expect(page.getByTestId("todo-status-delete-done")).toBeDisabled();
+  await expect(page.getByTestId("todo-status-delete-review")).toBeEnabled();
+  await page.getByTestId("todo-status-close").click();
+});
+
+test("arrow keys on a status grip reorder the catalog", async ({ page }) => {
+  await openTodo(page);
+  await page.getByTestId("todo-manage-statuses").click();
+
+  // `review` starts at index 2; two ArrowUp presses should walk it past
+  // `doing` and `todo` to the head of the list. Each press writes a reorder.
+  const grip = page.getByTestId("todo-status-grip-review");
+  await grip.focus();
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  const reorders = (await wbLog(page)).filter(
+    (row) => row.command === "reorder_todo_statuses",
+  );
+  expect(reorders).toHaveLength(2);
+  const last = reorders[reorders.length - 1].args as { ids: string[] };
+  expect(last.ids).toEqual(["review", "todo", "doing", "done"]);
+  await page.getByTestId("todo-status-close").click();
+  await expect(page.locator(".todo-column-name")).toHaveText([
+    "待确认",
+    "待处理",
+    "进行中",
+    "已完成",
+  ]);
+});
+
+test("dragging a card within its column reorders it via reorder_todo", async ({ page }) => {
+  await openTodo(page);
+
+  // todo-2 and todo-3 both sit in 待处理; dropping todo-2 on top of todo-3
+  // should call reorder_todo with beforeId=todo-3, not set_todo_status.
+  const handle = page.getByTestId("todo-handle-todo-2");
+  await handle.scrollIntoViewIfNeeded();
+  const target = page.getByTestId("todo-card-todo-3");
+  await target.scrollIntoViewIfNeeded();
+  const from = (await handle.boundingBox())!;
+  const to = (await target.boundingBox())!;
+
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+  await page.mouse.down();
+  // Stay inside the same column while moving, so the columnAt() never crosses.
+  await expect(page.locator(".todo-drag-ghost")).toHaveText("整理实时数仓搭建流程的说明文档");
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
+  await page.mouse.up();
+
+  const reorders = (await wbLog(page)).filter(
+    (row) => row.command === "reorder_todo",
+  );
+  expect(reorders).toHaveLength(1);
+  const args = reorders[0].args as { id: string; status: string; beforeId: string | null };
+  expect(args.id).toBe("todo-2");
+  expect(args.status).toBe("todo");
+  expect(args.beforeId).toBe("todo-3");
+  // The move did not also rewrite the status.
+  const statusWrites = (await commands(page)).filter(
+    (name) => name === "set_todo_status",
+  );
+  expect(statusWrites).toEqual([]);
+});
+
+test("a cancelled in-column drag leaves the order alone", async ({ page }) => {
+  await openTodo(page);
+
+  const handle = page.getByTestId("todo-handle-todo-2");
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  // Move inside the same column, then cancel with Escape.
+  await expect(page.locator(".todo-drag-ghost")).toBeVisible();
+  await page.mouse.move(box.x + 40, box.y + 40, { steps: 4 });
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".todo-drag-ghost")).toHaveCount(0);
+  await page.mouse.up();
+
+  expect(
+    (await commands(page)).filter(
+      (name) => name === "reorder_todo" || name === "set_todo_status",
+    ),
+  ).toEqual([]);
+});
+
+test("archiving takes a row off the board and into the list's 已归档 fold", async ({ page }) => {
+  await openTodo(page);
+
+  // The board has no column an archived row could sit in, so the fixture's one
+  // archived row is simply not on it.
+  await expect(page.getByTestId("todo-card-todo-7")).toHaveCount(0);
   await expect(page.getByTestId("todo-archived")).toHaveCount(0);
+
+  // The list folds them away: the count is there, the rows are not.
+  await page.getByTestId("todo-view-list").click();
+  await expect(page.getByTestId("todo-archived-toggle")).toContainText("1");
+  await expect(page.getByTestId("todo-archived-list")).toHaveCount(0);
+  await page.getByTestId("todo-archived-toggle").click();
+  await expect(page.getByTestId("todo-archived-list").locator(".todo-row")).toHaveCount(1);
+
+  // Archiving a live card takes it off the board and into the same fold.
+  await page.getByTestId("todo-view-board").click();
   await page.getByTestId("todo-edit-todo-6").click();
   await page.getByTestId("todo-edit-archive").click();
-
   await expect(page.getByTestId("todo-card-todo-6")).toHaveCount(0);
-  await page.getByTestId("todo-archived-toggle").click();
-  await expect(page.getByTestId("todo-archived")).toBeVisible();
-  await expect(page.getByTestId("todo-row-todo-6")).toBeVisible();
+
+  await page.getByTestId("todo-view-list").click();
+  await expect(page.getByTestId("todo-archived-list").locator(".todo-row")).toHaveCount(2);
 
   await page.getByTestId("todo-unarchive-todo-6").click();
-  await expect(page.getByTestId("todo-row-todo-6")).toHaveCount(0);
+  await expect(page.getByTestId("todo-archived-list").locator(".todo-row")).toHaveCount(1);
+  await expect(page.getByTestId("todo-list").getByTestId("todo-row-todo-6")).toBeVisible();
   expect(await commands(page)).toContain("set_todo_archived");
+});
+
+test("every chip counts what clicking it reveals, and the search narrows both", async ({ page }) => {
+  await openTodo(page);
+
+  // Six live rows — five unfinished, two 高优先级 — and the one archived row.
+  await expect(page.getByTestId("todo-filter-all").locator(".todo-chip-count")).toHaveText("6");
+  await expect(page.getByTestId("todo-filter-open").locator(".todo-chip-count")).toHaveText("5");
+  await expect(page.getByTestId("todo-filter-high").locator(".todo-chip-count")).toHaveText("2");
+  await expect(page.getByTestId("todo-filter-archived").locator(".todo-chip-count")).toHaveText("1");
+  await expect(page.getByTestId("todo-filter-all")).toHaveAttribute("aria-pressed", "true");
+
+  // The search is a row filter rather than a seventh chip: it narrows the rows
+  // and the counts with them, so a chip can never promise a number the board
+  // cannot deliver.
+  await page.getByTestId("todo-search").fill("k2k");
+  await expect(page.getByTestId("todo-filter-all").locator(".todo-chip-count")).toHaveText("3");
+  await expect(page.locator(".todo-card")).toHaveCount(3);
+  await expect(page.getByTestId("todo-filter-archived").locator(".todo-chip-count")).toHaveText("0");
+
+  // ⌘K is the keyboard way to the same box.
+  await page.getByTestId("todo-search").fill("");
+  await page.keyboard.press("Meta+k");
+  await expect(page.getByTestId("todo-search")).toBeFocused();
+});
+
+test("排序 reorders the list and writes nothing", async ({ page }) => {
+  await openTodo(page);
+  await page.getByTestId("todo-view-list").click();
+  const rows = page.getByTestId("todo-list").locator(".todo-row-title");
+
+  // 按优先级: both 高 rows lead, and no 高 is left behind them.
+  await page.getByTestId("todo-menu-sort").click();
+  await page.getByTestId("todo-menu-sort-priority").click();
+  const byPriority = await rows.allTextContents();
+  expect(byPriority.slice(0, 2)).toEqual([
+    "复核 k2k-rust 未知表路由的兜底分支",
+    "确认 Flink 任务的延迟基线",
+  ]);
+
+  // 按截止时间: soonest first, and the undated rows keep to the end in their
+  // stored order rather than being scattered among the dated ones.
+  await page.getByTestId("todo-menu-sort").click();
+  await page.getByTestId("todo-menu-sort-due").click();
+  const byDue = await rows.allTextContents();
+  expect(byDue[0]).toBe("确认 Flink 任务的延迟基线");
+  expect(byDue.slice(-2)).toEqual(["归档 09-25 的路由排查记录", "补齐 k2k-rust 的回归用例"]);
+
+  // An order is a view, not an edit.
+  const writes = (await commands(page)).filter(
+    (name) => name === "update_todo" || name === "reorder_todo" || name === "bulk_update_todos",
+  );
+  expect(writes).toEqual([]);
+});
+
+test("分组 splits the list into catalog-ordered buckets, and only in the list", async ({
+  page,
+}) => {
+  await openTodo(page);
+
+  // The board is grouped by status because its columns are statuses; the list
+  // only groups when asked, which is why the menu is not on the board.
+  await expect(page.getByTestId("todo-menu-group")).toHaveCount(0);
+  await page.getByTestId("todo-view-list").click();
+  await expect(page.getByTestId("todo-group-todo")).toHaveCount(0);
+
+  await page.getByTestId("todo-menu-group").click();
+  await page.getByTestId("todo-menu-group-status").click();
+
+  // Catalog order, one bucket per status that has rows, and no rows left over.
+  await expect(page.locator(".todo-list .todo-group-name")).toHaveText([
+    "待处理",
+    "进行中",
+    "待确认",
+    "已完成",
+  ]);
+  await expect(page.getByTestId("todo-group-todo").locator(".todo-row")).toHaveCount(2);
+  await expect(page.getByTestId("todo-group-doing").locator(".todo-row")).toHaveCount(2);
+  await expect(page.getByTestId("todo-group-review").locator(".todo-row")).toHaveCount(1);
+  await expect(page.getByTestId("todo-group-done").locator(".todo-row")).toHaveCount(1);
+});
+
+test("the selection bar writes the whole selection in one command", async ({ page }) => {
+  await openTodo(page);
+  await page.getByTestId("todo-view-list").click();
+
+  await page.getByTestId("todo-select-todo-2").check();
+  await page.getByTestId("todo-select-todo-3").check();
+  // The bar replaces the toolbar, so 筛选/排序 are not fighting it for the row.
+  await expect(page.getByTestId("todo-selection")).toContainText("已选择 2 项");
+  await expect(page.getByTestId("todo-menu-sort")).toHaveCount(0);
+
+  await page.getByTestId("todo-bulk-priority").click();
+  await page.getByTestId("todo-bulk-priority-high").click();
+
+  // One round trip for both rows, and the bar closes on the response.
+  const writes = (await wbLog(page)).filter((row) => row.command === "bulk_update_todos");
+  expect(writes).toHaveLength(1);
+  expect(writes[0].args).toMatchObject({
+    ids: ["todo-2", "todo-3"],
+    op: { op: "setPriority", priority: "high" },
+  });
+  await expect(page.getByTestId("todo-selection")).toHaveCount(0);
+  await expect(page.getByTestId("todo-row-todo-2").locator(".todo-priority")).toHaveText("高");
+  await expect(page.getByTestId("todo-row-todo-3").locator(".todo-priority")).toHaveText("高");
+});
+
+test("自定义列 is a stored preference, not a session-only view", async ({ page }) => {
+  await openTodo(page);
+  await page.getByTestId("todo-view-list").click();
+
+  // The full table starts on — the design shows the whole thing, and the menu
+  // is there to take a column away. Hiding 更新时间 drops it from both the head
+  // and the rows, and the column is no longer the design's first choice.
+  const updatedHead = page.locator(".todo-list-head .todo-head-cell", { hasText: "更新时间" });
+  await expect(updatedHead).toBeVisible();
+  await page.getByTestId("todo-columns").click();
+  await page.getByTestId("todo-column-updated").click();
+  await page.keyboard.press("Escape");
+  await expect(updatedHead).toHaveCount(0);
+  await expect(page.getByTestId("todo-row-todo-4").locator(".todo-updated")).toHaveCount(0);
+
+  // The toggle flips it back on, in the design's order.
+  await page.getByTestId("todo-columns").click();
+  await page.getByTestId("todo-column-updated").click();
+  await page.keyboard.press("Escape");
+  await expect(updatedHead).toBeVisible();
+
+  // It lands in the workbench prefs in the design's own order, whatever order
+  // the columns were switched on in.
+  const pref = (await wbLog(page)).filter((row) => row.command === "set_workbench_pref").at(-1);
+  expect(pref?.args).toMatchObject({ key: "todo.columns" });
+  expect(JSON.parse(String(pref?.args.value))).toEqual([
+    "status",
+    "priority",
+    "due",
+    "tags",
+    "assignee",
+    "progress",
+    "updated",
+  ]);
 });
 
 test("the calendar creates, edits and deletes a real event", async ({ page }) => {
@@ -693,9 +1282,10 @@ test("the apps run standalone: no model call, no scheduler run, no project", asy
   // Nothing here answers `send_message`, and the workbench was never given a
   // project — the three apps still do their whole job.
   await openTodo(page, { workspace: { projects: [], sessions: [] } });
-  await page.getByTestId("todo-new-input").fill("离线也能记一条");
-  await page.getByTestId("todo-new-submit").click();
-  await expect(page.locator('[data-testid="todo-column-todo"] .todo-card')).toHaveCount(4);
+  await page.getByTestId("todo-new").click();
+  await page.getByTestId("todo-edit-title").fill("离线也能记一条");
+  await page.getByTestId("todo-edit-save").click();
+  await expect(page.locator('[data-testid="todo-column-todo"] .todo-card')).toHaveCount(3);
 
   const sent = await commands(page);
   expect(sent).not.toContain("send_message");
@@ -739,7 +1329,7 @@ test("a version conflict surfaces as a message instead of a silent overwrite", a
 
   // The save is refused, the editor stays open with the reason, and what the
   // user typed is still there to retry.
-  await expect(page.locator(".skill-detail-body .page-error")).toHaveText(
+  await expect(page.locator(".todo-editor-body .page-error")).toHaveText(
     "记录已被其他修改更新，请刷新后重试。",
   );
   await expect(page.getByTestId("todo-edit-title")).toHaveValue("本地修改");

@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Kodo",
-  "version": "0.0.1",
   "identifier": "dev.kodo.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -22,6 +21,13 @@
         "hiddenTitle": true
       }
     ],
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/tray.png",
+      "iconAsTemplate": true,
+      "showMenuOnLeftClick": false,
+      "tooltip": "Kodo"
+    },
     "security": {
       "csp": null
     }
@@ -29,6 +35,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "copyright": "Copyright © 2026 lijx240 · MIT License",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

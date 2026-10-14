@@ -29,3 +29,20 @@ node node_modules/@tauri-apps/cli/tauri.js icon ../../docs/logos/kodo-icons-pack
 ```
 
 图像是 PNG 资产，不是矢量源文件。原生图标在重新构建应用后生效；已安装应用的图标缓存可能需要重启应用才会刷新。
+
+### 菜单栏托盘图标
+
+`apps/desktop/src-tauri/icons/tray.png` 是 macOS 顶部状态栏用的**模板图**：单色黑剪影 + alpha（`iconAsTemplate: true`，系统按菜单栏深浅自动反色）。它是从透明底标识派生的，不是手绘的——本地重新推导：
+
+```bash
+magick docs/logos/kodo-transparent-icons-pack/kodo-icon-transparent-1254.png \
+  -trim +repage -resize 36x36 -background none -gravity center -extent 44x44 \
+  -channel RGB -fill black -colorize 100 +channel \
+  PNG32:apps/desktop/src-tauri/icons/tray.png
+```
+
+- `-channel RGB -colorize` 只压 RGB、保留 alpha，得到纯黑剪影；
+- `PNG32:` 前缀强制输出 RGBA —— Tauri 编译期嵌入图标时要求 RGBA；
+- 44×44 够 Retina 用：`tray-icon` 会按 18pt 高缩放并保持宽高比。
+
+托盘图标由 `tauri.conf.json` 的 `app.trayIcon` 在编译期嵌入，改图后需要重新构建应用。

@@ -35,7 +35,7 @@ import { hrefTo, navigate, type AppId, type Route } from "../routes";
 import { workbenchErrorText } from "./apps/errors";
 import { CalendarApp } from "./apps/CalendarApp";
 import { ResultsApp } from "./apps/ResultsApp";
-import { TodoApp } from "./apps/TodoApp";
+import { TodoApp } from "./apps/todo/TodoApp";
 import { today as todayIso } from "./apps/time";
 
 const W = T.workbench;
@@ -109,7 +109,9 @@ export function WorkbenchPage({ route }: Props) {
     void listTodos(false)
       .then((rows) => {
         if (!live) return;
-        setTodayTodos(rows.filter((row) => row.dueDate === today && row.status !== "done"));
+        // `isDone` comes off the status catalog, so renaming or re-flagging a
+        // status cannot make a finished todo reappear here.
+        setTodayTodos(rows.filter((row) => row.dueDate === today && !row.isDone));
       })
       .catch(() => live && setTodayTodos([]));
     return () => {

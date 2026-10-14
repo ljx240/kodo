@@ -19,6 +19,7 @@ use kodo_agent::mcp::{
 
 use run::{ApprovalChoice, Approvals, Runs, StartArgs};
 
+mod platform;
 mod run;
 mod view;
 
@@ -29,11 +30,17 @@ use memory::{
 
 mod apps;
 use apps::{
-    create_calendar_event, create_result, create_todo, delete_calendar_event, delete_result,
-    get_workbench_prefs, list_apps, list_calendar_events, list_results, list_todos,
-    open_result_file, reveal_result_file, set_app_enabled, set_app_favorite, set_app_links,
-    set_app_order, set_result_flags, set_todo_archived, set_todo_status, set_workbench_pref,
-    update_calendar_event, update_result, update_todo, AppService,
+    add_todo_comment, bulk_update_todos, create_calendar_event, create_result, create_todo,
+    create_todo_attachment, create_todo_person, create_todo_reminder, create_todo_status,
+    create_todo_tag, delete_calendar_event, delete_result, delete_todo, delete_todo_attachment,
+    delete_todo_reminder, delete_todo_status, delete_todo_tag, get_workbench_prefs, list_apps,
+    list_calendar_events, list_results, list_todo_activity, list_todo_attachments, list_todo_people,
+    list_todo_reminders, list_todo_statuses, list_todo_tags, list_todos, open_result_file,
+    pick_todo_attachment, reorder_todo, reorder_todo_statuses, reveal_result_file, set_app_enabled,
+    set_app_favorite, set_app_links, set_app_order, set_result_flags, set_todo_archived,
+    set_todo_links, set_todo_reminder_enabled, set_todo_status, set_todo_tags, set_workbench_pref,
+    update_calendar_event, update_result, update_todo, update_todo_attachment, update_todo_status,
+    update_todo_tag, AppService,
 };
 
 mod scheduler;
@@ -201,6 +208,29 @@ fn reveal_project(app: AppHandle, path: String) -> Result<(), String> {
     app.opener()
         .reveal_item_in_dir(Path::new(&path))
         .map_err(|error| error.to_string())
+}
+
+/// Same idea as `reveal_project`, for the directory Kodo owns itself — the Help
+/// menu's "打开状态目录" reaches it through `platform::reveal_state_dir`.
+#[tauri::command]
+fn reveal_state_dir(app: AppHandle) {
+    platform::reveal_state_dir(&app);
+}
+
+/// The window's sidebar/inspector/theme state, pushed to the native menu so its
+/// check marks mirror the app. The webview is the source of truth; this only
+/// ever writes the menu.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MenuStateDto {
+    sidebar: bool,
+    inspector: bool,
+    theme: String,
+}
+
+#[tauri::command]
+fn set_menu_state(app: AppHandle, state: MenuStateDto) {
+    platform::apply_menu_state(&app, state.sidebar, state.inspector, &state.theme);
 }
 
 /// Open a project file with the system default application — the escape
@@ -1540,13 +1570,17 @@ fn main() {
         let _ = session::recover_interrupted(&dir, &live);
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Runs::default())
         .manage(Approvals::default())
         .manage(BrowseWebview::default())
         .setup(|app| {
+            // Native surfaces come up first: the status item is independent of
+            // both the scheduler and the workbench, so it has to exist even
+            // when one of them fails to boot and returns early below.
+            platform::build_tray(app.handle())?;
             // The scheduler needs a typed `AppHandle` to install the tick
             // thread and a `state_dir` to write its store under. Both
             // come from the desktop's `kodo_core::settings` module; the
@@ -1585,6 +1619,17 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(true) = event {
                 let _ = window.set_title("Kodo");
+            }
+            // Closing hides rather than quits: a run in flight outlives the
+            // window, and the status item is the way back in. macOS-only —
+            // `RunEvent::Reopen` below is the matching dock-icon path, and
+            // neither exists elsewhere.
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1672,6 +1717,33 @@ fn main() {
             update_todo,
             set_todo_status,
             set_todo_archived,
+            delete_todo,
+            reorder_todo,
+            set_todo_tags,
+            set_todo_links,
+            bulk_update_todos,
+            list_todo_statuses,
+            create_todo_status,
+            update_todo_status,
+            delete_todo_status,
+            reorder_todo_statuses,
+            list_todo_tags,
+            create_todo_tag,
+            update_todo_tag,
+            delete_todo_tag,
+            list_todo_people,
+            create_todo_person,
+            list_todo_attachments,
+            create_todo_attachment,
+            update_todo_attachment,
+            delete_todo_attachment,
+            pick_todo_attachment,
+            list_todo_reminders,
+            create_todo_reminder,
+            set_todo_reminder_enabled,
+            delete_todo_reminder,
+            list_todo_activity,
+            add_todo_comment,
             list_calendar_events,
             create_calendar_event,
             update_calendar_event,
@@ -1683,14 +1755,42 @@ fn main() {
             delete_result,
             open_result_file,
             reveal_result_file,
-        ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Kodo");
+            reveal_state_dir,
+            set_menu_state,
+        ]);
+
+    // The app menu bar exists only on macOS: `Menu::default` was the only thing
+    // that ever installed one, so Linux has never had one and must not gain one
+    // by accident. The tray is declared in `tauri.conf.json` and so is present
+    // everywhere — which is why the menu *event* handler is not gated: it also
+    // serves the tray menu.
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(platform::build_menu);
+
+    let app = builder
+        .on_menu_event(platform::on_menu_event)
+        .on_tray_icon_event(platform::on_tray_event)
+        .build(tauri::generate_context!())
+        .expect("failed to build Kodo");
+
+    app.run(|_app, _event| {
+        // Clicking the dock icon while the window is hidden has to bring it
+        // back; without this the hide-to-tray close button would be a one-way
+        // door.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen {
+            has_visible_windows: false,
+            ..
+        } = _event
+        {
+            platform::show_main(_app);
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
-    use super::select_listed_paths;
+    use super::{select_listed_paths, MenuStateDto};
 
     #[test]
     fn listing_keeps_tracked_content_under_truncation() {
@@ -1717,5 +1817,17 @@ mod tests {
             ("a.md".to_string(), true),
         ];
         assert_eq!(select_listed_paths(entries, 2), vec!["a.md", "b.md"]);
+    }
+
+    /// The wire contract with `api.ts`'s `setMenuState`. Worth a test because
+    /// the frontend fires it as a `void` — a field renamed on either side would
+    /// just stop moving the menu's check marks, with nothing to show for it.
+    #[test]
+    fn menu_state_payload_matches_the_frontend() {
+        let state: MenuStateDto =
+            serde_json::from_str(r#"{"sidebar":true,"inspector":false,"theme":"dark"}"#).unwrap();
+        assert!(state.sidebar);
+        assert!(!state.inspector);
+        assert_eq!(state.theme, "dark");
     }
 }

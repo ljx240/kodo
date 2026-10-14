@@ -41,6 +41,17 @@ When collapsed:
 - keep a narrow 40px tool rail;
 - main conversation immediately consumes freed width.
 
+### Platform shell — outside the window
+
+The macOS menu bar and the menu-bar status item are native surfaces, built in
+Rust (`apps/desktop/src-tauri/src/platform.rs`; `COMPONENTS.md` §17). They take
+no space inside the window: no column, no row, no reserved edge. The geometry
+above is unchanged and no viewport rule in this document applies to them.
+
+The one behaviour that touches the window: **closing hides it** (button or
+⌘W) — the process, and any run in flight, keep going. The dock icon and the
+status item bring it back.
+
 ---
 
 ## 2. Sidebar
@@ -164,6 +175,46 @@ if the active row sits past the fold, the list shows in full.
 
 Settings stays pinned at bottom, below the scrollable tree, as a single
 `nav-item` row.
+
+---
+
+## 2b. 工作台 apps — 待办 sub-layout
+
+An app opens *inside* 工作台 (`/workbench?app=todo`) and never takes a sidebar
+row (`LAYOUT.md` §2). The 待办 page is the only app with its own visual
+language (`DESIGN.md` §2a); its geometry is:
+
+```text
+待办 page (main.page-app.todo-app)
+├─ page head     title 待办 + subtitle · actions: search field, 返回工作台
+├─ toolbar       row 1  filter chips (with counts) + 筛选/排序/分组 + 看板|列表 + 新建事项
+│                row 2  ⚙ 状态管理
+├─ board | list  the active view fills the remaining height and scrolls itself
+├─ stats bar     sticky to the bottom of the page body (共 n 个事项 …)
+└─ editor        modal (settings-modal house style), two columns inside
+```
+
+- **Board** — one column per status in the catalog (`todo_statuses`), in
+  `sort_order`; a column is a fixed `--todo-column-width` wide and the board
+  scrolls horizontally when the statuses exceed the viewport. Each column head
+  carries the status dot + name + count and a `+`; an empty column shows the
+  dashed drop area, a status with no items at all shows the illustration empty
+  state.
+- **List** — a table whose header row carries the sortable columns; rows group
+  by status (default), priority or none; the 已归档 group renders last behind a
+  collapsible head. Selecting rows replaces the toolbar's right cluster with
+  the batch bar.
+- **Stats bar** — always pinned to the bottom of the app body; the board and
+  the list scroll above it and never under it.
+- **Editor** — the shared `settings-modal` shell, its panel widened
+  (`.wb-modal-panel`) and split into two columns: main fields left (title,
+  status/priority/due, tags, assignee, description, subtasks, related),
+  metadata right (custom fields, attachments, reminders, activity). The footer
+  is 归档 · 取消 · 保存.
+
+Responsive: below 820px the board collapses to a single stacked column and the
+list drops its non-essential columns; the stats bar stays sticky. The toolbar
+wraps rather than scrolling horizontally.
 
 ---
 

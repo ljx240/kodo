@@ -3,6 +3,12 @@ import {
   DEMO_CALENDAR_EVENTS,
   DEMO_RESULTS,
   DEMO_TIMEZONE,
+  DEMO_TODO_ACTIVITY,
+  DEMO_TODO_ATTACHMENTS,
+  DEMO_TODO_PEOPLE,
+  DEMO_TODO_REMINDERS,
+  DEMO_TODO_STATUSES,
+  DEMO_TODO_TAGS,
   DEMO_TODOS,
   DEMO_WORKBENCH_APPS,
   DEMO_WORKBENCH_PREFS,
@@ -39,10 +45,17 @@ type WbTodo = {
   id: string;
   title: string;
   notes: string;
+  /** An id into `WbStatus`, not one of three literals. */
   status: string;
   priority: string;
   dueDate: string | null;
+  dueTime: string | null;
   parentId: string | null;
+  assigneeId: string | null;
+  itemType: string;
+  module: string;
+  estimateHours: number | null;
+  actualHours: number | null;
   archived: boolean;
   completedAt: number | null;
   sortOrder: number;
@@ -50,6 +63,72 @@ type WbTodo = {
   version: number;
   createdAt: number;
   updatedAt: number;
+  tagIds: string[];
+  linkIds: string[];
+};
+
+/** A board column. `isDone` is the only place "done" is defined. */
+type WbStatus = {
+  id: string;
+  name: string;
+  color: string;
+  isDone: boolean;
+  builtin: boolean;
+  sortOrder: number;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type WbTag = {
+  id: string;
+  name: string;
+  color: string;
+  sortOrder: number;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type WbPerson = {
+  id: string;
+  name: string;
+  color: string;
+  createdAt: number;
+};
+
+type WbAttachment = {
+  id: string;
+  todoId: string;
+  name: string;
+  path: string;
+  size: number | null;
+  mime: string;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type WbReminder = {
+  id: string;
+  todoId: string;
+  kind: string;
+  offsetMinutes: number | null;
+  message: string;
+  enabled: boolean;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type WbActivity = {
+  id: string;
+  todoId: string;
+  kind: string;
+  authorId: string | null;
+  body: string;
+  meta: string;
+  createdAt: number;
 };
 
 type WbEvent = {
@@ -92,6 +171,12 @@ type WbResult = {
 type WorkbenchSeed = {
   apps: WbApp[];
   todos: WbTodo[];
+  todoStatuses: WbStatus[];
+  todoTags: WbTag[];
+  todoPeople: WbPerson[];
+  todoAttachments: WbAttachment[];
+  todoReminders: WbReminder[];
+  todoActivity: WbActivity[];
   events: WbEvent[];
   results: WbResult[];
   prefs: Record<string, string>;
@@ -203,6 +288,18 @@ export type Core = {
   workbenchApps?: WbApp[];
   /** 待办 rows; defaults to the frozen `DEMO_TODOS`. */
   todos?: WbTodo[];
+  /** 待办 board columns; defaults to `DEMO_TODO_STATUSES`. */
+  todoStatuses?: WbStatus[];
+  /** 待办 tags; defaults to `DEMO_TODO_TAGS`. */
+  todoTags?: WbTag[];
+  /** 待办 people; defaults to `DEMO_TODO_PEOPLE`. */
+  todoPeople?: WbPerson[];
+  /** 待办 attachments; defaults to `DEMO_TODO_ATTACHMENTS`. */
+  todoAttachments?: WbAttachment[];
+  /** 待办 reminders; defaults to `DEMO_TODO_REMINDERS`. */
+  todoReminders?: WbReminder[];
+  /** 待办 activity log; defaults to `DEMO_TODO_ACTIVITY`. */
+  todoActivity?: WbActivity[];
   /** 日历 events; defaults to the frozen `DEMO_CALENDAR_EVENTS`. */
   calendarEvents?: WbEvent[];
   /** 成果中心 rows; defaults to the frozen `DEMO_RESULTS`. */
@@ -229,6 +326,12 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     workbench: {
       apps: core.workbenchApps ?? DEMO_WORKBENCH_APPS,
       todos: core.todos ?? DEMO_TODOS,
+      todoStatuses: core.todoStatuses ?? DEMO_TODO_STATUSES,
+      todoTags: core.todoTags ?? DEMO_TODO_TAGS,
+      todoPeople: core.todoPeople ?? DEMO_TODO_PEOPLE,
+      todoAttachments: core.todoAttachments ?? DEMO_TODO_ATTACHMENTS,
+      todoReminders: core.todoReminders ?? DEMO_TODO_REMINDERS,
+      todoActivity: core.todoActivity ?? DEMO_TODO_ACTIVITY,
       events: core.calendarEvents ?? DEMO_CALENDAR_EVENTS,
       results: core.results ?? DEMO_RESULTS,
       prefs: core.workbenchPrefs ?? DEMO_WORKBENCH_PREFS,
@@ -343,6 +446,12 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     const seedWb = config.workbench;
     let wbApps = deepCopy(seedWb.apps);
     let wbTodos = deepCopy(seedWb.todos);
+    let wbStatuses = deepCopy(seedWb.todoStatuses);
+    let wbTags = deepCopy(seedWb.todoTags);
+    let wbPeople = deepCopy(seedWb.todoPeople);
+    let wbAttachments = deepCopy(seedWb.todoAttachments);
+    let wbReminders = deepCopy(seedWb.todoReminders);
+    let wbActivity = deepCopy(seedWb.todoActivity);
     let wbEvents = deepCopy(seedWb.events);
     let wbResults = deepCopy(seedWb.results);
     const wbPrefs = { ...seedWb.prefs };
@@ -372,6 +481,28 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
       const row = wbTodos.find((todo) => todo.id === id);
       if (!row) throw "not_found";
       return row;
+    };
+    const wbStatus = (id: string): WbStatus => {
+      const row = wbStatuses.find((status) => status.id === id);
+      if (!row) throw "not_found";
+      return row;
+    };
+    /** `isDone` lives on the status row and nowhere else. */
+    const wbIsDone = (status: string): boolean =>
+      Boolean(wbStatuses.find((row) => row.id === status)?.isDone);
+    /** What a todo looks like on the wire: the stored row plus derived `isDone`. */
+    const wbTodoOut = (row: WbTodo): WbTodo & { isDone: boolean } => ({
+      ...row,
+      isDone: wbIsDone(row.status),
+    });
+    /** Entering a done status stamps the moment; leaving one clears it. */
+    const wbCompletedFor = (
+      status: string,
+      wasDone: boolean,
+      previous: number | null,
+    ): number | null => {
+      if (!wbIsDone(status)) return null;
+      return wasDone ? previous : wbNow();
     };
     const wbEvent = (id: string): WbEvent => {
       const row = wbEvents.find((event) => event.id === id);
@@ -935,7 +1066,10 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
           case "list_todos": {
             wbLog.push({ command, args: args ?? {} });
             const includeArchived = Boolean(args?.includeArchived);
-            return deepCopy(wbTodos.filter((todo) => includeArchived || !todo.archived));
+            const rows = wbTodos
+              .filter((todo) => includeArchived || !todo.archived)
+              .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt);
+            return deepCopy(rows.map(wbTodoOut));
           }
           case "create_todo": {
             wbLog.push({ command, args: args ?? {} });
@@ -944,10 +1078,10 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             const replay = requestId ? wbRequests.get(requestId) : undefined;
             const seen = replay ? wbTodos.find((todo) => todo.id === replay) : undefined;
             // A repeated request replays the first row instead of adding one.
-            if (seen) return deepCopy(seen);
+            if (seen) return deepCopy(wbTodoOut(seen));
             const title = String(draft.title ?? "").trim();
             if (!title) throw "invalid_input";
-            const status = String(draft.status ?? "todo");
+            const status = wbStatus(String(draft.status ?? "todo")).id;
             const todo: WbTodo = {
               id: wbId("todo"),
               title,
@@ -955,52 +1089,435 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
               status,
               priority: String(draft.priority ?? "normal"),
               dueDate: draft.dueDate ? String(draft.dueDate) : null,
+              dueTime: draft.dueTime ? String(draft.dueTime) : null,
               parentId: draft.parentId ? String(draft.parentId) : null,
+              assigneeId: draft.assigneeId ? String(draft.assigneeId) : null,
+              itemType: String(draft.itemType ?? "task"),
+              module: String(draft.module ?? ""),
+              estimateHours: draft.estimateHours == null ? null : Number(draft.estimateHours),
+              actualHours: draft.actualHours == null ? null : Number(draft.actualHours),
               archived: false,
-              completedAt: null,
+              completedAt: wbIsDone(status) ? wbNow() : null,
               sortOrder: wbTodos.filter((row) => row.status === status).length,
               source: String(draft.source ?? "manual"),
               version: 1,
               createdAt: wbNow(),
               updatedAt: wbNow(),
+              tagIds: (draft.tagIds as string[] | undefined) ?? [],
+              linkIds: [],
             };
             wbTodos = [...wbTodos, todo];
             if (requestId) wbRequests.set(requestId, todo.id);
-            return deepCopy(todo);
+            return deepCopy(wbTodoOut(todo));
           }
           case "update_todo": {
             wbLog.push({ command, args: args ?? {} });
-            const incoming = (args?.todo ?? {}) as WbTodo;
+            const incoming = (args?.todo ?? {}) as WbTodo & { isDone?: boolean };
             const row = wbTodo(String(incoming.id ?? ""));
             wbStale(row.version, Number(args?.expectedVersion ?? 0));
             const title = String(incoming.title ?? "").trim();
             if (!title) throw "invalid_input";
             if (incoming.parentId && incoming.parentId === row.id) throw "invalid_input";
+            const status = wbStatus(String(incoming.status ?? row.status)).id;
+            const wasDone = wbIsDone(row.status);
+            // Archived is not the editor's to change, and the links have their
+            // own write path — the store ignores both, so the stub does too.
             Object.assign(row, {
               title,
               notes: incoming.notes ?? "",
-              status: incoming.status,
-              priority: incoming.priority,
+              status,
+              priority: incoming.priority ?? row.priority,
               dueDate: incoming.dueDate ?? null,
+              dueTime: incoming.dueTime ?? null,
               parentId: incoming.parentId ?? null,
+              assigneeId: incoming.assigneeId ?? null,
+              itemType: incoming.itemType ?? "task",
+              module: incoming.module ?? "",
+              estimateHours: incoming.estimateHours ?? null,
+              actualHours: incoming.actualHours ?? null,
+              completedAt: wbCompletedFor(status, wasDone, row.completedAt),
+              tagIds: incoming.tagIds ?? row.tagIds,
             });
-            return deepCopy(wbStamp(row));
+            return deepCopy(wbTodoOut(wbStamp(row)));
           }
           case "set_todo_status": {
             wbLog.push({ command, args: args ?? {} });
             const row = wbTodo(String(args?.id ?? ""));
             wbStale(row.version, Number(args?.expectedVersion ?? 0));
-            const status = String(args?.status ?? "todo");
+            const status = wbStatus(String(args?.status ?? "todo")).id;
+            const wasDone = wbIsDone(row.status);
             row.status = status;
-            row.completedAt = status === "done" ? wbNow() : null;
-            return deepCopy(wbStamp(row));
+            row.completedAt = wbCompletedFor(status, wasDone, row.completedAt);
+            return deepCopy(wbTodoOut(wbStamp(row)));
           }
           case "set_todo_archived": {
             wbLog.push({ command, args: args ?? {} });
             const row = wbTodo(String(args?.id ?? ""));
             wbStale(row.version, Number(args?.expectedVersion ?? 0));
             row.archived = Boolean(args?.archived);
+            return deepCopy(wbTodoOut(wbStamp(row)));
+          }
+          case "delete_todo": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbTodo(String(args?.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            // Sub-items first: `parent_id` would otherwise promote them.
+            wbTodos = wbTodos.filter((entry) => entry.parentId !== row.id && entry.id !== row.id);
+            return null;
+          }
+          case "reorder_todo": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbTodo(String(args?.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            const status = wbStatus(String(args?.status ?? row.status)).id;
+            const beforeId = args?.beforeId ? String(args.beforeId) : "";
+            const ordered = wbTodos
+              .filter((entry) => entry.status === status && !entry.archived && entry.id !== row.id)
+              .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt)
+              .map((entry) => entry.id);
+            const at = beforeId ? ordered.indexOf(beforeId) : -1;
+            ordered.splice(at < 0 ? ordered.length : at, 0, row.id);
+            ordered.forEach((id, slot) => {
+              const entry = wbTodo(id);
+              if (id === row.id) {
+                const wasDone = wbIsDone(entry.status);
+                entry.status = status;
+                entry.completedAt = wbCompletedFor(status, wasDone, entry.completedAt);
+                entry.sortOrder = slot;
+                wbStamp(entry);
+              } else {
+                // A shifting slot is invisible to the sibling: no version bump.
+                entry.sortOrder = slot;
+              }
+            });
+            return deepCopy(wbTodoOut(row));
+          }
+          case "set_todo_tags": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbTodo(String(args?.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            const tagIds = (args?.tagIds as string[] | undefined) ?? [];
+            for (const tagId of tagIds) {
+              if (!wbTags.some((tag) => tag.id === tagId)) throw "not_found";
+            }
+            row.tagIds = [...tagIds];
+            return deepCopy(wbTodoOut(wbStamp(row)));
+          }
+          case "set_todo_links": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbTodo(String(args?.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            const linkIds = (args?.linkIds as string[] | undefined) ?? [];
+            for (const other of linkIds) {
+              if (other === row.id) throw "invalid_input";
+              wbTodo(other);
+            }
+            for (const entry of wbTodos) {
+              if (entry.id === row.id) {
+                entry.linkIds = [...linkIds];
+                continue;
+              }
+              const kept = entry.linkIds.filter((link) => link !== row.id);
+              for (const other of linkIds) {
+                if (other === entry.id && !kept.includes(row.id)) kept.push(row.id);
+              }
+              entry.linkIds = kept;
+            }
+            return deepCopy(wbTodoOut(wbStamp(row)));
+          }
+          case "bulk_update_todos": {
+            wbLog.push({ command, args: args ?? {} });
+            const ids = (args?.ids as string[] | undefined) ?? [];
+            const op = (args?.op ?? {}) as { op?: string; status?: string; priority?: string; archived?: boolean };
+            const rows = ids.map((id) => wbTodo(id));
+            if (rows.length === 0) return [];
+            if (op.op === "setStatus") {
+              const status = wbStatus(String(op.status ?? "todo")).id;
+              const done = wbIsDone(status);
+              for (const row of rows) {
+                row.status = status;
+                // Already-done rows keep the moment they became done.
+                row.completedAt = done ? (row.completedAt ?? wbNow()) : null;
+                wbStamp(row);
+              }
+            } else if (op.op === "setPriority") {
+              for (const row of rows) {
+                row.priority = String(op.priority ?? row.priority);
+                wbStamp(row);
+              }
+            } else if (op.op === "archive") {
+              for (const row of rows) {
+                row.archived = Boolean(op.archived);
+                wbStamp(row);
+              }
+            } else {
+              const doomed = new Set(rows.map((row) => row.id));
+              wbTodos = wbTodos.filter(
+                (entry) => !doomed.has(entry.id) && !(entry.parentId && doomed.has(entry.parentId)),
+              );
+              return [];
+            }
+            return deepCopy(rows.map(wbTodoOut));
+          }
+          case "list_todo_statuses":
+            wbLog.push({ command, args: args ?? {} });
+            return deepCopy(
+              [...wbStatuses].sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt),
+            );
+          case "create_todo_status": {
+            wbLog.push({ command, args: args ?? {} });
+            const draft = (args?.draft ?? {}) as Record<string, unknown>;
+            const name = String(draft.name ?? "").trim();
+            if (!name) throw "invalid_input";
+            const status: WbStatus = {
+              id: wbId("st"),
+              name,
+              color: String(draft.color ?? "gray"),
+              isDone: Boolean(draft.isDone),
+              builtin: false,
+              sortOrder: wbStatuses.length,
+              version: 1,
+              createdAt: wbNow(),
+              updatedAt: wbNow(),
+            };
+            wbStatuses = [...wbStatuses, status];
+            return deepCopy(status);
+          }
+          case "update_todo_status": {
+            wbLog.push({ command, args: args ?? {} });
+            const incoming = (args?.status ?? {}) as WbStatus;
+            const row = wbStatus(String(args?.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            const name = String(incoming.name ?? "").trim();
+            if (!name) throw "invalid_input";
+            const isDone = Boolean(incoming.isDone);
+            // Flipping `isDone` restates every todo in the status.
+            if (isDone !== row.isDone) {
+              for (const todo of wbTodos) {
+                if (todo.status !== row.id) continue;
+                todo.completedAt = isDone ? (todo.completedAt ?? wbNow()) : null;
+              }
+            }
+            row.name = name;
+            row.color = String(incoming.color ?? row.color);
+            row.isDone = isDone;
             return deepCopy(wbStamp(row));
+          }
+          case "delete_todo_status": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbStatus(String(args?.id ?? ""));
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            if (row.builtin) throw "invalid_input";
+            const reassign = args?.reassignTo ? String(args.reassignTo) : "";
+            const held = wbTodos.filter((todo) => todo.status === row.id);
+            if (reassign === row.id) throw "invalid_input";
+            if (reassign) wbStatus(reassign);
+            if (held.length > 0 && !reassign) throw "status_in_use";
+            if (reassign) {
+              const done = wbIsDone(reassign);
+              for (const todo of held) {
+                todo.status = reassign;
+                todo.completedAt = done ? (todo.completedAt ?? wbNow()) : null;
+                wbStamp(todo);
+              }
+            }
+            wbStatuses = wbStatuses.filter((status) => status.id !== row.id);
+            return null;
+          }
+          case "reorder_todo_statuses": {
+            wbLog.push({ command, args: args ?? {} });
+            const ids = (args?.ids as string[] | undefined) ?? [];
+            if (ids.length !== wbStatuses.length) throw "invalid_input";
+            if (!ids.every((id) => wbStatuses.some((status) => status.id === id))) {
+              throw "invalid_input";
+            }
+            ids.forEach((id, slot) => {
+              wbStatus(id).sortOrder = slot;
+            });
+            wbStatuses = [...wbStatuses].sort((a, b) => a.sortOrder - b.sortOrder);
+            return deepCopy(wbStatuses);
+          }
+          case "list_todo_tags":
+            wbLog.push({ command, args: args ?? {} });
+            return deepCopy([...wbTags].sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)));
+          case "create_todo_tag": {
+            wbLog.push({ command, args: args ?? {} });
+            const draft = (args?.draft ?? {}) as Record<string, unknown>;
+            const name = String(draft.name ?? "").trim();
+            if (!name) throw "invalid_input";
+            const tag: WbTag = {
+              id: wbId("tag"),
+              name,
+              color: String(draft.color ?? "blue"),
+              sortOrder: wbTags.length,
+              version: 1,
+              createdAt: wbNow(),
+              updatedAt: wbNow(),
+            };
+            wbTags = [...wbTags, tag];
+            return deepCopy(tag);
+          }
+          case "update_todo_tag": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbTags.find((tag) => tag.id === String(args?.id ?? ""));
+            if (!row) throw "not_found";
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            const name = String(args?.name ?? "").trim();
+            if (!name) throw "invalid_input";
+            row.name = name;
+            row.color = String(args?.color ?? row.color);
+            return deepCopy(wbStamp(row));
+          }
+          case "delete_todo_tag": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbTags.find((tag) => tag.id === String(args?.id ?? ""));
+            if (!row) throw "not_found";
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            for (const todo of wbTodos) {
+              if (!todo.tagIds.includes(row.id)) continue;
+              todo.tagIds = todo.tagIds.filter((id) => id !== row.id);
+              wbStamp(todo);
+            }
+            wbTags = wbTags.filter((tag) => tag.id !== row.id);
+            return null;
+          }
+          case "list_todo_people":
+            wbLog.push({ command, args: args ?? {} });
+            return deepCopy(wbPeople);
+          case "create_todo_person": {
+            wbLog.push({ command, args: args ?? {} });
+            const name = String(args?.name ?? "").trim();
+            if (!name) throw "invalid_input";
+            const person: WbPerson = {
+              id: wbId("person"),
+              name,
+              color: String(args?.color ?? "blue"),
+              createdAt: wbNow(),
+            };
+            wbPeople = [...wbPeople, person];
+            return deepCopy(person);
+          }
+          case "list_todo_attachments":
+            wbLog.push({ command, args: args ?? {} });
+            return deepCopy(
+              wbAttachments.filter((row) => row.todoId === String(args?.todoId ?? "")),
+            );
+          case "create_todo_attachment": {
+            wbLog.push({ command, args: args ?? {} });
+            const draft = (args?.draft ?? {}) as Record<string, unknown>;
+            const requestId = draft.requestId ? String(draft.requestId) : "";
+            const replay = requestId ? wbRequests.get(requestId) : undefined;
+            const seen = replay ? wbAttachments.find((row) => row.id === replay) : undefined;
+            if (seen) return deepCopy(seen);
+            const name = String(draft.name ?? "").trim();
+            const path = String(draft.path ?? "").trim();
+            if (!name || !path) throw "invalid_input";
+            wbTodo(String(draft.todoId ?? ""));
+            const attachment: WbAttachment = {
+              id: wbId("att"),
+              todoId: String(draft.todoId ?? ""),
+              name,
+              path,
+              size: draft.size == null ? null : Number(draft.size),
+              mime: String(draft.mime ?? "").trim(),
+              version: 1,
+              createdAt: wbNow(),
+              updatedAt: wbNow(),
+            };
+            wbAttachments = [...wbAttachments, attachment];
+            if (requestId) wbRequests.set(requestId, attachment.id);
+            return deepCopy(attachment);
+          }
+          case "update_todo_attachment": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbAttachments.find((entry) => entry.id === String(args?.id ?? ""));
+            if (!row) throw "not_found";
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            const name = String(args?.name ?? "").trim();
+            if (!name) throw "invalid_input";
+            row.name = name;
+            return deepCopy(wbStamp(row));
+          }
+          case "delete_todo_attachment": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbAttachments.find((entry) => entry.id === String(args?.id ?? ""));
+            if (!row) throw "not_found";
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            wbAttachments = wbAttachments.filter((entry) => entry.id !== row.id);
+            return null;
+          }
+          case "pick_todo_attachment":
+            wbLog.push({ command, args: args ?? {} });
+            // The browser has no native picker; `null` is "cancelled".
+            return null;
+          case "list_todo_reminders":
+            wbLog.push({ command, args: args ?? {} });
+            return deepCopy(wbReminders.filter((row) => row.todoId === String(args?.todoId ?? "")));
+          case "create_todo_reminder": {
+            wbLog.push({ command, args: args ?? {} });
+            const draft = (args?.draft ?? {}) as Record<string, unknown>;
+            const kind = String(draft.kind ?? "dueBefore");
+            if (kind === "dueBefore") {
+              const minutes = draft.offsetMinutes == null ? null : Number(draft.offsetMinutes);
+              if (minutes == null || minutes < 0 || minutes > 525_600) throw "invalid_input";
+            }
+            wbTodo(String(draft.todoId ?? ""));
+            const reminder: WbReminder = {
+              id: wbId("rem"),
+              todoId: String(draft.todoId ?? ""),
+              kind,
+              offsetMinutes: draft.offsetMinutes == null ? null : Number(draft.offsetMinutes),
+              message: String(draft.message ?? ""),
+              enabled: draft.enabled == null ? true : Boolean(draft.enabled),
+              version: 1,
+              createdAt: wbNow(),
+              updatedAt: wbNow(),
+            };
+            wbReminders = [...wbReminders, reminder];
+            return deepCopy(reminder);
+          }
+          case "set_todo_reminder_enabled": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbReminders.find((entry) => entry.id === String(args?.id ?? ""));
+            if (!row) throw "not_found";
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            row.enabled = Boolean(args?.enabled);
+            return deepCopy(wbStamp(row));
+          }
+          case "delete_todo_reminder": {
+            wbLog.push({ command, args: args ?? {} });
+            const row = wbReminders.find((entry) => entry.id === String(args?.id ?? ""));
+            if (!row) throw "not_found";
+            wbStale(row.version, Number(args?.expectedVersion ?? 0));
+            wbReminders = wbReminders.filter((entry) => entry.id !== row.id);
+            return null;
+          }
+          case "list_todo_activity":
+            wbLog.push({ command, args: args ?? {} });
+            return deepCopy(
+              wbActivity
+                .filter((row) => row.todoId === String(args?.todoId ?? ""))
+                .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)),
+            );
+          case "add_todo_comment": {
+            wbLog.push({ command, args: args ?? {} });
+            const todoId = String(args?.todoId ?? "");
+            const body = String(args?.body ?? "").trim();
+            if (!body) throw "invalid_input";
+            wbTodo(todoId);
+            const authorId = args?.authorId ? String(args.authorId) : null;
+            if (authorId && !wbPeople.some((person) => person.id === authorId)) throw "not_found";
+            const entry: WbActivity = {
+              id: wbId("act"),
+              todoId,
+              kind: "comment",
+              authorId,
+              body,
+              meta: "",
+              createdAt: wbNow(),
+            };
+            wbActivity = [...wbActivity, entry];
+            return deepCopy(entry);
           }
           case "list_calendar_events":
             wbLog.push({ command, args: args ?? {} });

@@ -10,6 +10,12 @@ import {
   DEMO_CALENDAR_EVENTS,
   DEMO_RESULTS,
   DEMO_TODAY,
+  DEMO_TODO_ACTIVITY,
+  DEMO_TODO_ATTACHMENTS,
+  DEMO_TODO_PEOPLE,
+  DEMO_TODO_REMINDERS,
+  DEMO_TODO_STATUSES,
+  DEMO_TODO_TAGS,
   DEMO_TODOS,
   DEMO_WORKBENCH_APPS,
   DEMO_WORKBENCH_PREFS,
@@ -947,6 +953,46 @@ export function onRunEvent(handler: (event: RunEventDto) => void): Promise<() =>
   return listen<RunEventDto>(RUN_EVENT, (event) => handler(event.payload));
 }
 
+// ---- Native platform shell (macOS menu bar + status item) -----------------
+
+/**
+ * Actions the native menu and tray send to the window. The Rust side owns the
+ * labels; only these ids cross the boundary, so no chrome string is duplicated
+ * between `platform.rs` and `i18n.ts`.
+ */
+export type MenuAction =
+  | "new-task"
+  | "add-project"
+  | "open-settings"
+  | "toggle-sidebar"
+  | "toggle-inspector"
+  | "theme-light"
+  | "theme-dark"
+  | "theme-system"
+  | "shortcuts";
+
+export const MENU_ACTION_EVENT = "menu:action";
+
+/** No-op outside the desktop shell, so the browser build stays inert. */
+export function onMenuAction(handler: (action: MenuAction) => void): Promise<() => void> {
+  if (!isDesktop()) return Promise.resolve(() => {});
+  return listen<{ action: MenuAction }>(MENU_ACTION_EVENT, (event) =>
+    handler(event.payload.action),
+  );
+}
+
+/** The window state the native menu mirrors as check marks. */
+export type MenuState = {
+  sidebar: boolean;
+  inspector: boolean;
+  theme: string;
+};
+
+export function setMenuState(state: MenuState): Promise<void> {
+  if (!isDesktop()) return Promise.resolve();
+  return invoke<void>("set_menu_state", { state });
+}
+
 // ---- Memory Engine IPC ---------------------------------------------------
 
 export type MemoryKind =
@@ -1217,6 +1263,7 @@ export type WorkbenchErrorCode =
   | "invalid_input"
   | "not_found"
   | "revision_conflict"
+  | "status_in_use"
   | "unknown_app"
   | "app_disabled"
   | "storage_unavailable";
@@ -1236,6 +1283,7 @@ const WORKBENCH_CODES: WorkbenchErrorCode[] = [
   "invalid_input",
   "not_found",
   "revision_conflict",
+  "status_in_use",
   "unknown_app",
   "app_disabled",
   "storage_unavailable",
@@ -1293,8 +1341,14 @@ export type AppViewDto = {
   preference: AppPreferenceDto;
 };
 
-export type TodoStatusDto = "todo" | "doing" | "done";
 export type TodoPriorityDto = "low" | "normal" | "high";
+
+/**
+ * A status id. Deliberately not a union: the catalog is per-install and the
+ * user may rename, recolour, add or reorder statuses, so the type is an id into
+ * `TodoStatusDefDto` and nothing more.
+ */
+export type TodoStatusDto = string;
 
 export type TodoDto = {
   id: string;
@@ -1304,7 +1358,15 @@ export type TodoDto = {
   priority: TodoPriorityDto;
   /** Local `YYYY-MM-DD`; `null` puts the todo in the inbox. */
   dueDate: string | null;
+  /** Local `HH:MM`. Only meaningful alongside `dueDate`. */
+  dueTime: string | null;
   parentId: string | null;
+  assigneeId: string | null;
+  /** `task` | `bug` | `story` | `chore`. */
+  itemType: string;
+  module: string;
+  estimateHours: number | null;
+  actualHours: number | null;
   archived: boolean;
   completedAt: number | null;
   sortOrder: number;
@@ -1313,6 +1375,11 @@ export type TodoDto = {
   version: number;
   createdAt: number;
   updatedAt: number;
+  tagIds: string[];
+  linkIds: string[];
+  /** Derived from the status row, returned with the todo so nothing has to
+   *  resolve a status id itself. Never sent back. */
+  isDone: boolean;
 };
 
 export type TodoDraftDto = {
@@ -1321,11 +1388,125 @@ export type TodoDraftDto = {
   status?: TodoStatusDto | null;
   priority?: TodoPriorityDto | null;
   dueDate?: string | null;
+  dueTime?: string | null;
   parentId?: string | null;
+  assigneeId?: string | null;
+  itemType?: string | null;
+  module?: string | null;
+  estimateHours?: number | null;
+  actualHours?: number | null;
+  tagIds?: string[] | null;
   source?: string | null;
   /** Idempotency key: the same value never creates a second todo. */
   requestId?: string | null;
 };
+
+/** One column of the board, and the only place "done" is defined. */
+export type TodoStatusDefDto = {
+  id: string;
+  name: string;
+  /** A palette key (`gray` | `blue` | `amber` | `green` | `purple` | `teal` |
+   *  `pink` | `red`) — the frontend owns the actual colours. */
+  color: string;
+  isDone: boolean;
+  /** Built-in statuses cannot be deleted. */
+  builtin: boolean;
+  sortOrder: number;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TodoStatusDraftDto = {
+  name: string;
+  color?: string | null;
+  isDone?: boolean | null;
+};
+
+export type TodoTagDto = {
+  id: string;
+  name: string;
+  color: string;
+  sortOrder: number;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TodoTagDraftDto = {
+  name: string;
+  color?: string | null;
+};
+
+/** Local people only — Kodo has no accounts. */
+export type TodoPersonDto = {
+  id: string;
+  name: string;
+  color: string;
+  createdAt: number;
+};
+
+/** A file reference. Removing the record never deletes the file. */
+export type TodoAttachmentDto = {
+  id: string;
+  todoId: string;
+  name: string;
+  path: string;
+  size: number | null;
+  mime: string;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TodoAttachmentDraftDto = {
+  todoId: string;
+  name: string;
+  path: string;
+  size?: number | null;
+  mime?: string | null;
+  requestId?: string | null;
+};
+
+export type TodoReminderKindDto = "dueBefore" | "statusChange";
+
+export type TodoReminderDto = {
+  id: string;
+  todoId: string;
+  kind: TodoReminderKindDto;
+  /** Minutes before the due moment; only meaningful for `dueBefore`. */
+  offsetMinutes: number | null;
+  message: string;
+  enabled: boolean;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TodoReminderDraftDto = {
+  todoId: string;
+  kind: TodoReminderKindDto;
+  offsetMinutes?: number | null;
+  message?: string | null;
+  enabled?: boolean | null;
+};
+
+export type TodoActivityDto = {
+  id: string;
+  todoId: string;
+  /** `comment` today; the column is free-form so a new kind needs no migration. */
+  kind: string;
+  authorId: string | null;
+  body: string;
+  meta: string;
+  createdAt: number;
+};
+
+export type TodoBulkOpDto =
+  | { op: "setStatus"; status: TodoStatusDto }
+  | { op: "setPriority"; priority: TodoPriorityDto }
+  | { op: "archive"; archived: boolean }
+  | { op: "delete" };
 
 export type CalendarEventDto = {
   id: string;
@@ -1401,6 +1582,12 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 const demoApps: AppViewDto[] = DEMO_WORKBENCH_APPS.map(clone);
 let demoTodos: TodoDto[] = DEMO_TODOS.map(clone);
+let demoStatuses: TodoStatusDefDto[] = DEMO_TODO_STATUSES.map(clone);
+let demoTags: TodoTagDto[] = DEMO_TODO_TAGS.map(clone);
+const demoPeople: TodoPersonDto[] = DEMO_TODO_PEOPLE.map(clone);
+let demoAttachments: TodoAttachmentDto[] = DEMO_TODO_ATTACHMENTS.map(clone);
+let demoReminders: TodoReminderDto[] = DEMO_TODO_REMINDERS.map(clone);
+let demoActivity: TodoActivityDto[] = DEMO_TODO_ACTIVITY.map(clone);
 let demoEvents: CalendarEventDto[] = DEMO_CALENDAR_EVENTS.map(clone);
 let demoResults: ArtifactViewDto[] = DEMO_RESULTS.map(clone);
 const demoPrefs: Record<string, string> = { ...DEMO_WORKBENCH_PREFS };
@@ -1508,11 +1695,85 @@ export function setWorkbenchPref(key: string, value: string): Promise<void> {
 }
 
 // --- 待办 ------------------------------------------------------------------
+//
+// The demo store below mirrors `kodo_shell::AppStore` method for method: the
+// same validations, the same `completedAt` rule, the same version bumps. It
+// only has to be *good enough* for `vite dev` and the browser-driven tests, but
+// a divergence here is a bug that would not show up on the desktop, so the
+// shapes stay deliberately parallel.
+
+/** `kodo_core::apps::DEFAULT_TODO_STATUS` — the column a new todo lands in. */
+const DEFAULT_TODO_STATUS = "todo";
+/** `kodo_core::apps::STATUS_COLORS` — palette keys, never hex. */
+const TODO_COLORS = ["gray", "blue", "amber", "green", "purple", "teal", "pink", "red"];
+/** `kodo_core::apps::ITEM_TYPES`. */
+export const TODO_ITEM_TYPES = ["task", "bug", "story", "chore"] as const;
+const MAX_TODO_TAGS = 12;
+const MAX_TODO_HOURS = 100_000;
+const MAX_ID_LIST = 500;
+
+const demoStatus = (id: string): TodoStatusDefDto | undefined =>
+  demoStatuses.find((status) => status.id === id);
+
+function demoIsDone(status: string): boolean {
+  return demoStatus(status)?.isDone ?? false;
+}
+
+/** `check_status`: an unknown id is `not_found`, and the clean id is returned. */
+function checkStatus(status: string): string {
+  const found = demoStatus(status);
+  if (!found) throw new WorkbenchError("not_found");
+  return found.id;
+}
+
+/** The read path: `isDone` is never stored, it is read off the status row. */
+function deriveTodo(row: TodoDto): TodoDto {
+  return { ...row, isDone: demoIsDone(row.status) };
+}
+
+/** `completed_at_for`: entering a done status stamps the moment, leaving clears it. */
+function completedAtFor(status: string, wasDone: boolean, previous: number | null): number | null {
+  if (!demoIsDone(status)) return null;
+  return wasDone ? previous : demoNow();
+}
+
+function checkColor(raw: string | null | undefined, fallback: string): string {
+  if (raw == null) return fallback;
+  const value = raw.trim();
+  if (!TODO_COLORS.includes(value)) throw new WorkbenchError("invalid_input");
+  return value;
+}
+
+function checkHours(value: number | null | undefined): number | null {
+  if (value == null) return null;
+  if (!Number.isFinite(value) || value < 0 || value > MAX_TODO_HOURS) {
+    throw new WorkbenchError("invalid_input");
+  }
+  return value;
+}
+
+function checkIds(ids: string[] | null | undefined, max: number): string[] {
+  const seen: string[] = [];
+  for (const raw of ids ?? []) {
+    const id = raw.trim();
+    if (!id || id.length > 64) throw new WorkbenchError("invalid_input");
+    if (!seen.includes(id)) seen.push(id);
+  }
+  if (seen.length > max) throw new WorkbenchError("invalid_input");
+  return seen;
+}
+
+/** The store's global order: `sort_order ASC, created_at ASC`. */
+function demoTodoOrder(rows: TodoDto[]): TodoDto[] {
+  return [...rows].sort(
+    (a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt,
+  );
+}
 
 export function listTodos(includeArchived = false): Promise<TodoDto[]> {
   if (!isDesktop()) {
     const rows = demoTodos.filter((todo) => includeArchived || !todo.archived);
-    return Promise.resolve(clone(rows));
+    return Promise.resolve(clone(demoTodoOrder(rows).map(deriveTodo)));
   }
   return wbRead<TodoDto[]>("list_todos", { includeArchived });
 }
@@ -1521,24 +1782,51 @@ export function createTodo(draft: TodoDraftDto): Promise<TodoDto> {
   if (!isDesktop()) {
     const replay = draft.requestId ? demoRequests.get(draft.requestId) : undefined;
     const seen = replay && demoTodos.find((todo) => todo.id === replay);
-    if (seen) return Promise.resolve(clone(seen));
+    if (seen) return Promise.resolve(clone(deriveTodo(seen)));
     const title = draft.title.trim();
     if (!title) throw new WorkbenchError("invalid_input");
+    const status = checkStatus(draft.status?.trim() || DEFAULT_TODO_STATUS);
+    const tagIds = checkIds(draft.tagIds, MAX_TODO_TAGS);
+    if (tagIds.some((id) => !demoTags.some((tag) => tag.id === id))) {
+      throw new WorkbenchError("not_found");
+    }
+    const parentId = draft.parentId?.trim() || null;
+    if (parentId && !demoTodos.some((row) => row.id === parentId)) {
+      throw new WorkbenchError("not_found");
+    }
+    const assigneeId = draft.assigneeId?.trim() || null;
+    if (assigneeId && !demoPeople.some((person) => person.id === assigneeId)) {
+      throw new WorkbenchError("not_found");
+    }
+    const now = demoNow();
     const todo: TodoDto = {
       id: demoId("todo"),
       title,
       notes: draft.notes ?? "",
-      status: draft.status ?? "todo",
+      status,
       priority: draft.priority ?? "normal",
       dueDate: draft.dueDate ?? null,
-      parentId: draft.parentId ?? null,
+      dueTime: draft.dueTime ?? null,
+      parentId,
+      assigneeId,
+      itemType: (TODO_ITEM_TYPES as readonly string[]).includes(draft.itemType ?? "")
+        ? (draft.itemType as string)
+        : "task",
+      module: draft.module ?? "",
+      estimateHours: checkHours(draft.estimateHours),
+      actualHours: checkHours(draft.actualHours),
       archived: false,
-      completedAt: null,
-      sortOrder: demoTodos.filter((row) => row.status === (draft.status ?? "todo")).length,
+      completedAt: demoIsDone(status) ? now : null,
+      // End of the target column, counting every row in it — children included,
+      // exactly as `next_sort_order` does not distinguish them either.
+      sortOrder: demoTodos.filter((row) => row.status === status).length,
       source: draft.source ?? "manual",
       version: 1,
-      createdAt: demoNow(),
-      updatedAt: demoNow(),
+      createdAt: now,
+      updatedAt: now,
+      tagIds,
+      linkIds: [],
+      isDone: demoIsDone(status),
     };
     demoTodos = [...demoTodos, todo];
     if (draft.requestId) demoRequests.set(draft.requestId, todo.id);
@@ -1554,15 +1842,34 @@ export function updateTodo(expectedVersion: number, todo: TodoDto): Promise<Todo
     conflictIfStale(current.version, expectedVersion);
     if (!todo.title.trim()) throw new WorkbenchError("invalid_input");
     if (todo.parentId === todo.id) throw new WorkbenchError("invalid_input");
+    const status = checkStatus(todo.status);
+    const tagIds = checkIds(todo.tagIds, MAX_TODO_TAGS);
+    if (tagIds.some((id) => !demoTags.some((tag) => tag.id === id))) {
+      throw new WorkbenchError("not_found");
+    }
+    if (todo.assigneeId && !demoPeople.some((person) => person.id === todo.assigneeId)) {
+      throw new WorkbenchError("not_found");
+    }
+    // Archived is not the editor's to change, and the links have their own
+    // write path — `update_todo` ignores both, so the demo does too.
     const next: TodoDto = stamp({
       ...current,
       title: todo.title.trim(),
       notes: todo.notes,
-      status: todo.status,
+      status,
       priority: todo.priority,
       dueDate: todo.dueDate,
+      dueTime: todo.dueTime,
       parentId: todo.parentId,
+      assigneeId: todo.assigneeId,
+      itemType: (TODO_ITEM_TYPES as readonly string[]).includes(todo.itemType) ? todo.itemType : "task",
+      module: todo.module,
+      estimateHours: checkHours(todo.estimateHours),
+      actualHours: checkHours(todo.actualHours),
+      completedAt: completedAtFor(status, current.isDone, current.completedAt),
+      tagIds,
     });
+    next.isDone = demoIsDone(status);
     return Promise.resolve(clone(next));
   }
   return wbWrite<TodoDto>("update_todo", { expectedVersion, todo });
@@ -1578,9 +1885,11 @@ export function setTodoStatus(
     const current = demoTodos.find((row) => row.id === id);
     if (!current) throw new WorkbenchError("not_found");
     conflictIfStale(current.version, expectedVersion);
-    current.status = status;
-    current.completedAt = status === "done" ? demoNow() : null;
+    const next = checkStatus(status);
+    current.status = next;
+    current.completedAt = completedAtFor(next, current.isDone, current.completedAt);
     stamp(current);
+    current.isDone = demoIsDone(next);
     return Promise.resolve(clone(current));
   }
   return wbWrite<TodoDto>("set_todo_status", { id, expectedVersion, status });
@@ -1600,6 +1909,533 @@ export function setTodoArchived(
     return Promise.resolve(clone(current));
   }
   return wbWrite<TodoDto>("set_todo_archived", { id, expectedVersion, archived });
+}
+
+/** Remove a todo together with its sub-items — `parent_id` would promote them. */
+export function deleteTodo(id: string, expectedVersion: number): Promise<void> {
+  if (!isDesktop()) {
+    const current = demoTodos.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    demoTodos = demoTodos.filter((row) => row.parentId !== id && row.id !== id);
+    return Promise.resolve();
+  }
+  return wbWrite<void>("delete_todo", { id, expectedVersion });
+}
+
+/**
+ * Drop a todo at a position inside a column. Siblings whose slot merely shifts
+ * are rewritten without a version bump, and archived rows keep their slot —
+ * both deliberately, so an unrelated editor's save is not failed.
+ */
+export function reorderTodo(
+  id: string,
+  expectedVersion: number,
+  status: TodoStatusDto,
+  beforeId: string | null,
+): Promise<TodoDto> {
+  if (!isDesktop()) {
+    const current = demoTodos.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    const next = checkStatus(status);
+    const ordered = demoTodoOrder(
+      demoTodos.filter((row) => row.status === next && !row.archived && row.id !== id),
+    ).map((row) => row.id);
+    const at = beforeId ? ordered.indexOf(beforeId) : -1;
+    ordered.splice(at < 0 ? ordered.length : at, 0, id);
+    ordered.forEach((rowId, slot) => {
+      const row = demoTodos.find((candidate) => candidate.id === rowId);
+      if (!row) return;
+      if (rowId === id) {
+        row.status = next;
+        row.completedAt = completedAtFor(next, row.isDone, row.completedAt);
+        row.isDone = demoIsDone(next);
+        row.sortOrder = slot;
+        stamp(row);
+      } else {
+        row.sortOrder = slot;
+      }
+    });
+    return Promise.resolve(clone(current));
+  }
+  return wbWrite<TodoDto>("reorder_todo", { id, expectedVersion, status, beforeId });
+}
+
+/** Replace a todo's tags wholesale. The row's version moves too. */
+export function setTodoTags(
+  id: string,
+  expectedVersion: number,
+  tagIds: string[],
+): Promise<TodoDto> {
+  if (!isDesktop()) {
+    const current = demoTodos.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    const next = checkIds(tagIds, MAX_TODO_TAGS);
+    if (next.some((tagId) => !demoTags.some((tag) => tag.id === tagId))) {
+      throw new WorkbenchError("not_found");
+    }
+    current.tagIds = next;
+    stamp(current);
+    return Promise.resolve(clone(current));
+  }
+  return wbWrite<TodoDto>("set_todo_tags", { id, expectedVersion, tagIds });
+}
+
+/** Replace a todo's related items wholesale. Both directions, no self-link. */
+export function setTodoLinks(
+  id: string,
+  expectedVersion: number,
+  linkIds: string[],
+): Promise<TodoDto> {
+  if (!isDesktop()) {
+    const current = demoTodos.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    const next = checkIds(linkIds, MAX_TODO_TAGS);
+    for (const other of next) {
+      if (other === id) throw new WorkbenchError("invalid_input");
+      if (!demoTodos.some((row) => row.id === other)) throw new WorkbenchError("not_found");
+    }
+    demoTodos.forEach((row) => {
+      if (row.id === id) {
+        row.linkIds = next;
+        return;
+      }
+      const kept = row.linkIds.filter((link) => link !== id);
+      for (const other of next) {
+        if (other === row.id && !kept.includes(id)) kept.push(id);
+      }
+      row.linkIds = kept;
+    });
+    stamp(current);
+    return Promise.resolve(clone(current));
+  }
+  return wbWrite<TodoDto>("set_todo_links", { id, expectedVersion, linkIds });
+}
+
+/**
+ * One action over many todos — the list view's selection bar.
+ *
+ * `expectedVersion` is deliberately **not** checked per row: this is an
+ * explicit multi-row action, and one stale copy among twenty must not fail the
+ * batch. Every touched row still bumps its own version, so a client holding an
+ * older copy still loses its next single-row write to `revision_conflict`.
+ * Do not "fix" this into per-row version checks.
+ */
+export function bulkUpdateTodos(ids: string[], op: TodoBulkOpDto): Promise<TodoDto[]> {
+  if (!isDesktop()) {
+    const targets = checkIds(ids, MAX_ID_LIST)
+      .map((id) => demoTodos.find((row) => row.id === id))
+      .filter((row): row is TodoDto => row !== undefined);
+    if (targets.length === 0) return Promise.resolve([]);
+    const now = demoNow();
+    if (op.op === "setStatus") {
+      const next = checkStatus(op.status);
+      const done = demoIsDone(next);
+      for (const row of targets) {
+        row.status = next;
+        row.completedAt = done ? (row.completedAt ?? now) : null;
+        row.isDone = done;
+        stamp(row);
+      }
+    } else if (op.op === "setPriority") {
+      for (const row of targets) {
+        row.priority = op.priority;
+        stamp(row);
+      }
+    } else if (op.op === "archive") {
+      for (const row of targets) {
+        row.archived = op.archived;
+        stamp(row);
+      }
+    } else {
+      const doomed = new Set(targets.map((row) => row.id));
+      demoTodos = demoTodos.filter(
+        (row) => !doomed.has(row.id) && !(row.parentId && doomed.has(row.parentId)),
+      );
+      return Promise.resolve([]);
+    }
+    return Promise.resolve(clone(targets.map((row) => ({ ...row }))));
+  }
+  return wbWrite<TodoDto[]>("bulk_update_todos", { ids, op });
+}
+
+// --- 待办 · 状态目录 -------------------------------------------------------
+
+export function listTodoStatuses(): Promise<TodoStatusDefDto[]> {
+  if (!isDesktop()) return Promise.resolve(clone(demoStatuses));
+  return wbRead<TodoStatusDefDto[]>("list_todo_statuses");
+}
+
+export function createTodoStatus(draft: TodoStatusDraftDto): Promise<TodoStatusDefDto> {
+  if (!isDesktop()) {
+    const name = draft.name.trim();
+    if (!name) throw new WorkbenchError("invalid_input");
+    const now = demoNow();
+    const status: TodoStatusDefDto = {
+      id: demoId("st"),
+      name,
+      color: checkColor(draft.color, "gray"),
+      isDone: draft.isDone ?? false,
+      builtin: false,
+      sortOrder: demoStatuses.length,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    demoStatuses = [...demoStatuses, status];
+    return Promise.resolve(clone(status));
+  }
+  return wbWrite<TodoStatusDefDto>("create_todo_status", { draft });
+}
+
+export function updateTodoStatus(
+  id: string,
+  expectedVersion: number,
+  status: TodoStatusDefDto,
+): Promise<TodoStatusDefDto> {
+  if (!isDesktop()) {
+    const current = demoStatuses.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    const name = status.name.trim();
+    if (!name) throw new WorkbenchError("invalid_input");
+    // Flipping `isDone` restates every todo in the status, so `completedAt`
+    // is reconciled rather than left stale.
+    if (status.isDone !== current.isDone) {
+      for (const todo of demoTodos) {
+        if (todo.status !== id) continue;
+        todo.completedAt = status.isDone ? (todo.completedAt ?? demoNow()) : null;
+        todo.isDone = status.isDone;
+      }
+    }
+    current.name = name;
+    current.color = checkColor(status.color, "gray");
+    current.isDone = status.isDone;
+    stamp(current);
+    return Promise.resolve(clone(current));
+  }
+  return wbWrite<TodoStatusDefDto>("update_todo_status", { id, expectedVersion, status });
+}
+
+/**
+ * Remove a status. A built-in one is refused; one that still holds todos is
+ * refused with `status_in_use` unless `reassignTo` names where they should go.
+ */
+export function deleteTodoStatus(
+  id: string,
+  expectedVersion: number,
+  reassignTo: string | null,
+): Promise<void> {
+  if (!isDesktop()) {
+    const current = demoStatuses.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    if (current.builtin) throw new WorkbenchError("invalid_input");
+    const held = demoTodos.filter((row) => row.status === id);
+    const target = reassignTo?.trim() || null;
+    if (target === id) throw new WorkbenchError("invalid_input");
+    if (target) checkStatus(target);
+    if (held.length > 0 && !target) throw new WorkbenchError("status_in_use");
+    if (target) {
+      const done = demoIsDone(target);
+      for (const todo of held) {
+        todo.status = target;
+        todo.completedAt = done ? (todo.completedAt ?? demoNow()) : null;
+        todo.isDone = done;
+        stamp(todo);
+      }
+    }
+    demoStatuses = demoStatuses.filter((row) => row.id !== id);
+    return Promise.resolve();
+  }
+  return wbWrite<void>("delete_todo_status", { id, expectedVersion, reassignTo });
+}
+
+/** Write a new column order. `ids` must name every status exactly once. */
+export function reorderTodoStatuses(ids: string[]): Promise<TodoStatusDefDto[]> {
+  if (!isDesktop()) {
+    if (ids.length !== demoStatuses.length) throw new WorkbenchError("invalid_input");
+    if (!ids.every((id) => demoStatuses.some((row) => row.id === id))) {
+      throw new WorkbenchError("invalid_input");
+    }
+    ids.forEach((id, slot) => {
+      const row = demoStatuses.find((status) => status.id === id);
+      if (row) row.sortOrder = slot;
+    });
+    demoStatuses = [...demoStatuses].sort((a, b) => a.sortOrder - b.sortOrder);
+    return Promise.resolve(clone(demoStatuses));
+  }
+  return wbWrite<TodoStatusDefDto[]>("reorder_todo_statuses", { ids });
+}
+
+// --- 待办 · 标签与成员 -----------------------------------------------------
+
+export function listTodoTags(): Promise<TodoTagDto[]> {
+  if (!isDesktop()) return Promise.resolve(clone(demoTags));
+  return wbRead<TodoTagDto[]>("list_todo_tags");
+}
+
+export function createTodoTag(draft: TodoTagDraftDto): Promise<TodoTagDto> {
+  if (!isDesktop()) {
+    const name = draft.name.trim();
+    if (!name) throw new WorkbenchError("invalid_input");
+    const now = demoNow();
+    const tag: TodoTagDto = {
+      id: demoId("tag"),
+      name,
+      color: checkColor(draft.color, "blue"),
+      sortOrder: demoTags.length,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    demoTags = [...demoTags, tag];
+    return Promise.resolve(clone(tag));
+  }
+  return wbWrite<TodoTagDto>("create_todo_tag", { draft });
+}
+
+export function updateTodoTag(
+  id: string,
+  expectedVersion: number,
+  name: string,
+  color: string,
+): Promise<TodoTagDto> {
+  if (!isDesktop()) {
+    const current = demoTags.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    const clean = name.trim();
+    if (!clean) throw new WorkbenchError("invalid_input");
+    current.name = clean;
+    current.color = checkColor(color, "blue");
+    stamp(current);
+    return Promise.resolve(clone(current));
+  }
+  return wbWrite<TodoTagDto>("update_todo_tag", { id, expectedVersion, name, color });
+}
+
+/** Remove a tag. Every todo that carried it moves its version. */
+export function deleteTodoTag(id: string, expectedVersion: number): Promise<void> {
+  if (!isDesktop()) {
+    const current = demoTags.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    for (const todo of demoTodos) {
+      if (!todo.tagIds.includes(id)) continue;
+      todo.tagIds = todo.tagIds.filter((tagId) => tagId !== id);
+      stamp(todo);
+    }
+    demoTags = demoTags.filter((row) => row.id !== id);
+    return Promise.resolve();
+  }
+  return wbWrite<void>("delete_todo_tag", { id, expectedVersion });
+}
+
+export function listTodoPeople(): Promise<TodoPersonDto[]> {
+  if (!isDesktop()) return Promise.resolve(clone(demoPeople));
+  return wbRead<TodoPersonDto[]>("list_todo_people");
+}
+
+export function createTodoPerson(name: string, color: string): Promise<TodoPersonDto> {
+  if (!isDesktop()) {
+    const clean = name.trim();
+    if (!clean) throw new WorkbenchError("invalid_input");
+    const person: TodoPersonDto = {
+      id: demoId("person"),
+      name: clean,
+      color: checkColor(color, "blue"),
+      createdAt: demoNow(),
+    };
+    demoPeople.push(person);
+    return Promise.resolve(clone(person));
+  }
+  return wbWrite<TodoPersonDto>("create_todo_person", { name, color });
+}
+
+// --- 待办 · 附件、提醒与活动记录 -------------------------------------------
+
+export function listTodoAttachments(todoId: string): Promise<TodoAttachmentDto[]> {
+  if (!isDesktop()) {
+    return Promise.resolve(clone(demoAttachments.filter((row) => row.todoId === todoId)));
+  }
+  return wbRead<TodoAttachmentDto[]>("list_todo_attachments", { todoId });
+}
+
+/** Record a file as attached. The file itself is never read, copied or deleted. */
+export function createTodoAttachment(
+  draft: TodoAttachmentDraftDto,
+): Promise<TodoAttachmentDto> {
+  if (!isDesktop()) {
+    const replay = draft.requestId ? demoRequests.get(draft.requestId) : undefined;
+    const seen = replay && demoAttachments.find((row) => row.id === replay);
+    if (seen) return Promise.resolve(clone(seen));
+    const name = draft.name.trim();
+    const path = draft.path.trim();
+    if (!name || !path) throw new WorkbenchError("invalid_input");
+    if (!demoTodos.some((row) => row.id === draft.todoId)) {
+      throw new WorkbenchError("not_found");
+    }
+    const now = demoNow();
+    const attachment: TodoAttachmentDto = {
+      id: demoId("att"),
+      todoId: draft.todoId,
+      name,
+      path,
+      size: draft.size ?? null,
+      mime: draft.mime?.trim() ?? "",
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    demoAttachments = [...demoAttachments, attachment];
+    if (draft.requestId) demoRequests.set(draft.requestId, attachment.id);
+    return Promise.resolve(clone(attachment));
+  }
+  return wbWrite<TodoAttachmentDto>("create_todo_attachment", { draft });
+}
+
+/** Rename an attachment. Path, size and mime are facts about the file. */
+export function updateTodoAttachment(
+  id: string,
+  expectedVersion: number,
+  name: string,
+): Promise<TodoAttachmentDto> {
+  if (!isDesktop()) {
+    const current = demoAttachments.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    const clean = name.trim();
+    if (!clean) throw new WorkbenchError("invalid_input");
+    current.name = clean;
+    stamp(current);
+    return Promise.resolve(clone(current));
+  }
+  return wbWrite<TodoAttachmentDto>("update_todo_attachment", { id, expectedVersion, name });
+}
+
+/** Forget an attachment. The file on disk is left alone. */
+export function deleteTodoAttachment(id: string, expectedVersion: number): Promise<void> {
+  if (!isDesktop()) {
+    const current = demoAttachments.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    demoAttachments = demoAttachments.filter((row) => row.id !== id);
+    return Promise.resolve();
+  }
+  return wbWrite<void>("delete_todo_attachment", { id, expectedVersion });
+}
+
+/**
+ * The native file picker. It lives in Rust because `tauri-plugin-dialog` is
+ * deliberately not exposed to the webview; the browser has no picker, so the
+ * demo answers `null` (cancel) rather than pretending to have one.
+ */
+export function pickTodoAttachment(): Promise<string | null> {
+  if (!isDesktop()) return Promise.resolve(null);
+  return wbRead<string | null>("pick_todo_attachment");
+}
+
+export function listTodoReminders(todoId: string): Promise<TodoReminderDto[]> {
+  if (!isDesktop()) {
+    return Promise.resolve(clone(demoReminders.filter((row) => row.todoId === todoId)));
+  }
+  return wbRead<TodoReminderDto[]>("list_todo_reminders", { todoId });
+}
+
+export function createTodoReminder(draft: TodoReminderDraftDto): Promise<TodoReminderDto> {
+  if (!isDesktop()) {
+    // A due-before reminder without a sane offset would never fire.
+    if (draft.kind === "dueBefore") {
+      const minutes = draft.offsetMinutes;
+      if (minutes == null || minutes < 0 || minutes > 525_600) {
+        throw new WorkbenchError("invalid_input");
+      }
+    }
+    if (!demoTodos.some((row) => row.id === draft.todoId)) {
+      throw new WorkbenchError("not_found");
+    }
+    const now = demoNow();
+    const reminder: TodoReminderDto = {
+      id: demoId("rem"),
+      todoId: draft.todoId,
+      kind: draft.kind,
+      offsetMinutes: draft.offsetMinutes ?? null,
+      message: draft.message ?? "",
+      enabled: draft.enabled ?? true,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    demoReminders = [...demoReminders, reminder];
+    return Promise.resolve(clone(reminder));
+  }
+  return wbWrite<TodoReminderDto>("create_todo_reminder", { draft });
+}
+
+export function setTodoReminderEnabled(
+  id: string,
+  expectedVersion: number,
+  enabled: boolean,
+): Promise<TodoReminderDto> {
+  if (!isDesktop()) {
+    const current = demoReminders.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    current.enabled = enabled;
+    stamp(current);
+    return Promise.resolve(clone(current));
+  }
+  return wbWrite<TodoReminderDto>("set_todo_reminder_enabled", { id, expectedVersion, enabled });
+}
+
+export function deleteTodoReminder(id: string, expectedVersion: number): Promise<void> {
+  if (!isDesktop()) {
+    const current = demoReminders.find((row) => row.id === id);
+    if (!current) throw new WorkbenchError("not_found");
+    conflictIfStale(current.version, expectedVersion);
+    demoReminders = demoReminders.filter((row) => row.id !== id);
+    return Promise.resolve();
+  }
+  return wbWrite<void>("delete_todo_reminder", { id, expectedVersion });
+}
+
+export function listTodoActivity(todoId: string): Promise<TodoActivityDto[]> {
+  if (!isDesktop()) {
+    return Promise.resolve(clone(demoActivity.filter((row) => row.todoId === todoId)));
+  }
+  return wbRead<TodoActivityDto[]>("list_todo_activity", { todoId });
+}
+
+/** Append a comment. Entries are never edited or removed — it is a log. */
+export function addTodoComment(
+  todoId: string,
+  authorId: string | null,
+  body: string,
+): Promise<TodoActivityDto> {
+  if (!isDesktop()) {
+    const text = body.trim();
+    if (!text) throw new WorkbenchError("invalid_input");
+    if (!demoTodos.some((row) => row.id === todoId)) throw new WorkbenchError("not_found");
+    if (authorId && !demoPeople.some((person) => person.id === authorId)) {
+      throw new WorkbenchError("not_found");
+    }
+    const entry: TodoActivityDto = {
+      id: demoId("act"),
+      todoId,
+      kind: "comment",
+      authorId,
+      body: text,
+      meta: "",
+      createdAt: demoNow(),
+    };
+    demoActivity = [...demoActivity, entry];
+    return Promise.resolve(clone(entry));
+  }
+  return wbWrite<TodoActivityDto>("add_todo_comment", { todoId, authorId, body });
 }
 
 // --- 日历 ------------------------------------------------------------------

@@ -18,7 +18,9 @@ use tauri_plugin_opener::OpenerExt;
 
 use kodo_core::apps::{
     app_job_types, AppError, AppView, Artifact, ArtifactDraft, ArtifactView, CalendarEvent,
-    CalendarEventDraft, Todo, TodoDraft, TodoStatus,
+    CalendarEventDraft, Todo, TodoActivity, TodoAttachment, TodoAttachmentDraft, TodoBulkOp,
+    TodoDraft, TodoPerson, TodoReminder, TodoReminderDraft, TodoStatusDef, TodoStatusDraft, TodoTag,
+    TodoTagDraft,
 };
 use kodo_core::scheduler::TaskKind;
 use kodo_shell::AppStore;
@@ -207,17 +209,17 @@ pub fn update_todo(
 }
 
 /// The one write path behind drag, the status select and completing or
-/// restoring a todo.
+/// restoring a todo. `status` is an id into the status catalog.
 #[tauri::command]
 pub fn set_todo_status(
     service: State<'_, AppService>,
     id: String,
     expected_version: u64,
-    status: TodoStatus,
+    status: String,
 ) -> Result<Todo, String> {
     service
         .store()?
-        .set_todo_status(&id, expected_version, status)
+        .set_todo_status(&id, expected_version, &status)
         .map_err(app_err)
 }
 
@@ -231,6 +233,310 @@ pub fn set_todo_archived(
     service
         .store()?
         .set_todo_archived(&id, expected_version, archived)
+        .map_err(app_err)
+}
+
+/// Delete a todo and its sub-items.
+#[tauri::command]
+pub fn delete_todo(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+) -> Result<(), String> {
+    service
+        .store()?
+        .delete_todo(&id, expected_version)
+        .map_err(app_err)
+}
+
+/// The same-column half of a drag: drop `id` into `status` ahead of
+/// `before_id`, or at the end when it is `None`.
+#[tauri::command]
+pub fn reorder_todo(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+    status: String,
+    before_id: Option<String>,
+) -> Result<Todo, String> {
+    service
+        .store()?
+        .reorder_todo(&id, expected_version, &status, before_id.as_deref())
+        .map_err(app_err)
+}
+
+#[tauri::command]
+pub fn set_todo_tags(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+    tag_ids: Vec<String>,
+) -> Result<Todo, String> {
+    service
+        .store()?
+        .set_todo_tags(&id, expected_version, &tag_ids)
+        .map_err(app_err)
+}
+
+#[tauri::command]
+pub fn set_todo_links(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+    link_ids: Vec<String>,
+) -> Result<Todo, String> {
+    service
+        .store()?
+        .set_todo_links(&id, expected_version, &link_ids)
+        .map_err(app_err)
+}
+
+/// One action over many todos — the list view's selection bar.
+#[tauri::command]
+pub fn bulk_update_todos(
+    service: State<'_, AppService>,
+    ids: Vec<String>,
+    op: TodoBulkOp,
+) -> Result<Vec<Todo>, String> {
+    service.store()?.bulk_update_todos(&ids, &op).map_err(app_err)
+}
+
+// ---------------------------------------------------------------------------
+// 待办 · 状态目录
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_todo_statuses(service: State<'_, AppService>) -> Result<Vec<TodoStatusDef>, String> {
+    service.store()?.list_todo_statuses().map_err(app_err)
+}
+
+#[tauri::command]
+pub fn create_todo_status(
+    service: State<'_, AppService>,
+    draft: TodoStatusDraft,
+) -> Result<TodoStatusDef, String> {
+    service.store()?.create_todo_status(&draft).map_err(app_err)
+}
+
+#[tauri::command]
+pub fn update_todo_status(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+    status: TodoStatusDef,
+) -> Result<TodoStatusDef, String> {
+    service
+        .store()?
+        .update_todo_status(&id, expected_version, &status)
+        .map_err(app_err)
+}
+
+/// `reassign_to` moves the status's todos somewhere else first; without it a
+/// status that still holds todos answers `status_in_use`.
+#[tauri::command]
+pub fn delete_todo_status(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+    reassign_to: Option<String>,
+) -> Result<(), String> {
+    service
+        .store()?
+        .delete_todo_status(&id, expected_version, reassign_to.as_deref())
+        .map_err(app_err)
+}
+
+#[tauri::command]
+pub fn reorder_todo_statuses(
+    service: State<'_, AppService>,
+    ids: Vec<String>,
+) -> Result<Vec<TodoStatusDef>, String> {
+    service.store()?.reorder_todo_statuses(&ids).map_err(app_err)
+}
+
+// ---------------------------------------------------------------------------
+// 待办 · 标签与成员
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_todo_tags(service: State<'_, AppService>) -> Result<Vec<TodoTag>, String> {
+    service.store()?.list_todo_tags().map_err(app_err)
+}
+
+#[tauri::command]
+pub fn create_todo_tag(
+    service: State<'_, AppService>,
+    draft: TodoTagDraft,
+) -> Result<TodoTag, String> {
+    service.store()?.create_todo_tag(&draft).map_err(app_err)
+}
+
+#[tauri::command]
+pub fn update_todo_tag(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+    name: String,
+    color: String,
+) -> Result<TodoTag, String> {
+    service
+        .store()?
+        .update_todo_tag(&id, expected_version, &name, &color)
+        .map_err(app_err)
+}
+
+#[tauri::command]
+pub fn delete_todo_tag(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+) -> Result<(), String> {
+    service
+        .store()?
+        .delete_todo_tag(&id, expected_version)
+        .map_err(app_err)
+}
+
+#[tauri::command]
+pub fn list_todo_people(service: State<'_, AppService>) -> Result<Vec<TodoPerson>, String> {
+    service.store()?.list_todo_people().map_err(app_err)
+}
+
+#[tauri::command]
+pub fn create_todo_person(
+    service: State<'_, AppService>,
+    name: String,
+    color: String,
+) -> Result<TodoPerson, String> {
+    service.store()?.create_todo_person(&name, &color).map_err(app_err)
+}
+
+// ---------------------------------------------------------------------------
+// 待办 · 附件、提醒与活动记录
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_todo_attachments(
+    service: State<'_, AppService>,
+    todo_id: String,
+) -> Result<Vec<TodoAttachment>, String> {
+    service
+        .store()?
+        .list_todo_attachments(&todo_id)
+        .map_err(app_err)
+}
+
+/// Name a file the user picked and record it against the todo. The path comes
+/// from [`pick_todo_attachment`]; nothing here reads or copies the file.
+#[tauri::command]
+pub fn create_todo_attachment(
+    service: State<'_, AppService>,
+    draft: TodoAttachmentDraft,
+) -> Result<TodoAttachment, String> {
+    service
+        .store()?
+        .create_todo_attachment(&draft)
+        .map_err(app_err)
+}
+
+#[tauri::command]
+pub fn update_todo_attachment(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+    name: String,
+) -> Result<TodoAttachment, String> {
+    service
+        .store()?
+        .update_todo_attachment(&id, expected_version, &name)
+        .map_err(app_err)
+}
+
+/// Forget the attachment. The file is left on disk.
+#[tauri::command]
+pub fn delete_todo_attachment(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+) -> Result<(), String> {
+    service
+        .store()?
+        .delete_todo_attachment(&id, expected_version)
+        .map_err(app_err)
+}
+
+/// The native file picker. It runs in Rust because `tauri-plugin-dialog` is
+/// deliberately not exposed to the webview (see `src-tauri/Cargo.toml`): the
+/// GUI hands back a path, never a filesystem capability.
+#[tauri::command]
+pub fn pick_todo_attachment(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app.dialog().file().blocking_pick_file();
+    Ok(picked.map(|file| file.to_string()))
+}
+
+#[tauri::command]
+pub fn list_todo_reminders(
+    service: State<'_, AppService>,
+    todo_id: String,
+) -> Result<Vec<TodoReminder>, String> {
+    service
+        .store()?
+        .list_todo_reminders(&todo_id)
+        .map_err(app_err)
+}
+
+#[tauri::command]
+pub fn create_todo_reminder(
+    service: State<'_, AppService>,
+    draft: TodoReminderDraft,
+) -> Result<TodoReminder, String> {
+    service.store()?.create_todo_reminder(&draft).map_err(app_err)
+}
+
+#[tauri::command]
+pub fn set_todo_reminder_enabled(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+    enabled: bool,
+) -> Result<TodoReminder, String> {
+    service
+        .store()?
+        .set_todo_reminder_enabled(&id, expected_version, enabled)
+        .map_err(app_err)
+}
+
+#[tauri::command]
+pub fn delete_todo_reminder(
+    service: State<'_, AppService>,
+    id: String,
+    expected_version: u64,
+) -> Result<(), String> {
+    service
+        .store()?
+        .delete_todo_reminder(&id, expected_version)
+        .map_err(app_err)
+}
+
+#[tauri::command]
+pub fn list_todo_activity(
+    service: State<'_, AppService>,
+    todo_id: String,
+) -> Result<Vec<TodoActivity>, String> {
+    service.store()?.list_todo_activity(&todo_id).map_err(app_err)
+}
+
+#[tauri::command]
+pub fn add_todo_comment(
+    service: State<'_, AppService>,
+    todo_id: String,
+    author_id: Option<String>,
+    body: String,
+) -> Result<TodoActivity, String> {
+    service
+        .store()?
+        .add_todo_comment(&todo_id, author_id.as_deref(), &body)
         .map_err(app_err)
 }
 

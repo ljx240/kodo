@@ -86,6 +86,17 @@ struct RunEventEnvelope {
 }
 
 fn emit_run(app: &AppHandle, token: &RunToken, event: RunEvent) {
+    // Mirror the run's lifecycle onto the status item. The window can be hidden
+    // for the whole run (closing hides rather than quits), so this is the only
+    // ambient signal that the agent is still working — hence it hangs off the
+    // one funnel every run event already passes through.
+    match &event {
+        RunEvent::TurnStarted { .. } => crate::platform::set_run_status(app, true),
+        RunEvent::TurnComplete { .. } | RunEvent::Stopped { .. } | RunEvent::Error { .. } => {
+            crate::platform::set_run_status(app, false)
+        }
+        _ => {}
+    }
     let _ = app.emit(
         "run:event",
         RunEventEnvelope {

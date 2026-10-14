@@ -14,7 +14,10 @@ kodo-shell = { path = "../../../crates/shell" }
 kodo-memory = { path = "../../../crates/memory" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
+# `tray-icon` is what the macOS menu-bar status item is built from; the icon
+# itself is embedded at compile time by `tauri.conf.json`'s `trayIcon`, so no
+# runtime image decoder (`image-png`) is needed alongside it.
+tauri = { version = "2", features = ["tray-icon"] }
 # Both are called from Rust inside our own commands, not from the webview, so
 # neither needs a `capabilities/default.json` entry: the ACL gates webview IPC,
 # and a Rust-to-Rust call never goes through it. Doing it this way also avoids

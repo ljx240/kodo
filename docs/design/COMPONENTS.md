@@ -1100,3 +1100,89 @@ Slots: `data-testid` `turn-rail` / `turn-rail-mark` / `turn-rail-preview`;
 (label / jump / turn). Tokens only: `--kodo-border-strong`,
 `--kodo-text-secondary`, `--kodo-accent`, `--kodo-focus-*`, `--kodo-canvas`,
 `--kodo-border`, `--kodo-radius-popover`, `--kodo-font-*`.
+
+---
+
+## 17. Platform shell — macOS menu bar & status item
+
+> 2026-10-14. The only surface in this document with **no DOM**. Both menus
+> are drawn by the OS, live outside the window, and are built in Rust
+> (`apps/desktop/src-tauri/src/platform.rs`). The renderer contributes
+> nothing: no component, no CSS, no `i18n.ts` key, no visual-regression
+> baseline change (LAYOUT §1).
+
+### Menu bar (macOS only)
+
+```text
+Kodo │ 文件        编辑      显示            窗口      帮助
+     │ 新建任务⌘N  撤销      侧边栏 ✓        最小化⌘M  键盘快捷键
+     │ 添加项目⌘O  重做      检查器 ✓        缩放      打开状态目录
+     │ ───────      ───────   外观 ▸ 浅色/深色/跟随系统
+     │ 关闭窗口⌘W  剪切       ───────
+     │             复制      进入全屏
+     │             粘贴
+     │             全选
+```
+
+- **The Edit roles stay predefined.** `undo` / `redo` / `cut` / `copy` /
+  `paste` / `select_all` are `PredefinedMenuItem`s, not text items. Dropping
+  them is the standard way a custom Tauri menu silently takes ⌘C, ⌘V and ⌘A
+  away from the webview.
+- Predefined roles keep **no custom label** — macOS localizes them itself.
+  Custom items (新建任务, 侧边栏, …) carry their zh-CN label in Rust, which is
+  the DESIGN §10 carve-out recorded there.
+- **App menu** is the first submenu: 关于 Kodo (native About panel),
+  服务, 隐藏/隐藏其他/全部显示, 设置… ⌘,, 退出 Kodo.
+- **Scope.** macOS only. `Menu::default` is the only thing that ever installed
+  a menu bar, and it is `#[cfg(target_os = "macos")]`, so Linux has never had
+  one — an unconditional custom menu would hand Linux a menu bar nobody asked
+  for.
+- 开发者工具 appears under 显示 in debug builds only.
+
+### Status item (tray)
+
+Declared by `tauri.conf.json` → `app.trayIcon` (icon embedded at compile time
+from `icons/tray.png`), so it exists on every desktop platform. The menu and
+tooltip are attached in `setup` by `platform::build_tray`.
+
+```text
+显示 Kodo
+新建任务
+──────────
+运行状态：空闲        (disabled — reports, never commands)
+──────────
+退出 Kodo
+```
+
+- `iconAsTemplate: true` — the icon is a **black silhouette**, so macOS
+  inverts it for a dark menu bar. `icons/tray.png` is derived from the
+  transparent icon pack; the command is recorded in `docs/logos/README.md`.
+- `showMenuOnLeftClick: false` — left click **toggles the window**, right click
+  opens the menu.
+- Tooltip and the 运行状态 row follow the run lifecycle (`Kodo` ⇄
+  `Kodo — 运行中`), driven from `emit_run` — the single funnel every run event
+  already passes through. This matters because the window is often hidden
+  during a run.
+
+### Window behaviors
+
+- **Close hides, does not quit** (`CloseRequested` → `prevent_close()` +
+  `hide()`, main window only, macOS). A run in flight outlives the window.
+- **Dock click returns**: `RunEvent::Reopen { has_visible_windows: false }` →
+  `show_main`. Without it, hide-to-tray would be a one-way door.
+
+### The bridge
+
+The renderer never renders a label and never sees a string — it receives an
+**action id** on `menu:action` and dispatches it onto handles the app already
+had (`App.tsx`, one `switch`). Ids: `new-task` · `add-project` ·
+`open-settings` · `toggle-sidebar` · `toggle-inspector` · `theme-light` ·
+`theme-dark` · `theme-system` · `shortcuts`. Two menu entries are handled
+entirely in Rust and never reach the renderer: 退出 Kodo and 打开状态目录.
+
+Check marks flow the other way: the window is the source of truth, and
+`set_menu_state` (`{ sidebar, inspector, theme }`) is called whenever one of
+them changes, so the menu can never show a stale ✓.
+
+Menu ids are dotted (`kodo.view.sidebar`) and looked up one level at a time —
+`Menu::get` / `Submenu::get` never recurse.
