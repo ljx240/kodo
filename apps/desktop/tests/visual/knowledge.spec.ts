@@ -1,5 +1,15 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { DEMO_RESULTS, DEMO_WORKBENCH_APPS } from "../../src/data/workbench";
+
+const pageErrors = new WeakMap<Page, string[]>();
+test.beforeEach(({ page }) => {
+  const errors: string[] = [];
+  pageErrors.set(page, errors);
+  page.on("pageerror", (error) => errors.push(error.message));
+});
+test.afterEach(({ page }) => {
+  expect(pageErrors.get(page) ?? [], "页面不应有未处理异常").toEqual([]);
+});
 
 type MockIpcCall = { id: number; command: string; args: Record<string, unknown> };
 
@@ -44,6 +54,9 @@ async function installDelayedKnowledgeIpc(
       type Call = { id: number; command: string; args: Record<string, unknown> };
       type Pending = { command: string; resolve: (value: unknown) => void };
       type MockGlobal = {
+        __TAURI_EVENT_PLUGIN_INTERNALS__?: {
+          unregisterListener: (event: string, eventId: number) => void;
+        };
         __TAURI_INTERNALS__?: {
           invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
           transformCallback: (callback: (value?: unknown) => void) => number;
@@ -71,6 +84,9 @@ async function installDelayedKnowledgeIpc(
       };
 
       target.__knowledgeIpc = { calls, pendingIds: () => [...pending.keys()], resolve };
+      // The fixture emits no native events; Tauri still calls this hook when
+      // StrictMode releases the menu listener added by the desktop shell.
+      target.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
       target.__TAURI_INTERNALS__ = {
         transformCallback: (callback) => {
           const id = nextId++;
