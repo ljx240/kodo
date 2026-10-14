@@ -1600,7 +1600,11 @@ const demoPrefs: Record<string, string> = { ...DEMO_WORKBENCH_PREFS };
 const demoRequests = new Map<string, string>();
 let demoSeq = 0;
 
-const demoNow = (): number => Math.floor(Date.parse(`${DEMO_TODAY}T10:24:32Z`) / 1000);
+// Mirrors the Rust `now_unix_ms()`: the IPC, the `Todo.epochMs` shape and the
+// `at(...)` helper in `data/workbench.ts` are all in milliseconds, so this
+// helper is too. The previous `/ 1000` turned every `demoStamp` into a 1970
+// timestamp and broke "updated today" sorting and the relative-time chips.
+const demoNow = (): number => Math.floor(Date.parse(`${DEMO_TODAY}T10:24:32Z`));
 const demoId = (prefix: string): string => `${prefix}-demo-${(demoSeq += 1)}`;
 
 function stamp<T extends { version: number; updatedAt: number }>(row: T): T {

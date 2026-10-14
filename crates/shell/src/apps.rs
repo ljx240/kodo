@@ -46,10 +46,16 @@ fn default_sort_order(app_id: &str) -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-pub fn now_unix() -> i64 {
+/// Wall-clock milliseconds since the Unix epoch. The frontend reads this as
+/// `epochMs` (`new Date(n)`, `Date.parse(...)` are all in milliseconds) and
+/// `DEMO_TODOS`' `at(...)` helper follows the same unit, so the round-trip
+/// across the IPC stays in one scale. The scheduler is the one place that
+/// genuinely wants whole seconds, and it goes through `Clock::now_unix`
+/// instead of this helper.
+pub fn now_unix_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
@@ -157,7 +163,7 @@ impl AppStore {
             tx.execute(
                 "INSERT OR REPLACE INTO schema_migrations (version, applied_at, description)
                  VALUES (?1, ?2, ?3)",
-                params![version, now_unix(), description],
+                params![version, now_unix_ms(), description],
             )
             .map_err(store_err)?;
             tx.commit().map_err(store_err)?;
@@ -270,7 +276,7 @@ impl AppStore {
         let manifest = self.known_manifest(app_id)?;
         let mut pref = self.preference_for(&manifest)?;
         pref.enabled = enabled;
-        pref.updated_at = now_unix();
+        pref.updated_at = now_unix_ms();
         self.write_preference(&pref)?;
         Ok(AppView {
             manifest,
@@ -282,7 +288,7 @@ impl AppStore {
         let manifest = self.known_manifest(app_id)?;
         let mut pref = self.preference_for(&manifest)?;
         pref.favorite = favorite;
-        pref.updated_at = now_unix();
+        pref.updated_at = now_unix_ms();
         self.write_preference(&pref)?;
         Ok(AppView {
             manifest,
@@ -306,7 +312,7 @@ impl AppStore {
         let mut pref = self.preference_for(&manifest)?;
         pref.ai_enabled = ai_enabled;
         pref.schedule_enabled = schedule_enabled;
-        pref.updated_at = now_unix();
+        pref.updated_at = now_unix_ms();
         self.write_preference(&pref)?;
         Ok(AppView {
             manifest,
@@ -323,7 +329,7 @@ impl AppStore {
             self.known_manifest(app_id)?;
         }
         let prefs = self.read_preferences()?;
-        let now = now_unix();
+        let now = now_unix_ms();
         let mut next = app_ids.len() as i64;
         for manifest in builtin_apps() {
             let mut pref = prefs.get(&manifest.app_id).cloned().unwrap_or_else(|| {
@@ -386,7 +392,7 @@ impl AppStore {
         conn.execute(
             "INSERT INTO workbench_prefs (key, value, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            params![key.trim(), value, now_unix()],
+            params![key.trim(), value, now_unix_ms()],
         )
         .map_err(store_err)?;
         Ok(())
@@ -763,7 +769,7 @@ impl AppStore {
             }
         }
 
-        let now = now_unix();
+        let now = now_unix_ms();
         let sort_order = self.next_sort_order()?;
         let id = new_id("todo");
         let inserted = {
@@ -905,7 +911,7 @@ impl AppStore {
         let tag_ids = clean_id_list(&patch.tag_ids, MAX_TODO_TAGS)?;
         self.todo_tag_ids_exist(&tag_ids)?;
         let tags_changed = tag_ids != existing.tag_ids;
-        let now = now_unix();
+        let now = now_unix_ms();
         {
             let mut conn = self.conn.lock();
             let statuses = Self::status_map(&conn)?;
@@ -974,7 +980,7 @@ impl AppStore {
         if existing.version != expected_version {
             return Err(AppError::RevisionConflict);
         }
-        let now = now_unix();
+        let now = now_unix_ms();
         {
             let conn = self.conn.lock();
             let statuses = Self::status_map(&conn)?;
@@ -1012,7 +1018,7 @@ impl AppStore {
             conn.execute(
                 "UPDATE todos SET archived = ?2, version = version + 1, updated_at = ?3
                  WHERE id = ?1 AND version = ?4",
-                params![id, archived as i64, now_unix(), expected_version as i64],
+                params![id, archived as i64, now_unix_ms(), expected_version as i64],
             )
             .map_err(store_err)?;
         }
@@ -1059,7 +1065,7 @@ impl AppStore {
         if existing.version != expected_version {
             return Err(AppError::RevisionConflict);
         }
-        let now = now_unix();
+        let now = now_unix_ms();
         {
             let mut conn = self.conn.lock();
             let statuses = Self::status_map(&conn)?;
@@ -1151,7 +1157,7 @@ impl AppStore {
             tx.execute(
                 "UPDATE todos SET version = version + 1, updated_at = ?2
                  WHERE id = ?1 AND version = ?3",
-                params![id, now_unix(), expected_version as i64],
+                params![id, now_unix_ms(), expected_version as i64],
             )
             .map_err(store_err)?;
             tx.commit().map_err(store_err)?;
@@ -1198,7 +1204,7 @@ impl AppStore {
             tx.execute(
                 "UPDATE todos SET version = version + 1, updated_at = ?2
                  WHERE id = ?1 AND version = ?3",
-                params![id, now_unix(), expected_version as i64],
+                params![id, now_unix_ms(), expected_version as i64],
             )
             .map_err(store_err)?;
             tx.commit().map_err(store_err)?;
@@ -1230,7 +1236,7 @@ impl AppStore {
         for id in &ids {
             self.todo_exists(id)?;
         }
-        let now = now_unix();
+        let now = now_unix_ms();
         {
             let mut conn = self.conn.lock();
             let tx = conn.transaction().map_err(store_err)?;
@@ -1312,7 +1318,7 @@ impl AppStore {
         let name = clean_title(&draft.name)?;
         let color = clean_color(draft.color.as_deref(), "gray")?;
         let is_done = draft.is_done.unwrap_or(false);
-        let now = now_unix();
+        let now = now_unix_ms();
         let id = new_id("st");
         {
             let conn = self.conn.lock();
@@ -1346,7 +1352,7 @@ impl AppStore {
         }
         let name = clean_title(&patch.name)?;
         let color = clean_color(Some(&patch.color), "gray")?;
-        let now = now_unix();
+        let now = now_unix_ms();
         {
             let mut conn = self.conn.lock();
             let tx = conn.transaction().map_err(store_err)?;
@@ -1410,7 +1416,7 @@ impl AppStore {
         if existing.builtin {
             return Err(AppError::InvalidInput);
         }
-        let now = now_unix();
+        let now = now_unix_ms();
         {
             let mut conn = self.conn.lock();
             let statuses = Self::status_map(&conn)?;
@@ -1520,7 +1526,7 @@ impl AppStore {
     pub fn create_todo_tag(&self, draft: &TodoTagDraft) -> Result<TodoTag, AppError> {
         let name = clean_title(&draft.name)?;
         let color = clean_color(draft.color.as_deref(), "blue")?;
-        let now = now_unix();
+        let now = now_unix_ms();
         let id = new_id("tag");
         {
             let conn = self.conn.lock();
@@ -1559,7 +1565,7 @@ impl AppStore {
             conn.execute(
                 "UPDATE todo_tags SET name = ?2, color = ?3, version = version + 1, updated_at = ?4
                  WHERE id = ?1 AND version = ?5",
-                params![id, name, color, now_unix(), expected_version as i64],
+                params![id, name, color, now_unix_ms(), expected_version as i64],
             )
             .map_err(store_err)?;
         }
@@ -1581,7 +1587,7 @@ impl AppStore {
         tx.execute(
             "UPDATE todos SET version = version + 1, updated_at = ?2
              WHERE id IN (SELECT todo_id FROM todo_tag_links WHERE tag_id = ?1)",
-            params![id, now_unix()],
+            params![id, now_unix_ms()],
         )
         .map_err(store_err)?;
         tx.execute("DELETE FROM todo_tags WHERE id = ?1", params![id])
@@ -1611,7 +1617,7 @@ impl AppStore {
     pub fn create_todo_person(&self, name: &str, color: &str) -> Result<TodoPerson, AppError> {
         let name = clean_title(name)?;
         let color = clean_color(Some(color), "blue")?;
-        let now = now_unix();
+        let now = now_unix_ms();
         let id = new_id("person");
         {
             let conn = self.conn.lock();
@@ -1671,7 +1677,7 @@ impl AppStore {
                 return Ok(existing);
             }
         }
-        let now = now_unix();
+        let now = now_unix_ms();
         let id = new_id("att");
         {
             let conn = self.conn.lock();
@@ -1714,7 +1720,7 @@ impl AppStore {
             conn.execute(
                 "UPDATE todo_attachments SET name = ?2, version = version + 1, updated_at = ?3
                  WHERE id = ?1 AND version = ?4",
-                params![id, name, now_unix(), expected_version as i64],
+                params![id, name, now_unix_ms(), expected_version as i64],
             )
             .map_err(store_err)?;
         }
@@ -1786,7 +1792,7 @@ impl AppStore {
         self.todo_exists(&draft.todo_id)?;
         let message = clean_body(draft.message.as_deref())?;
         let enabled = draft.enabled.unwrap_or(true);
-        let now = now_unix();
+        let now = now_unix_ms();
         let id = new_id("rem");
         {
             let conn = self.conn.lock();
@@ -1821,7 +1827,7 @@ impl AppStore {
             conn.execute(
                 "UPDATE todo_reminders SET enabled = ?2, version = version + 1, updated_at = ?3
                  WHERE id = ?1 AND version = ?4",
-                params![id, enabled as i64, now_unix(), expected_version as i64],
+                params![id, enabled as i64, now_unix_ms(), expected_version as i64],
             )
             .map_err(store_err)?;
         }
@@ -1882,7 +1888,7 @@ impl AppStore {
         if let Some(author) = author_id {
             self.todo_person_exists(author)?;
         }
-        let now = now_unix();
+        let now = now_unix_ms();
         let id = new_id("act");
         {
             let conn = self.conn.lock();
@@ -1982,7 +1988,7 @@ impl AppStore {
             }
         }
 
-        let now = now_unix();
+        let now = now_unix_ms();
         let event = CalendarEvent {
             id: new_id("evt"),
             title,
@@ -2077,7 +2083,7 @@ impl AppStore {
                     end_time,
                     patch.all_day as i64,
                     timezone,
-                    now_unix(),
+                    now_unix_ms(),
                     expected_version as i64,
                 ],
             )
@@ -2225,7 +2231,7 @@ impl AppStore {
             }
         }
 
-        let now = now_unix();
+        let now = now_unix_ms();
         let artifact = Artifact {
             id: new_id("art"),
             title,
@@ -2329,7 +2335,7 @@ impl AppStore {
                     file_size,
                     file_modified_at,
                     category,
-                    now_unix(),
+                    now_unix_ms(),
                     expected_version as i64,
                 ],
             )
@@ -2363,7 +2369,7 @@ impl AppStore {
                     id,
                     favorite as i64,
                     archived as i64,
-                    now_unix(),
+                    now_unix_ms(),
                     expected_version as i64
                 ],
             )
@@ -2399,7 +2405,7 @@ impl AppStore {
             .execute(
                 "INSERT OR IGNORE INTO job_receipts (receipt_key, job_type, created_at)
                  VALUES (?1, ?2, ?3)",
-                params![key, job_type, now_unix()],
+                params![key, job_type, now_unix_ms()],
             )
             .map_err(store_err)?;
         Ok(changed == 1)

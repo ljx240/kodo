@@ -102,26 +102,27 @@ export function TodoBoard({
           />
         ))}
 
-        {isDone ? (
-          <div className="todo-empty" data-testid={`todo-empty-${column}`}>
-            <InboxCheck />
-            <p className="todo-empty-title">{W.emptyStatusTitle}</p>
-            <p className="todo-empty-hint">{W.emptyStatusHint}</p>
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="todo-drop-zone"
-            data-testid={`todo-drop-${column}`}
-            onClick={() => openDraft(column)}
-          >
-            <span className="todo-drop-badge">
-              <Plus size={14} strokeWidth={2} />
-            </span>
-            <span className="todo-drop-title">{W.dropTitle}</span>
-            <span className="todo-drop-hint">{W.dropHint}</span>
-          </button>
-        )}
+        {cards.length === 0 &&
+          (isDone ? (
+            <div className="todo-empty" data-testid={`todo-empty-${column}`}>
+              <InboxCheck />
+              <p className="todo-empty-title">{W.emptyStatusTitle}</p>
+              <p className="todo-empty-hint">{W.emptyStatusHint}</p>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="todo-drop-zone"
+              data-testid={`todo-drop-${column}`}
+              onClick={() => openDraft(column)}
+            >
+              <span className="todo-drop-badge">
+                <Plus size={14} strokeWidth={2} />
+              </span>
+              <span className="todo-drop-title">{W.dropTitle}</span>
+              <span className="todo-drop-hint">{W.dropHint}</span>
+            </button>
+          ))}
       </div>
     );
   };

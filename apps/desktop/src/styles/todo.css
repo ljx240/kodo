@@ -1388,8 +1388,17 @@
 }
 
 .todo-app .todo-status-row {
+  /*
+   * 7 children: grip · chip · name · color · done · builtIn|reassign · delete.
+   * The name input is the only stretchy cell; chip / done / builtIn / delete
+   * are content-sized so the Chinese label 「进行中」 and the checkbox row
+   * never get clipped, and the reassign <select> (when the user clicks
+   * delete on a still-populated status) reads its full option text instead
+   * of being squeezed by a second competing `1fr` track. min-width:0 on
+   * the inputs/selects lets the row actually fit the modal body.
+   */
   display: grid;
-  grid-template-columns: 18px 28px minmax(120px, 1fr) auto auto 1fr auto;
+  grid-template-columns: 18px auto minmax(0, 1fr) auto auto auto auto;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
@@ -1429,6 +1438,8 @@
   font-weight: 500;
   color: var(--todo-st-gray, currentColor);
   background: var(--todo-st-gray-bg, transparent);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .todo-app .todo-status-chip[data-color="blue"] { color: var(--todo-st-blue); background: var(--todo-st-blue-bg); }
@@ -1443,6 +1454,7 @@
   height: 28px;
   padding: 0 8px;
   font-size: 13px;
+  min-width: 0;
 }
 
 .todo-app .todo-status-name:disabled {
@@ -1464,6 +1476,7 @@
   background: var(--kodo-surface);
   cursor: pointer;
   font-size: 12px;
+  min-width: 0;
 }
 
 .todo-app .todo-status-color select {
@@ -1523,6 +1536,8 @@
 .todo-app .todo-status-reassign {
   height: 28px;
   font-size: 12px;
+  min-width: 0;
+  max-width: 220px;
 }
 
 .todo-app .todo-status-delete {
