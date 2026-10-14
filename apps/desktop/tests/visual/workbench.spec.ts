@@ -141,13 +141,13 @@ test("the workbench opens from the sidebar and returns from an app", async ({ pa
 test("search, favorite and ordering change the collection", async ({ page }) => {
   await openWorkbench(page);
 
-  // All three apps first, then the search narrows the rows.
-  await expect(page.locator(".wb-app-row")).toHaveCount(3);
+  // The four apps appear first, then the search narrows the rows.
+  await expect(page.locator(".wb-app-row")).toHaveCount(4);
   await page.getByTestId("workbench-search").fill("日历");
   await expect(page.locator(".wb-app-row")).toHaveCount(1);
   await expect(page.locator(".wb-app-row")).toContainText("日历");
   await page.getByTestId("workbench-search").fill("");
-  await expect(page.locator(".wb-app-row")).toHaveCount(3);
+  await expect(page.locator(".wb-app-row")).toHaveCount(4);
 
   // 待办 is the pre-starred fixture, so it heads the 收藏 section.
   const sections = page.locator(".wb-section");
@@ -171,7 +171,7 @@ test("search, favorite and ordering change the collection", async ({ page }) => 
         ?.filter((row) => row.command === "set_app_order")
         .at(-1)?.args.appIds,
   );
-  expect(order).toEqual(["calendar", "todo", "artifacts"]);
+  expect(order).toEqual(["calendar", "todo", "artifacts", "knowledge"]);
   // …and both starred apps now lead the list, favorites first.
   await expect(page.locator(".wb-app-row").first()).toContainText("日历");
 });
@@ -183,7 +183,7 @@ test("disabling an app removes it from the collection and refuses to open it", a
   await page.getByTestId("workbench-manage-close").click();
 
   await expect(page.getByTestId("wb-app-artifacts")).toHaveCount(0);
-  await expect(page.locator(".wb-app-row")).toHaveCount(2);
+  await expect(page.locator(".wb-app-row")).toHaveCount(3);
 
   // A URL that still names the disabled app lands on the collection with a
   // hint instead of a dead screen — the data is kept, only the entry goes.

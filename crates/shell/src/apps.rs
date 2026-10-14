@@ -519,8 +519,7 @@ impl AppStore {
     const REMINDER_COLUMNS: &'static str = "id, todo_id, kind, offset_minutes, message, enabled, \
          version, created_at, updated_at";
 
-    const ACTIVITY_COLUMNS: &'static str =
-        "id, todo_id, kind, author_id, body, meta, created_at";
+    const ACTIVITY_COLUMNS: &'static str = "id, todo_id, kind, author_id, body, meta, created_at";
 
     /// The status catalog keyed by id. The one place `is_done` is resolved, and
     /// the thing every status write validates against.
@@ -557,7 +556,12 @@ impl AppStore {
     /// The `completed_at` a write should leave behind. Callers pass the target
     /// status's `is_done` and the row's previous one: entering done stamps the
     /// moment, staying done keeps the original, and leaving done clears it.
-    fn completed_at_for(now: i64, done: bool, was_done: bool, previous: Option<i64>) -> Option<i64> {
+    fn completed_at_for(
+        now: i64,
+        done: bool,
+        was_done: bool,
+        previous: Option<i64>,
+    ) -> Option<i64> {
         match (done, was_done) {
             (false, _) => None,
             (true, true) => previous.or(Some(now)),
@@ -619,7 +623,10 @@ impl AppStore {
                 .map_err(store_err)?;
             for entry in found {
                 let (todo_id, related_id) = entry.map_err(store_err)?;
-                links.entry(todo_id.clone()).or_default().push(related_id.clone());
+                links
+                    .entry(todo_id.clone())
+                    .or_default()
+                    .push(related_id.clone());
                 links.entry(related_id).or_default().push(todo_id);
             }
         }
@@ -762,7 +769,12 @@ impl AppStore {
         let inserted = {
             let mut conn = self.conn.lock();
             let statuses = Self::status_map(&conn)?;
-            let status = match draft.status.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            let status = match draft
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
                 Some(value) => Self::check_status(&statuses, value)?,
                 None => DEFAULT_TODO_STATUS.to_owned(),
             };
@@ -1127,11 +1139,8 @@ impl AppStore {
         {
             let mut conn = self.conn.lock();
             let tx = conn.transaction().map_err(store_err)?;
-            tx.execute(
-                "DELETE FROM todo_tag_links WHERE todo_id = ?1",
-                params![id],
-            )
-            .map_err(store_err)?;
+            tx.execute("DELETE FROM todo_tag_links WHERE todo_id = ?1", params![id])
+                .map_err(store_err)?;
             for tag_id in &tag_ids {
                 tx.execute(
                     "INSERT OR IGNORE INTO todo_tag_links (todo_id, tag_id) VALUES (?1, ?2)",
@@ -1240,7 +1249,8 @@ impl AppStore {
                          WHERE id = ?1"
                     };
                     for id in &ids {
-                        tx.execute(sql, params![id, status, now]).map_err(store_err)?;
+                        tx.execute(sql, params![id, status, now])
+                            .map_err(store_err)?;
                     }
                 }
                 TodoBulkOp::SetPriority { priority } => {
@@ -1298,10 +1308,7 @@ impl AppStore {
         collect(rows)
     }
 
-    pub fn create_todo_status(
-        &self,
-        draft: &TodoStatusDraft,
-    ) -> Result<TodoStatusDef, AppError> {
+    pub fn create_todo_status(&self, draft: &TodoStatusDraft) -> Result<TodoStatusDef, AppError> {
         let name = clean_title(&draft.name)?;
         let color = clean_color(draft.color.as_deref(), "gray")?;
         let is_done = draft.is_done.unwrap_or(false);
@@ -1368,8 +1375,11 @@ impl AppStore {
                     )
                     .map_err(store_err)?;
                 } else {
-                    tx.execute("UPDATE todos SET completed_at = NULL WHERE status = ?1", params![id])
-                        .map_err(store_err)?;
+                    tx.execute(
+                        "UPDATE todos SET completed_at = NULL WHERE status = ?1",
+                        params![id],
+                    )
+                    .map_err(store_err)?;
                 }
             }
             tx.commit().map_err(store_err)?;
@@ -1454,10 +1464,7 @@ impl AppStore {
     /// Write a new column order. `ids` must name every status exactly once — a
     /// partial list would leave the rest at stale sort keys. Sort keys are not
     /// versions, so nothing is bumped here.
-    pub fn reorder_todo_statuses(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<TodoStatusDef>, AppError> {
+    pub fn reorder_todo_statuses(&self, ids: &[String]) -> Result<Vec<TodoStatusDef>, AppError> {
         let ids = clean_id_list(ids, MAX_ID_LIST)?;
         {
             let mut conn = self.conn.lock();
@@ -1486,7 +1493,10 @@ impl AppStore {
 
     fn todo_status(&self, id: &str) -> Result<Option<TodoStatusDef>, AppError> {
         let conn = self.conn.lock();
-        let sql = format!("SELECT {} FROM todo_statuses WHERE id = ?1", Self::STATUS_COLUMNS);
+        let sql = format!(
+            "SELECT {} FROM todo_statuses WHERE id = ?1",
+            Self::STATUS_COLUMNS
+        );
         conn.query_row(&sql, params![id], Self::read_status)
             .optional()
             .map_err(store_err)
@@ -2785,7 +2795,7 @@ mod tests {
     fn builtin_apps_start_enabled_with_defaults() {
         let (_dir, store) = store();
         let apps = store.list_apps().unwrap();
-        assert_eq!(apps.len(), 3);
+        assert_eq!(apps.len(), 4);
         assert!(apps.iter().all(|a| a.preference.enabled));
         assert!(apps.iter().all(|a| !a.preference.favorite));
         // Default order follows the manifest order.
@@ -2830,7 +2840,7 @@ mod tests {
         let order = store.set_app_order(&["artifacts".to_string()]).unwrap();
         assert_eq!(order[0].manifest.app_id, "artifacts");
         // The apps the caller did not mention are still listed, after it.
-        assert_eq!(order.len(), 3);
+        assert_eq!(order.len(), 4);
         assert_eq!(order[1].manifest.app_id, "todo");
         assert_eq!(order[2].manifest.app_id, "calendar");
         // A full reorder is honoured exactly.
@@ -2838,7 +2848,7 @@ mod tests {
             .set_app_order(&["calendar".into(), "todo".into(), "artifacts".into()])
             .unwrap();
         let ids: Vec<&str> = order.iter().map(|a| a.manifest.app_id.as_str()).collect();
-        assert_eq!(ids, vec!["calendar", "todo", "artifacts"]);
+        assert_eq!(ids, vec!["calendar", "todo", "artifacts", "knowledge"]);
         assert_eq!(
             store.set_app_order(&["nope".into()]),
             Err(AppError::UnknownApp)
@@ -3045,11 +3055,12 @@ mod tests {
     fn a_whole_row_update_keeps_every_field() {
         let (_dir, store) = store();
         let person = store.create_todo_person("张三", "teal").unwrap();
-        let tag = store.create_todo_tag(&TodoTagDraft {
-            name: "后端".into(),
-            color: Some("purple".into()),
-        })
-        .unwrap();
+        let tag = store
+            .create_todo_tag(&TodoTagDraft {
+                name: "后端".into(),
+                color: Some("purple".into()),
+            })
+            .unwrap();
         let other = store.create_todo(&draft("关联事项")).unwrap();
 
         let mut d = draft("整行往返");
@@ -3107,9 +3118,7 @@ mod tests {
             .unwrap();
         assert_eq!(tagged.tag_ids, vec![tag.id.clone()]);
         // Clearing takes them all off again.
-        let cleared = store
-            .set_todo_tags(&first.id, tagged.version, &[])
-            .unwrap();
+        let cleared = store.set_todo_tags(&first.id, tagged.version, &[]).unwrap();
         assert!(cleared.tag_ids.is_empty());
 
         // A link shows on both sides, and a self-link is refused.
@@ -3183,7 +3192,12 @@ mod tests {
         let ids = vec![a.id.clone(), b.id.clone()];
 
         let done = store
-            .bulk_update_todos(&ids, &TodoBulkOp::SetStatus { status: "done".into() })
+            .bulk_update_todos(
+                &ids,
+                &TodoBulkOp::SetStatus {
+                    status: "done".into(),
+                },
+            )
             .unwrap();
         assert!(done.iter().all(|t| t.is_done));
         assert!(done.iter().all(|t| t.completed_at.is_some()));
@@ -3245,7 +3259,9 @@ mod tests {
     fn comments_append_and_need_a_body() {
         let (_dir, store) = store();
         let todo = store.create_todo(&draft("评论我")).unwrap();
-        store.add_todo_comment(&todo.id, None, "已联系供应商").unwrap();
+        store
+            .add_todo_comment(&todo.id, None, "已联系供应商")
+            .unwrap();
         store.add_todo_comment(&todo.id, None, "明天跟进").unwrap();
         let log = store.list_todo_activity(&todo.id).unwrap();
         assert_eq!(log.len(), 2);

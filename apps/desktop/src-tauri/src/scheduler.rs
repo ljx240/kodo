@@ -440,6 +440,7 @@ fn execute_agent_run(
         project: Some(project_path.clone()),
         message,
         conversation_history: Vec::new(),
+        knowledge_context: None,
         context: Vec::new(),
         provider: config.provider,
         permission: AGENT_RUN_PERMISSION,

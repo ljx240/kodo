@@ -238,6 +238,7 @@ fn run_scenario(
         personas: Vec::new(),
         budget_family: None,
         memory: None,
+        knowledge_context: None,
     };
 
     let cancel_after = Arc::new(AtomicUsize::new(

@@ -34,9 +34,17 @@ const PAGES: Array<{ name: string; url: string; setup?: (page: Page) => Promise<
     },
   },
   { name: "settings", url: "/ui-demo/settings" },
-  // The workbench collection and the three apps it hosts. An open app is the
+  // The workbench collection and the four apps it hosts. An open app is the
   // same route with `?app=`, so the sidebar keeps its single 工作台 entry.
   { name: "workbench", url: "/ui-demo/workbench" },
+  {
+    name: "workbench-knowledge",
+    url: "/ui-demo/workbench?app=knowledge",
+    setup: async (page) => {
+      await page.getByTestId("knowledge-open-doc-compat-demo").click();
+      await expect(page.getByTestId("knowledge-source-lines")).toBeVisible();
+    },
+  },
   { name: "workbench-todo", url: "/ui-demo/workbench?app=todo" },
   {
     name: "workbench-todo-list",

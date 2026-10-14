@@ -73,6 +73,8 @@ pub struct SessionView {
 #[derive(serde::Serialize)]
 pub struct TurnView {
     pub ask: String,
+    #[serde(rename = "knowledgeUsed")]
+    pub knowledge_used: bool,
     /// Project-relative paths attached as context for this turn.
     pub context: Vec<String>,
     pub items: Vec<ItemView>,
@@ -682,6 +684,7 @@ impl From<session::Session> for SessionView {
                     let status = turn_status(&turn);
                     TurnView {
                         ask: turn.ask,
+                        knowledge_used: turn.knowledge_used,
                         context: turn.context,
                         items: turn.items.into_iter().map(Into::into).collect(),
                         done: turn.done,
@@ -1415,6 +1418,7 @@ mod tests {
             mode: kodo_core::session::Mode::Work,
             turns: vec![kodo_core::session::Turn {
                 ask: "帮我看一下".to_owned(),
+                knowledge_used: true,
                 context: vec!["src/lib.rs".to_owned()],
                 items: vec![item(ItemKind::reasoning("s".to_owned()))],
                 done: true,
@@ -1429,6 +1433,7 @@ mod tests {
         assert_eq!(value["project"], json!("/p"));
         assert_eq!(value["mode"], json!("work"));
         assert_eq!(value["turns"][0]["ask"], json!("帮我看一下"));
+        assert_eq!(value["turns"][0]["knowledgeUsed"], json!(true));
         assert_eq!(value["turns"][0]["context"], json!(["src/lib.rs"]));
         assert_eq!(value["turns"][0]["done"], json!(true));
         assert_eq!(value["turns"][0]["items"][0]["kind"], json!("reasoning"));
@@ -1473,6 +1478,7 @@ mod tests {
     fn turn_with(items: Vec<Item>, done: bool) -> kodo_core::session::Turn {
         kodo_core::session::Turn {
             ask: "q".to_owned(),
+            knowledge_used: false,
             context: Vec::new(),
             items,
             done,

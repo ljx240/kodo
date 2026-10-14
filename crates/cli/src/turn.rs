@@ -166,6 +166,7 @@ impl TurnContext {
             personas: Vec::new(),
             budget_family: None,
             memory: open_memory_handle(),
+            knowledge_context: None,
         };
 
         let mut logger = TurnLogger::new(self.session_dir.clone(), session_id)

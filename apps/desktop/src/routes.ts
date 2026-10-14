@@ -21,11 +21,11 @@ export type PluginType = "skills" | "mcp" | "agents";
 /**
  * The apps the workbench can open — `?app=`. The ids are the ones the backend
  * manifests declare ([`kodo_core::apps::builtin_apps`]); 待办 / 日历 /
- * 成果中心 open *inside* the workbench and never become first-level entries.
+ * 成果中心 / 知识库 open *inside* the workbench and never become first-level entries.
  */
-export type AppId = "todo" | "calendar" | "artifacts";
+export type AppId = "todo" | "calendar" | "artifacts" | "knowledge";
 
-const APP_IDS: AppId[] = ["todo", "calendar", "artifacts"];
+const APP_IDS: AppId[] = ["todo", "calendar", "artifacts", "knowledge"];
 
 export type Route = {
   name: RouteName;

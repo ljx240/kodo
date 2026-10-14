@@ -190,6 +190,20 @@ pub fn builtin_apps() -> Vec<AppManifest> {
                 summary: false,
             },
         },
+        AppManifest {
+            app_id: "knowledge".into(),
+            name: "知识库".into(),
+            description: "管理本地资料，检索并引用可追溯的出处".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            api_version: APP_API_VERSION.into(),
+            icon: "book-open".into(),
+            builtin: true,
+            capabilities: AppCapabilities {
+                ai: false,
+                scheduler: false,
+                summary: false,
+            },
+        },
     ]
 }
 
@@ -829,11 +843,11 @@ mod tests {
     #[test]
     fn builtin_apps_have_unique_ids() {
         let apps = builtin_apps();
-        assert_eq!(apps.len(), 3);
+        assert_eq!(apps.len(), 4);
         let mut ids: Vec<&str> = apps.iter().map(|a| a.app_id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.len(), 4);
     }
 
     #[test]
@@ -911,16 +925,16 @@ mod tests {
     fn item_types_are_closed_and_default_to_task() {
         assert_eq!(clean_item_type(None).unwrap(), "task");
         assert_eq!(clean_item_type(Some("bug")).unwrap(), "bug");
-        assert_eq!(
-            clean_item_type(Some("epic")),
-            Err(AppError::InvalidInput)
-        );
+        assert_eq!(clean_item_type(Some("epic")), Err(AppError::InvalidInput));
     }
 
     #[test]
     fn id_lists_dedupe_and_stay_bounded() {
         let ids = vec!["t1".to_owned(), "t2".to_owned(), "t1".to_owned()];
-        assert_eq!(clean_id_list(&ids, MAX_TODO_TAGS).unwrap(), vec!["t1", "t2"]);
+        assert_eq!(
+            clean_id_list(&ids, MAX_TODO_TAGS).unwrap(),
+            vec!["t1", "t2"]
+        );
         let too_many: Vec<String> = (0..MAX_TODO_TAGS + 1).map(|n| format!("t{n}")).collect();
         assert_eq!(
             clean_id_list(&too_many, MAX_TODO_TAGS),

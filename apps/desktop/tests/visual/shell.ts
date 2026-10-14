@@ -545,6 +545,13 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
           }
           case "core_info":
             return { name: "kodo-core", version: "0.0.1" };
+          case "knowledge_list_bases":
+          case "knowledge_turn_citations":
+            return [];
+          case "knowledge_get_bindings":
+            return { baseIds: [], strict: true };
+          case "knowledge_set_bindings":
+            return args?.selection ?? { baseIds: [], strict: true };
           case "workspace":
             if (config.workspace === null)
               throw "HOME is not set, so there is nowhere to keep the project list";

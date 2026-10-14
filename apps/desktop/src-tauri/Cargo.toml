@@ -12,6 +12,9 @@ kodo-core = { path = "../../../crates/core" }
 kodo-agent = { path = "../../../crates/agent" }
 kodo-shell = { path = "../../../crates/shell" }
 kodo-memory = { path = "../../../crates/memory" }
+kodo-knowledge = { path = "../../../crates/knowledge" }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `tray-icon` is what the macOS menu-bar status item is built from; the icon
@@ -28,6 +31,9 @@ tauri-plugin-opener = "2"
 # resource guard and job-cancel registry; pulling it directly here
 # avoids a second std::sync::Mutex layer in the Tauri binding.
 parking_lot = "0.12"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # Only to assert the exact JSON the GUI receives. The shape of a flattened,

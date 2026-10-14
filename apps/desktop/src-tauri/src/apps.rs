@@ -19,8 +19,8 @@ use tauri_plugin_opener::OpenerExt;
 use kodo_core::apps::{
     app_job_types, AppError, AppView, Artifact, ArtifactDraft, ArtifactView, CalendarEvent,
     CalendarEventDraft, Todo, TodoActivity, TodoAttachment, TodoAttachmentDraft, TodoBulkOp,
-    TodoDraft, TodoPerson, TodoReminder, TodoReminderDraft, TodoStatusDef, TodoStatusDraft, TodoTag,
-    TodoTagDraft,
+    TodoDraft, TodoPerson, TodoReminder, TodoReminderDraft, TodoStatusDef, TodoStatusDraft,
+    TodoTag, TodoTagDraft,
 };
 use kodo_core::scheduler::TaskKind;
 use kodo_shell::AppStore;
@@ -51,10 +51,17 @@ impl AppService {
         }
     }
 
-    fn store(&self) -> Result<&Arc<AppStore>, String> {
+    pub(crate) fn store(&self) -> Result<&Arc<AppStore>, String> {
         self.store
             .as_ref()
             .ok_or_else(|| AppError::StorageUnavailable.code().to_owned())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(store: AppStore) -> Self {
+        Self {
+            store: Some(Arc::new(store)),
+        }
     }
 }
 
@@ -298,7 +305,10 @@ pub fn bulk_update_todos(
     ids: Vec<String>,
     op: TodoBulkOp,
 ) -> Result<Vec<Todo>, String> {
-    service.store()?.bulk_update_todos(&ids, &op).map_err(app_err)
+    service
+        .store()?
+        .bulk_update_todos(&ids, &op)
+        .map_err(app_err)
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +361,10 @@ pub fn reorder_todo_statuses(
     service: State<'_, AppService>,
     ids: Vec<String>,
 ) -> Result<Vec<TodoStatusDef>, String> {
-    service.store()?.reorder_todo_statuses(&ids).map_err(app_err)
+    service
+        .store()?
+        .reorder_todo_statuses(&ids)
+        .map_err(app_err)
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +421,10 @@ pub fn create_todo_person(
     name: String,
     color: String,
 ) -> Result<TodoPerson, String> {
-    service.store()?.create_todo_person(&name, &color).map_err(app_err)
+    service
+        .store()?
+        .create_todo_person(&name, &color)
+        .map_err(app_err)
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +507,10 @@ pub fn create_todo_reminder(
     service: State<'_, AppService>,
     draft: TodoReminderDraft,
 ) -> Result<TodoReminder, String> {
-    service.store()?.create_todo_reminder(&draft).map_err(app_err)
+    service
+        .store()?
+        .create_todo_reminder(&draft)
+        .map_err(app_err)
 }
 
 #[tauri::command]
@@ -524,7 +543,10 @@ pub fn list_todo_activity(
     service: State<'_, AppService>,
     todo_id: String,
 ) -> Result<Vec<TodoActivity>, String> {
-    service.store()?.list_todo_activity(&todo_id).map_err(app_err)
+    service
+        .store()?
+        .list_todo_activity(&todo_id)
+        .map_err(app_err)
 }
 
 #[tauri::command]

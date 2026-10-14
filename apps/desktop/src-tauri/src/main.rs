@@ -19,9 +19,17 @@ use kodo_agent::mcp::{
 
 use run::{ApprovalChoice, Approvals, Runs, StartArgs};
 
+mod knowledge;
 mod platform;
 mod run;
 mod view;
+use knowledge::{
+    knowledge_confirm_import, knowledge_create_base, knowledge_delete_document,
+    knowledge_get_bindings, knowledge_import_text, knowledge_inspect_document,
+    knowledge_list_bases, knowledge_list_documents, knowledge_pick_import, knowledge_prepare_turn,
+    knowledge_search, knowledge_set_bindings, knowledge_set_enabled, knowledge_turn_citations,
+    KnowledgeService,
+};
 
 mod memory;
 use memory::{
@@ -34,13 +42,13 @@ use apps::{
     create_todo_attachment, create_todo_person, create_todo_reminder, create_todo_status,
     create_todo_tag, delete_calendar_event, delete_result, delete_todo, delete_todo_attachment,
     delete_todo_reminder, delete_todo_status, delete_todo_tag, get_workbench_prefs, list_apps,
-    list_calendar_events, list_results, list_todo_activity, list_todo_attachments, list_todo_people,
-    list_todo_reminders, list_todo_statuses, list_todo_tags, list_todos, open_result_file,
-    pick_todo_attachment, reorder_todo, reorder_todo_statuses, reveal_result_file, set_app_enabled,
-    set_app_favorite, set_app_links, set_app_order, set_result_flags, set_todo_archived,
-    set_todo_links, set_todo_reminder_enabled, set_todo_status, set_todo_tags, set_workbench_pref,
-    update_calendar_event, update_result, update_todo, update_todo_attachment, update_todo_status,
-    update_todo_tag, AppService,
+    list_calendar_events, list_results, list_todo_activity, list_todo_attachments,
+    list_todo_people, list_todo_reminders, list_todo_statuses, list_todo_tags, list_todos,
+    open_result_file, pick_todo_attachment, reorder_todo, reorder_todo_statuses,
+    reveal_result_file, set_app_enabled, set_app_favorite, set_app_links, set_app_order,
+    set_result_flags, set_todo_archived, set_todo_links, set_todo_reminder_enabled,
+    set_todo_status, set_todo_tags, set_workbench_pref, update_calendar_event, update_result,
+    update_todo, update_todo_attachment, update_todo_status, update_todo_tag, AppService,
 };
 
 mod scheduler;
@@ -1057,6 +1065,8 @@ fn send_message(
     app: AppHandle,
     runs: State<'_, Runs>,
     approvals: State<'_, Approvals>,
+    knowledge: State<'_, KnowledgeService>,
+    apps: State<'_, AppService>,
     id: String,
     text: String,
     context: Option<Vec<String>>,
@@ -1067,6 +1077,8 @@ fn send_message(
     // caps. The desktop passes `Some("summary")` only from the "继续本轮"
     // affordance after a budget-exhausted partial delivery.
     budget_family: Option<String>,
+    knowledge_token: Option<String>,
+    knowledge_remote_approved: Option<bool>,
 ) -> Result<String, String> {
     let dir = sessions()?;
 
@@ -1095,6 +1107,8 @@ fn send_message(
         }
     };
 
+    let project_hint = project.clone();
+    let created_session = id.trim().is_empty();
     let id = if id.trim().is_empty() {
         match project {
             Some(path) if !path.trim().is_empty() => session::open(
@@ -1145,17 +1159,75 @@ fn send_message(
                 path,
             )?;
         }
+        let conversation_history = knowledge.safe_history(&dir, &found)?;
+        let turn_seq = (found.turns.len() + 1) as u64;
+        let knowledge_evidence = if let Some(preview) = knowledge_token.as_deref() {
+            knowledge::ensure_enabled(&apps)?;
+            let scope = knowledge::canonical_project(found.project.to_str())?;
+            if scope != knowledge::canonical_project(project_hint.as_deref())? {
+                return Err("scope_denied".into());
+            }
+            let (selection, hits) = knowledge.consume_turn(
+                preview,
+                &id,
+                scope.as_deref(),
+                &text,
+                created_session,
+                config.provider.as_ref(),
+                knowledge_remote_approved.unwrap_or(false),
+            )?;
+            Some((scope, selection, hits))
+        } else {
+            None
+        };
         session::record_ask_with_context(&dir, &id, session::now(), &text, &context_paths)
             .map_err(|error| error.to_string())?;
+        let knowledge_context = if let Some((scope, selection, hits)) = knowledge_evidence {
+            // Allocate the turn in the session before immutable citations so a
+            // failed write cannot strand an occupied number for the next ask.
+            let prepared = (|| {
+                knowledge::mark_knowledge_turn(&dir, &id, turn_seq)?;
+                knowledge.save_turn(
+                    &id,
+                    turn_seq,
+                    scope.as_deref(),
+                    &selection,
+                    &hits,
+                    created_session,
+                )?;
+                knowledge.context(&apps, &id, scope.as_deref(), &selection, &hits)
+            })();
+            match prepared {
+                Ok(context) => Some(context),
+                Err(error) => {
+                    let _ = session::record_error(
+                        &dir,
+                        &id,
+                        session::now(),
+                        "knowledge context unavailable",
+                    );
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let mut provider = config.provider;
+        if knowledge_context.is_some() {
+            if let Some(provider) = &mut provider {
+                provider.fallbacks.clear();
+            }
+        }
 
         Ok(StartArgs {
             dir,
             id: id.clone(),
             project: effective_project,
             message: text,
-            conversation_history: kodo_shell::turn::conversation_history(&found),
+            conversation_history,
+            knowledge_context,
             context: context_paths,
-            provider: config.provider,
+            provider,
             permission: config.permission,
             mode: agent_mode(found.mode),
             fallback_to_local: config.fallback_to_local,
@@ -1576,6 +1648,8 @@ fn main() {
         .manage(Runs::default())
         .manage(Approvals::default())
         .manage(BrowseWebview::default())
+        .manage(AppService::boot())
+        .manage(KnowledgeService::boot())
         .setup(|app| {
             // Native surfaces come up first: the status item is independent of
             // both the scheduler and the workbench, so it has to exist even
@@ -1607,10 +1681,6 @@ fn main() {
                 }
             };
             app.manage(service);
-            // The workbench is independent of the scheduler: a failure to
-            // open its database leaves the scheduler running and makes the
-            // workbench commands answer `storage_unavailable`.
-            app.manage(AppService::boot());
             Ok(())
         })
         // The completion marker from `task_feedback` clears as soon as the
@@ -1676,6 +1746,20 @@ fn main() {
             save_agent,
             delete_agent,
             send_message,
+            knowledge_list_bases,
+            knowledge_create_base,
+            knowledge_list_documents,
+            knowledge_inspect_document,
+            knowledge_import_text,
+            knowledge_pick_import,
+            knowledge_confirm_import,
+            knowledge_set_enabled,
+            knowledge_delete_document,
+            knowledge_search,
+            knowledge_get_bindings,
+            knowledge_set_bindings,
+            knowledge_prepare_turn,
+            knowledge_turn_citations,
             stop_run,
             respond_approval,
             list_project_files,
