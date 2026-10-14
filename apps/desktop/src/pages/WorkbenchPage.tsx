@@ -12,7 +12,7 @@
  * language as the rest of the app.
  */
 
-import { CalendarDays, Files, LayoutGrid, ListTodo, Search, Settings2, Star } from "lucide-react";
+import { BookOpen, CalendarDays, Files, LayoutGrid, ListTodo, Search, Settings2, Star } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   getWorkbenchPrefs,
@@ -34,6 +34,7 @@ import { DEMO_TODAY } from "../data/workbench";
 import { hrefTo, navigate, type AppId, type Route } from "../routes";
 import { workbenchErrorText } from "./apps/errors";
 import { CalendarApp } from "./apps/CalendarApp";
+import { KnowledgeApp } from "./apps/KnowledgeApp";
 import { ResultsApp } from "./apps/ResultsApp";
 import { TodoApp } from "./apps/TodoApp";
 import { today as todayIso } from "./apps/time";
@@ -45,6 +46,7 @@ const APP_ICONS: Record<string, typeof LayoutGrid> = {
   "list-todo": ListTodo,
   "calendar-days": CalendarDays,
   files: Files,
+  "book-open": BookOpen,
 };
 
 /** Which app owns which workbench pref key. `showToday` is workbench-level. */
@@ -214,6 +216,9 @@ export function WorkbenchPage({ route }: Props) {
   }
   if (route.appId === "artifacts" && openAppView?.preference.enabled) {
     return <ResultsApp manifest={openAppView.manifest} onBack={backToCollection} />;
+  }
+  if (route.appId === "knowledge" && openAppView?.preference.enabled) {
+    return <KnowledgeApp manifest={openAppView.manifest} onBack={backToCollection} />;
   }
 
   // An app the user opened by URL while it is disabled (or gone) falls back to

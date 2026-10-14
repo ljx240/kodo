@@ -15,6 +15,7 @@ pub mod compaction;
 mod context;
 mod dedup;
 pub mod evidence;
+pub mod knowledge;
 pub mod mcp;
 pub mod office;
 mod patch;
@@ -555,6 +556,9 @@ pub struct RunRequest {
     /// behavior — `initial_history` output is byte-identical, no DB is
     /// touched, and `run()` does no extra work.
     pub memory: Option<kodo_memory::MemoryHandle>,
+    /// Approved knowledge snapshot for this turn. Its body is appended to
+    /// the first user observation; the guard is rechecked during the run.
+    pub knowledge_context: Option<knowledge::KnowledgeContext>,
 }
 
 /// Where per-turn change sets are persisted for the diff/undo UI.
@@ -1050,9 +1054,37 @@ fn execute_tool_call(
             if !run_step(step, alive, emit) {
                 return Ok((false, None));
             }
-            // Approval kind is WebSearch (network egress), but the session
-            // log already shows it as a Search step above — permission has
-            // already cleared via the pre-dispatch `approve` gate in the loop.
+            // Retrieval approval covers the model destination only. A search
+            // can carry private evidence in its query, so approve this exact
+            // payload separately before contacting the search provider.
+            let detail = format!("DuckDuckGo 网页搜索（将发送完整查询）：\n{query}");
+            if request
+                .permission
+                .needs_approval(StepKind::WebSearch, Some(query))
+                && !approve(StepKind::WebSearch, &detail)
+            {
+                let keep = finish_step(
+                    Step::Search {
+                        query: query.clone(),
+                        detail: "用户拒绝了网页搜索".into(),
+                    },
+                    0,
+                    true,
+                    emit,
+                );
+                return Ok((
+                    keep,
+                    Some(ToolResult::failure(
+                        call.id.clone(),
+                        ToolName::WebSearch.label(),
+                        query.clone(),
+                        ToolError::permission_denied("用户拒绝了网页搜索，未发送查询"),
+                    )),
+                ));
+            }
+            if !alive() {
+                return Ok((false, None));
+            }
             let began = Instant::now();
             let cap = max_results.unwrap_or(8).clamp(1, 20);
             let detail = match crate::websearch::search(query, cap) {
@@ -2053,7 +2085,14 @@ fn call_model(
     alive: &Alive,
     emit: &mut Emit,
 ) -> Result<Option<ModelAttempt>, String> {
-    if !alive() {
+    let guarded_alive = || {
+        alive()
+            && request
+                .knowledge_context
+                .as_ref()
+                .is_none_or(knowledge::KnowledgeContext::is_current)
+    };
+    if !guarded_alive() {
         return Ok(None);
     }
     let model_label = provider.display_label();
@@ -2075,7 +2114,10 @@ fn call_model(
         retry_index: 0,
         llm_io_ref: None,
     };
-    if !run_step(call, alive, emit) {
+    if !run_step(call, &guarded_alive, emit) {
+        return Ok(None);
+    }
+    if !guarded_alive() {
         return Ok(None);
     }
     let began = Instant::now();
@@ -2087,7 +2129,9 @@ fn call_model(
     let mut failover_count: u32 = 0;
     let mut last_finish_reason = String::new();
     let tool_list: &[ToolSchema] = if use_native { tools } else { &[] };
-    let allow_failover = request.fallback_to_local && !provider.fallbacks.is_empty();
+    let allow_failover = request.fallback_to_local
+        && request.knowledge_context.is_none()
+        && !provider.fallbacks.is_empty();
 
     // Batch deltas so the UI gets frequent-but-not-per-token updates.
     let mut delta_buf = String::new();
@@ -2099,7 +2143,7 @@ fn call_model(
         tool_list,
         request.max_output_tokens,
         allow_failover,
-        alive,
+        &guarded_alive,
         |event| {
             match event {
                 ProviderEvent::TextDelta { text: delta } => {
@@ -2181,14 +2225,14 @@ fn call_model(
                 _ => {}
             }
             // Every event path honors cancellation immediately.
-            alive()
+            guarded_alive()
         },
     );
     let cancelled = match &result {
         Err(err) => err.class == provider::ProviderFailureClass::Cancelled,
         Ok(_) => false,
     };
-    if cancelled || !alive() {
+    if cancelled || !guarded_alive() {
         // Stop 后不再产生用户可见 TextDelta — drop any unflushed buffer.
         delta_buf.clear();
         return Ok(None);
@@ -2200,7 +2244,7 @@ fn call_model(
         }
     }
     let duration_ms = began.elapsed().as_millis() as u64;
-    if !alive() {
+    if !guarded_alive() {
         return Ok(None);
     }
     match result.map_err(|err| {
@@ -2427,10 +2471,22 @@ fn initial_history(
         .filter(|p| !p.snippets.is_empty())
         .map(format_memory_block)
         .unwrap_or_default();
-    let user_body = if memory_block.is_empty() {
-        format!("{}\n\n{observations}", request.message)
-    } else {
-        format!("{}\n\n{observations}\n\n{memory_block}", request.message)
+    let knowledge_block = request
+        .knowledge_context
+        .as_ref()
+        .map(knowledge::user_observation);
+    let user_body = match (memory_block.is_empty(), knowledge_block.as_deref()) {
+        (true, None) => format!("{}\n\n{observations}", request.message),
+        (false, None) => {
+            format!("{}\n\n{observations}\n\n{memory_block}", request.message)
+        }
+        (true, Some(knowledge)) => {
+            format!("{}\n\n{observations}\n\n{knowledge}", request.message)
+        }
+        (false, Some(knowledge)) => format!(
+            "{}\n\n{observations}\n\n{memory_block}\n\n{knowledge}",
+            request.message
+        ),
     };
     let mut user_msg = ProviderMessage::user(user_body);
     // Pin inlined image attachments onto the first user message as real
@@ -2642,6 +2698,30 @@ fn compact_if_needed(
     }
 }
 
+fn emit_knowledge_terminal(
+    text: String,
+    delivery: &str,
+    failure_reason: &str,
+    alive: &Alive,
+    emit: &mut Emit,
+) -> Result<(), String> {
+    if alive() {
+        let _ = simple_step(
+            Step::AgentMessage {
+                text,
+                checks: Vec::new(),
+                delivery: delivery.to_owned(),
+                verification: "not_run".to_owned(),
+                plain: true,
+                failure_reason: failure_reason.to_owned(),
+            },
+            alive,
+            emit,
+        );
+    }
+    Ok(())
+}
+
 fn budget_for_task(task_type: TaskType, project_summary: bool, family: Option<&str>) -> Budget {
     let mut budget = if project_summary {
         Budget::for_summary()
@@ -2718,8 +2798,66 @@ pub fn run(
     approve: &Approve,
     emit: &mut Emit,
 ) -> Result<(), String> {
-    if !alive() {
+    let host_alive = alive;
+    if !host_alive() {
         return Ok(());
+    }
+    if request
+        .knowledge_context
+        .as_ref()
+        .is_some_and(|context| !context.is_current())
+    {
+        return emit_knowledge_terminal(
+            knowledge::revoked_answer().to_owned(),
+            "failed",
+            "unrecoverable",
+            host_alive,
+            emit,
+        );
+    }
+    let knowledge_alive = || {
+        host_alive()
+            && request
+                .knowledge_context
+                .as_ref()
+                .is_none_or(knowledge::KnowledgeContext::is_current)
+    };
+    let alive: &Alive = &knowledge_alive;
+
+    if let Some(context) = request.knowledge_context.as_ref() {
+        if context.strict && !context.has_evidence {
+            return emit_knowledge_terminal(
+                knowledge::no_evidence_answer().to_owned(),
+                "ready",
+                "",
+                alive,
+                emit,
+            );
+        }
+        let hits = match context.validated_hits() {
+            Ok(hits) => hits,
+            Err(()) => {
+                return emit_knowledge_terminal(
+                    knowledge::invalid_answer().to_owned(),
+                    "failed",
+                    "unrecoverable",
+                    alive,
+                    emit,
+                );
+            }
+        };
+        let provider_ready = request.provider.as_ref().is_some_and(|p| {
+            !p.api_key.trim().is_empty() && !p.resolved_model_id().trim().is_empty()
+        });
+        if !provider_ready {
+            return emit_knowledge_terminal(
+                knowledge::no_provider_answer(&hits),
+                "ready",
+                "",
+                alive,
+                emit,
+            );
+        }
     }
     let has_project = request.project.is_some();
     // No project is allowed in either mode as constrained Q&A (DESIGN.md §11):
@@ -3415,7 +3553,9 @@ pub fn run(
         // wins" for the composer. Cross-provider overrides (persona picks
         // a different template than the active provider) are silently
         // dropped: switching providers mid-run is out of scope.
-        apply_persona_model_override(&mut provider, &request.personas);
+        if request.knowledge_context.is_none() {
+            apply_persona_model_override(&mut provider, &request.personas);
+        }
         // Real failover chain when setting says try next best model.
         // No fallbacks configured → same behavior as fail-fast on provider error.
         if request.fallback_to_local && provider.fallbacks.is_empty() {
@@ -3427,6 +3567,9 @@ pub fn run(
             &registry,
             &mcp.status_hint(),
         );
+        if let Some(context) = request.knowledge_context.as_ref() {
+            system.push_str(knowledge::system_instruction(context.strict));
+        }
         system.push_str(&repository_rules);
         system.push_str(&recovery_anchor);
         if let Some(map) = &repo_map {
@@ -6385,7 +6528,194 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         }
+    }
+
+    fn test_knowledge_context(strict: bool, has_evidence: bool) -> knowledge::KnowledgeContext {
+        let observations = if has_evidence {
+            serde_json::json!({
+                "hits": [{
+                    "citation": "K1",
+                    "title": "Synthetic guide",
+                    "heading": "Approved section",
+                    "lineStart": 3,
+                    "lineEnd": 4,
+                    "quote": "synthetic knowledge quote"
+                }]
+            })
+        } else {
+            serde_json::json!({ "hits": [] })
+        };
+        knowledge::KnowledgeContext {
+            observations: observations.to_string(),
+            strict,
+            has_evidence,
+            guard: None,
+        }
+    }
+
+    #[test]
+    fn knowledge_observation_stays_in_user_message_and_none_is_legacy_stable() {
+        let mut request = temp_request(Path::new("/tmp/knowledge-history"), Permission::Ask);
+        request.message = "请回答问题".to_owned();
+
+        let legacy = initial_history(
+            &request,
+            "legacy system".to_owned(),
+            "ordinary observation",
+            None,
+            &[],
+        );
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(legacy[0].text_of(), "legacy system");
+        assert_eq!(legacy[1].text_of(), "请回答问题\n\nordinary observation");
+
+        let context = test_knowledge_context(true, true);
+        let evidence_json = context.observations.clone();
+        request.knowledge_context = Some(context);
+        let system = knowledge::system_instruction(true).to_owned();
+        let with_knowledge = initial_history(&request, system, "", None, &[]);
+        let system_text = with_knowledge
+            .iter()
+            .filter(|message| message.role == MessageRole::System)
+            .map(ProviderMessage::text_of)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let user_text = with_knowledge
+            .iter()
+            .find(|message| message.role == MessageRole::User)
+            .expect("knowledge-bearing user message")
+            .text_of();
+        assert!(system_text.contains("untrusted quoted data"));
+        assert!(!system_text.contains("synthetic knowledge quote"));
+        assert!(user_text.contains(&evidence_json));
+        assert!(user_text.contains("synthetic knowledge quote"));
+    }
+
+    #[test]
+    fn strict_knowledge_without_evidence_ends_before_models_or_tools() {
+        let mut request = temp_request(Path::new("/tmp/knowledge-no-evidence"), Permission::Ask);
+        request.message = "请说明这项规则".to_owned();
+        request.provider = Some(Provider::new(
+            "fake",
+            "synthetic-key",
+            "/tmp/unused-knowledge-provider-script.jsonl",
+            "synthetic-model",
+        ));
+        request.knowledge_context = Some(test_knowledge_context(true, false));
+
+        let mut answer = String::new();
+        let mut model_calls = 0;
+        let mut other_steps = 0;
+        let mut emit = |event| {
+            match event {
+                SinkEvent::Started {
+                    step: Step::AgentMessage { text, .. },
+                } => answer = text,
+                SinkEvent::Finished {
+                    step: Step::AgentMessage { text, .. },
+                    ..
+                } => answer = text,
+                SinkEvent::Started {
+                    step: Step::ModelCall { .. },
+                } => model_calls += 1,
+                SinkEvent::Started { .. } | SinkEvent::Finished { .. } => other_steps += 1,
+                _ => {}
+            }
+            true
+        };
+        run(&request, &|| true, &|_, _| true, &mut emit).unwrap();
+
+        assert!(answer.contains("没有提供可用于回答的问题证据"));
+        assert!(answer.contains("不会调用模型或执行工具"));
+        assert_eq!(model_calls, 0);
+        assert_eq!(other_steps, 0);
+    }
+
+    #[test]
+    fn knowledge_missing_provider_returns_only_approved_quoted_evidence() {
+        let mut request = temp_request(Path::new("/tmp/knowledge-offline"), Permission::Ask);
+        request.message = "这份资料说了什么？".to_owned();
+        request.knowledge_context = Some(test_knowledge_context(false, true));
+
+        let mut answer = String::new();
+        let mut model_calls = 0;
+        let mut other_steps = 0;
+        let mut emit = |event| {
+            match event {
+                SinkEvent::Started {
+                    step: Step::AgentMessage { text, .. },
+                }
+                | SinkEvent::Finished {
+                    step: Step::AgentMessage { text, .. },
+                    ..
+                } => answer = text,
+                SinkEvent::Started {
+                    step: Step::ModelCall { .. },
+                } => model_calls += 1,
+                SinkEvent::Started { .. } | SinkEvent::Finished { .. } => other_steps += 1,
+                _ => {}
+            }
+            true
+        };
+        run(&request, &|| true, &|_, _| true, &mut emit).unwrap();
+
+        assert!(answer.contains("未调用模型或执行任务"));
+        assert!(answer.contains("[K1]"));
+        assert!(answer.contains("Synthetic guide"));
+        assert!(answer.contains("第3-4行"));
+        assert!(answer.contains("> synthetic knowledge quote"));
+        assert_eq!(model_calls, 0);
+        assert_eq!(other_steps, 0);
+    }
+
+    #[test]
+    fn knowledge_revoked_guard_blocks_the_model_before_any_provider_request() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let requested = Arc::new(AtomicBool::new(false));
+        let server_requested = Arc::clone(&requested);
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        server_requested.store(true, Ordering::SeqCst);
+                        let mut request_bytes = [0u8; 1024];
+                        let _ = stream.read(&mut request_bytes);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+
+        let provider = Provider::new("openai", "synthetic-key", endpoint, "gpt-4o");
+        let mut request = temp_request(Path::new("/tmp/knowledge-guard"), Permission::Ask);
+        request.provider = Some(provider.clone());
+        let mut context = test_knowledge_context(false, true);
+        context.guard = Some(Arc::new(|| false));
+        request.knowledge_context = Some(context);
+        let mut emit = |_| true;
+        let result = call_model(&provider, &[], &[], &request, &|| true, &mut emit);
+        server.join().unwrap();
+
+        assert!(result.unwrap().is_none());
+        assert!(!requested.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -7809,6 +8139,85 @@ mod tests {
     }
 
     #[test]
+    fn websearch_approval_denial_prevents_network_dispatch() {
+        let dir = std::env::temp_dir();
+        let request = temp_request(&dir, Permission::Full);
+        let calls = vec![ToolInvocation::Ready(ToolCall {
+            id: protocol::ToolCallId::new("search-private"),
+            name: ToolName::WebSearch,
+            args: ToolArgs::WebSearch {
+                query: "synthetic knowledge excerpt".into(),
+                max_results: Some(1),
+            },
+        })];
+        let prompted = std::cell::Cell::new(false);
+        let results = run_invocations(
+            calls,
+            &dir,
+            &request,
+            None,
+            &mut McpClients::default(),
+            &|| true,
+            &|kind, payload| {
+                assert_eq!(kind, StepKind::WebSearch);
+                assert!(payload.contains("DuckDuckGo"));
+                assert!(payload.ends_with("synthetic knowledge excerpt"));
+                prompted.set(true);
+                false
+            },
+            &mut |_| true,
+            &mut Vec::new(),
+            &mut false,
+            &mut TurnChangeSet::default(),
+            &mut dedup::TurnDedup::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(prompted.get());
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].error.as_ref().unwrap().code,
+            ToolErrorCode::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn websearch_cancellation_after_approval_prevents_network_dispatch() {
+        let dir = std::env::temp_dir();
+        let request = temp_request(&dir, Permission::Ask);
+        let calls = vec![ToolInvocation::Ready(ToolCall {
+            id: protocol::ToolCallId::new("search-cancelled"),
+            name: ToolName::WebSearch,
+            args: ToolArgs::WebSearch {
+                query: "synthetic query".into(),
+                max_results: Some(1),
+            },
+        })];
+        let live = std::cell::Cell::new(true);
+        let results = run_invocations(
+            calls,
+            &dir,
+            &request,
+            None,
+            &mut McpClients::default(),
+            &|| live.get(),
+            &|kind, _| {
+                assert_eq!(kind, StepKind::WebSearch);
+                live.set(false);
+                true
+            },
+            &mut |_| true,
+            &mut Vec::new(),
+            &mut false,
+            &mut TurnChangeSet::default(),
+            &mut dedup::TurnDedup::new(),
+        )
+        .unwrap();
+        assert!(!live.get());
+        assert!(results.is_none());
+    }
+
+    #[test]
     fn run_invocations_maps_rejections_to_results_without_crash() {
         let dir = std::env::temp_dir().join(format!("kodo-inv-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -8218,6 +8627,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let approvals = std::cell::Cell::new(0);
         let mut command_outputs: Vec<(String, String)> = Vec::new();
@@ -8525,6 +8935,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut steps: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -8564,6 +8975,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut steps: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -8604,6 +9016,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut messages: Vec<(String, String, String, bool)> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -8677,6 +9090,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut messages: Vec<(String, bool)> = Vec::new();
@@ -8734,6 +9148,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -8782,6 +9197,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -8833,6 +9249,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -8909,6 +9326,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let images = vec![ContentBlock::Image {
             media_type: "image/png".to_owned(),
@@ -8955,6 +9373,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -9011,6 +9430,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -9141,6 +9561,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut kinds: Vec<String> = Vec::new();
         let mut answers: Vec<(String, String, String, bool)> = Vec::new();
@@ -9211,6 +9632,7 @@ mod tests {
             personas: vec![],
             budget_family: None,
             memory: None,
+            knowledge_context: None,
         };
         let mut kinds: Vec<String> = Vec::new();
         let mut answers: Vec<(String, String, String, bool)> = Vec::new();

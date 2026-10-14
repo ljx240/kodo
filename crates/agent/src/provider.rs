@@ -1105,10 +1105,17 @@ fn emit_or_cancel(
 /// blocked reads well under a 2s cancellation latency budget.
 fn stream_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
+        .redirects(0)
         .timeout_connect(Duration::from_millis(1500))
         .timeout_read(Duration::from_millis(200))
         .timeout_write(Duration::from_secs(30))
         .build()
+}
+
+/// Model requests stay at the configured destination. A redirect must be
+/// resolved explicitly in settings rather than bypassing evidence approval.
+fn model_post(url: &str) -> ureq::Request {
+    ureq::AgentBuilder::new().redirects(0).build().post(url)
 }
 
 pub fn is_read_timeout(err: &std::io::Error) -> bool {
@@ -1545,7 +1552,7 @@ fn openai_native(
         "max_tokens": max_tokens,
     });
 
-    let response = ureq::post(&url)
+    let response = model_post(&url)
         .timeout(Duration::from_secs(90))
         .set(
             "Authorization",
@@ -1579,7 +1586,7 @@ fn openai_text(
         "temperature": 0.2,
         "max_tokens": max_tokens,
     });
-    let response = ureq::post(&url)
+    let response = model_post(&url)
         .timeout(Duration::from_secs(90))
         .set(
             "Authorization",
@@ -2159,7 +2166,7 @@ fn anthropic_native(
         "messages": rest,
         "tools": anthropic_tools(tools),
     });
-    let response = ureq::post(&url)
+    let response = model_post(&url)
         .timeout(Duration::from_secs(90))
         .set("x-api-key", provider.api_key.trim())
         .set("anthropic-version", "2023-06-01")
@@ -2202,7 +2209,7 @@ fn anthropic_text(
         "system": system,
         "messages": rest,
     });
-    let response = ureq::post(&url)
+    let response = model_post(&url)
         .timeout(Duration::from_secs(90))
         .set("x-api-key", provider.api_key.trim())
         .set("anthropic-version", "2023-06-01")

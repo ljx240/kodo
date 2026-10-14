@@ -192,6 +192,8 @@ pub struct StartArgs {
     pub project: Option<PathBuf>,
     pub message: String,
     pub conversation_history: Vec<(String, String)>,
+    /// Approved evidence for this turn; never persisted as a user instruction.
+    pub knowledge_context: Option<agent::knowledge::KnowledgeContext>,
     /// Project-relative context paths pinned for this turn.
     pub context: Vec<String>,
     pub provider: Option<agent::Provider>,
@@ -339,7 +341,13 @@ pub fn start(
         // items without having to thread the request through the
         // closure capture. Same on-disk file as the agent loop will
         // see — fail-open if HOME is unset.
-        let memory_handle = open_memory_handle();
+        // Evidence and knowledge-derived answers must not enter the ordinary
+        // memory outbox and later bypass per-turn approval as recalled memory.
+        let memory_handle = if args.knowledge_context.is_some() {
+            None
+        } else {
+            open_memory_handle()
+        };
         // Envelope writes live in kodo-shell; this sink records first, then
         // emits, so the log stays the source of truth for the GUI.
         let mut logger =
@@ -546,6 +554,7 @@ pub fn start(
             project: args.project.clone(),
             message: args.message.clone(),
             conversation_history: args.conversation_history.clone(),
+            knowledge_context: args.knowledge_context.clone(),
             pinned_context: args.context.clone(),
             provider: args.provider.clone(),
             permission: args.permission,
@@ -561,7 +570,11 @@ pub fn start(
             agent_instructions: args.agent_instructions.clone(),
             personas: args.personas.clone(),
             budget_family: args.budget_family.clone(),
-            memory: open_memory_handle(),
+            memory: if args.knowledge_context.is_some() {
+                None
+            } else {
+                open_memory_handle()
+            },
         };
 
         let result = agent::run(&request, &alive, &approve, &mut sink);

@@ -4,7 +4,7 @@
  * never the live clock — the calendar week and 今日概览 are pinned to
  * `DEMO_TODAY`, so a screenshot taken next year is identical.
  *
- * The three app manifests mirror `kodo_core::apps::builtin_apps`; the desktop
+ * The app manifests mirror `kodo_core::apps::builtin_apps`; the desktop
  * shell reads them from `list_apps` instead. Anything the real store computes
  * (file fingerprints, `completed_at`, versions) is spelled out here as a
  * literal for the same reason.
@@ -82,6 +82,27 @@ export const DEMO_WORKBENCH_APPS: AppViewDto[] = [
       enabled: true,
       favorite: false,
       sortOrder: 2,
+      aiEnabled: false,
+      scheduleEnabled: false,
+      updatedAt: at(9, 12),
+    },
+  },
+  {
+    manifest: {
+      appId: "knowledge",
+      name: "知识库",
+      description: "管理文本资料、验证关键词检索并查看原文出处。",
+      version: "1.0.0",
+      apiVersion: "1",
+      icon: "book-open",
+      builtin: true,
+      capabilities: { ai: false, scheduler: false, summary: false },
+    },
+    preference: {
+      appId: "knowledge",
+      enabled: true,
+      favorite: false,
+      sortOrder: 3,
       aiEnabled: false,
       scheduleEnabled: false,
       updatedAt: at(9, 12),

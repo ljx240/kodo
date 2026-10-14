@@ -37,7 +37,10 @@ pub fn conversation_history(session: &session::Session) -> Vec<(String, String)>
     let turns: Vec<_> = session
         .turns
         .iter()
-        .filter(|turn| turn.done || turn.stopped || turn.interrupted || turn.error.is_some())
+        .filter(|turn| {
+            !turn.knowledge_used
+                && (turn.done || turn.stopped || turn.interrupted || turn.error.is_some())
+        })
         .rev()
         .take(8)
         .collect();
@@ -432,6 +435,88 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record_answer_turn(
+        dir: &std::path::Path,
+        id: &str,
+        at: u64,
+        ask: &str,
+        answer: &str,
+        knowledge_used: bool,
+    ) {
+        let turn_seq = session::load(dir, id).unwrap().turns.len() as u64 + 1;
+        session::record_ask(dir, id, at, ask).unwrap();
+        if knowledge_used {
+            session::record_knowledge_turn(dir, id, turn_seq).unwrap();
+        }
+        let step = Step::AgentMessage {
+            text: answer.to_owned(),
+            checks: Vec::new(),
+            delivery: "ready".to_owned(),
+            verification: "not_run".to_owned(),
+            plain: true,
+            failure_reason: String::new(),
+        };
+        let mut logger = TurnLogger::new(dir.to_path_buf(), id.to_owned());
+        assert!(matches!(
+            logger.record(&SinkEvent::Started { step: step.clone() }),
+            Logged::Started(_)
+        ));
+        assert!(matches!(
+            logger.record(&SinkEvent::Finished {
+                step,
+                duration_ms: 1,
+                denied: false,
+            }),
+            Logged::Finished(_)
+        ));
+        logger.finish(TurnOutcome::Complete).unwrap();
+    }
+
+    #[test]
+    fn knowledge_turns_are_not_replayed_but_ordinary_turns_are() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let id = session::open(
+            dir,
+            std::path::Path::new("/tmp/fixture"),
+            "history",
+            1,
+            session::Mode::Code,
+        )
+        .unwrap();
+
+        record_answer_turn(dir, &id, 2, "ordinary question", "ordinary answer", false);
+        // Match the desktop's ask → provenance marker → model dispatch order.
+        record_answer_turn(dir, &id, 3, "knowledge question", "knowledge answer", true);
+        record_answer_turn(
+            dir,
+            &id,
+            4,
+            "later ordinary question",
+            "later ordinary answer",
+            false,
+        );
+
+        let saved = session::load(dir, &id).unwrap();
+        assert_eq!(
+            saved
+                .turns
+                .iter()
+                .map(|turn| turn.knowledge_used)
+                .collect::<Vec<_>>(),
+            vec![false, true, false]
+        );
+        assert_eq!(
+            conversation_history(&saved),
+            vec![
+                ("user".to_owned(), "ordinary question".to_owned()),
+                ("assistant".to_owned(), "ordinary answer".to_owned()),
+                ("user".to_owned(), "later ordinary question".to_owned()),
+                ("assistant".to_owned(), "later ordinary answer".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn history_replays_public_answers_without_private_traces_or_open_turns() {

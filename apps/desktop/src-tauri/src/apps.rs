@@ -49,10 +49,17 @@ impl AppService {
         }
     }
 
-    fn store(&self) -> Result<&Arc<AppStore>, String> {
+    pub(crate) fn store(&self) -> Result<&Arc<AppStore>, String> {
         self.store
             .as_ref()
             .ok_or_else(|| AppError::StorageUnavailable.code().to_owned())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(store: AppStore) -> Self {
+        Self {
+            store: Some(Arc::new(store)),
+        }
     }
 }
 

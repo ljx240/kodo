@@ -2205,15 +2205,19 @@ version = "0.0.1"
 dependencies = [
  "kodo-agent",
  "kodo-core",
+ "kodo-knowledge",
  "kodo-memory",
  "kodo-shell",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "uuid",
 ]
 
 [[package]]
@@ -2223,6 +2227,21 @@ dependencies = [
  "kodo-agent",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "kodo-knowledge"
+version = "0.0.1"
+dependencies = [
+ "hex",
+ "kodo-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]

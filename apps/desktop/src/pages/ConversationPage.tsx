@@ -26,6 +26,8 @@ import { AssistantReply } from "../conversation/AssistantReply";
 import { Composer } from "../conversation/Composer";
 import { ContextCard } from "../conversation/ContextCard";
 import { FindBar } from "../conversation/FindBar";
+import { KnowledgeBinding } from "../conversation/KnowledgeBinding";
+import { KnowledgeSources } from "../conversation/KnowledgeSources";
 import { TurnRail, type TurnRailItem } from "../conversation/TurnRail";
 import type { FilePanelRequest } from "../inspector/Inspector";
 import {
@@ -44,6 +46,15 @@ import {
 } from "../conversation/trace";
 import { type DemoState } from "../data/demoState";
 import { kindFromPath } from "../fileKind";
+import {
+  knowledgeGetBindings,
+  knowledgeListBases,
+  knowledgePrepareTurn,
+  knowledgeSetBindings,
+  type KnowledgeBase,
+  type KnowledgeSelection,
+  type PreparedTurn,
+} from "../knowledgeApi";
 import { snapshotFromTurn, type LiveSnapshot } from "../data/liveContext";
 import { type ProviderConfig } from "../data/providers";
 import type { Project } from "../data/types";
@@ -485,6 +496,137 @@ export function ConversationPage({
   /** Live sessions get conversation controls (rename/archive in the top bar). */
   const liveSession = !demoMode && sessionId !== null;
 
+  const knowledgeProjectPath = projectPath || null;
+  const knowledgeScopeKey = `${sessionId ?? "new"}\u0000${knowledgeProjectPath ?? "personal"}`;
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
+  const [knowledgeSelection, setKnowledgeSelection] = useState<KnowledgeSelection>({
+    baseIds: [],
+    strict: true,
+  });
+  const [knowledgeLoading, setKnowledgeLoading] = useState(!demoMode);
+  const [knowledgeSaving, setKnowledgeSaving] = useState(false);
+  const [knowledgePreparing, setKnowledgePreparing] = useState(false);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  const [knowledgeFallbackAvailable, setKnowledgeFallbackAvailable] = useState(false);
+  const [knowledgeApproval, setKnowledgeApproval] = useState<PreparedTurn | null>(null);
+  const [knowledgeReload, setKnowledgeReload] = useState(0);
+  const knowledgeSelectionRef = useRef(knowledgeSelection);
+  knowledgeSelectionRef.current = knowledgeSelection;
+  const knowledgeScopeKeyRef = useRef(knowledgeScopeKey);
+  knowledgeScopeKeyRef.current = knowledgeScopeKey;
+  const knowledgeLoadedScopeRef = useRef("");
+  const knowledgeGenerationRef = useRef(0);
+  const knowledgeSendLockRef = useRef(false);
+  const knowledgeSendLockGenerationRef = useRef(0);
+  const knowledgeSavingRef = useRef(false);
+  knowledgeSavingRef.current = knowledgeSaving;
+  const pendingKnowledgeApprovalRef = useRef<{ resolve: (approved: boolean) => void } | null>(null);
+  const applyKnowledgeSelection = (next: KnowledgeSelection) => {
+    knowledgeSelectionRef.current = next;
+    setKnowledgeSelection(next);
+  };
+  const finishKnowledgeApproval = (approved: boolean) => {
+    const pending = pendingKnowledgeApprovalRef.current;
+    if (!pending) return;
+    pendingKnowledgeApprovalRef.current = null;
+    setKnowledgeApproval(null);
+    pending.resolve(approved);
+  };
+
+  useEffect(() => {
+    const generation = ++knowledgeGenerationRef.current;
+    let alive = true;
+    knowledgeLoadedScopeRef.current = "";
+    finishKnowledgeApproval(false);
+    knowledgeSavingRef.current = false;
+    applyKnowledgeSelection({ baseIds: [], strict: true });
+    setKnowledgeBases([]);
+    setKnowledgeError(null);
+    setKnowledgeFallbackAvailable(false);
+    setKnowledgeSaving(false);
+    setKnowledgeLoading(!demoMode);
+
+    if (demoMode) {
+      setKnowledgeLoading(false);
+      knowledgeLoadedScopeRef.current = knowledgeScopeKey;
+      return () => {
+        alive = false;
+        knowledgeGenerationRef.current += 1;
+        if (knowledgeSendLockGenerationRef.current === generation) {
+          knowledgeSendLockRef.current = false;
+          setKnowledgePreparing(false);
+        }
+        finishKnowledgeApproval(false);
+      };
+    }
+
+    void (async () => {
+      try {
+        const listedBases = await knowledgeListBases({ projectPath: knowledgeProjectPath });
+        const bases = Array.from(new Map(listedBases.map((base) => [base.id, base])).values());
+        const persisted = sessionId
+          ? await knowledgeGetBindings({ sessionId, projectPath: knowledgeProjectPath })
+          : { baseIds: [], strict: true };
+        if (!alive || knowledgeGenerationRef.current !== generation) return;
+        const allowed = new Set(bases.map((base) => base.id));
+        const cleanSelection: KnowledgeSelection = {
+          baseIds: persisted.baseIds.filter((baseId) => allowed.has(baseId)),
+          strict: persisted.strict ?? true,
+        };
+        setKnowledgeBases(bases);
+        setKnowledgeFallbackAvailable(false);
+        applyKnowledgeSelection(cleanSelection);
+        if (cleanSelection.baseIds.length !== persisted.baseIds.length) {
+          await knowledgeSetBindings({
+            sessionId: sessionId!,
+            projectPath: knowledgeProjectPath,
+            selection: cleanSelection,
+          });
+          if (!alive || knowledgeGenerationRef.current !== generation) return;
+          setKnowledgeError("部分已绑定知识库在当前范围不可用，已从本轮选择中清除。");
+        }
+        knowledgeLoadedScopeRef.current = knowledgeScopeKey;
+      } catch (failure) {
+        if (!alive || knowledgeGenerationRef.current !== generation) return;
+        const code = errorMessage(failure);
+        if (code === "app_disabled") {
+          setKnowledgeError("知识库已停用，本轮不使用资料。");
+          knowledgeLoadedScopeRef.current = knowledgeScopeKey;
+          setKnowledgeFallbackAvailable(false);
+        } else {
+          setKnowledgeError(`知识库绑定读取失败：${knowledgeErrorMessage(failure)}`);
+          setKnowledgeFallbackAvailable(true);
+        }
+        setKnowledgeBases([]);
+        applyKnowledgeSelection({ baseIds: [], strict: true });
+      } finally {
+        if (alive && knowledgeGenerationRef.current === generation) setKnowledgeLoading(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+      if (knowledgeGenerationRef.current === generation) knowledgeGenerationRef.current += 1;
+      if (knowledgeSendLockGenerationRef.current === generation) {
+        knowledgeSendLockRef.current = false;
+        setKnowledgePreparing(false);
+      }
+      finishKnowledgeApproval(false);
+    };
+  }, [knowledgeScopeKey, demoMode, knowledgeReload]);
+
+  useEffect(() => {
+    if (!knowledgeApproval) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finishKnowledgeApproval(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [knowledgeApproval]);
+
   // A create-send races its own run: the first answer can finish before
   // send_message returns the new session id. Keep one long-lived subscription,
   // match events through this ref, and buffer the race window for replay
@@ -520,12 +662,146 @@ export function ConversationPage({
     });
   };
 
+  const persistKnowledgeSelection = async (next: KnowledgeSelection) => {
+    const scopeKey = knowledgeScopeKeyRef.current;
+    if (
+      demoMode ||
+      knowledgeSendLockRef.current ||
+      knowledgeSavingRef.current ||
+      knowledgeLoadedScopeRef.current !== scopeKey
+    ) return;
+    const previous = knowledgeSelectionRef.current;
+    if (sessionId) {
+      knowledgeSavingRef.current = true;
+      setKnowledgeSaving(true);
+      setKnowledgeError(null);
+      try {
+        await knowledgeSetBindings({
+          sessionId,
+          projectPath: knowledgeProjectPath,
+          selection: next,
+        });
+        if (knowledgeScopeKeyRef.current !== scopeKey) return;
+        applyKnowledgeSelection(next);
+      } catch (failure) {
+        if (knowledgeScopeKeyRef.current === scopeKey) {
+          setKnowledgeError(`知识库绑定保存失败：${knowledgeErrorMessage(failure)}`);
+          applyKnowledgeSelection(previous);
+        }
+      } finally {
+        if (knowledgeScopeKeyRef.current === scopeKey) {
+          knowledgeSavingRef.current = false;
+          setKnowledgeSaving(false);
+        }
+      }
+      return;
+    }
+    applyKnowledgeSelection(next);
+    setKnowledgeError(null);
+  };
+
+  const toggleKnowledgeBase = (baseId: string, checked: boolean) => {
+    const current = knowledgeSelectionRef.current;
+    const selected = new Set(current.baseIds);
+    if (checked) selected.add(baseId);
+    else selected.delete(baseId);
+    void persistKnowledgeSelection({ ...current, baseIds: Array.from(selected) });
+  };
+
+  const changeKnowledgeStrict = (strict: boolean) => {
+    void persistKnowledgeSelection({ ...knowledgeSelectionRef.current, strict });
+  };
+
+  const continueWithoutKnowledge = () => {
+    const scopeKey = knowledgeScopeKeyRef.current;
+    applyKnowledgeSelection({ baseIds: [], strict: true });
+    setKnowledgeBases([]);
+    setKnowledgeError(null);
+    setKnowledgeFallbackAvailable(false);
+    setKnowledgeLoading(false);
+    knowledgeLoadedScopeRef.current = scopeKey;
+  };
+
   const dispatchSend = async (text: string, context: string[], opts?: { skipTitle?: boolean; budgetFamily?: string | null }) => {
+    if (knowledgeSendLockRef.current) return;
+    knowledgeSendLockRef.current = true;
     const payload = { text, context };
     const targetId = sessionId ?? "";
+    const scopeKey = knowledgeScopeKeyRef.current;
+    const generation = knowledgeGenerationRef.current;
+    knowledgeSendLockGenerationRef.current = generation;
+    let prepared: PreparedTurn | null = null;
+    let remoteApproved = false;
+    const restoreDraft = () => setEditSeed({ text, nonce: Date.now() });
+
+    try {
+      try {
+        if (!demoMode) {
+          if (
+            knowledgeLoading ||
+            knowledgeSavingRef.current ||
+            knowledgeLoadedScopeRef.current !== scopeKey
+          ) {
+            throw new Error("knowledge_binding_unavailable");
+          }
+          const selection = knowledgeSelectionRef.current;
+          if (selection.baseIds.length > 0) {
+            setKnowledgePreparing(true);
+            prepared = await knowledgePrepareTurn({
+              sessionId: targetId,
+              projectPath: knowledgeProjectPath,
+              selection,
+              text,
+            });
+            if (
+              knowledgeGenerationRef.current !== generation ||
+              knowledgeScopeKeyRef.current !== scopeKey
+            ) return;
+            if (prepared.remote) {
+              const approved = await new Promise<boolean>((resolve) => {
+                pendingKnowledgeApprovalRef.current = { resolve };
+                setKnowledgeApproval(prepared);
+              });
+              if (
+                knowledgeGenerationRef.current !== generation ||
+                knowledgeScopeKeyRef.current !== scopeKey
+              ) return;
+              if (!approved) {
+                restoreDraft();
+                return;
+              }
+              remoteApproved = true;
+            }
+          }
+        }
+      } catch (failure) {
+        if (
+          knowledgeGenerationRef.current === generation &&
+          knowledgeScopeKeyRef.current === scopeKey
+        ) {
+          restoreDraft();
+          setPageError({
+            message: `资料准备失败：${knowledgeErrorMessage(failure)}`,
+            retryLabel: "重新准备",
+            retry: () => {
+              setPageError(null);
+              void dispatchSend(text, context, { ...opts, skipTitle: true });
+            },
+          });
+        }
+        return;
+      } finally {
+        if (knowledgeGenerationRef.current === generation) setKnowledgePreparing(false);
+      }
+
+      if (
+        knowledgeGenerationRef.current !== generation ||
+        knowledgeScopeKeyRef.current !== scopeKey
+      ) return;
+
     setPageError(null);
     setUndoMessage(null);
-    setTurns((current) => [...current, blank(text, context)]);
+    setTurns((current) => [...current, blank(text, context, Boolean(prepared?.token))]);
     setRunning(true);
     setRunStartedAt(Date.now());
     acceptStreamRef.current = true;
@@ -561,6 +837,8 @@ export function ConversationPage({
         projectPath,
         personaChain,
         opts?.budgetFamily ?? null,
+        prepared?.token,
+        prepared ? remoteApproved : undefined,
       );
       // Stamp the chain's first entry as just-used; recents are an MRU,
       // so the next send will move it back to the top automatically.
@@ -604,6 +882,12 @@ export function ConversationPage({
         },
       });
     }
+    } finally {
+      if (knowledgeGenerationRef.current === generation) setKnowledgePreparing(false);
+      if (knowledgeSendLockGenerationRef.current === generation) {
+        knowledgeSendLockRef.current = false;
+      }
+    }
   };
 
   const drainQueue = () => {
@@ -619,6 +903,7 @@ export function ConversationPage({
   };
 
   const send = (text: string, context: string[]) => {
+    if (knowledgeSendLockRef.current || knowledgeSavingRef.current) return;
     // Running: queue the follow-up instead of dropping the draft (codex/DSH).
     if (running) {
       applyQueue([...queueRef.current, { text, context }]);
@@ -1196,45 +1481,71 @@ export function ConversationPage({
     return best;
   }, [projects, conversationId]);
 
+  const knowledgeScopeReady = knowledgeLoadedScopeRef.current === knowledgeScopeKey;
+  const knowledgeUiBusy =
+    knowledgeLoading ||
+    knowledgeSaving ||
+    knowledgePreparing ||
+    Boolean(knowledgeApproval) ||
+    (!demoMode && !knowledgeScopeReady);
   const composer = (
-    <Composer
-      provider={provider}
-      providers={providers}
-      defaultModel={defaultModel}
-      onSelectProvider={onSelectProvider}
-      onSelectProviderModel={onSelectProviderModel}
-      agentMode={agentMode}
-      ready={!demoMode}
-      running={running}
-      projectPath={projectPath}
-      contexts={contexts}
-      probes={probes}
-      onProbed={(path, probe) => setProbes((current) => ({ ...current, [path]: probe }))}
-      queueCount={queue.length}
-      onAddContext={addContext}
-      onRemoveContext={(path) => setContexts((current) => current.filter((item) => item !== path))}
-      onContextError={(message) =>
-        setPageError({
-          message,
-          action: {
-            label: "打开设置",
-            run: () => openSettings(),
-          },
-        })
-      }
-      onSend={(text, context) => send(text, context)}
-      onStop={stop}
-      providerWarning={providerWarning}
-      onOpenProviderSettings={openSettings}
-      draftKey={`kodo:draft:${sessionId ?? "new"}:${projectPath ?? "-"}`}
-      editSeed={editSeed}
-      personaChain={personaChain}
-      onSelectAgents={(names) => onSelectAgents(sessionKey, names)}
-      favoriteAgents={favoriteAgents}
-      recentAgents={recentAgents}
-      contextBudget={running ? budget : null}
-      agentsVersion={agentsVersion}
-    />
+    <>
+      {!demoMode && (
+        <KnowledgeBinding
+          bases={knowledgeBases}
+          selection={knowledgeSelection}
+          loading={knowledgeLoading}
+          busy={knowledgeSaving || knowledgePreparing || Boolean(knowledgeApproval)}
+          error={knowledgeError}
+          onContinueWithoutKnowledge={knowledgeFallbackAvailable ? continueWithoutKnowledge : undefined}
+          projectName={projectName}
+          approval={knowledgeApproval}
+          onToggleBase={toggleKnowledgeBase}
+          onStrictChange={changeKnowledgeStrict}
+          onRetry={() => setKnowledgeReload((value) => value + 1)}
+          onApprove={() => finishKnowledgeApproval(true)}
+          onCancelApproval={() => finishKnowledgeApproval(false)}
+        />
+      )}
+      <Composer
+        provider={provider}
+        providers={providers}
+        defaultModel={defaultModel}
+        onSelectProvider={onSelectProvider}
+        onSelectProviderModel={onSelectProviderModel}
+        agentMode={agentMode}
+        ready={!demoMode && !knowledgeUiBusy}
+        running={running}
+        projectPath={projectPath}
+        contexts={contexts}
+        probes={probes}
+        onProbed={(path, probe) => setProbes((current) => ({ ...current, [path]: probe }))}
+        queueCount={queue.length}
+        onAddContext={addContext}
+        onRemoveContext={(path) => setContexts((current) => current.filter((item) => item !== path))}
+        onContextError={(message) =>
+          setPageError({
+            message,
+            action: {
+              label: "打开设置",
+              run: () => openSettings(),
+            },
+          })
+        }
+        onSend={(text, context) => send(text, context)}
+        onStop={stop}
+        providerWarning={providerWarning}
+        onOpenProviderSettings={openSettings}
+        draftKey={`kodo:draft:${sessionId ?? "new"}:${projectPath ?? "-"}`}
+        editSeed={editSeed}
+        personaChain={personaChain}
+        onSelectAgents={(names) => onSelectAgents(sessionKey, names)}
+        favoriteAgents={favoriteAgents}
+        recentAgents={recentAgents}
+        contextBudget={running ? budget : null}
+        agentsVersion={agentsVersion}
+      />
+    </>
   );
 
   return (
@@ -1498,6 +1809,15 @@ export function ConversationPage({
                           // Demo has no project — openReferencedFile falls back to 改动.
                           onOpenPath={(raw) => void openReferencedFile(raw, reply.changes)}
                         />
+                        <KnowledgeSources
+                          sessionId={demo!.conversation.id}
+                          projectPath={null}
+                          turnSeq={index + 1}
+                          finished
+                          knowledgeUsed={new URLSearchParams(window.location.search).get("knowledge-fixture") === "citations"}
+                          answerTitle={`第 ${index + 1} 轮回答`}
+                          answerText={reply.final}
+                        />
                       </Fragment>
                     );
                   })
@@ -1576,6 +1896,15 @@ export function ConversationPage({
                           onOpenPath={(raw) => void openReferencedFile(raw, reply.changes)}
                           preExisting={last ? turnMeta.preExisting : []}
                           conflicts={last ? turnMeta.conflicts : []}
+                        />
+                        <KnowledgeSources
+                          sessionId={sessionId}
+                          projectPath={knowledgeProjectPath}
+                          turnSeq={index + 1}
+                          finished={turn.done || turn.stopped || Boolean(turn.error) || !running}
+                          knowledgeUsed={turn.knowledgeUsed === true}
+                          answerTitle={`第 ${index + 1} 轮回答`}
+                          answerText={reply.final}
                         />
                       </Fragment>
                     );
@@ -1708,6 +2037,24 @@ function errorMessage(failure: unknown): string {
   return String(failure);
 }
 
+function knowledgeErrorMessage(failure: unknown): string {
+  const code = errorMessage(failure);
+  const copy: Record<string, string> = {
+    knowledge_binding_unavailable: "知识库绑定尚未准备好，请重新读取后再发送。",
+    knowledge_remote_approval_required: "资料外发尚未获得批准，本轮未发送。",
+    knowledge_unavailable: "知识库暂时不可用，本轮未发送。",
+    app_disabled: "知识库功能当前已停用，本轮未发送。",
+    not_found: "所选知识库或资料已不存在，请刷新绑定后重试。",
+    scope_denied: "当前会话范围无法访问所选知识库。",
+    storage_unavailable: "知识库暂时不可用，请稍后重试。",
+    revision_conflict: "资料版本已变化，请重新检索后再试。",
+    preview_expired: "发送预览已过期，请重新准备本轮。",
+    source_changed: "资料来源已变化，请重新检索后再试。",
+    invalid_input: "知识库选择无效，请检查绑定后重试。",
+  };
+  return copy[code] ?? "资料准备失败，请检查知识库绑定后重试。";
+}
+
 function navigateSettings() {
   navigate(window.location.pathname.startsWith("/ui-demo") ? "/ui-demo/settings" : "/settings");
 }
@@ -1801,8 +2148,17 @@ function UserMessage({
   );
 }
 
-function blank(ask: string, context: string[] = []): TurnDto {
-  return { ask, context, items: [], done: false, stopped: false, interrupted: false, error: null };
+function blank(ask: string, context: string[] = [], knowledgeUsed = false): TurnDto {
+  return {
+    ask,
+    context,
+    items: [],
+    done: false,
+    stopped: false,
+    interrupted: false,
+    error: null,
+    ...(knowledgeUsed ? { knowledgeUsed: true } : {}),
+  };
 }
 
 function reduce(turns: TurnDto[], event: RunEventDto): TurnDto[] {

@@ -185,6 +185,20 @@ pub fn builtin_apps() -> Vec<AppManifest> {
                 summary: false,
             },
         },
+        AppManifest {
+            app_id: "knowledge".into(),
+            name: "知识库".into(),
+            description: "管理本地资料，检索并引用可追溯的出处".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            api_version: APP_API_VERSION.into(),
+            icon: "book-open".into(),
+            builtin: true,
+            capabilities: AppCapabilities {
+                ai: false,
+                scheduler: false,
+                summary: false,
+            },
+        },
     ]
 }
 
@@ -547,11 +561,11 @@ mod tests {
     #[test]
     fn builtin_apps_have_unique_ids() {
         let apps = builtin_apps();
-        assert_eq!(apps.len(), 3);
+        assert_eq!(apps.len(), 4);
         let mut ids: Vec<&str> = apps.iter().map(|a| a.app_id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.len(), 4);
     }
 
     #[test]

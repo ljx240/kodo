@@ -13,6 +13,7 @@
 //! item.completed <seq>  <at>  <durationMs|->  <kind>  <fields…>
 //! item.failed    <seq>  <at>
 //! turn.complete  <at>
+//! knowledge.used <one-based turn number>
 //! stopped        <at>
 //! interrupted    <at>
 //! error          <at>  <message>
@@ -93,6 +94,9 @@ pub struct Session {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
     pub ask: String,
+    /// True when an approved knowledge snapshot contributed to this turn.
+    /// Persisted as a separate session marker so old answers cannot be replayed.
+    pub knowledge_used: bool,
     /// Relative project paths pinned as context for this turn (not file bodies).
     pub context: Vec<String>,
     pub items: Vec<Item>,
@@ -393,6 +397,7 @@ pub fn list(dir: &Path) -> io::Result<Vec<SessionRef>> {
 /// Reads one session, replaying its log in order.
 pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
     let lines = line::read_lines(&path_of(dir, id)?)?;
+    let knowledge_turns = parse_knowledge_markers(&lines)?;
 
     let mut session = Session {
         id: id.to_owned(),
@@ -417,6 +422,7 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
             }
             ("ask", [_at, text]) => session.turns.push(Turn {
                 ask: text.clone(),
+                knowledge_used: false,
                 context: Vec::new(),
                 items: Vec::new(),
                 done: false,
@@ -427,6 +433,7 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
             // `ask <at> <text> <context-json>` — optional trailing field.
             ("ask", [_at, text, context]) => session.turns.push(Turn {
                 ask: text.clone(),
+                knowledge_used: false,
                 context: parse_context_field(context),
                 items: Vec::new(),
                 done: false,
@@ -473,6 +480,12 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
         }
     }
 
+    // Resolve provenance after folding all asks. Trusted hosts can append a
+    // marker before or after its ask without changing the original turn number.
+    for (index, turn) in session.turns.iter_mut().enumerate() {
+        turn.knowledge_used = knowledge_turns.contains(&((index + 1) as u64));
+    }
+
     Ok(session)
 }
 
@@ -480,6 +493,47 @@ pub fn load(dir: &Path, id: &str) -> io::Result<Session> {
 /// this is what opens one.
 pub fn record_ask(dir: &Path, id: &str, at: u64, text: &str) -> io::Result<()> {
     append(dir, id, &["ask", &at.to_string(), text])
+}
+
+/// Marks a knowledge-derived turn before model dispatch. This lives
+/// with the session so losing an index cannot silently re-send old evidence.
+pub fn record_knowledge_turn(dir: &Path, id: &str, turn_seq: u64) -> io::Result<()> {
+    if turn_seq == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "turn number must be positive",
+        ));
+    }
+    append(dir, id, &["knowledge.used", &turn_seq.to_string()])
+}
+
+/// Reads trusted knowledge provenance independently of the search catalog.
+/// Invalid markers fail closed instead of exposing history to a model.
+pub fn knowledge_turns(dir: &Path, id: &str) -> io::Result<std::collections::HashSet<u64>> {
+    let lines = line::read_lines(&path_of(dir, id)?)?;
+    parse_knowledge_markers(&lines)
+}
+
+/// Parses marker lines from an already-read session log.
+fn parse_knowledge_markers(lines: &[String]) -> io::Result<std::collections::HashSet<u64>> {
+    let mut used = std::collections::HashSet::new();
+    for raw in lines {
+        let fields = line::split(&raw);
+        if fields.first().is_some_and(|verb| verb == "knowledge.used") {
+            let seq = fields
+                .get(1)
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|seq| *seq > 0);
+            if fields.len() != 2 || seq.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid knowledge marker",
+                ));
+            }
+            used.insert(seq.unwrap());
+        }
+    }
+    Ok(used)
 }
 
 /// Records the user's message plus pinned context paths (project-relative).
@@ -1210,6 +1264,35 @@ mod tests {
     /// Most tests predate dual-mode and just need a Code session.
     fn open_code(dir: &Path, project: &Path, title: &str, at: u64) -> io::Result<String> {
         open(dir, project, title, at, Mode::Code)
+    }
+
+    #[test]
+    fn knowledge_provenance_survives_reload_and_rejects_damaged_markers() {
+        let tmp = TempDir::new("session-knowledge");
+        let dir = tmp.dir("sessions");
+        let id = open_code(&dir, Path::new(""), "knowledge", 1).unwrap();
+        record_ask(&dir, &id, 2, "ordinary question").unwrap();
+        record_knowledge_turn(&dir, &id, 2).unwrap();
+        record_ask(&dir, &id, 3, "question using evidence").unwrap();
+        let loaded = load(&dir, &id).unwrap();
+        assert_eq!(loaded.turns.len(), 2);
+        assert!(!loaded.turns[0].knowledge_used);
+        assert!(loaded.turns[1].knowledge_used);
+        assert_eq!(
+            knowledge_turns(&dir, &id).unwrap(),
+            [2].into_iter().collect()
+        );
+        assert!(record_knowledge_turn(&dir, &id, 0).is_err());
+        assert!(record_knowledge_turn(&dir, "../outside", 1).is_err());
+        append(&dir, &id, &["knowledge.used", "invalid"]).unwrap();
+        assert_eq!(
+            knowledge_turns(&dir, &id).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            load(&dir, &id).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     fn item(id: u32, kind: ItemKind) -> Item {

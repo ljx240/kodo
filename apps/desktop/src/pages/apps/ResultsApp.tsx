@@ -39,6 +39,7 @@ import {
   type ArtifactViewDto,
 } from "../../api";
 import { T } from "../../i18n";
+import { KnowledgeSaveDialog } from "./KnowledgeSaveDialog";
 import { workbenchErrorText } from "./errors";
 
 const W = T.workbench.results;
@@ -97,6 +98,7 @@ export function ResultsApp({ manifest, onBack }: Props) {
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [promoteArtifact, setPromoteArtifact] = useState<ArtifactDto | null>(null);
 
   const reload = useCallback(async (): Promise<ArtifactViewDto[]> => {
     const list = await listResults(true);
@@ -273,7 +275,21 @@ export function ResultsApp({ manifest, onBack }: Props) {
     return (
       <div className="result-detail" data-testid={`result-detail-${artifact.id}`}>
         {artifact.kind === "text" ? (
-          <pre className="result-body">{artifact.body}</pre>
+          <>
+            <pre className="result-body">{artifact.body}</pre>
+            <div className="knowledge-promotion">
+              <button
+                type="button"
+                className="btn"
+                data-testid={`result-to-knowledge-${artifact.id}`}
+                disabled={!artifact.body?.trim()}
+                onClick={() => setPromoteArtifact(artifact)}
+              >
+                加入知识库
+              </button>
+              <span className="app-hint">将保存这份文本快照，并保留成果记录来源。</span>
+            </div>
+          </>
         ) : (
           <div className="result-file">
             <p className="result-path">{artifact.filePath}</p>
@@ -318,6 +334,9 @@ export function ResultsApp({ manifest, onBack }: Props) {
             </div>
             {row.fileStatus === "missing" && <p className="app-hint">{W.missingHint}</p>}
             {row.fileStatus === "changed" && <p className="app-hint">{W.changedHint}</p>}
+            <p className="app-hint" data-testid={`result-file-to-knowledge-${artifact.id}`}>
+              文件引用暂不支持直接入库。成果中心不会读取该路径；如需导入，请在知识库中使用原生文件选择器选择受支持的 Markdown 或 TXT 文件。
+            </p>
           </div>
         )}
         <p className="result-provenance">
@@ -507,6 +526,17 @@ export function ResultsApp({ manifest, onBack }: Props) {
           </section>
         )}
       </div>
+
+      {promoteArtifact && (
+        <KnowledgeSaveDialog
+          title={promoteArtifact.title}
+          body={promoteArtifact.body ?? ""}
+          sourceKind="result"
+          sourceRef={promoteArtifact.id}
+          onClose={() => setPromoteArtifact(null)}
+          onSaved={() => setError(null)}
+        />
+      )}
 
       {editor && (
         <div

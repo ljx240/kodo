@@ -1546,7 +1546,7 @@ mod tests {
     fn builtin_apps_start_enabled_with_defaults() {
         let (_dir, store) = store();
         let apps = store.list_apps().unwrap();
-        assert_eq!(apps.len(), 3);
+        assert_eq!(apps.len(), 4);
         assert!(apps.iter().all(|a| a.preference.enabled));
         assert!(apps.iter().all(|a| !a.preference.favorite));
         // Default order follows the manifest order.
@@ -1591,7 +1591,7 @@ mod tests {
         let order = store.set_app_order(&["artifacts".to_string()]).unwrap();
         assert_eq!(order[0].manifest.app_id, "artifacts");
         // The apps the caller did not mention are still listed, after it.
-        assert_eq!(order.len(), 3);
+        assert_eq!(order.len(), 4);
         assert_eq!(order[1].manifest.app_id, "todo");
         assert_eq!(order[2].manifest.app_id, "calendar");
         // A full reorder is honoured exactly.
@@ -1599,7 +1599,7 @@ mod tests {
             .set_app_order(&["calendar".into(), "todo".into(), "artifacts".into()])
             .unwrap();
         let ids: Vec<&str> = order.iter().map(|a| a.manifest.app_id.as_str()).collect();
-        assert_eq!(ids, vec!["calendar", "todo", "artifacts"]);
+        assert_eq!(ids, vec!["calendar", "todo", "artifacts", "knowledge"]);
         assert_eq!(
             store.set_app_order(&["nope".into()]),
             Err(AppError::UnknownApp)

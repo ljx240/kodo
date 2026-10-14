@@ -180,6 +180,8 @@ export type TurnDto = {
   /** Recovery stamped a killed run as interrupted (never Completed). */
   interrupted?: boolean;
   error: string | null;
+  /** True only when this turn consumed a prepared knowledge selection. */
+  knowledgeUsed?: boolean;
   /** Backend-computed status axes (absent on live/demo turns — derived). */
   status?: TurnStatusDto;
 };
@@ -304,6 +306,8 @@ export function sendMessage(
   project?: string,
   agents: string[] = [],
   budgetFamily?: string | null,
+  knowledgeToken?: string | null,
+  knowledgeRemoteApproved?: boolean,
 ): Promise<string> {
   return invoke<string>("send_message", {
     id,
@@ -312,6 +316,8 @@ export function sendMessage(
     project,
     agents,
     budgetFamily,
+    ...(knowledgeToken !== undefined ? { knowledgeToken } : {}),
+    ...(knowledgeRemoteApproved !== undefined ? { knowledgeRemoteApproved } : {}),
   });
 }
 
