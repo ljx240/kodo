@@ -260,7 +260,7 @@ p {
   display: flex;
   align-items: center;
   gap: 9px;
-  height: 30px;
+  height: var(--kodo-control-height);
   flex: none;
   margin: 0 12px 14px;
   padding: 0 10px;
@@ -289,7 +289,7 @@ p {
   display: flex;
   align-items: center;
   gap: 13px;
-  height: 34px;
+  height: 36px;
   padding: 0 18px;
   border-radius: var(--kodo-radius);
   color: var(--kodo-text);
@@ -307,12 +307,12 @@ p {
 
 .nav-item--active {
   background: var(--kodo-selected);
-  color: var(--kodo-accent);
-  font-weight: 500;
+  color: var(--kodo-text);
+  font-weight: 600;
 }
 
 .nav-item--active svg {
-  color: var(--kodo-accent);
+  color: var(--kodo-text);
 }
 
 .projects {
@@ -331,10 +331,10 @@ p {
   padding: 0 8px 0 12px;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
+  font-weight: 600;
 }
 
-/* Conversation filter — one field between the section head and the tree,
-   same geometry as the file viewer's filter (26px, sm, canvas). */
+/* Keep conversation filtering separate from the global quick switcher. */
 .tree-filter-bar {
   flex: none;
   padding: 2px 0 10px;
@@ -342,7 +342,7 @@ p {
 
 .tree-filter {
   width: 100%;
-  height: 26px;
+  height: 30px;
   padding: 0 8px;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-sm);
@@ -378,7 +378,7 @@ p {
   display: flex;
   align-items: center;
   width: 100%;
-  height: 30px;
+  height: 32px;
   padding: 0 4px 0 13px;
   border-radius: var(--kodo-radius);
   font-size: var(--kodo-font-md);
@@ -485,7 +485,7 @@ p {
   align-items: center;
   gap: 11px;
   width: 100%;
-  height: 28px;
+  height: 30px;
   padding: 0 8px;
   border-radius: var(--kodo-radius);
   font-size: var(--kodo-font-sm);
@@ -509,7 +509,7 @@ p {
 .tree-conversation-time {
   flex: none;
   font-size: var(--kodo-font-sm);
-  color: var(--kodo-text-muted);
+  color: var(--kodo-text-secondary);
 }
 
 .tree-conversation:hover {
@@ -754,14 +754,14 @@ p {
 
 /* ---------------------------------------------------------- page header -- */
 
-/* The reference's header rule sits 70px below the top of the page. */
+/* Breadcrumbs and wrapping descriptions must fit inside their header. */
 .page-head {
   display: flex;
   align-items: center;
   gap: 12px;
   flex: none;
-  height: 71px;
-  padding: 0 28px;
+  min-height: 71px;
+  padding: 14px 28px;
   border-bottom: 1px solid var(--kodo-border);
 }
 
@@ -771,7 +771,7 @@ p {
   flex: none;
   display: grid;
   place-items: center;
-  border: 1px solid var(--kodo-border);
+  background: var(--kodo-surface);
   border-radius: var(--kodo-radius);
   color: var(--kodo-text-secondary);
 }
@@ -845,8 +845,7 @@ p {
   .page-head > .search-field--inline { flex-basis: 100%; }
 }
 
-/* Filled controls need inverse ink when the dark palette lightens the fill. */
-[data-theme="dark"] .btn--primary,
+/* Status fills use the theme's canvas as inverse ink. */
 [data-theme="dark"] .status-mark {
   color: var(--kodo-canvas);
 }
@@ -907,11 +906,11 @@ p {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  padding: 0 11px;
+  height: 32px;
+  padding: 0 12px;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-sm);
-  background: var(--kodo-canvas);
+  background: var(--kodo-surface);
   font-size: var(--kodo-font-sm);
   white-space: nowrap;
 }
@@ -921,18 +920,19 @@ p {
 }
 
 .btn--primary {
-  background: var(--kodo-accent);
-  border-color: var(--kodo-accent);
-  color: #fff;
+  background: var(--kodo-primary);
+  border-color: var(--kodo-primary);
+  color: var(--kodo-primary-ink);
 }
 
 .btn--primary:hover {
-  background: var(--kodo-accent-hover);
+  background: var(--kodo-primary-hover);
+  border-color: var(--kodo-primary-hover);
 }
 
 .btn--block {
   width: 100%;
-  height: 32px;
+  height: var(--kodo-control-height);
   justify-content: center;
 }
 
@@ -1237,7 +1237,7 @@ button.code-chip--link:focus-visible {
 .main--welcome .scroll {
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, var(--kodo-canvas) 0%, var(--kodo-surface) 140%);
+  background: var(--kodo-canvas);
 }
 
 .main--welcome .page-inner {
@@ -1713,11 +1713,11 @@ button.code-chip--link:focus-visible {
 .select {
   height: var(--kodo-control-height);
   padding: 0 26px 0 10px;
-  border: 1px solid var(--kodo-border-strong);
+  border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-sm);
-  background-color: var(--kodo-canvas);
+  background-color: var(--kodo-surface);
   /* Stroke matches decorative-muted; the control text stays primary ink. */
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2398a2b3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23828282' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 8px center;
   appearance: none;
@@ -1728,9 +1728,9 @@ button.code-chip--link:focus-visible {
   width: 100%;
   height: var(--kodo-control-height);
   padding: 0 10px;
-  border: 1px solid var(--kodo-border-strong);
+  border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-sm);
-  background: var(--kodo-canvas);
+  background: var(--kodo-surface);
   font-size: var(--kodo-font-md);
 }
 

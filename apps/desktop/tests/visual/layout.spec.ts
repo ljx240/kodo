@@ -22,7 +22,7 @@ for (const viewport of VIEWPORTS) {
 
   test(`layout holds at ${label}`, async ({ page }) => {
     await page.setViewportSize(viewport);
-    await page.goto("/ui-demo/conversation");
+    await page.goto("/ui-demo/conversation?inspector=open");
     await page.waitForLoadState("networkidle");
 
     const m = await page.evaluate(() => {
@@ -36,7 +36,6 @@ for (const viewport of VIEWPORTS) {
         composerBottom: box(".composer")?.bottom ?? 0,
         composerWidth: box(".composer")?.width ?? 0,
         hasFinal: document.querySelector('[data-testid="answer-conclusion"]') !== null,
-        traceRows: document.querySelectorAll(".trace-row").length,
       };
     });
 
@@ -45,12 +44,10 @@ for (const viewport of VIEWPORTS) {
     expect(m.inspector).toBe(INSPECTOR_WIDTH);
     expect(m.composerBottom).toBeLessThanOrEqual(m.innerHeight);
     expect(m.composerWidth).toBeGreaterThan(0);
-    // The fixture conversation is complete: the reply shows its final answer
-    // alone — the execution process lives in the Response Trace page, and the
-    // running-state row density is asserted in behaviour.spec at the reference
-    // viewport (UI_ACCEPTANCE §3/§4).
+    // Completed replies keep the execution record folded so it takes no space.
+    // Running row density is covered in behaviour.spec (UI_ACCEPTANCE §3/§4).
     expect(m.hasFinal).toBe(true);
-    expect(m.traceRows).toBe(0);
+    await expect(page.locator(".main .trace-row:visible")).toHaveCount(0);
   });
 
   test(`collapsed inspector becomes a rail at ${label}`, async ({ page }) => {

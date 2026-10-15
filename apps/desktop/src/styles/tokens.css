@@ -2,33 +2,36 @@
 :root {
   /* ── Surfaces ─────────────────────────────────────────────────────────── */
   --kodo-canvas: #ffffff;
-  --kodo-sidebar: #fafbfc;
-  --kodo-surface: #f7f8fa;
-  --kodo-hover: #f3f6fa;
-  --kodo-selected: #eef5ff;
+  --kodo-sidebar: #f5f5f5;
+  --kodo-surface: #f2f2f2;
+  --kodo-hover: #ededed;
+  --kodo-selected: #e7e7e7;
 
-  --kodo-border: #e5e9f0;
-  --kodo-border-strong: #d7dee8;
-  --kodo-border-subtle: #f2f4f7;
+  --kodo-border: #e3e3e3;
+  --kodo-border-strong: #d4d4d4;
+  --kodo-border-subtle: #efefef;
 
   /* ── Readable ink (must meet WCAG AA on every surface above) ─────────── */
-  --kodo-text: #172033;
-  --kodo-text-secondary: #667085;
+  --kodo-text: #242424;
+  --kodo-text-secondary: #606060;
   /* Legacy alias kept so older rules that still read muted-as-text resolve to
      a readable value; new rules should use secondary or decorative-muted. */
-  --kodo-text-tertiary: #667085;
+  --kodo-text-tertiary: #606060;
 
   /* ── Decorative ink (icons, chevrons, separators only) ────────────────── */
   /* ~2.6:1 on canvas — never use for informational text. */
-  --kodo-text-muted: #98a2b3;
+  --kodo-text-muted: #929292;
 
   /* ── Accents & status ─────────────────────────────────────────────────── */
-  --kodo-accent: #2563eb;
-  --kodo-accent-hover: #1d4ed8;
+  --kodo-accent: #176b60;
+  --kodo-accent-hover: #11554c;
+  --kodo-primary: #202020;
+  --kodo-primary-hover: #363636;
+  --kodo-primary-ink: #ffffff;
   --kodo-success: #16a34a;
-  --kodo-success-text: #15803d;
+  --kodo-success-text: #116c33;
   --kodo-warning: #d97706;
-  --kodo-warning-text: #b45309;
+  --kodo-warning-text: #984308;
   /* #dc2626 dips under 4.5:1 on hover/selected surfaces; #b91c1c holds AA. */
   --kodo-error: #b91c1c;
 
@@ -37,16 +40,16 @@
   --kodo-error-bg: #fef2f2;
 
   /* ── Syntax highlighting (highlight.js, all ≥4.5:1 on every surface) ─── */
-  --kodo-syntax-comment: #667085;
-  --kodo-syntax-keyword: #cf222e;
+  --kodo-syntax-comment: #606060;
+  --kodo-syntax-keyword: #b91c2a;
   --kodo-syntax-string: #0a3069;
   --kodo-syntax-number: #0550ae;
-  --kodo-syntax-title: #8250df;
-  --kodo-syntax-meta: #bc4c00;
+  --kodo-syntax-title: #7542b4;
+  --kodo-syntax-meta: #a94700;
   --kodo-syntax-addition: #1a7f37;
 
   /* ── Focus ────────────────────────────────────────────────────────────── */
-  --kodo-focus-ring: #2563eb;
+  --kodo-focus-ring: #176b60;
   --kodo-focus-width: 2px;
   --kodo-focus-offset: 2px;
 
@@ -55,15 +58,16 @@
   --kodo-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 
   --kodo-font-xs: 11px;
-  --kodo-font-sm: 12px;
-  --kodo-font-md: 13px;
-  --kodo-font-chat: 14px;
-  --kodo-font-title: 18px;
+  --kodo-font-sm: 13px;
+  --kodo-font-md: 14px;
+  --kodo-font-chat: 15px;
+  --kodo-font-title: 22px;
 
   /* ── Shape ────────────────────────────────────────────────────────────── */
-  --kodo-radius-sm: 5px;
-  --kodo-radius: 6px;
-  --kodo-radius-popover: 8px;
+  --kodo-radius-sm: 8px;
+  --kodo-radius: 10px;
+  --kodo-radius-popover: 12px;
+  --kodo-radius-lg: 14px;
 
   /* ── Shell geometry ───────────────────────────────────────────────────── */
   --kodo-sidebar-width: 260px;
@@ -72,7 +76,7 @@
   --kodo-inspector-file-width: 640px;
   --kodo-inspector-rail-width: 40px;
   --kodo-topbar-height: 44px;
-  --kodo-control-height: 32px;
+  --kodo-control-height: 36px;
 
   /* ── Spacing scale ────────────────────────────────────────────────────── */
   --kodo-space-1: 2px;
@@ -101,23 +105,26 @@
    <html data-theme="dark"> remaps every semantic alias without touching
    component CSS. Values are provisional and untested against references. */
 [data-theme="dark"] {
-  --kodo-canvas: #0f141c;
-  --kodo-sidebar: #121821;
-  --kodo-surface: #171e29;
-  --kodo-hover: #1c2431;
-  --kodo-selected: #17253f;
+  --kodo-canvas: #1c1c1c;
+  --kodo-sidebar: #242424;
+  --kodo-surface: #282828;
+  --kodo-hover: #2c2c2c;
+  --kodo-selected: #303030;
 
-  --kodo-border: #273043;
-  --kodo-border-strong: #364156;
-  --kodo-border-subtle: #1e2633;
+  --kodo-border: #383838;
+  --kodo-border-strong: #484848;
+  --kodo-border-subtle: #303030;
 
-  --kodo-text: #e8edf6;
-  --kodo-text-secondary: #a7b0c0;
-  --kodo-text-tertiary: #a7b0c0;
-  --kodo-text-muted: #6d778a;
+  --kodo-text: #eeeeee;
+  --kodo-text-secondary: #b9b9b9;
+  --kodo-text-tertiary: #b9b9b9;
+  --kodo-text-muted: #828282;
 
-  --kodo-accent: #5b8cff;
-  --kodo-accent-hover: #7aa2ff;
+  --kodo-accent: #8dd1c6;
+  --kodo-accent-hover: #a9e2d9;
+  --kodo-primary: #eeeeee;
+  --kodo-primary-hover: #ffffff;
+  --kodo-primary-ink: #1c1c1c;
   --kodo-success: #22c55e;
   --kodo-success-text: #4ade80;
   --kodo-warning: #f59e0b;
@@ -129,7 +136,7 @@
   --kodo-error-bg: #2a1515;
 
   /* Syntax — provisional GitHub-dark family; V1 ships light only. */
-  --kodo-syntax-comment: #8b949e;
+  --kodo-syntax-comment: #a1a1a1;
   --kodo-syntax-keyword: #ff7b72;
   --kodo-syntax-string: #a5d6ff;
   --kodo-syntax-number: #79c0ff;
@@ -137,5 +144,5 @@
   --kodo-syntax-meta: #ffa657;
   --kodo-syntax-addition: #3fb950;
 
-  --kodo-focus-ring: #7aa2ff;
+  --kodo-focus-ring: #8dd1c6;
 }

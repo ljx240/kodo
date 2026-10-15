@@ -448,7 +448,7 @@
   box-shadow: 0 24px 70px rgb(23 32 51 / 20%);
 }
 
-.settings-modal-panel .page-head { height: 64px; }
+.settings-modal-panel .page-head { min-height: 64px; }
 
 .skills-card {
   width: min(760px, 100%);
@@ -583,7 +583,7 @@
   display: flex;
   align-items: center;
   gap: 11px;
-  height: 32px;
+  height: 36px;
   padding: 0 10px;
   border-radius: var(--kodo-radius);
   color: var(--kodo-text);
@@ -609,12 +609,12 @@
 
 .settings-nav-item--active {
   background: var(--kodo-selected);
-  color: var(--kodo-accent);
-  font-weight: 500;
+  color: var(--kodo-text);
+  font-weight: 600;
 }
 
 .settings-nav-item--active svg {
-  color: var(--kodo-accent);
+  color: var(--kodo-text);
 }
 
 .settings-detail {
@@ -622,10 +622,7 @@
   width: min(760px, 100%);
   min-height: 0;
   margin: 16px auto 0;
-  border: 1px solid var(--kodo-border);
-  border-radius: var(--kodo-radius);
   background: var(--kodo-canvas);
-  box-shadow: 0 2px 8px rgb(23 32 51 / 3%);
 }
 
 .settings-section-head {
@@ -634,15 +631,11 @@
   padding: 14px 16px 10px;
 }
 
-/* The reference colours both the card glyph and the per-row glyphs with the
-   accent rather than the muted UI grey. */
 .settings-card-icon {
   margin-top: 1px;
-  color: var(--kodo-accent);
+  color: var(--kodo-text-secondary);
 }
 
-/* Measured off the reference, a step above the 13px UI text but below the
-   18px page title. */
 .settings-section-head h2 {
   font-size: 17px;
   font-weight: 600;
@@ -1777,7 +1770,7 @@
 .wb-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }
 
 .wb-app-list {
@@ -1792,8 +1785,9 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 38px;
-  padding: 0 4px;
+  min-height: 50px;
+  padding: 8px 12px;
+  border-radius: var(--kodo-radius);
   border-bottom: 1px solid var(--kodo-border-subtle);
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
@@ -1801,6 +1795,10 @@
 
 .wb-app-row:last-child {
   border-bottom: 0;
+}
+
+.wb-app-row:hover {
+  background: var(--kodo-surface);
 }
 
 .wb-app-name {
@@ -1840,7 +1838,7 @@
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
   background: var(--kodo-surface);
-  padding: 12px 14px;
+  padding: 16px 18px;
 }
 
 .wb-today-body {
@@ -1861,9 +1859,9 @@
   background: transparent;
   padding: 0;
   text-align: left;
-  color: var(--kodo-accent);
+  color: var(--kodo-text);
   font-size: var(--kodo-font-sm);
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
 }
 

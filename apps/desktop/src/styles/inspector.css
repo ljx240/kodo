@@ -68,18 +68,9 @@
 }
 
 .rail-btn--active {
-  color: var(--kodo-accent);
+  background: var(--kodo-selected);
+  color: var(--kodo-text);
 }
-
-/* The reference draws the active section as a filled accent disc with a
-   knocked-out glyph. */
-.rail-btn--active svg {
-  border-radius: 50%;
-  background: var(--kodo-accent);
-  color: #fff;
-}
-
-[data-theme="dark"] .rail-btn--active svg { color: var(--kodo-canvas); }
 
 .ins-panel {
   width: var(--kodo-inspector-width);
@@ -174,20 +165,26 @@
 
 .ins-tabs--chips {
   height: auto;
-  gap: 10px;
+  gap: 4px;
+  min-width: 0;
   padding: 0;
   border-bottom: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .ins-tabs--chips .ins-tab {
+  flex: none;
   height: 28px;
+  padding: 0 8px;
   border: 1px solid transparent;
   color: var(--kodo-text);
+  font-size: var(--kodo-font-sm);
 }
 
 .ins-tabs--chips .ins-tab--active {
-  background: var(--kodo-canvas);
-  border-color: var(--kodo-accent);
+  background: var(--kodo-selected);
+  border-color: var(--kodo-border);
 }
 
 .ins-tabs--chips .ins-tab--active::after {
@@ -196,8 +193,8 @@
 
 .ins-tab--active {
   background: var(--kodo-selected);
-  color: var(--kodo-accent);
-  font-weight: 500;
+  color: var(--kodo-text);
+  font-weight: 600;
 }
 
 .ins-content {

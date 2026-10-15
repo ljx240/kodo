@@ -30,26 +30,30 @@ The content — conversation, commands, files, results — is the product.
 
 V1 primary theme: **Light**
 
-Use neutral whites and cool grays with one restrained blue accent.
+Use the macOS workspace reference: white content, a soft gray sidebar, neutral
+selection, black primary actions, and a restrained teal accent for links and
+enabled switches. Preserve the existing three-column workstation structure.
 
 ```text
 Canvas                #FFFFFF
-Sidebar                #FAFBFC
-Secondary surface      #F7F8FA
-Hover                  #F3F6FA
-Selected               #EEF5FF
-Border                 #E5E9F0
-Border strong          #D7DEE8
+Sidebar                #F5F5F5
+Secondary surface      #F2F2F2
+Hover                  #EDEDED
+Selected               #E7E7E7
+Border                 #E3E3E3
+Border strong          #D4D4D4
 
-Text primary           #172033
-Text secondary         #667085
-Text muted             #98A2B3
+Text primary           #242424
+Text secondary         #606060
+Text muted             #929292
 
-Accent                 #2563EB
-Accent hover           #1D4ED8
+Primary action         #202020
+Primary action hover   #363636
+Accent                 #176B60
+Accent hover           #11554C
 Success                #16A34A
 Warning                #D97706
-Error                  #DC2626
+Error                  #B91C1C
 ```
 
 Do not use gradients in normal application chrome.
@@ -69,13 +73,13 @@ Code:
 Base sizes:
 
 ```text
-Primary UI text        13px
-Secondary text         12px
+Primary UI text        14px
+Secondary text         13px
 Micro metadata         11px
-Conversation body      14px
+Conversation body      15px
 Code / commands        12px
-Page title             18px
-Section title          13px / 600
+Page title             22px
+Section title          14px / 600
 ```
 
 Typical line height:
@@ -86,8 +90,8 @@ Conversation            1.55
 Code                    1.45
 ```
 
-Do not enlarge text to make the UI feel “premium”.  
-Kodo uses compact IDE density.
+Use a modest size increase for readable controls and conversation content;
+retain the workstation's compact metadata and panel widths.
 
 ---
 
@@ -106,7 +110,7 @@ The exception is **contained**, not a new house style:
   that file begins with `.todo-app`;
 - `.todo-app` renders only on the 待办 `<main>`, so no other page can match;
 - the app's tokens (`--todo-*`) are declared on `.todo-app`, never on `:root`,
-  and `tokens.css` / `TOKENS.css` are untouched;
+  the shared shell tokens remain independent of this exception;
 - §10 copy policy still holds — every string comes from `i18n.ts`.
 
 Nothing outside 待办 adopts this language. A second surface wanting pills or a
@@ -147,13 +151,14 @@ No oversized empty hero areas.
 Radius:
 
 ```text
-Input / small control       5px
-Panel                       6px
-Popover                     8px
+Input / small control       8px
+Panel                      10px
+Popover                    12px
+Composer                   14px
 ```
 
-Avoid frequent 12–20px rounded cards. The 待办 app is the one exception — its
-rounded cards are scoped to `.todo-app` (§2a).
+Use whitespace and fine dividers for groups. Larger radii are reserved for the
+composer and floating surfaces; status pills remain scoped to 待办 (§2a).
 
 Borders:
 - 1px subtle separators;
@@ -176,8 +181,8 @@ Base scale:
 Default compact control height:
 
 ```text
-Small control        28px
-Default control      32px
+Small control        32px
+Default control      36px
 Toolbar              44px
 Composer min         54px
 ```

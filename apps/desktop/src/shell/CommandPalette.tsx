@@ -44,7 +44,11 @@ export function CommandPalette({ actions, sessions, agents = [], onClose }: Prop
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    const previousFocus = document.activeElement;
     input.current?.focus();
+    return () => {
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+    };
   }, []);
 
   const filteredActions = useMemo(() => {
