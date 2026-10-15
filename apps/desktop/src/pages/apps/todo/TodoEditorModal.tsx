@@ -12,6 +12,7 @@
  */
 
 import {
+  Check,
   FileText,
   Link2,
   Paperclip,
@@ -31,6 +32,7 @@ import {
   type TodoReminderKindDto,
 } from "../../../api";
 import { T } from "../../../i18n";
+import { Menu, MenuItem } from "../../../shell/Menu";
 import {
   Avatar,
   relativeTime,
@@ -103,7 +105,6 @@ export function TodoEditorModal({
   const isNew = draft.id === "";
   const title = isNew ? W.newItemTitle : W.edit;
   const children = (todos ?? []).filter((row) => row.parentId === draft.id);
-  const relatedOpen = useRelatedMenuOpen(draft);
   const otherTodos = (todos ?? []).filter(
     (row) => row.id !== draft.id && row.parentId === null && !row.archived,
   );
@@ -390,7 +391,7 @@ export function TodoEditorModal({
                         <button
                           type="button"
                           className="todo-remove-btn"
-                          aria-label={W.removeAttachment}
+                          aria-label={W.removeRelated}
                           onClick={() => onRelatedToggle(id)}
                         >
                           <X size={13} strokeWidth={1.8} />
@@ -401,7 +402,6 @@ export function TodoEditorModal({
                 </ul>
               )}
               <RelatedMenu
-                open={relatedOpen}
                 draft={draft}
                 otherTodos={otherTodos}
                 onToggle={onRelatedToggle}
@@ -587,42 +587,42 @@ function ActivityRow({
 }
 
 function RelatedMenu({
-  open,
   draft,
   otherTodos,
   onToggle,
 }: {
-  open: boolean;
   draft: TodoDto;
   otherTodos: TodoDto[];
   onToggle: (id: string) => void;
 }) {
-  if (!open) return null;
   return (
     <div className="todo-related-pick">
-      <button type="button" className="todo-add-btn" disabled>
-        <Plus size={12} strokeWidth={2} /> {W.addRelated}
-      </button>
-      <div className="todo-related-menu">
-        {otherTodos.length === 0 ? (
-          <span className="todo-chip-empty">{W.noRelated}</span>
-        ) : (
-          otherTodos.slice(0, 12).map((other) => {
-            const on = draft.linkIds.includes(other.id);
-            return (
-              <button
-                key={other.id}
-                type="button"
-                className={`todo-related-option${on ? " todo-related-option--on" : ""}`}
-                onClick={() => onToggle(other.id)}
-                data-testid={`todo-related-option-${other.id}`}
-              >
-                {other.title}
-              </button>
-            );
-          })
+      <Menu
+        trigger={({ toggle }) => (
+          <button type="button" className="todo-add-btn" onClick={toggle}>
+            <Plus size={12} strokeWidth={2} /> {W.addRelated}
+          </button>
         )}
-      </div>
+      >
+        {(close) => otherTodos.length === 0 ? (
+          <span className="todo-chip-empty">{W.noRelated}</span>
+        ) : otherTodos.map((other) => {
+          const selected = draft.linkIds.includes(other.id);
+          return (
+            <MenuItem
+              key={other.id}
+              icon={selected ? <Check size={13} /> : <Link2 size={13} />}
+              label={other.title}
+              selected={selected}
+              testId={`todo-related-option-${other.id}`}
+              onSelect={() => {
+                onToggle(other.id);
+                close();
+              }}
+            />
+          );
+        })}
+      </Menu>
     </div>
   );
 }
@@ -713,15 +713,4 @@ function ReminderQuickAdd({
       </div>
     </form>
   );
-}
-
-// The "open" prop is the related menu's open state — kept here for the menu
-// to be reachable from the rail without dragging extra state into the modal
-// itself.
-function useRelatedMenuOpen(draft: TodoDto): boolean {
-  // The picker is always rendered below the list (not in a popover), so it
-  // is technically "open". This hook exists so the future popover can flip
-  // the same state without rewiring the modal.
-  void draft;
-  return true;
 }

@@ -1128,6 +1128,7 @@ export const T = {
       related: "关联事项",
       noRelated: "无关联",
       addRelated: "添加关联",
+      removeRelated: "移除关联",
       customFields: "自定义字段",
       itemType: "事项类型",
       itemTypes: { task: "任务", bug: "缺陷", story: "需求", chore: "杂项" },

@@ -107,14 +107,14 @@
 
 .reply-summary h4 {
   margin-bottom: 8px;
-  font-size: var(--kodo-font-xs);
+  font-size: var(--kodo-font-sm);
   font-weight: 600;
 }
 
 .reply-summary p {
   color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-xs);
-  line-height: 22px;
+  font-size: var(--kodo-font-sm);
+  line-height: 1.65;
 }
 
 .page-tabs {
@@ -1391,30 +1391,16 @@
      silently inherit a different tint. */
 }
 
-/* Scheduled tasks page */
-.page-schedule {
-  padding: 24px 28px;
+/* Scheduled tasks use the same fixed header and scrolling body as apps. */
+.page-schedule .app-body > .page-empty {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  min-width: 0;
-}
-
-.page-schedule .page-head {
-  align-items: flex-end;
-}
-
-.page-schedule .page-head-titles h1 {
-  font-size: 18px;
-  font-weight: 600;
-  margin: 0;
-}
-
-.page-schedule .page-subtitle {
-  color: var(--kodo-text-secondary);
-  margin: 4px 0 0;
-  font-size: 13px;
-  line-height: 1.5;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 200px;
+  border: 1px solid var(--kodo-border-subtle);
+  border-radius: var(--kodo-radius);
 }
 
 .page-error {
@@ -1468,7 +1454,7 @@
 .schedule-row {
   border: 1px solid var(--kodo-border, rgba(0, 0, 0, 0.08));
   border-radius: 8px;
-  background: var(--kodo-bg-elevated, #fff);
+  background: var(--kodo-canvas);
   padding: 10px 12px;
 }
 
@@ -1501,6 +1487,7 @@
   font-weight: 500;
   margin: 0 0 4px;
   color: var(--kodo-text);
+  overflow-wrap: anywhere;
 }
 
 .schedule-row-sub {
@@ -1513,16 +1500,18 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 12px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--kodo-bg-muted, rgba(0, 0, 0, 0.04));
+  background: var(--kodo-surface);
   color: var(--kodo-text-secondary);
   border: 1px solid var(--kodo-border, rgba(0, 0, 0, 0.06));
 }
 
 .schedule-pill--kind {
-  background: var(--kodo-accent-bg-soft, rgba(74, 108, 247, 0.12));
+  background: color-mix(in srgb, var(--kodo-accent) 10%, var(--kodo-canvas));
   color: var(--kodo-accent, #4a6cf7);
   border-color: transparent;
 }
@@ -1537,16 +1526,17 @@
 }
 
 .schedule-pill--state-paused {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--kodo-surface);
   color: var(--kodo-text-secondary);
 }
 
 .schedule-pill--state-archived {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--kodo-surface);
   color: var(--kodo-text-secondary);
 }
 
 .schedule-row-actions {
+  flex: none;
   display: flex;
   gap: 4px;
   align-items: center;
@@ -1584,7 +1574,7 @@
 .schedule-runs th {
   color: var(--kodo-text-secondary);
   font-weight: 500;
-  background: var(--kodo-bg-muted, rgba(0, 0, 0, 0.02));
+  background: var(--kodo-surface);
 }
 
 .schedule-runs-id {
@@ -1619,7 +1609,7 @@
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 6px;
-  background: var(--kodo-bg-muted, rgba(0, 0, 0, 0.04));
+  background: var(--kodo-surface);
   color: var(--kodo-text-secondary);
 }
 
@@ -1632,28 +1622,6 @@
 .page-app,
 .page-workbench {
   min-width: 0;
-}
-
-/* `.page-head` is `flex: none`, so the scroller is `.app-body` beneath it. */
-.page-app .page-head-titles,
-.page-workbench .page-head-titles {
-  flex: 1;
-  min-width: 0;
-}
-
-.page-app .page-head-actions,
-.page-workbench .page-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-}
-
-.page-app .page-subtitle,
-.page-workbench .page-subtitle {
-  margin-top: 2px;
-  color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-sm);
 }
 
 .app-body {
@@ -1731,7 +1699,7 @@
   margin: 0;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .app-hint {
@@ -1782,15 +1750,27 @@
 }
 
 .wb-app-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 10px;
-  min-height: 50px;
-  padding: 8px 12px;
+  gap: 3px 12px;
+  min-height: 68px;
+  padding: 12px;
   border-radius: var(--kodo-radius);
   border-bottom: 1px solid var(--kodo-border-subtle);
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-md);
+}
+
+.wb-app-row > svg {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  justify-self: center;
+}
+
+.wb-app-row > .btn {
+  grid-column: 4;
+  grid-row: 1 / 3;
 }
 
 .wb-app-row:last-child {
@@ -1802,14 +1782,16 @@
 }
 
 .wb-app-name {
+  grid-column: 2;
+  grid-row: 1;
+  text-align: left;
   border: 0;
   background: transparent;
   padding: 0;
   color: var(--kodo-text);
   font-size: var(--kodo-font-md);
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  flex: none;
 }
 
 .wb-app-name:hover {
@@ -1817,17 +1799,16 @@
 }
 
 .wb-app-desc {
-  flex: 1;
+  grid-column: 2;
+  grid-row: 2;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  line-height: 1.5;
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
 }
 
-.wb-app-star {
-  flex: none;
+.wb-app-row > .wb-app-star {
+  grid-column: 3;
   color: var(--kodo-warning);
 }
 
@@ -1837,7 +1818,7 @@
   gap: 8px;
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
-  background: var(--kodo-surface);
+  background: var(--kodo-canvas);
   padding: 16px 18px;
 }
 
@@ -1860,7 +1841,7 @@
   padding: 0;
   text-align: left;
   color: var(--kodo-text);
-  font-size: var(--kodo-font-sm);
+  font-size: var(--kodo-font-md);
   font-weight: 600;
   cursor: pointer;
 }
@@ -2122,7 +2103,7 @@
 
 /* Working hours carry the only tint in the grid, per LAYOUT's density rules. */
 .cal-slot--work {
-  background: var(--kodo-surface);
+  background: color-mix(in srgb, var(--kodo-surface) 45%, var(--kodo-canvas));
 }
 
 .cal-slot--work:hover {
@@ -2142,9 +2123,10 @@
   border: 1px solid var(--kodo-accent);
   border-left-width: 3px;
   border-radius: var(--kodo-radius-sm);
-  background: var(--kodo-selected);
+  background: color-mix(in srgb, var(--kodo-accent) 9%, var(--kodo-canvas));
   color: var(--kodo-text);
-  font-size: var(--kodo-font-xs);
+  font-size: 12px;
+  line-height: 15px;
   text-align: left;
   overflow: hidden;
   cursor: pointer;
@@ -2347,24 +2329,64 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
-  padding: 4px 8px;
+  min-height: 64px;
+  padding: 10px 8px;
   color: var(--kodo-text-secondary);
 }
 
+.result-head > .icon-btn {
+  flex: none;
+  width: 28px;
+  height: 28px;
+}
+
+.result-info {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 5px;
+}
+
+.result-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .result-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--kodo-text);
   font-size: var(--kodo-font-md);
-  font-weight: 500;
+  font-weight: 600;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   cursor: pointer;
   text-align: left;
+}
+
+.result-title > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.result-title svg {
+  flex: none;
+  color: var(--kodo-text-secondary);
+  transition: transform 120ms ease;
+}
+
+.result-title[aria-expanded="true"] svg {
+  transform: rotate(90deg);
 }
 
 .result-kind,
@@ -2402,7 +2424,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 0 8px 12px 38px;
+  padding: 0 8px 16px 70px;
 }
 
 .result-body {

@@ -873,7 +873,11 @@ export function App() {
               demoState={demoState}
               selectedId={archiveSelection?.id ?? null}
               reloadToken={archiveReload}
-              onSelect={setArchiveSelection}
+              onSelect={(selection) => {
+                setArchiveSelection(selection);
+                setInspectorTab("summary");
+                setInspectorOpen(true);
+              }}
             />
           )}
           {route.name === "settings" && (

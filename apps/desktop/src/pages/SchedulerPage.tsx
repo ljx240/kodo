@@ -230,7 +230,7 @@ export function SchedulerPage({ demo }: { demo: boolean }) {
     });
 
   return (
-    <div className="page page-schedule">
+    <main className="main page-schedule">
       <header className="page-head">
         <div className="page-head-titles">
           <h1>{S.title}</h1>
@@ -249,6 +249,7 @@ export function SchedulerPage({ demo }: { demo: boolean }) {
         </div>
       </header>
 
+      <div className="app-body">
       {error && (
         <p className="page-error" role="alert">
           {error}
@@ -261,6 +262,7 @@ export function SchedulerPage({ demo }: { demo: boolean }) {
             key={value}
             type="button"
             className={`schedule-filter-pill${filter === value ? " schedule-filter-pill--active" : ""}`}
+            aria-pressed={filter === value}
             onClick={() => setFilter(value)}
             data-testid={`schedule-filter-${value}`}
           >
@@ -270,7 +272,10 @@ export function SchedulerPage({ demo }: { demo: boolean }) {
       </div>
 
       {filtered.length === 0 ? (
-        <p className="page-empty">{S.list.empty}</p>
+        <div className="page-empty" role="status">
+          <Clock size={24} strokeWidth={1.5} aria-hidden="true" />
+          <p>{S.list.empty}</p>
+        </div>
       ) : (
         <ul className="schedule-list">
           {filtered.map((task) => {
@@ -422,6 +427,7 @@ export function SchedulerPage({ demo }: { demo: boolean }) {
           </ul>
         </section>
       )}
-    </div>
+      </div>
+    </main>
   );
 }

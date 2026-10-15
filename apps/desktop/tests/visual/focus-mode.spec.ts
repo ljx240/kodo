@@ -169,11 +169,11 @@ test("below 1200px focus mode yields to the overlay and returns on widening", as
   await page.locator('[data-testid="inspector-resizer"]').dblclick();
   await page.setViewportSize({ width: 1100, height: 992 });
   await expect(page.locator('[data-testid="inspector-resizer"]')).toHaveCount(0);
-  await expect(focusModeActive(page)).resolves.toBe(0);
+  await expect(page.locator(".app.app--focus-mode")).toHaveCount(0);
   await expect(page.locator(".main")).toBeVisible();
 
   await page.setViewportSize({ width: 1586, height: 992 });
-  await expect(focusModeActive(page)).resolves.toBe(1);
+  await expect(page.locator(".app.app--focus-mode")).toHaveCount(1);
   await expect(page.locator(".main")).toBeHidden();
 });
 

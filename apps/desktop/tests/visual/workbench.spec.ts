@@ -357,7 +357,7 @@ test("a card's foot is its sub-item progress, and only when it has sub-items", a
   await expect(noKids.locator(".todo-progress")).toHaveCount(0);
 });
 
-test("a column ends in a drop zone, and a 已完成 one in 太棒了", async ({ page }) => {
+test("only empty columns show a drop zone or the 已完成 celebration", async ({ page }) => {
   await openTodo(page, {
     todos: [
       todo({ id: "t-todo", title: "还在待处理", status: "todo" }),
@@ -365,17 +365,21 @@ test("a column ends in a drop zone, and a 已完成 one in 太棒了", async ({ 
     ],
   });
 
-  // A column that cannot complete anything invites a drop…
-  const drop = page.getByTestId("todo-drop-todo");
+  // Empty open columns invite a drop; populated columns keep the card area clear.
+  await expect(page.getByTestId("todo-drop-todo")).toHaveCount(0);
+  await expect(page.getByTestId("todo-empty-todo")).toHaveCount(0);
+  const drop = page.getByTestId("todo-drop-doing");
   await expect(drop).toContainText("拖拽事项到此");
   await expect(drop).toContainText("或点击上方按钮添加");
-  await expect(page.getByTestId("todo-empty-todo")).toHaveCount(0);
   // …and clicking it opens the same draft the column head's ＋ does.
   await drop.click();
-  await expect(page.getByRole("textbox", { name: "在「待处理」中新建" })).toBeFocused();
+  await expect(page.getByRole("textbox", { name: "在「进行中」中新建" })).toBeFocused();
 
-  // The one that means "done" celebrates instead — even with a card in it.
+  // A populated completed column must not claim that it is empty.
   await expect(page.getByTestId("todo-column-done").locator(".todo-card")).toHaveCount(1);
+  await expect(page.getByTestId("todo-empty-done")).toHaveCount(0);
+  await page.getByTestId("todo-status-t-done").selectOption("todo");
+  await expect(page.getByTestId("todo-column-done").locator(".todo-card")).toHaveCount(0);
   await expect(page.getByTestId("todo-empty-done")).toContainText("太棒了！");
   await expect(page.getByTestId("todo-empty-done")).toContainText("该状态下没有更多事项了");
   await expect(page.getByTestId("todo-drop-done")).toHaveCount(0);

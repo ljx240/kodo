@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { DEMO_TODOS } from "../../src/data/workbench";
 import { project, stubShell } from "./shell";
 
 const projectPath = "/tmp/ws/alpha";
@@ -15,6 +16,184 @@ const provider = {
   model: "demo-flash",
   models,
 };
+
+test("scheduled task details fit narrow windows and lifecycle actions remain available", async ({ page }, testInfo) => {
+  await stubShell(page);
+  await page.addInitScript(() => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
+      __scheduleLog: string[];
+    };
+    const invoke = host.__TAURI_INTERNALS__.invoke.bind(host.__TAURI_INTERNALS__);
+    const task = {
+      id: "schedule-check", title: "每日工作区状态检查", state: "enabled", archived: false,
+      task: { kind: "agent", project: `/tmp/workspaces/${"long-project-name/".repeat(7)}`, message: "检查本地状态" },
+      schedule: { kind: "daily", hour: 9, minute: 0, tzName: "Asia/Shanghai" },
+      nextFireAt: 1_760_576_400,
+    };
+    host.__scheduleLog = [];
+    host.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
+      switch (command) {
+        case "list_scheduled_tasks": return task.archived ? [] : [{ ...task }];
+        case "list_job_types": return ["workspace-check"];
+        case "list_task_runs": return [{
+          id: "run-check", lifecycle: "running", outcome: null,
+          scheduledFor: 1_760_576_400, startedAt: 1_760_576_401, finishedAt: null, reasonCode: null,
+        }];
+        case "set_scheduled_task_enabled":
+          task.state = args.enabled ? "enabled" : "paused";
+          return { ...task };
+        case "archive_scheduled_task": task.archived = true; return;
+        case "run_scheduled_task_now": host.__scheduleLog.push(command); return {};
+        case "cancel_task_run": host.__scheduleLog.push(command); return true;
+        default: return invoke(command, args);
+      }
+    };
+  });
+  await page.goto("/schedule");
+  const task = page.getByTestId("schedule-row-schedule-check");
+  await expect(task).toContainText("每日工作区状态检查");
+  await task.getByRole("button", { name: "运行历史", exact: true }).click();
+  await expect(task.locator(".schedule-runs")).toContainText("run-check");
+  for (const theme of ["light", "dark"]) {
+    await page.locator(".sidebar-foot").getByRole("button", { name: "设置", exact: true }).click();
+    await page.locator(".settings-modal .settings-nav").getByRole("button", { name: "外观", exact: true }).click();
+    await page.locator(".settings-modal").getByLabel("主题", { exact: true }).selectOption(theme);
+    await page.locator('.settings-modal .icon-btn[aria-label="关闭设置"]').click();
+    const contrast = await task.evaluate((row) => {
+      const luminance = (color: string) => {
+        const channels = color.match(/[\d.]+/g)!.slice(0, 3).map(Number).map((value) => {
+          const channel = value / 255;
+          return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+        });
+        return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+      };
+      const foreground = luminance(getComputedStyle(row.querySelector(".schedule-row-title")!).color);
+      const background = luminance(getComputedStyle(row).backgroundColor);
+      return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+    });
+    expect(contrast, `${theme} task title contrast`).toBeGreaterThanOrEqual(4.5);
+    for (const width of [900, 1586]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.screenshot({ path: testInfo.outputPath(`schedule-${theme}-${width}.png`) });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      const overflow = await task.evaluate((row) => {
+        const boundary = row.getBoundingClientRect();
+        return Array.from(row.querySelectorAll(".schedule-row-main button, .schedule-row-main .schedule-pill"))
+          .some((item) => item.getBoundingClientRect().right > boundary.right + 1);
+      });
+      expect(overflow, `${theme} schedule controls at ${width}px`).toBe(false);
+    }
+  }
+  await task.getByRole("button", { name: "立即执行", exact: true }).click();
+  await task.getByRole("button", { name: "取消", exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { __scheduleLog: string[] }).__scheduleLog))
+    .toEqual(["run_scheduled_task_now", "cancel_task_run"]);
+  await task.getByRole("button", { name: "暂停", exact: true }).click();
+  await page.getByTestId("schedule-filter-enabled").click();
+  await expect(task).toHaveCount(0);
+  await page.getByTestId("schedule-filter-paused").click();
+  await expect(task.getByRole("button", { name: "恢复", exact: true })).toBeEnabled();
+  await task.getByRole("button", { name: "归档", exact: true }).click();
+  await expect(task).toHaveCount(0);
+  await expect(page.getByRole("status")).toBeVisible();
+});
+
+test("todo controls stay inside narrow cards and summary labels stay on one line", async ({ page }) => {
+  await page.goto("/ui-demo/workbench?app=todo");
+  await expect(page.locator(".todo-card").first()).toBeVisible();
+  for (const width of [900, 1280, 1586]) {
+    await page.setViewportSize({ width, height: 900 });
+    const overflow = await page.locator(".todo-card").evaluateAll((cards) =>
+      cards.flatMap((card) => {
+        const boundary = card.getBoundingClientRect();
+        return Array.from(card.querySelectorAll(".todo-card-foot select, .todo-card-foot button"))
+          .filter((control) => {
+            const box = control.getBoundingClientRect();
+            return box.left < boundary.left || box.right > boundary.right + 1 || box.bottom > boundary.bottom + 1;
+          })
+          .map((control) => control.className);
+      }),
+    );
+    expect(overflow, `card controls at ${width}px`).toEqual([]);
+    const stats = await page.locator(".todo-stat").evaluateAll((items) =>
+      items.map((item) => item.getBoundingClientRect().height - Number.parseFloat(getComputedStyle(item).lineHeight)),
+    );
+    expect(stats.every((extraHeight) => extraHeight < 1)).toBe(true);
+  }
+});
+
+test("related items beyond the twelfth are selectable, cancelable, and saved for new todos", async ({ page }) => {
+  const todos = Array.from({ length: 14 }, (_, index) => ({
+    ...DEMO_TODOS[0],
+    id: `related-${index}`,
+    title: `关联事项 ${index + 1}`,
+    parentId: null,
+    archived: false,
+    linkIds: [],
+  }));
+  await stubShell(page, { todos });
+  await page.goto("/workbench?app=todo");
+  await page.getByTestId("todo-edit-related-0").click();
+  const editor = page.getByRole("dialog");
+  const add = editor.getByRole("button", { name: "添加关联", exact: true });
+  await expect(add).toBeEnabled();
+  await expect(editor.getByRole("menu")).toHaveCount(0);
+  await expect(editor.getByRole("button", { name: "上传附件", exact: true })).toBeVisible();
+  await expect(editor.getByRole("button", { name: "添加提醒", exact: true })).toBeVisible();
+  await add.click();
+  await editor.getByTestId("todo-related-option-related-13").click();
+  await expect(editor.getByRole("menu")).toHaveCount(0);
+  await expect(editor.getByTestId("todo-related-related-13")).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as {
+    __wbLog: Array<{ command: string }>;
+  }).__wbLog.filter((entry) => entry.command === "set_todo_links"))).toEqual([]);
+  await editor.getByRole("button", { name: "取消", exact: true }).click();
+
+  await page.getByTestId("todo-edit-related-0").click();
+  await expect(editor.getByTestId("todo-related-related-13")).toHaveCount(0);
+  await add.click();
+  await editor.getByRole("menuitem").first().press("Escape");
+  await expect(editor).toBeVisible();
+  await expect(add).toHaveAttribute("aria-expanded", "false");
+  await add.click();
+  await editor.getByTestId("todo-related-option-related-13").click();
+  await editor.getByRole("button", { name: "保存并关闭", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await page.getByTestId("todo-edit-related-13").click();
+  await expect(editor.getByTestId("todo-related-related-0")).toBeVisible();
+  await editor.getByRole("button", { name: "取消", exact: true }).click();
+  await page.getByTestId("todo-edit-related-0").click();
+  await expect(editor.getByTestId("todo-related-related-13")).toBeVisible();
+  await editor.getByRole("button", { name: "取消", exact: true }).click();
+
+  await page.evaluate(() => {
+    const tauri = (window as unknown as { __TAURI_INTERNALS__: {
+      invoke: (command: string, args?: unknown) => Promise<unknown>;
+    } }).__TAURI_INTERNALS__;
+    const invoke = tauri.invoke.bind(tauri);
+    let failLinks = true;
+    tauri.invoke = (command, args) => {
+      if (command === "set_todo_links" && failLinks) {
+        failLinks = false;
+        return Promise.reject("storage_unavailable");
+      }
+      return invoke(command, args);
+    };
+  });
+  await page.getByRole("button", { name: "新建事项", exact: true }).click();
+  await page.getByTestId("todo-edit-title").fill("保留新建关联");
+  await add.click();
+  await editor.getByTestId("todo-related-option-related-13").click();
+  await editor.getByRole("button", { name: "保存并关闭", exact: true }).click();
+  await expect(editor.getByRole("alert")).toHaveText("存储不可用，请稍后重试。");
+  await editor.getByRole("button", { name: "保存并关闭", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const created = page.locator(".todo-card").filter({ hasText: "保留新建关联" });
+  await expect(created).toHaveCount(1);
+  await created.getByRole("button", { name: "编辑", exact: true }).click();
+  await expect(editor.getByTestId("todo-related-related-13")).toBeVisible();
+});
 
 test("welcome stays inside the window and attaches files with the selected project", async ({ page }) => {
   await stubShell(page, {

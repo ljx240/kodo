@@ -79,10 +79,11 @@ export function TodoCard({
           and finished without opening the editor. */}
       <div className="todo-card-foot">
         <TodoProgress done={progress.done} total={progress.total} />
-        <span className="spacer" />
-        <TodoStatusSelect todo={todo} catalogs={catalogs} onApply={onApply} />
-        <TodoCompleteButton todo={todo} catalogs={catalogs} onApply={onApply} />
-        <TodoEditButton todo={todo} onEdit={onEdit} />
+        <div className="todo-card-actions">
+          <TodoStatusSelect todo={todo} catalogs={catalogs} onApply={onApply} />
+          <TodoCompleteButton todo={todo} catalogs={catalogs} onApply={onApply} />
+          <TodoEditButton todo={todo} onEdit={onEdit} />
+        </div>
       </div>
     </article>
   );

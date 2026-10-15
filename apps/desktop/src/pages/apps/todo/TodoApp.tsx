@@ -378,16 +378,17 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
         setEditor((current) => (current ? { ...current, error: W.titleRequired } : current));
         return;
       }
+      let storedId = draft.id;
       const showFail = (failure: unknown): void => {
         const code = workbenchErrorText(failure);
-        setEditor((current) => (current ? { ...current, error: code } : current));
+        setEditor((current) => (current?.draft.id === storedId ? { ...current, error: code } : current));
         // Re-read so a retry saves against the version that actually won.
         void reload()
           .then((fresh) => {
-            const stored = fresh.find((row) => row.id === draft.id);
+            const stored = fresh.find((row) => row.id === storedId);
             if (!stored) return;
             setEditor((current) =>
-              current
+              current?.draft.id === storedId
                 ? { ...current, draft: { ...current.draft, version: stored.version } }
                 : current,
             );
@@ -395,10 +396,7 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
           .catch(() => {});
       };
 
-      // An id-less draft is a new row: it goes through the same create the
-      // column's quick-add uses, then closes.
-      if (draft.id === "") {
-        void createTodo({
+      void Promise.resolve().then(() => draft.id === "" ? createTodo({
           title: trimmed,
           status: draft.status,
           parentId: draft.parentId,
@@ -413,21 +411,26 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
           actualHours: draft.actualHours,
           tagIds: draft.tagIds,
           requestId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+        }) : updateTodo(draft.version, { ...draft, title: trimmed }))
+        .then(async (stored) => {
+          storedId = stored.id;
+          if (draft.id === "") setTodos((current) => [...(current ?? []), stored]);
+          else put(stored);
+          // Keep the created id if writing links fails, so retry updates it.
+          setEditor((current) => current?.draft.id === draft.id
+            ? { ...current, draft: { ...current.draft, id: stored.id, version: stored.version } }
+            : current);
+          const changed = stored.linkIds.length !== draft.linkIds.length ||
+            draft.linkIds.some((id) => !stored.linkIds.includes(id));
+          if (!changed) return stored;
+          const linked = await setTodoLinks(stored.id, stored.version, draft.linkIds);
+          await reload();
+          return linked;
         })
-          .then((created) => {
-            setTodos((current) => [...(current ?? []), created]);
-            setError(null);
-            setEditor(null);
-          })
-          .catch(showFail);
-        return;
-      }
-
-      updateTodo(draft.version, { ...draft, title: trimmed })
         .then((next) => {
           put(next);
           setError(null);
-          setEditor(null);
+          setEditor((current) => current?.draft.id === next.id ? null : current);
         })
         .catch(showFail);
     },
@@ -738,10 +741,8 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
         : [...current.draft.linkIds, otherId];
       const draft = { ...current.draft, linkIds: next };
       setEditor((state) => (state ? { ...state, draft } : state));
-      if (current.draft.id === "") return;
-      void setTodoLinks(current.draft.id, current.draft.version, next).catch(fail);
     },
-    [fail],
+    [],
   );
 
   return (
