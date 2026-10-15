@@ -846,10 +846,10 @@ function DefaultModelSelect({
 function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m: string) => void }) {
   return (
     <>
-      <Field label={T.page.settings.rows.fallback} hint={T.page.settings.rows.fallbackHint} hintBelow wide>
+      <Field label={T.page.settings.rows.fallback} hint={T.page.settings.rows.fallbackHint} wide>
         <FallbackSelect />
       </Field>
-      <Field label={T.page.settings.rows.defaultModel} hint={T.page.settings.models.defaultModelHint} hintBelow wide>
+      <Field label={T.page.settings.rows.defaultModel} hint={T.page.settings.models.defaultModelHint} wide>
         <DefaultModelSelect model={model} onSelectModel={onSelectModel} />
       </Field>
       <SwitchRow
@@ -864,10 +864,10 @@ function ModelsBody({ model, onSelectModel }: { model: string; onSelectModel: (m
         trailing
         settingKey="local-detailed-traces"
       />
-      <Field label={T.page.settings.rows.maxOutputTokens} hint={T.page.settings.rows.maxTokensHint} hintBelow wide>
+      <Field label={T.page.settings.rows.maxOutputTokens} hint={T.page.settings.rows.maxTokensHint} wide>
         <MaxTokens />
       </Field>
-      <Field label={T.page.settings.rows.contextWindow} hint={T.page.settings.rows.contextWindowHint} hintBelow wide>
+      <Field label={T.page.settings.rows.contextWindow} hint={T.page.settings.rows.contextWindowHint} wide>
         <ContextWindow />
       </Field>
     </>
@@ -1018,10 +1018,10 @@ function MemoryBody() {
 function GeneralBody({ model, onSelectModel }: { model: string; onSelectModel: (m: string) => void }) {
   return (
     <>
-      <Field label={T.page.settings.rows.defaultModel} hint={T.page.settings.models.defaultModelHint} hintBelow wide>
+      <Field label={T.page.settings.rows.defaultModel} hint={T.page.settings.models.defaultModelHint} wide>
         <DefaultModelSelect model={model} onSelectModel={onSelectModel} />
       </Field>
-      <Field label={T.page.settings.rows.fallback} hint={T.page.settings.rows.fallbackHint} hintBelow wide>
+      <Field label={T.page.settings.rows.fallback} hint={T.page.settings.rows.fallbackHint} wide>
         <FallbackSelect />
       </Field>
     </>

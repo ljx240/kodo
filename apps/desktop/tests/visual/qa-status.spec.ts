@@ -326,10 +326,12 @@ test("consecutive thinking steps fold into one row with a sub-step count", async
 test("Inspector nav: panel tabs and rail never share a name", async ({ page }) => {
   await page.goto("/ui-demo/conversation");
   await page.waitForLoadState("networkidle");
+  await expect(page.locator(".ins-tab")).toHaveCount(0);
+  await page.getByTestId("rail-summary").click();
 
   // 文件 and 浏览 are panel chips now, so the rail section 文件 used to label
   // is 改动 — a panel and a rail section never share a name.
-  await expect(page.locator(".ins-tab")).toHaveText(["Inspector", "终端", "文件", "浏览"]);
+  await expect(page.locator(".ins-tab")).toHaveText(["Inspector", "终端", "文件", "浏览", "Memory"]);
   await expect(page.locator(".rail-btn")).toHaveCount(4);
   await expect(page.locator('[data-testid="rail-summary"]')).toHaveAttribute("aria-label", "概览");
   await expect(page.locator('[data-testid="rail-files"]')).toHaveAttribute("aria-label", "改动");

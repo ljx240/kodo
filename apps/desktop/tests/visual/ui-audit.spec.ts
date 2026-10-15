@@ -67,6 +67,7 @@ test("appearance changes reach the shell immediately and survive category change
 test("archive selection supports keyboard, Chinese details and honest empty results", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto("/ui-demo/archive");
+  await expect(page.locator(".ins-panel")).toHaveCount(0);
   const first = page.locator(".archive-table .arc-title").first();
   const name = await first.innerText();
   await first.press("Enter");
@@ -100,8 +101,9 @@ test("all page families render in both themes without page errors", async ({ pag
   // and share the same tokens as the rest.
   const routes = [
     "conversation", "plugins", "plugins?type=agents", "plugins?type=mcp",
-    "archive", "trace", "settings",
+    "archive", "trace", "settings", "schedule",
     "workbench", "workbench?app=todo", "workbench?app=calendar", "workbench?app=artifacts",
+    "workbench?app=knowledge",
   ];
   for (const theme of ["light", "dark"]) {
     for (const [index, route] of routes.entries()) {
@@ -124,6 +126,7 @@ test("terminal preserves repeated commands without duplicate-key errors", async 
     if (message.type() === "error") errors.push(message.text());
   });
   await page.goto("/ui-demo/conversation");
+  await page.getByTestId("rail-summary").click();
   await page.getByRole("tab", { name: "终端", exact: true }).click();
   await expect(page.locator(".terminal-run .terminal-cmd")).toHaveText(["Run command", "Run command"]);
   const outputs = await page.locator(".terminal-run .terminal-block").allTextContents();

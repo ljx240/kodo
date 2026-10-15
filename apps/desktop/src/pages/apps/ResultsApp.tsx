@@ -15,6 +15,7 @@
 
 import {
   Archive,
+  ChevronRight,
   Copy,
   ExternalLink,
   FileText,
@@ -273,7 +274,7 @@ export function ResultsApp({ manifest, onBack }: Props) {
     const artifact = row.artifact;
     const status = statusLabel(row.fileStatus);
     return (
-      <div className="result-detail" data-testid={`result-detail-${artifact.id}`}>
+      <div className="result-detail" id={`result-detail-${artifact.id}`} data-testid={`result-detail-${artifact.id}`}>
         {artifact.kind === "text" ? (
           <>
             <pre className="result-body">{artifact.body}</pre>
@@ -435,29 +436,36 @@ export function ResultsApp({ manifest, onBack }: Props) {
                     <Star size={14} strokeWidth={1.8} />
                   </button>
                   <FileText size={14} strokeWidth={1.8} />
-                  <button
-                    type="button"
-                    className="result-title"
-                    data-testid={`result-toggle-${artifact.id}`}
-                    onClick={() => setOpenId(expanded ? null : artifact.id)}
-                  >
-                    {artifact.title}
-                  </button>
-                  <span className={`result-kind result-kind--${artifact.kind}`}>
-                    {artifact.kind === "text" ? W.kinds.text : W.kinds.file}
-                  </span>
-                  {artifact.category && (
-                    <span className="result-category">{artifact.category}</span>
-                  )}
-                  {artifact.kind === "file" && statusLabel(row.fileStatus) && (
-                    <span
-                      className={`result-status result-status--${row.fileStatus}`}
-                      data-testid={`result-status-${artifact.id}`}
+                  <div className="result-info">
+                    <button
+                      type="button"
+                      className="result-title"
+                      title={artifact.title}
+                      aria-expanded={expanded}
+                      aria-controls={expanded ? `result-detail-${artifact.id}` : undefined}
+                      data-testid={`result-toggle-${artifact.id}`}
+                      onClick={() => setOpenId(expanded ? null : artifact.id)}
                     >
-                      {statusLabel(row.fileStatus)}
-                    </span>
-                  )}
-                  <span className="spacer" />
+                      <ChevronRight size={13} strokeWidth={1.8} aria-hidden="true" />
+                      <span>{artifact.title}</span>
+                    </button>
+                    <div className="result-meta">
+                      <span className={`result-kind result-kind--${artifact.kind}`}>
+                        {artifact.kind === "text" ? W.kinds.text : W.kinds.file}
+                      </span>
+                      {artifact.category && (
+                        <span className="result-category">{artifact.category}</span>
+                      )}
+                      {artifact.kind === "file" && statusLabel(row.fileStatus) && (
+                        <span
+                          className={`result-status result-status--${row.fileStatus}`}
+                          data-testid={`result-status-${artifact.id}`}
+                        >
+                          {statusLabel(row.fileStatus)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                   <button
                     type="button"
                     className="icon-btn icon-btn--sm"

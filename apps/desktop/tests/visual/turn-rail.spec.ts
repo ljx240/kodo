@@ -141,8 +141,9 @@ test("clicking a tick jumps to that turn and releases stick-to-bottom", async ({
 
   // A progress event re-runs the follow effect — with follow released (the
   // 48px threshold in onScroll did it on the jump) it must not yank the view.
-  await emit(page, { type: "progress", session: "s1", phase: "搜索", detail: "扫描路由" });
-  await expect(page.locator(".reply-working")).toContainText("扫描路由");
+  await emit(page, { type: "progress", session: "s1", phase: "analyze", detail: "扫描路由" });
+  await expect(page.locator(".reply-working")).toContainText("分析任务");
+  await expect(page.locator(".reply-working")).not.toContainText("扫描路由");
   await page.waitForTimeout(100);
   expect(await scrollTop(page)).toBe(atTop);
 });

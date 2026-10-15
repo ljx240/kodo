@@ -776,9 +776,19 @@ p {
   color: var(--kodo-text-secondary);
 }
 
-.page-head-text h1 {
+.page-head-text h1,
+.page-head-titles h1 {
   font-size: var(--kodo-font-title);
   font-weight: 600;
+}
+
+.page-head-titles { flex: 1; min-width: 0; }
+.page-head-actions { display: flex; align-items: center; flex: none; gap: 8px; }
+.page-subtitle {
+  margin-top: 2px;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
 }
 
 .page-head-text { flex: 1; min-width: 0; }
@@ -1697,7 +1707,7 @@ button.code-chip--link:focus-visible {
   }
 
   .page-head {
-    padding: 0 16px;
+    padding: 12px 16px;
     gap: 10px;
   }
 

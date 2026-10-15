@@ -525,9 +525,18 @@
 .todo-app .todo-card-foot {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   min-height: 24px;
   margin-top: 2px;
+}
+
+.todo-app .todo-card-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 6px;
+  margin-left: auto;
 }
 
 /* ── quiet icon buttons (card foot, column head) ────────────────────────── */
@@ -1005,6 +1014,7 @@
   z-index: 2;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   margin: auto -28px 0;
   padding: 12px 28px;
@@ -1015,10 +1025,13 @@
 }
 
 .todo-app .todo-stat {
+  flex: none;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .todo-app .todo-stat-sep {
+  flex: none;
   width: 1px;
   height: 12px;
   background: var(--kodo-border-strong);
@@ -1029,6 +1042,7 @@
   align-items: center;
   gap: 6px;
   color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
 }
 
 /* ── editor ─────────────────────────────────────────────────────────────── */
@@ -1287,46 +1301,18 @@
   border-color: var(--kodo-text-secondary);
 }
 
-.todo-app .todo-related-pick {
-  position: relative;
+.todo-app .todo-related-pick .menu {
+  width: 100%;
+  max-height: 240px;
+  overflow-y: auto;
 }
 
-.todo-app .todo-related-menu {
-  position: absolute;
-  z-index: 5;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  max-height: 200px;
-  overflow: auto;
-  background: var(--kodo-canvas);
-  border: 1px solid var(--kodo-border-strong);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px rgb(23 32 51 / 12%);
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.todo-app .todo-related-option {
-  text-align: left;
-  border: 0;
-  background: transparent;
+.todo-app .todo-related-pick .menu-item {
+  height: auto;
+  min-height: 32px;
   padding: 6px 10px;
-  border-radius: 6px;
-  font-size: var(--kodo-font-sm);
-  color: var(--kodo-text);
-  cursor: pointer;
-}
-
-.todo-app .todo-related-option:hover {
-  background: var(--kodo-surface);
-}
-
-.todo-app .todo-related-option--on {
-  color: var(--kodo-accent);
-  font-weight: 600;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* The ghost follows the pointer above everything and must never swallow the
@@ -1346,6 +1332,12 @@
 
 /* ── responsive ─────────────────────────────────────────────────────────── */
 
+@media (max-width: 1199px) {
+  .todo-app .todo-stats-hint {
+    display: none;
+  }
+}
+
 /* Below the reference width the board stacks rather than scrolling sideways:
    a column is a list of cards, and a 244px one is unreadable. */
 @media (max-width: 820px) {
@@ -1353,10 +1345,6 @@
     grid-auto-flow: row;
     grid-auto-columns: auto;
     overflow-x: visible;
-  }
-
-  .todo-app .todo-stats-hint {
-    display: none;
   }
 
   /* The editor collapses to one column, with the rail underneath. The body
@@ -1371,6 +1359,8 @@
 
 .todo-app .todo-status-modal {
   width: min(720px, 100%);
+  height: auto;
+  max-height: min(720px, 100%);
 }
 
 .todo-app .todo-status-body {
