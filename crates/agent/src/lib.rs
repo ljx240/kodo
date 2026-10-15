@@ -3507,7 +3507,7 @@ pub fn run(
     let mut last_verify_plan: Option<VerificationPlan> = None;
     let mut partial_verify = false;
     let mut stop_gathering = false;
-    let mut retried_output = false;
+    let mut output_retries = 0;
     let mut truncated_output = false;
     let mut partial_output = false;
     let mut pending_question = false;
@@ -4083,10 +4083,7 @@ pub fn run(
             } else {
                 schemas.as_slice()
             };
-            // Reset the one-shot flag so a single final-only retry stays
-            // single: if the recovery answer is itself empty, the counter
-            // (`final_only_retries`) blocks another attempt and the loop
-            // exits through the no_answer branch.
+            // Each bounded recovery must explicitly request another prose-only call.
             final_only_requested = false;
             match call_model(&provider, &history, call_schemas, request, alive, emit) {
                 Ok(Some(attempt)) => {
@@ -4156,31 +4153,54 @@ pub fn run(
                         break;
                     }
 
-                    if output_was_truncated(&attempt_finish) {
+                    let mut partial = String::new();
+                    if (output_was_truncated(&attempt_finish) || partial_output)
+                        && native_calls.is_empty()
+                        && !text.contains("\"tool_calls\"")
+                    {
+                        if let ModelTurn::Final { text } = parse_model_turn(&text, &registry) {
+                            append_output_fragment(&mut partial, &text);
+                        }
+                    }
+                    if output_was_truncated(&attempt_finish)
+                        || (partial_output && partial.trim().is_empty())
+                    {
                         truncated_output = true;
-                        machine.budget_mut().rounds_used += 1;
-                        let partial = if native_calls.is_empty()
-                            && !text.contains("\"tool_calls\"")
-                            && matches!(parse_model_turn(&text, &registry), ModelTurn::Final { .. })
-                        {
-                            strip_tool_artifacts(&text)
-                        } else {
-                            String::new()
-                        };
+                        machine.budget_mut().rounds_used =
+                            machine.budget().rounds_used.saturating_add(1);
                         if !partial.trim().is_empty() {
-                            answer = format!("{partial}\n\n> 输出达到上限，以上为不完整内容；截断的工具调用未执行。");
+                            if !partial_output {
+                                answer.clear();
+                            }
+                            append_output_fragment(&mut answer, &partial);
                             partial_output = true;
                         }
                         // Do not execute any calls from a truncated generation,
                         // including a complete call before a cut-off batch tail.
-                        if !retried_output && !machine.budget().rounds_exhausted() {
-                            retried_output = true;
-                            history.push(ProviderMessage::user(
-                                "The last generation hit the configured output limit. None of its tool calls were executed. Retry once without long reasoning or repetition, within the same output limit. Return a concise answer or one complete tool call; write long documents in small patches. Use the preceding conversation for a file-export follow-up, and respect repository instructions.".to_owned(),
-                            ));
+                        if output_retries < MAX_OUTPUT_RECOVERY_RETRIES
+                            && !machine.budget().rounds_exhausted()
+                        {
+                            output_retries += 1;
+                            let instruction = if partial_output {
+                                history
+                                    .push(ProviderMessage::assistant(answer.clone(), Vec::new()));
+                                final_only_requested = true;
+                                "The preceding assistant message is the incomplete public answer already generated. Continue exactly from its cutoff, preserving word and paragraph boundaries, without repeating it. Finish the remaining answer concisely. Return prose only; do not call tools or output tool-call JSON."
+                            } else if final_only_call {
+                                final_only_requested = true;
+                                "Return a complete concise final answer using the available observations. Do not call tools or output tool-call JSON."
+                            } else {
+                                "Retry with at most one small complete tool call, or a concise answer. Split long file contents into small create_file/edit_file calls; do not repeat a large batch. Use the preceding conversation for a file-export follow-up."
+                            };
+                            history.push(ProviderMessage::user(format!(
+                                "The last generation hit the configured output limit or failed to complete its continuation. None of its tool calls were executed. {instruction} Avoid long reasoning and repetition; stay within the same {} token output limit. Respect repository instructions and permissions.",
+                                provider::effective_max_tokens(request.max_output_tokens),
+                            )));
                             if !simple_step(
                                 Step::Reasoning {
-                                    summary: "模型输出被截断，正在尝试一次恢复".to_owned(),
+                                    summary: format!(
+                                        "模型输出未完整生成，正在恢复（{output_retries}/{MAX_OUTPUT_RECOVERY_RETRIES}）"
+                                    ),
                                     phase: "summarize",
                                     diagnostics: None,
                                 },
@@ -4193,20 +4213,21 @@ pub fn run(
                         }
                         model_gap = Some(format!(
                             "{}；截断的工具调用未执行{}",
-                            empty_answer_detail(&attempt_finish, attempt_saw_reasoning),
-                            if retried_output {
-                                "，已尝试一次恢复"
+                            if partial_output {
+                                "输出达到单次上限，自动续写仍未完成"
                             } else {
-                                "，本轮剩余预算不足以恢复"
+                                empty_answer_detail(&attempt_finish, attempt_saw_reasoning)
+                            },
+                            if output_retries > 0 {
+                                format!("，已尝试 {output_retries} 次恢复")
+                            } else {
+                                "，本轮剩余预算不足以恢复".to_owned()
                             }
                         ));
                         break;
                     }
                     truncated_output = false;
-                    if partial_output {
-                        answer.clear();
-                        partial_output = false;
-                    }
+                    output_retries = 0;
 
                     if machine.state() == &AgentState::Plan && !conversational {
                         if let Some(plan) = TaskPlan::parse_model_json(&text) {
@@ -4368,8 +4389,14 @@ pub fn run(
                     }
 
                     if calls.is_empty() {
-                        answer = strip_tool_artifacts(&assistant_text);
-                        checks = checks_from(&assistant_text);
+                        if partial_output {
+                            append_output_fragment(&mut answer, &assistant_text);
+                            answer = strip_tool_artifacts(&answer);
+                            partial_output = false;
+                        } else {
+                            answer = strip_tool_artifacts(&assistant_text);
+                        }
+                        checks = checks_from(&answer);
                         let report_errors = machine.plan().validate_final_answer(&answer);
                         if let Some(evidence) = machine.evidence_mut() {
                             evidence.final_answer_errors = Some(report_errors.clone());
@@ -4417,7 +4444,7 @@ pub fn run(
                             // the trigger — the gate is the broader
                             // "needs final report AND no usable text AND
                             // budget allows AND retries not exhausted". Output
-                            // truncation keeps the original one-shot path so
+                            // truncation uses its own bounded recovery so
                             // we don't suggest "extend output" when the
                             // signal is "truncated".
                             let burned_reasoning_only = !output_was_truncated(&attempt_finish);
@@ -4703,6 +4730,13 @@ pub fn run(
             }
         }
 
+        if truncated_output && partial_output {
+            answer = format!(
+                "{}\n\n> 输出达到单次上限，自动恢复后仍未完成；已保留生成内容，截断的工具调用未执行。",
+                answer.trim(),
+            );
+        }
+
         // A failed or cancelled run never ships interim prose: that text was a
         // claim the acceptance gate refused (or a draft the user stopped), so
         // the reply is the record itself. Only a genuinely empty answer hit
@@ -4953,8 +4987,8 @@ pub fn run(
         // Each distinct failure now carries its own tag, ordered most specific
         // first.
         let failure_reason: &str = if truncated_output
-            && output_was_truncated(&last_attempt_finish)
-            && delivery == "failed"
+            && (output_was_truncated(&last_attempt_finish) || partial_output)
+            && matches!(delivery, "failed" | "partial")
         {
             "output_truncated"
         } else if last_state_rejection.is_some()
@@ -5490,8 +5524,26 @@ fn empty_answer_detail(finish_reason: &str, saw_reasoning: bool) -> &'static str
 /// answer also arrived empty. Anything beyond two is a no-answer failure.
 const MAX_FINAL_ONLY_RETRIES: u32 = 2;
 
+// Successful tool progress resets this streak; the task round budget still applies.
+const MAX_OUTPUT_RECOVERY_RETRIES: u32 = 2;
+
 fn output_was_truncated(finish_reason: &str) -> bool {
     matches!(finish_reason, "length" | "max_tokens")
+}
+
+fn append_output_fragment(answer: &mut String, fragment: &str) {
+    let (visible, _) = protocol::strip_think_blocks(fragment);
+    let clean = strip_tool_artifacts(&visible);
+    // Preserve whitespace at a cutoff so words and Markdown blocks stay intact.
+    let fragment = if clean == visible.trim() {
+        visible
+    } else {
+        clean
+    };
+    if !answer.is_empty() && fragment.starts_with(answer.as_str()) {
+        answer.clear();
+    }
+    answer.push_str(&fragment);
 }
 
 fn offline_answer(message: &str, notes: &[String], reason: OfflineReason<'_>) -> String {
@@ -9867,7 +9919,7 @@ mod tests {
     }
 
     #[test]
-    fn output_truncation_recovers_once_and_never_dispatches_cut_off_tools() {
+    fn output_truncation_recovery_is_bounded_and_never_dispatches_cut_off_tools() {
         let tool = serde_json::json!({"tool_calls": [{"id":"cut", "name":"create_file", "arguments":{"path":"must-not-write.md", "content":"unfinished"}}]}).to_string();
         for (case, first, second, expected) in [
             ("recover", "", "架构说明已恢复。", "ready"),
@@ -9884,7 +9936,8 @@ mod tests {
             let responses = [
                 serde_json::json!({"text":first,"finish_reason":"length"}),
                 serde_json::json!({"text":second,"finish_reason": if case == "recover" {"stop"} else {"max_tokens"}}),
-                serde_json::json!({"text":"MUST_NOT_CALL_THIRD_TIME"}),
+                serde_json::json!({"text":second,"finish_reason":"length"}),
+                serde_json::json!({"text":"MUST_NOT_CALL_AGAIN"}),
             ];
             std::fs::write(
                 &script,
@@ -9925,7 +9978,7 @@ mod tests {
                 true
             };
             run(&request, &|| true, &|_, _| true, &mut emit).unwrap();
-            assert_eq!(calls, 2, "{case}");
+            assert_eq!(calls, if case == "recover" { 2 } else { 3 }, "{case}");
             assert_eq!(answers.len(), 1, "{case}");
             assert_eq!(answers[0].1, expected, "{case}: {}", answers[0].0);
             assert_eq!(answers[0].2, "not_run", "{case}");
@@ -9938,11 +9991,201 @@ mod tests {
                 assert!(answers[0].0.contains(first));
             }
             if expected == "failed" {
-                assert!(answers[0].0.contains("已尝试一次恢复"));
+                assert!(answers[0].0.contains("已尝试 2 次恢复"));
             }
             assert!(std::fs::read_to_string(&script)
                 .unwrap()
-                .contains("MUST_NOT_CALL_THIRD_TIME"));
+                .contains("MUST_NOT_CALL_AGAIN"));
+        }
+    }
+
+    #[test]
+    fn output_truncation_continues_prose_and_resets_after_tool_progress() {
+        let cut = serde_json::json!({"tool_calls":[{"id":"cut","name":"create_file","arguments":{"path":"must-not-write.md","content":"unfinished"}}]}).to_string();
+        let read = serde_json::json!({"tool_calls":[{"id":"read","name":"read_file","arguments":{"path":"README.md"}}]}).to_string();
+        for (case, responses, expected) in [
+            (
+                "prose",
+                vec![
+                    (
+                        "<think>PRIVATE_REASONING</think># 架构\n\n第一部分：hello ",
+                        "length",
+                    ),
+                    ("world。\n\n第二部分。", "max_tokens"),
+                    ("\n\n结论。", "stop"),
+                ],
+                "# 架构\n\n第一部分：hello world。\n\n第二部分。\n\n结论。",
+            ),
+            (
+                "tool-progress",
+                vec![
+                    (cut.as_str(), "length"),
+                    (cut.as_str(), "max_tokens"),
+                    (read.as_str(), "stop"),
+                    ("第一部分。", "length"),
+                    ("\n\n第二部分。", "max_tokens"),
+                    ("\n\n结论。", "stop"),
+                ],
+                "第一部分。\n\n第二部分。\n\n结论。",
+            ),
+            (
+                "complete-rewrite",
+                vec![("第一部分。", "length"), ("第一部分。\n\n结论。", "stop")],
+                "第一部分。\n\n结论。",
+            ),
+            (
+                "empty-then-prose",
+                vec![
+                    ("第一部分。", "length"),
+                    ("", "stop"),
+                    ("\n\n结论。", "stop"),
+                ],
+                "第一部分。\n\n结论。",
+            ),
+            (
+                "tools-then-prose",
+                vec![
+                    ("第一部分。", "length"),
+                    (cut.as_str(), "stop"),
+                    ("\n\n结论。", "stop"),
+                ],
+                "第一部分。\n\n结论。",
+            ),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "kodo-output-continuation-{}-{case}",
+                std::process::id()
+            ));
+            let project = root.join("repo");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("README.md"), "# Synthetic fixture\n").unwrap();
+            let script = root.join("script.jsonl");
+            let mut lines = responses
+                .iter()
+                .map(|(text, reason)| {
+                    serde_json::json!({"text":text,"finish_reason":reason}).to_string()
+                })
+                .collect::<Vec<_>>();
+            lines.push(serde_json::json!({"text":"MUST_NOT_CALL_AGAIN"}).to_string());
+            std::fs::write(&script, lines.join("\n") + "\n").unwrap();
+            let mut request = temp_request(&project, Permission::Full);
+            request.message = "为我输出该项目的总体架构设计".into();
+            request.local_trace = true;
+            request.provider = Some(Provider::new(
+                "fake",
+                "fake-key",
+                script.to_string_lossy(),
+                "fake-model",
+            ));
+            let mut requests = Vec::new();
+            let mut answers = Vec::new();
+            run(&request, &|| true, &|_, _| true, &mut |event| {
+                match event {
+                    SinkEvent::LocalTrace {
+                        kind: "llm_io",
+                        capture,
+                    } => requests.push(capture["request"].clone()),
+                    SinkEvent::Started {
+                        step:
+                            Step::AgentMessage {
+                                text,
+                                delivery,
+                                verification,
+                                ..
+                            },
+                    } => answers.push((text, delivery, verification)),
+                    _ => {}
+                }
+                true
+            })
+            .unwrap();
+            assert_eq!(requests.len(), responses.len(), "{case}");
+            assert_eq!(
+                answers,
+                vec![(expected.into(), "ready".into(), "not_run".into())],
+                "{case}"
+            );
+            assert!(!project.join("must-not-write.md").exists(), "{case}");
+            for next in requests.iter().skip(1) {
+                let history = next["messages"].to_string();
+                assert!(!history.contains("PRIVATE_REASONING"), "{case}");
+                assert!(!history.contains("must-not-write.md"), "{case}");
+            }
+            assert!(
+                requests
+                    .iter()
+                    .skip(1)
+                    .any(|next| next["messages"].to_string().contains("第一部分")),
+                "{case}: continuation must include the preceding draft"
+            );
+            assert!(std::fs::read_to_string(&script)
+                .unwrap()
+                .contains("MUST_NOT_CALL_AGAIN"));
+        }
+    }
+
+    #[test]
+    fn output_truncation_keeps_partial_when_continuation_returns_empty_or_tools() {
+        let tool = serde_json::json!({"tool_calls":[{"id":"unexpected","name":"create_file","arguments":{"path":"must-not-write.md","content":"unfinished"}}]}).to_string();
+        for (case, second) in [("empty", ""), ("tools", tool.as_str())] {
+            let root = std::env::temp_dir().join(format!(
+                "kodo-output-no-progress-{}-{case}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let script = root.join("script.jsonl");
+            let responses = [
+                serde_json::json!({"text":"已生成的正文。","finish_reason":"length"}),
+                serde_json::json!({"text":second,"finish_reason":"stop"}),
+                serde_json::json!({"text":second,"finish_reason":"stop"}),
+                serde_json::json!({"text":"MUST_NOT_CALL_AGAIN"}),
+            ];
+            std::fs::write(
+                &script,
+                responses
+                    .iter()
+                    .map(|reply| format!("{reply}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+            let mut request = temp_request(&root, Permission::Full);
+            request.message = "为我输出该项目的总体架构设计".into();
+            request.provider = Some(Provider::new(
+                "fake",
+                "fake-key",
+                script.to_string_lossy(),
+                "fake-model",
+            ));
+            let mut calls = 0;
+            let mut answers = Vec::new();
+            run(&request, &|| true, &|_, _| true, &mut |event| {
+                match event {
+                    SinkEvent::Started {
+                        step: Step::ModelCall { .. },
+                    } => calls += 1,
+                    SinkEvent::Started {
+                        step:
+                            Step::AgentMessage {
+                                text,
+                                delivery,
+                                failure_reason,
+                                ..
+                            },
+                    } => answers.push((text, delivery, failure_reason)),
+                    _ => {}
+                }
+                true
+            })
+            .unwrap();
+            assert_eq!(calls, 3, "{case}");
+            assert_eq!(answers.len(), 1, "{case}");
+            assert!(answers[0].0.contains("已生成的正文。"), "{case}");
+            assert_eq!(answers[0].1, "partial", "{case}");
+            assert_eq!(answers[0].2, "output_truncated", "{case}");
+            assert!(!root.join("must-not-write.md").exists(), "{case}");
+            assert!(std::fs::read_to_string(&script)
+                .unwrap()
+                .contains("MUST_NOT_CALL_AGAIN"));
         }
     }
 
