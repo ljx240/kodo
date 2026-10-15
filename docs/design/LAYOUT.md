@@ -64,6 +64,8 @@ Structure (labels as rendered, zh-CN from `apps/desktop/src/i18n.ts`):
 Kodo Code ˅                   ← brand dropdown = Work/Code switcher; the label
                                  names the current space (Kodo Work in Work)
 
+搜索                 ⌘K      ← opens the existing quick switcher
+
 工作台          ← app collection; an app opens inside it, never as its own row
 新建任务          ← action, never active
 插件
@@ -119,7 +121,7 @@ Click expanded project:
 - collapses it.
 
 Project row:
-- 30px target height;
+- 32px target height;
 - trailing `⋯` opens the row menu: rename, reveal in Finder, remove from list
   (two-step: first click arms the item and flips its label to `确认移除`, the
   second click commits; clicking away resets — no modal).
@@ -152,10 +154,10 @@ Reordering uses native HTML5 drag-and-drop. The drop writes the whole new order,
 not "moved item N to index M" — see `docs/设计文档.md`.
 
 Conversation row:
-- 28px target height;
+- 30px target height;
 - indented below project: thread line ≈18px from the tree's left edge, row
   padding-left 8px — tight enough that the rows hug the left like project rows;
-- selected conversation uses subtle blue background;
+- selected conversation uses a neutral gray background with readable dark text;
 - show compact timestamp/date on right where space allows.
 
 Do not introduce:

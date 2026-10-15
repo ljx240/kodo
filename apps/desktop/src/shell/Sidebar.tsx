@@ -15,6 +15,7 @@ import {
   Pencil,
   Plus,
   Puzzle,
+  Search,
   Settings,
   Sparkles,
   Timer,
@@ -53,6 +54,7 @@ type Props = {
   onSelectConversation: (id: string) => void;
   onNewTask: () => void;
   onOpenSettings: () => void;
+  onOpenPalette: () => void;
   onToggleSidebar: () => void;
   /** Creates a new conversation under the given project and selects it. */
   onStartConversation: (projectPath: string) => void;
@@ -77,6 +79,7 @@ export function Sidebar({
   onSelectConversation,
   onNewTask,
   onOpenSettings,
+  onOpenPalette,
   onToggleSidebar,
   onStartConversation,
   onRenameConversation,
@@ -426,6 +429,18 @@ export function Sidebar({
           )}
         </Menu>
       </div>
+
+      <button
+        type="button"
+        className="sidebar-search"
+        aria-label={T.palette.open}
+        aria-keyshortcuts="Meta+K Control+K"
+        onClick={onOpenPalette}
+      >
+        <Search size={16} strokeWidth={1.7} aria-hidden="true" />
+        <span>{T.nav.search}</span>
+        <kbd aria-hidden="true">⌘K</kbd>
+      </button>
 
       <nav className="nav">{NAV.map(({ name, label, Icon, action }) => navItem(name, label, Icon, action))}</nav>
 

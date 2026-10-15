@@ -727,6 +727,7 @@ export function App() {
         onSelectConversation={openConversation}
         onNewTask={() => void newChat()}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenPalette={() => setPaletteOpen(true)}
         onToggleSidebar={() => setSidebarVisible((value) => !value)}
         onStartConversation={(path) => void newChat(path)}
         onRenameConversation={async (id, title) => {

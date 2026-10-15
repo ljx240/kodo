@@ -6,6 +6,7 @@
 
 export const T = {
   nav: {
+    search: "搜索",
     workbench: "工作台",
     newTask: "新建任务",
     plugins: "插件",

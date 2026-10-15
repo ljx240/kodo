@@ -988,17 +988,17 @@ button.changed-file-path:focus-visible {
 
 .composer {
   flex: none;
-  padding: 4px 20px 8px;
+  padding: 8px 24px 16px;
   min-width: 0;
 }
 
 .composer-box {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--kodo-border-strong);
-  border-radius: var(--kodo-radius-popover);
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-lg);
   background: var(--kodo-canvas);
-  box-shadow: 0 4px 14px rgb(23 32 51 / 5%);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 3%);
   overflow: hidden;
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
@@ -1012,9 +1012,8 @@ button.changed-file-path:focus-visible {
 }
 
 .composer-box:has(.composer-input:focus) {
-  border-color: var(--kodo-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--kodo-accent) 14%, transparent),
-    0 4px 14px rgb(23 32 51 / 5%);
+  border-color: var(--kodo-focus-ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kodo-focus-ring) 12%, transparent);
 }
 
 /* Bottom controls sit below the full-width draft. */
@@ -1389,13 +1388,11 @@ button.changed-file-path:focus-visible {
   display: grid;
   place-items: center;
   border-radius: var(--kodo-radius-sm);
-  background: var(--kodo-accent);
-  color: #fff;
-  box-shadow: 0 1px 2px rgb(37 99 235 / 22%);
+  background: var(--kodo-primary);
+  color: var(--kodo-primary-ink);
   transition: background 120ms ease, transform 120ms ease;
 }
 
-[data-theme="dark"] .composer-send,
 [data-theme="dark"] .trace-mark--done,
 [data-theme="dark"] .trace-mark--interrupted,
 [data-theme="dark"] .trace-mark--stopped {
@@ -1403,7 +1400,7 @@ button.changed-file-path:focus-visible {
 }
 
 .composer-send:not(:disabled):hover {
-  background: var(--kodo-accent-hover);
+  background: var(--kodo-primary-hover);
   transform: translateY(-1px);
 }
 
@@ -1415,7 +1412,7 @@ button.changed-file-path:focus-visible {
 }
 
 .composer-send--stop {
-  background: var(--kodo-text);
+  background: var(--kodo-primary);
 }
 
 /* ── Pinned context chips (paths only) ───────────────────────────────────── */

@@ -7,6 +7,18 @@ import { project, sessionRef, stubShell } from "./shell";
  * commands alone).
  */
 
+test("sidebar search opens the palette and Escape returns focus", async ({ page }) => {
+  await page.goto("/ui-demo/workbench");
+  const search = page.getByRole("button", { name: "打开快速切换", exact: true });
+  await search.click();
+  await expect(page.getByTestId("palette-input")).toBeFocused();
+  await page.getByTestId("palette-input").fill("插件");
+  await expect(page.getByTestId("palette-item-plugins")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("command-palette")).toBeHidden();
+  await expect(search).toBeFocused();
+});
+
 test("⌘K opens the palette, filters commands, and Enter runs one", async ({ page }) => {
   await stubShell(page, {
     workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [] },

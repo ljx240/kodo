@@ -74,7 +74,7 @@ const READABLE = [
 ];
 
 /** Inverse text on solid accent controls. */
-const INVERSE = ["--kodo-accent", "--kodo-accent-hover", "--kodo-text"];
+const INVERSE = ["--kodo-accent", "--kodo-accent-hover", "--kodo-text", "--kodo-primary", "--kodo-primary-hover"];
 
 /** Decorative only — icons, chevrons, separators. Never informational body text. */
 const DECORATIVE = ["--kodo-text-muted"];
@@ -123,8 +123,9 @@ for (const [theme, tokens] of themes) {
   const fg = theme === "dark" ? tokens.get("--kodo-canvas") : "#ffffff";
   for (const bg of INVERSE) {
     const bgc = tokens.get(bg) ?? bg;
-    const ratio = contrast(fg, bgc);
-    report(ratio >= AA, `${fg} on ${bg} ${bgc}`, ratio, AA);
+    const ink = bg.startsWith("--kodo-primary") ? tokens.get("--kodo-primary-ink") : fg;
+    const ratio = contrast(ink, bgc);
+    report(ratio >= AA, `${ink} on ${bg} ${bgc}`, ratio, AA);
   }
 
   lines.push("");

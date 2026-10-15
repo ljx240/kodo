@@ -8,17 +8,17 @@ import { expect, test } from "@playwright/test";
  */
 
 const VIEWPORTS = [
-  { width: 900, height: 800, sidebar: 220, inspectorDefaultOpen: false },
-  { width: 1100, height: 800, sidebar: 220, inspectorDefaultOpen: false },
-  { width: 1440, height: 900, sidebar: 260, inspectorDefaultOpen: true },
-  { width: 1586, height: 992, sidebar: 260, inspectorDefaultOpen: true },
-  { width: 1920, height: 1080, sidebar: 260, inspectorDefaultOpen: true },
+  { width: 900, height: 800, sidebar: 220, inspectorOpen: false },
+  { width: 1100, height: 800, sidebar: 220, inspectorOpen: false },
+  { width: 1440, height: 900, sidebar: 260, inspectorOpen: true },
+  { width: 1586, height: 992, sidebar: 260, inspectorOpen: true },
+  { width: 1920, height: 1080, sidebar: 260, inspectorOpen: true },
 ];
 
 for (const vp of VIEWPORTS) {
   test(`viewport smoke ${vp.width}×${vp.height}: no overflow, geometry holds`, async ({ page }) => {
     await page.setViewportSize({ width: vp.width, height: vp.height });
-    await page.goto("/ui-demo/conversation");
+    await page.goto(`/ui-demo/conversation?inspector=${vp.inspectorOpen ? "open" : "closed"}`);
     await page.waitForLoadState("networkidle");
 
     const m = await page.evaluate(() => {
@@ -38,11 +38,11 @@ for (const vp of VIEWPORTS) {
 
     expect(m.scrollWidth).toBeLessThanOrEqual(vp.width);
     expect(m.sidebar).toBe(vp.sidebar);
-    expect(m.hasPanel).toBe(vp.inspectorDefaultOpen);
+    expect(m.hasPanel).toBe(vp.inspectorOpen);
     expect(m.composerBottom).toBeLessThanOrEqual(vp.height);
     expect(m.composerRight).toBeLessThanOrEqual(vp.width + 1);
     expect(m.composerWidth).toBeGreaterThan(0);
-    if (!vp.inspectorDefaultOpen) expect(m.rail).toBe(40);
+    if (!vp.inspectorOpen) expect(m.rail).toBe(40);
   });
 }
 
@@ -203,8 +203,8 @@ test("decorative muted is not used as informational body color on key text", asy
     };
   });
 
-  // Readable secondary #667085 → rgb(102, 112, 133); muted is #98a2b3.
-  const readable = "rgb(102, 112, 133)";
+  // Readable secondary #606060 → rgb(96, 96, 96); decorative muted is #929292.
+  const readable = "rgb(96, 96, 96)";
   if (colors.duration) expect(colors.duration).toBe(readable);
   if (colors.empty) expect(colors.empty).toBe(readable);
   if (colors.brandCaret) expect(colors.brandCaret).toBe(readable);
