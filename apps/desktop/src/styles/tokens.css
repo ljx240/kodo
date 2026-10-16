@@ -55,7 +55,8 @@
 
   /* ── Typography ───────────────────────────────────────────────────────── */
   --kodo-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --kodo-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --kodo-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", ui-monospace,
+    "PingFang SC", "Microsoft YaHei", "Noto Sans Mono CJK SC", monospace;
 
   --kodo-font-xs: 11px;
   --kodo-font-sm: 13px;
