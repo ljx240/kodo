@@ -4772,6 +4772,9 @@ pub fn run(
                                 }
                             }
                             FailReason::AcceptanceUnmet => "验收标准未满足".to_owned(),
+                            FailReason::PermissionDenied =>
+                                "工具权限受限，所需操作仍未获准；请确认允许的操作或调整任务范围"
+                                    .to_owned(),
                             FailReason::Unrecoverable => "不可恢复错误".to_owned(),
                         },
                         offline_answer(&request.message, &notes, OfflineReason::Aborted)
@@ -4877,7 +4880,9 @@ pub fn run(
                         FinalStatus::NotVerified
                     }
                 }
-                FailReason::AcceptanceUnmet => FinalStatus::NotVerified,
+                FailReason::AcceptanceUnmet | FailReason::PermissionDenied => {
+                    FinalStatus::NotVerified
+                }
             },
             _ => {
                 if verified {
@@ -4938,7 +4943,10 @@ pub fn run(
         let (delivery, verification) = match machine.state() {
             _ if pending_question => ("blocked", "blocked"),
             AgentState::Failed {
-                reason: FailReason::BudgetExhausted | FailReason::AcceptanceUnmet,
+                reason:
+                    FailReason::BudgetExhausted
+                    | FailReason::AcceptanceUnmet
+                    | FailReason::PermissionDenied,
             } => (
                 if wrote_files { "partial" } else { "failed" },
                 if wrote_files { verification } else { "not_run" },
@@ -5013,6 +5021,9 @@ pub fn run(
                 AgentState::Failed {
                     reason: FailReason::AcceptanceUnmet,
                 } => "acceptance_unmet",
+                AgentState::Failed {
+                    reason: FailReason::PermissionDenied,
+                } => "permission_blocked",
                 AgentState::Failed {
                     reason: FailReason::Unrecoverable,
                 } => "unrecoverable",
@@ -7050,6 +7061,159 @@ mod tests {
                         .contains("MUST_NOT_CALL_AGAIN"),
                     "{native}/{case}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn permission_denials_replan_review_and_never_fake_environment_failure() {
+        for native in [false, true] {
+            for review in [true, false] {
+                let dir = std::env::temp_dir().join(format!(
+                    "kodo-permission-recovery-{}-{native}-{review}",
+                    std::process::id()
+                ));
+                std::fs::create_dir_all(&dir).unwrap();
+                for index in 0..6 {
+                    std::fs::write(dir.join(format!("source-{index}.rs")), "fn validate() {}\n")
+                        .unwrap();
+                }
+                let tools = |calls: Vec<serde_json::Value>| {
+                    serde_json::json!({
+                        "text": serde_json::json!({"tool_calls": calls}).to_string()
+                    })
+                };
+                let read = |index: usize| {
+                    serde_json::json!({
+                        "id": format!("read-{index}"), "name": "read_file",
+                        "arguments": {"path": format!("source-{index}.rs")}
+                    })
+                };
+                let report = "评分项目：正确性、安全性、可维护性。评分：80/100。\n问题：source-0.rs:1 缺少输入校验。\n解决方案：增加边界检查与测试。";
+                let mut replies = if review {
+                    let mut replies = (0..5)
+                        .map(|_| {
+                            serde_json::json!({
+                                "text": "现有证据只有改动清单；我会读取具体差异，不重复仓库盘点。"
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let mut batch = vec![serde_json::json!({
+                        "id": "denied-command", "name": "run_command",
+                        "arguments": {"command": "touch must-not-write.md"}
+                    })];
+                    batch.extend((0..5).map(read));
+                    replies.extend([
+                        tools(batch),
+                        tools(vec![read(5)]),
+                        serde_json::json!({"text": report}),
+                    ]);
+                    replies
+                } else {
+                    (0..4).map(|index| tools(vec![serde_json::json!({
+                        "id": format!("write-{index}"), "name": "write_file",
+                        "arguments": {"path": format!("denied-{index}.md"), "content": "must not write"}
+                    })])).collect()
+                };
+                replies.push(serde_json::json!({"text": "MUST_NOT_CALL_AGAIN"}));
+                let script = dir.join("script.jsonl");
+                std::fs::write(
+                    &script,
+                    replies
+                        .iter()
+                        .map(|reply| format!("{reply}\n"))
+                        .collect::<String>(),
+                )
+                .unwrap();
+                let mut request = temp_request(&dir, Permission::Ask);
+                request.message = if review {
+                    "为我做一个详细的代码评审，为我输出详细评分，按照该项目情况设定评分项目 然后评分 分析问题和解决方案"
+                } else {
+                    "【技能：docs】\n编写方案并保存到 plan.md"
+                }.into();
+                request.local_trace = true;
+                let mut provider = Provider::new(
+                    "fake",
+                    "fixture-key",
+                    script.to_string_lossy(),
+                    "fixture-model",
+                );
+                provider.capabilities_override = Some(provider::ProviderCapabilities {
+                    native_tools: native,
+                    ..provider::ProviderCapabilities::text_only()
+                });
+                request.provider = Some(provider);
+                let mut requests = Vec::new();
+                let mut reads = Vec::new();
+                let mut result = None;
+                let approvals = std::cell::RefCell::new(Vec::new());
+                run(
+                    &request,
+                    &|| true,
+                    &|kind, detail| {
+                        approvals.borrow_mut().push((kind, detail.to_owned()));
+                        false
+                    },
+                    &mut |event| {
+                        match event {
+                            SinkEvent::LocalTrace {
+                                kind: "llm_io",
+                                capture,
+                            } => requests.push(capture["request"].clone()),
+                            SinkEvent::Finished {
+                                step: Step::FileRead { path, .. },
+                                ..
+                            } => reads.push(path),
+                            SinkEvent::Finished {
+                                step:
+                                    Step::AgentMessage {
+                                        text,
+                                        delivery,
+                                        verification,
+                                        failure_reason,
+                                        ..
+                                    },
+                                ..
+                            } => {
+                                result = Some((text, delivery, verification, failure_reason));
+                            }
+                            _ => {}
+                        }
+                        true
+                    },
+                )
+                .unwrap();
+                let (text, delivery, verification, reason) = result.unwrap();
+                assert_eq!(verification, "not_run", "{native}/{review}: {text}");
+                if review {
+                    assert_eq!(delivery, "ready", "{native}: {text}");
+                    assert_eq!(requests.len(), 8);
+                    assert_eq!(reads.len(), 6);
+                    assert_eq!(
+                        approvals.borrow().as_slice(),
+                        &[(StepKind::Command, "git status --short".to_owned())],
+                        "only initial orientation asks for consent; the mutation stays blocked"
+                    );
+                    assert!(requests[6]["messages"]
+                        .to_string()
+                        .contains("read-only review cannot run a command"));
+                    assert!(text.contains("80/100") && text.contains("source-0.rs:1"));
+                    assert!(reason.is_empty(), "{reason}");
+                } else {
+                    assert_eq!(delivery, "failed", "{native}: {text}");
+                    assert_eq!(reason, "permission_blocked");
+                    assert_eq!(requests.len(), 3, "orientation already used one replan");
+                    assert_eq!(approvals.borrow().len(), 4);
+                    assert!(text.contains("权限"), "{text}");
+                }
+                for index in 0..4 {
+                    assert!(!dir.join(format!("denied-{index}.md")).exists());
+                }
+                assert!(!dir.join("must-not-write.md").exists());
+                assert!(std::fs::read_to_string(&script)
+                    .unwrap()
+                    .contains("MUST_NOT_CALL_AGAIN"));
+                std::fs::remove_dir_all(dir).unwrap();
             }
         }
     }
