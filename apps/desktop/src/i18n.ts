@@ -24,8 +24,6 @@ export const T = {
     toggleInspector: "切换 Inspector",
     viewFiles: "查看项目文件",
     sidebarDestinations: "侧边栏入口",
-    filterConversations: "筛选会话…",
-    noMatch: "没有匹配会话",
     selectProject: "选择项目",
     noProject: "未选择项目",
     addProject: "添加新项目",

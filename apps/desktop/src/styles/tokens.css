@@ -53,9 +53,17 @@
   --kodo-focus-width: 2px;
   --kodo-focus-offset: 2px;
 
+  /* ── Elevation (floating surfaces only) ─────────────────────────────── */
+  /* Inky kodo-blue at low alpha reads as a soft depth tint on light
+     canvases; the dark theme re-anchors to black at higher alpha so the
+     shadow stays visible against dark surfaces. */
+  --kodo-shadow-popover: 0 8px 24px rgb(23 32 51 / 12%);
+  --kodo-shadow-modal: 0 24px 70px rgb(23 32 51 / 20%);
+
   /* ── Typography ───────────────────────────────────────────────────────── */
   --kodo-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --kodo-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --kodo-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", ui-monospace,
+    "PingFang SC", "Microsoft YaHei", "Noto Sans Mono CJK SC", monospace;
 
   --kodo-font-xs: 11px;
   --kodo-font-sm: 13px;
@@ -145,4 +153,7 @@
   --kodo-syntax-addition: #3fb950;
 
   --kodo-focus-ring: #8dd1c6;
+
+  --kodo-shadow-popover: 0 8px 24px rgb(0 0 0 / 35%);
+  --kodo-shadow-modal: 0 24px 70px rgb(0 0 0 / 55%);
 }

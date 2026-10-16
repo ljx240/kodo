@@ -2,8 +2,6 @@ import {
   Archive,
   Check,
   ChevronDown,
-  ChevronRight,
-  Clock,
   ExternalLink,
   Folder,
   FolderOpen,
@@ -97,8 +95,6 @@ export function Sidebar({
   const [renamingConversation, setRenamingConversation] = useState<string | null>(null);
   /** Conversation pending a second click on 「确认删除」 (two-step, no modal). */
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  /** Case-insensitive title filter over the conversation tree. */
-  const [conversationFilter, setConversationFilter] = useState("");
   const [draft, setDraft] = useState("");
   /** The parent the user picked, held while they type the new folder's name. */
   const [parent, setParent] = useState<string | null>(null);
@@ -185,7 +181,6 @@ export function Sidebar({
             }`}
             onClick={() => onSelectConversation(conversation.id)}
           >
-            <Clock size={14} strokeWidth={1.7} />
             <span className="tree-conversation-title">{conversation.title}</span>
             <span className="tree-conversation-time">{conversation.time}</span>
           </button>
@@ -283,33 +278,19 @@ export function Sidebar({
     conversations: { id: string; title: string; time: string }[];
   }) => {
     const { conversations } = project;
-    // Filtering runs before the fold: every match shows (no 加载全部会话 in the
-    // way), and the open conversation always passes — it must never vanish
-    // under a filter the user typed.
-    const query = conversationFilter.trim().toLowerCase();
-    const matched = query
-      ? conversations.filter(
-          (conversation) =>
-            conversation.title.toLowerCase().includes(query) ||
-            conversation.id === activeConversationId,
-        )
-      : conversations;
-    if (query && conversations.length > 0 && matched.length === 0) {
-      return <p className="tree-no-match">{T.nav.noMatch}</p>;
-    }
     const activeInTail =
       activeConversationId !== null &&
-      matched
+      conversations
         .slice(CONVERSATION_FOLD)
         .some((conversation) => conversation.id === activeConversationId);
     const visible =
-      query || showAllConversations.has(project.id) || activeInTail
-        ? matched
-        : matched.slice(0, CONVERSATION_FOLD);
+      showAllConversations.has(project.id) || activeInTail
+        ? conversations
+        : conversations.slice(0, CONVERSATION_FOLD);
     return (
       <>
         {visible.map(conversationRow)}
-        {visible.length < matched.length && (
+        {visible.length < conversations.length && (
           <button
             type="button"
             className="tree-load-all"
@@ -483,21 +464,6 @@ export function Sidebar({
           </Menu>
         </div>
 
-        {/* Conversation filter — only worth a row once there is something to
-            filter (the tree may be projects-only). */}
-        {projects.some((project) => project.conversations.length > 0) && (
-          <div className="tree-filter-bar">
-            <input
-              className="tree-filter"
-              data-testid="tree-conversation-filter"
-              value={conversationFilter}
-              placeholder={T.nav.filterConversations}
-              aria-label={T.nav.filterConversations}
-              onChange={(event) => setConversationFilter(event.target.value)}
-            />
-          </div>
-        )}
-
         <div className="tree">
           {projects.map((project, index) =>
             project.id === "" ? (
@@ -527,11 +493,10 @@ export function Sidebar({
               >
                 <button type="button" className="tree-project-main" onClick={() => workspace.toggleProject(project.id)}>
                   {project.expanded ? (
-                    <ChevronDown size={14} strokeWidth={2} />
+                    <FolderOpen size={14} strokeWidth={1.5} />
                   ) : (
-                    <ChevronRight size={14} strokeWidth={2} />
+                    <Folder size={14} strokeWidth={1.5} />
                   )}
-                  <Folder size={15} strokeWidth={1.7} />
                   {renaming === project.id ? (
                     <input
                       className="tree-input"
