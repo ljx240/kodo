@@ -261,6 +261,37 @@
   padding: 0 12px;
 }
 
+.browse-icon-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.browse-icon-btn:hover:not(:disabled) {
+  background: var(--kodo-surface-hover);
+  color: var(--kodo-text);
+}
+
+.browse-icon-btn:focus-visible {
+  outline: 2px solid var(--kodo-focus-ring);
+  outline-offset: 1px;
+}
+
+.browse-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .browse-error {
   flex: none;
   margin: 8px 12px 0;
@@ -292,7 +323,7 @@
   min-height: 0;
   width: 100%;
   border: 0;
-  background: #fff;
+  background: var(--kodo-surface);
 }
 
 .browse-empty {
@@ -414,6 +445,35 @@
   align-items: center;
   gap: 8px;
   font-size: var(--kodo-font-sm);
+}
+
+/* When a FileRow acts as a button (Response Trace artifacts tab), keep the
+   static-row metrics but add a click affordance — hover touches background,
+   focus draws the same ring as other controls. No shadow, no card chrome. */
+.file-row--clickable {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--kodo-radius-sm);
+  padding: 4px 8px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.file-row--clickable:hover {
+  background: var(--kodo-hover);
+  border-color: var(--kodo-border);
+}
+
+.file-row--clickable:focus-visible {
+  outline: none;
+  border-color: var(--kodo-accent);
+  box-shadow: 0 0 0 var(--kodo-focus-width) var(--kodo-focus-ring);
 }
 
 .file-icon {
@@ -925,3 +985,153 @@
   box-shadow: 6px 0 18px rgb(0 0 0 / 14%);
 }
 .fv--compact.fv--tree-open .fv-tree { display: block; }
+
+/* ── Memory inspector: search + refresh row, dense entry list ─────────────── */
+
+.ins-overview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kodo-space-5);
+  min-height: 0;
+  flex: 1;
+}
+
+/* The empty panel — used by Memory when no project is selected. */
+.ins-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kodo-space-4);
+  padding: var(--kodo-space-8) var(--kodo-space-6);
+  color: var(--kodo-text-secondary);
+  text-align: center;
+}
+
+.ins-empty > svg {
+  color: var(--kodo-text-muted);
+}
+
+.ins-empty > p {
+  margin: 0;
+  font-size: var(--kodo-font-sm);
+}
+
+/* The list-level placeholder — used when the list renders zero rows. */
+.ins-empty-text {
+  padding: var(--kodo-space-7) var(--kodo-space-6);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  text-align: center;
+  border: 1px dashed var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-surface);
+}
+
+.memory-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--kodo-space-4);
+  flex-wrap: nowrap;
+}
+
+.memory-toolbar > .search-field--inline {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+.memory-toolbar > .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kodo-space-4);
+  min-height: 0;
+}
+
+.memory-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kodo-space-3);
+  padding: var(--kodo-space-5) var(--kodo-space-6);
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  background: var(--kodo-surface);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+}
+
+.memory-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--kodo-space-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.memory-row-head > .btn-icon {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.memory-row-id {
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-muted);
+  letter-spacing: 0.02em;
+}
+
+.memory-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--kodo-space-3);
+  border: 1px solid var(--kodo-border);
+  border-radius: 10px;
+  font-size: var(--kodo-font-xs);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-weight: 500;
+}
+
+.memory-row-title {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--kodo-text);
+  font-size: var(--kodo-font-md);
+  word-break: break-word;
+}
+
+.memory-row-abstract {
+  margin: 0;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.memory-row-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kodo-space-3);
+  margin: 0;
+}
+
+.memory-evidence-uri {
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-xs);
+  padding: 2px var(--kodo-space-3);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-bg);
+  color: var(--kodo-text-secondary);
+  border: 1px solid var(--kodo-border-subtle);
+}

@@ -654,7 +654,7 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
 /// ran `cmd1 &&` and forgot the right side).
 fn classify_chain_risk(command: &str) -> CommandRisk {
     let mut worst = CommandRisk::ReadOnly;
-    for segment in command.split(|c| c == '&' || c == '|' || c == ';') {
+    for segment in command.split(['&', '|', ';']) {
         // `&&` / `||` split on a single char produces empty strings
         // between the operator and the next char. Drop them.
         let trimmed = segment.trim();
@@ -903,15 +903,10 @@ fn classify_single_command_risk(command: &str) -> CommandRisk {
                     bump(CommandRisk::FilesystemWrite);
                 }
             }
-            Some("add") | Some("commit") | Some("status") | Some("diff") | Some("log")
-            | Some("branch") | Some("switch") | Some("stash") | Some("show") | Some("blame") => {
-                if matches!(
-                    sub.as_deref(),
-                    Some("add") | Some("commit") | Some("stash") | Some("switch") | Some("branch")
-                ) && read_only_git_args(command).is_none()
-                {
-                    bump(CommandRisk::FilesystemWrite);
-                }
+            Some("add") | Some("commit") | Some("branch") | Some("switch") | Some("stash")
+                if read_only_git_args(command).is_none() =>
+            {
+                bump(CommandRisk::FilesystemWrite);
             }
             _ => {}
         }

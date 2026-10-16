@@ -4597,7 +4597,6 @@ mod tests {
     #[derive(Deserialize)]
     struct TestResponse {
         choices: Vec<TestChoice>,
-        usage: Option<TestUsage>,
     }
     #[derive(Deserialize)]
     #[allow(dead_code)]
@@ -4613,13 +4612,6 @@ mod tests {
         #[serde(default)]
         reasoning_content: Option<String>,
     }
-    #[derive(Deserialize)]
-    #[allow(dead_code)]
-    struct TestUsage {
-        prompt_tokens: u32,
-        completion_tokens: u32,
-    }
-
     #[test]
     fn nonstream_reasoning_content_sets_saw_reasoning_flag() {
         let body: TestResponse = serde_json::from_value(serde_json::json!({

@@ -172,8 +172,10 @@ mod tests {
 
     #[test]
     fn worktree_mismatch_marks_stale() {
-        let mut scope = MemoryScope::default();
-        scope.worktree_id = Some("/worktrees/A".to_owned());
+        let scope = MemoryScope {
+            worktree_id: Some("/worktrees/A".to_owned()),
+            ..Default::default()
+        };
         let entry = sample_entry(scope);
         let live_ctx = live(Some("/worktrees/B"), Some("main"));
         let label = evaluate(&ValidityInput {
@@ -187,9 +189,11 @@ mod tests {
 
     #[test]
     fn worktree_match_but_branch_mismatch_marks_needs_revalidation() {
-        let mut scope = MemoryScope::default();
-        scope.worktree_id = Some("/worktrees/A".to_owned());
-        scope.branch = Some("feat/x".to_owned());
+        let scope = MemoryScope {
+            worktree_id: Some("/worktrees/A".to_owned()),
+            branch: Some("feat/x".to_owned()),
+            ..Default::default()
+        };
         let entry = sample_entry(scope);
         let live_ctx = live(Some("/worktrees/A"), Some("main"));
         let label = evaluate(&ValidityInput {

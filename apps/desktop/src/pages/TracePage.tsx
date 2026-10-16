@@ -27,10 +27,12 @@ import { FileSpanModal } from "../conversation/FileSpanModal";
 import { formatDuration, formatTokens, mergeChanges, totals } from "../conversation/trace";
 import { type DemoState, type DemoState as Demo } from "../data/demoState";
 import type { ChangedFile } from "../data/types";
+import type { ItemDto } from "../api";
 import { ReplyMeta } from "../inspector/TraceInspector";
 import { FileRow } from "../inspector/Section";
 import { T, toolAlias } from "../i18n";
 import { navigate } from "../routes";
+import { TraceMap } from "../traceMap/TraceMap";
 
 const TABS = [
   { id: "timeline", label: T.page.traceTabs.timeline },
@@ -39,6 +41,7 @@ const TABS = [
   { id: "llmIo", label: T.page.traceTabs.llmIo },
   { id: "thinking", label: T.page.traceTabs.thinking },
   { id: "spans", label: T.page.traceTabs.spans },
+  { id: "map", label: T.page.traceTabs.map },
 ] as const;
 type Tab = (typeof TABS)[number]["id"];
 
@@ -67,6 +70,9 @@ function TypePill({ type }: { type: TimelineRow["type"] }) {
 
 function liveTimeline(session: SessionDto): {
   rows: TimelineRow[];
+  /** Parallel to `rows`: the underlying `ItemDto.id` for cross-tab anchors. */
+  itemIds: number[];
+  items: ItemDto[];
   final: string;
   checks: string[];
   files: ChangedFile[];
@@ -76,14 +82,16 @@ function liveTimeline(session: SessionDto): {
 } {
   const turn = session.turns[session.turns.length - 1];
   if (!turn) {
-    return { rows: [], final: "", checks: [], files: [], done: false, stopped: false, interrupted: false };
+    return { rows: [], itemIds: [], items: [], final: "", checks: [], files: [], done: false, stopped: false, interrupted: false };
   }
   let final = "";
   let checks: string[] = [];
   const files: ChangedFile[] = [];
   const rows: TimelineRow[] = [];
+  const itemIds: number[] = [];
 
   turn.items.forEach((item, index) => {
+    itemIds.push(item.id);
     if (item.kind === "agentMessage") {
       final = item.text;
       checks = item.checks;
@@ -152,6 +160,8 @@ function liveTimeline(session: SessionDto): {
 
   return {
     rows,
+    itemIds,
+    items: turn.items,
     final,
     checks,
     files: mergeChanges(files),
@@ -202,7 +212,22 @@ export function TracePage({
   live?: SessionDto | null;
 }) {
   const demoMode = Boolean(demo);
-  const [tab, setTab] = useState<Tab>("timeline");
+  const [tab, setTabRaw] = useState<Tab>(() => {
+    if (typeof window === "undefined") return "timeline";
+    const t = new URLSearchParams(window.location.search).get("tab");
+    return TABS.some(({ id }) => id === t) ? (t as Tab) : "timeline";
+  });
+  const setTab = (next: Tab) => {
+    setTabRaw(next);
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (next === "timeline") {
+      url.searchParams.delete("tab");
+    } else {
+      url.searchParams.set("tab", next);
+    }
+    window.history.replaceState({}, "", url.toString());
+  };
   const [session, setSession] = useState<SessionDto | null>(live ?? null);
   const [openSpanRef, setOpenSpanRef] = useState<ArtifactRefDto | null>(null);
   const [openSpan, setOpenSpan] = useState<FileSpanDto | null>(null);
@@ -231,7 +256,21 @@ export function TracePage({
   }, [demoMode, conversationId, live]);
 
   useEffect(() => {
-    if (!openSpanRef || demoMode || !session) {
+    if (!openSpanRef) {
+      setOpenSpan(null);
+      return;
+    }
+    if (demoMode) {
+      // /ui-demo/trace — read from fixture so the modal still opens.
+      const fixture = demo?.spans ?? [];
+      const found = fixture.find((s) => s.path === openSpanRef.label)
+        ?? fixture[0]
+        ?? null;
+      setOpenSpan(found);
+      setOpenSpanLoading(false);
+      return;
+    }
+    if (!session) {
       setOpenSpan(null);
       return;
     }
@@ -246,7 +285,7 @@ export function TracePage({
     return () => {
       alive = false;
     };
-  }, [openSpanRef, demoMode, session]);
+  }, [openSpanRef, demoMode, session, demo]);
 
   if (!demoMode && !conversationId) {
     return (
@@ -273,6 +312,8 @@ export function TracePage({
   const data = demoMode && demo
     ? {
         rows: demo.timeline,
+        itemIds: (demo.items ?? []).map((it) => it.id),
+        items: (demo.items ?? []) as ItemDto[],
         // The demo Response Trace records turn 1's run (pairs with demo.timeline).
         final: demo.conversation.turns[0].assistant.final,
         checks: [] as string[],
@@ -291,6 +332,8 @@ export function TracePage({
           crumbTitle: session!.title,
         };
       })();
+
+  const itemsForDag: ItemDto[] = data.items ?? [];
 
   if (!demoMode && data.rows.length === 0) {
     return (
@@ -345,6 +388,7 @@ export function TracePage({
                 <span>{statusLabel}</span>
               </span>
             </div>
+            <p className="trace-scope-hint">{T.page.responseTraceScope}</p>
 
             <div className="reply-card-body">
               <ReplyMeta
@@ -393,14 +437,44 @@ export function TracePage({
             ))}
           </nav>
 
-          {tab === "logs" && <pre className="terminal-block terminal-block--tall">{logs.join("\n") || T.page.noLogs}</pre>}
+          {tab === "logs" && <pre className="terminal-block trace-log-pre">{logs.join("\n") || T.page.noLogs}</pre>}
 
           {tab === "artifacts" && (
             <div className="artifact-list">
               {data.files.length === 0 ? (
                 <p className="empty-note">{T.page.noFileChanges}</p>
               ) : (
-                data.files.map((file) => <FileRow key={file.path} file={file} />)
+                data.files.map((file) => {
+                  // Find the fileChange item that contributed this path; the
+                  // item carries the optional `fileSpanRef` we need to load
+                  // the captured before/after snapshot.
+                  const sourceItem = (data.items ?? []).find(
+                    (it) =>
+                      it.kind === "fileChange" &&
+                      it.changes.some((c) => c.path === file.path),
+                  ) as
+                    | (ItemDto & {
+                        kind: "fileChange";
+                        fileSpanRef?: string | null;
+                      })
+                    | undefined;
+                  const spanLabel = sourceItem?.fileSpanRef ?? file.path;
+                  return (
+                    <FileRow
+                      key={file.path}
+                      file={file}
+                      onClick={() =>
+                        setOpenSpanRef({
+                          kind: "file_span",
+                          seq: 1,
+                          label: spanLabel,
+                          sizeBytes: 0,
+                          at: sourceItem?.at ?? 0,
+                        })
+                      }
+                    />
+                  );
+                })
               )}
             </div>
           )}
@@ -408,6 +482,8 @@ export function TracePage({
           {tab === "llmIo" && (
             <LlmIoTab
               demoMode={demoMode}
+              demoCaptures={demo?.llmIoCaptures ?? null}
+              demoRefs={demo?.artifactRefs ?? null}
               sessionId={demoMode ? null : session!.id}
               turnSeq={demoMode ? null : session!.turns.length - 1}
             />
@@ -423,10 +499,33 @@ export function TracePage({
           {tab === "spans" && (
             <SpansTab
               demoMode={demoMode}
+              demoSpans={demo?.spans ?? null}
+              demoArtifactRefs={demo?.artifactRefs ?? null}
               sessionId={demoMode ? null : session!.id}
               turnSeq={demoMode ? null : session!.turns.length - 1}
               onOpenSpan={(ref) => {
-                if (!demoMode) setOpenSpanRef(ref);
+                setOpenSpanRef(ref);
+              }}
+            />
+          )}
+
+          {tab === "map" && (
+            <TraceMap
+              items={itemsForDag}
+              onSelectNode={(itemId) => {
+                setTab("timeline");
+                if (typeof window === "undefined") return;
+                requestAnimationFrame(() => {
+                  const el = document.querySelector(
+                    `[data-item-row="${itemId}"]`,
+                  );
+                  if (el) {
+                    (el as HTMLElement).scrollIntoView({
+                      block: "center",
+                      behavior: "smooth",
+                    });
+                  }
+                });
               }}
             />
           )}
@@ -444,8 +543,11 @@ export function TracePage({
                   </tr>
                 </thead>
                 <tbody>
-                  {data.rows.map((row) => (
-                    <tr key={`${row.n}-${row.title}`}>
+                  {data.rows.map((row, idx) => (
+                    <tr
+                      key={`${row.n}-${row.title}`}
+                      data-item-row={data.itemIds[idx] ?? ""}
+                    >
                       <td className="col-n">{row.n}</td>
                       <td className="col-time mono">{row.time}</td>
                       <td className="col-duration mono">{row.duration}</td>
@@ -508,10 +610,17 @@ export function TracePage({
 
 function LlmIoTab({
   demoMode,
+  demoCaptures,
+  demoRefs,
   sessionId,
   turnSeq,
 }: {
   demoMode: boolean;
+  /** /ui-demo only — pre-captured fixtures so the page shows real bodies. */
+  demoCaptures: LlmIoDto[] | null;
+  /** /ui-demo only — fixture refs to drive the call bar (matches live
+   *  `list_artifacts` output). */
+  demoRefs: ArtifactRefDto[] | null;
   sessionId: string | null;
   turnSeq: number | null;
 }) {
@@ -519,6 +628,22 @@ function LlmIoTab({
   const [active, setActive] = useState<number>(0);
   const [capture, setCapture] = useState<LlmIoDto | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+
+  // Demo mode short-circuits both effects — fixture is already in hand.
+  useEffect(() => {
+    if (!demoMode) return;
+    const llmRefs = (demoRefs ?? []).filter((a) => a.kind === "llm_io");
+    setRefs(llmRefs);
+    setActive(0);
+  }, [demoMode, demoRefs]);
+
+  useEffect(() => {
+    if (!demoMode || !demoCaptures || demoCaptures.length === 0) {
+      if (demoMode) setCapture(null);
+      return;
+    }
+    setCapture(demoCaptures[Math.min(active, demoCaptures.length - 1)] ?? null);
+  }, [demoMode, demoCaptures, active]);
 
   useEffect(() => {
     if (demoMode || sessionId === null || turnSeq === null) return;
@@ -536,6 +661,7 @@ function LlmIoTab({
   }, [demoMode, sessionId, turnSeq]);
 
   useEffect(() => {
+    if (demoMode) return;
     if (!refs || refs.length === 0) {
       setCapture(null);
       return;
@@ -552,10 +678,22 @@ function LlmIoTab({
     return () => {
       alive = false;
     };
-  }, [refs, active, sessionId, turnSeq]);
+  }, [refs, active, sessionId, turnSeq, demoMode]);
 
   if (demoMode) {
-    return <p className="empty-note">{T.page.llmIo.empty}</p>;
+    const llmRefs = (demoRefs ?? []).filter((a) => a.kind === "llm_io");
+    if (llmRefs.length === 0) {
+      return <p className="empty-note">{T.page.llmIo.empty}</p>;
+    }
+    return (
+      <LlmIoViewer
+        artifacts={llmRefs}
+        activeIndex={active}
+        onSelect={setActive}
+        capture={capture}
+        loading={loading}
+      />
+    );
   }
   if (!refs) {
     return <p className="empty-note">{T.page.loadingTrace}</p>;
@@ -576,16 +714,29 @@ function LlmIoTab({
 
 function SpansTab({
   demoMode,
+  demoSpans,
+  demoArtifactRefs,
   sessionId,
   turnSeq,
   onOpenSpan,
 }: {
   demoMode: boolean;
+  /** /ui-demo only — file-span fixture for the list. */
+  demoSpans: FileSpanDto[] | null;
+  /** /ui-demo only — refs to drive the list (matches live output). */
+  demoArtifactRefs: ArtifactRefDto[] | null;
   sessionId: string | null;
   turnSeq: number | null;
   onOpenSpan: (ref: ArtifactRefDto) => void;
 }) {
   const [refs, setRefs] = useState<ArtifactRefDto[] | null>(null);
+
+  // /ui-demo — drive the list straight from the fixture refs.
+  useEffect(() => {
+    if (!demoMode) return;
+    const list = (demoArtifactRefs ?? []).filter((a) => a.kind === "file_span");
+    setRefs(list);
+  }, [demoMode, demoArtifactRefs]);
 
   useEffect(() => {
     if (demoMode || sessionId === null || turnSeq === null) return;
@@ -601,7 +752,44 @@ function SpansTab({
   }, [demoMode, sessionId, turnSeq]);
 
   if (demoMode) {
-    return <p className="empty-note">{T.page.spansView.empty}</p>;
+    const fileSpans = refs ?? [];
+    if (fileSpans.length === 0) {
+      return <p className="empty-note">{T.page.spansView.empty}</p>;
+    }
+    return (
+      <div className="artifact-list">
+        {fileSpans.map((ref, idx) => {
+          // Match by seq; fall back to first span if the index drifts.
+          const span =
+            (demoSpans ?? []).find((s) => s.seq === ref.seq) ??
+            (demoSpans ?? [])[idx] ??
+            null;
+          const pathHint = span?.path.split("/").pop() ?? ref.label;
+          return (
+            <button
+              key={ref.label}
+              type="button"
+              className="artifact-row"
+              onClick={() =>
+                onOpenSpan({
+                  kind: "file_span",
+                  seq: ref.seq,
+                  label: span?.path ?? ref.label,
+                  sizeBytes: ref.sizeBytes,
+                  at: ref.at,
+                })
+              }
+              title={span?.path ?? ref.label}
+            >
+              <code className="code-chip">{pathHint}</code>
+              <span className="muted">
+                {(ref.sizeBytes / 1024).toFixed(1)} KiB
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    );
   }
   if (!refs) {
     return <p className="empty-note">{T.page.loadingTrace}</p>;

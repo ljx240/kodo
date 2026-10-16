@@ -6,7 +6,15 @@
  * clocks, random ids and real machine state in screenshot fixtures.
  */
 
-import type { McpServerDto, McpToolDto } from "../api";
+import type {
+  ArtifactRefDto,
+  FileSpanDto,
+  ItemDto,
+  LlmIoDto,
+  McpServerDto,
+  McpToolDto,
+  MemoryEntryDto,
+} from "../api";
 
 export type TimelineRow = {
   n: number;
@@ -213,6 +221,214 @@ export const DEMO_MCP_SERVERS: McpServerDto[] = [
 ];
 
 /**
+ * Item-level fixture for the Response Trace page (UI demo / plain browser).
+ *
+ * Mirrors `timeline` row-for-row so the "地图" tab can draw a 10-node
+ * trace without going through `load_session`.
+ *
+ * Time stamps are frozen (DESIGN §11/DEMO_DATA fixture rule); only relative
+ * differences matter for the visual.
+ */
+export const demoItems: ItemDto[] = [
+  {
+    id: 1,
+    at: 1735194272,
+    status: "done",
+    duration: 12,
+    kind: "reasoning",
+    summary: "梳理 k2k-rust 项目的路径结构和核心模块",
+  },
+  {
+    id: 2,
+    at: 1735194284,
+    status: "done",
+    duration: 8,
+    kind: "search",
+    query: "router heartbeat",
+    detail: "搜索路由与 heartbeat 处理实现",
+  },
+  {
+    id: 3,
+    at: 1735194292,
+    status: "done",
+    duration: 14,
+    kind: "fileRead",
+    path: "source/db/source.table",
+    detail: "查看路由实现与核心逻辑",
+  },
+  {
+    id: 4,
+    at: 1735194306,
+    status: "done",
+    duration: 18,
+    kind: "commandExecution",
+    command: "cargo check --workspace",
+    cwd: "/projects/realtime-lakehouse",
+    output: "Compiling k2k-router v0.23.0\nFinished release [optimized] target(s)",
+    exitCode: 0,
+  },
+  {
+    id: 5,
+    at: 1735194324,
+    status: "done",
+    duration: 36,
+    kind: "commandExecution",
+    command: "docker build",
+    cwd: "/projects/realtime-lakehouse",
+    output: "sha256:9f2a… built",
+    exitCode: 0,
+  },
+  {
+    id: 6,
+    at: 1735194360,
+    status: "done",
+    duration: 24,
+    kind: "modelCall",
+    model: "Claude 3.5 Sonnet",
+    inputTokens: 12400,
+    outputTokens: 2100,
+  },
+  {
+    id: 7,
+    at: 1735194384,
+    status: "done",
+    duration: 28,
+    kind: "fileChange",
+    changes: [{ path: "src/router/mod.rs", added: 42, removed: 8 }],
+  },
+  {
+    id: 8,
+    at: 1735194412,
+    status: "failed",
+    duration: 42,
+    kind: "commandExecution",
+    command: "docker run",
+    cwd: "/projects/realtime-lakehouse",
+    output: "Error response from daemon: port already allocated",
+    exitCode: 125,
+  },
+  {
+    id: 9,
+    at: 1735194454,
+    status: "done",
+    duration: 52,
+    kind: "modelCall",
+    model: "Claude 3.5 Sonnet",
+    inputTokens: 14500,
+    outputTokens: 2300,
+  },
+  {
+    id: 10,
+    at: 1735194506,
+    status: "done",
+    duration: 8,
+    kind: "agentMessage",
+    text: "整理测试结论与改进建议，生成最终回复。",
+    checks: [],
+  },
+];
+
+/**
+ * File-span captures (before/after) for the demo Edit step (item 7 in
+ * `demoItems`). The artifacts tab on `/ui-demo/trace` opens the same
+ * `FileSpanModal` the spans tab uses; the live build loads these from
+ * `traces/<session>/<turn>/spans/*.json` via `load_file_span`.
+ *
+ * The `refPath` matches what the live artifact ref would carry, so the
+ * same `loadFileSpan`-style lookup keeps working when this fixture is
+ * swapped for live data.
+ */
+export const demoSpans: FileSpanDto[] = [
+  {
+    path: "src/router/mod.rs",
+    contentBefore:
+      "fn route(&self, table: &str) -> Option<Route> {\n    self.table_routes.get(table).cloned()\n}",
+    contentAfter:
+      "fn route(&self, table: &str) -> Option<Route> {\n    if let Some(route) = self.table_routes.get(table) {\n        return Some(route.clone());\n    }\n    if table.starts_with(\"k2k_legacy_\") {\n        warn!(\"falling back to legacy router for {}\", table);\n        return self.legacy_route(table);\n    }\n    None\n}",
+    toolCallId: "toolu_demo_007",
+    seq: 1,
+  },
+];
+
+/**
+ * LLM I/O captures for the demo Model call steps (items 6 and 9 in
+ * `demoItems`). The LLM I/O tab on `/ui-demo/trace` reads these directly
+ * when in demo mode so the page shows real content rather than the
+ * "no capture" empty note.
+ */
+export const demoLlmIo: LlmIoDto[] = [
+  {
+    seq: 1,
+    model: "Claude 3.5 Sonnet",
+    protocol: "anthropic-messages",
+    retryIndex: 0,
+    providerLatencyMs: 24000,
+    finishReason: "end_turn",
+    inputTokens: 12400,
+    outputTokens: 2100,
+    sawReasoning: true,
+    at: 1735194360,
+    request: {
+      system:
+        "你是 Kodo，一名工作于 <kodo> 环境的代码助手。\n以中文回答，命令、模型名、路径保留原文。",
+      messages: [
+        { role: "user", content: "分析 cargo check / docker build 的输出，构建校验报告。" },
+        { role: "assistant", content: "编译通过；构建镜像成功。让我整理校验报告…" },
+      ],
+      tools: [
+        { name: "edit_file", description: "Make selective edits with string replacement." },
+      ],
+    },
+    response: {
+      text: "校验报告：\n- cargo check --workspace 通过（0 errors, 12 warnings）\n- docker build 镜像构建成功\n- 建议下一步：补 unit tests 并接 CI。",
+      reasoningContent:
+        "I should summarize the build results and propose the next concrete step (add tests + CI).",
+      nativeToolCalls: [
+        { name: "edit_file", arguments: { path: "src/router/mod.rs" } },
+      ],
+    },
+  },
+  {
+    seq: 2,
+    model: "Claude 3.5 Sonnet",
+    protocol: "anthropic-messages",
+    retryIndex: 0,
+    providerLatencyMs: 52000,
+    finishReason: "end_turn",
+    inputTokens: 14500,
+    outputTokens: 2300,
+    sawReasoning: true,
+    at: 1735194454,
+    request: {
+      system:
+        "你是 Kodo，一名工作于 <kodo> 环境的代码助手。\n以中文回答，命令、模型名、路径保留原文。",
+      messages: [
+        { role: "user", content: "基于构建结果做最终验证，并总结修改内容。" },
+      ],
+      tools: [
+        { name: "edit_file", description: "Make selective edits with string replacement." },
+      ],
+    },
+    response: {
+      text: "最终验证：路由改动覆盖 k2k_legacy_* 路径，集成测试通过。变更摘要：+737 / -46 行。",
+      reasoningContent:
+        "All targeted paths verified; aggregate change +737/-46 matches demo summary.",
+      nativeToolCalls: [],
+    },
+  },
+];
+
+/**
+ * Artifact refs (what `list_artifacts` returns in the live build). The
+ * LLM I/O tab on `/ui-demo/trace` walks this list to render the call bar.
+ */
+export const demoArtifactRefs: ArtifactRefDto[] = [
+  { kind: "llm_io", seq: 1, label: "demo-llm-io/1.json", sizeBytes: 4096, at: 1735194360 },
+  { kind: "llm_io", seq: 2, label: "demo-llm-io/2.json", sizeBytes: 5120, at: 1735194454 },
+  { kind: "file_span", seq: 1, label: "demo-file-span/1.json", sizeBytes: 2048, at: 1735194384 },
+];
+
+/**
  * Demo fixture for the per-server tool list on `/ui-demo/mcp` (plain browser):
  * names and descriptions only — the real page reads these through
  * `mcp_list_tools`, which never hands schemas or secrets to the webview.
@@ -235,3 +451,128 @@ export const DEMO_MCP_TOOLS: Record<string, McpToolDto[]> = {
     { name: "search_tickets", description: "Search tickets by query string." },
   ],
 };
+
+/**
+ * Memory entries backing the Inspector Memory tab on `/ui-demo/*`.
+ * The real Memory engine is Tauri-side and only runs in the desktop
+ * shell; in the browser the `memoryList` stub returns these rows so the
+ * visual layout / row chrome can be reviewed without a Tauri host.
+ *
+ * Frozen timestamps so screenshot baselines stay byte-identical; see
+ * docs/design/DEMO_DATA.md for the clock rule.
+ */
+export const demoMemoryEntries: MemoryEntryDto[] = [
+  {
+    id: "mem-0001",
+    kind: "semantic",
+    status: "active",
+    authority: "user_rule",
+    sourceTrust: "test_verified",
+    title: "k2k-rust 未知表路由走 Debezium 动态注册",
+    abstractText:
+      "新增表的 topic 在路由层不要硬编码; 通过 Debezium source.db/source.table 生成, 静态路由优先, 首次投递前需创建目标 topic。",
+    body: null,
+    contentHash: "h-7a3f",
+    confidence: 0.92,
+    verified: true,
+    conditions: ["routing == dynamic", "source.kind == debezium"],
+    sourceUris: ["repo:k2k-rust/src/router/mod.rs"],
+    scopeProjectId: "realtime-lakehouse",
+    scopeRepositoryId: "k2k-rust",
+    scopeBranch: "main",
+    useCount: 7,
+    version: 3,
+    createdAt: 1_700_000_100,
+    updatedAt: 1_700_000_900,
+  },
+  {
+    id: "mem-0002",
+    kind: "procedural",
+    status: "active",
+    authority: "historical",
+    sourceTrust: "tool_verified",
+    title: "Flink 任务延迟排查：先看 heartbeat, 再看 checkpoint",
+    abstractText:
+      "延迟上升先看 heartbeat.rs 的处理频率; 若心跳正常则对比最近 24h checkpoint 时长, 单点 > 5s 多为背压。",
+    body: null,
+    contentHash: "h-2c81",
+    confidence: 0.81,
+    verified: true,
+    conditions: ["symptom == flink_latency"],
+    sourceUris: ["repo:k2k-rust/src/heartbeat.rs", "runbook:flink-latency"],
+    scopeProjectId: "realtime-lakehouse",
+    scopeRepositoryId: "k2k-rust",
+    scopeBranch: "main",
+    useCount: 4,
+    version: 2,
+    createdAt: 1_700_001_000,
+    updatedAt: 1_700_001_500,
+  },
+  {
+    id: "mem-0003",
+    kind: "evidence_ref",
+    status: "active",
+    authority: "historical",
+    sourceTrust: "tool_verified",
+    title: "实时数仓 schema 注册流程",
+    abstractText:
+      "DDL → schema-registry 校验 → topic 创建 → Flink Source 订阅, 缺一步下游就拿不到字段。",
+    body: null,
+    contentHash: "h-91ab",
+    confidence: 0.7,
+    verified: false,
+    conditions: [],
+    sourceUris: ["docs:realtime-warehouse/schema.md"],
+    scopeProjectId: "realtime-lakehouse",
+    scopeRepositoryId: null,
+    scopeBranch: null,
+    useCount: 1,
+    version: 1,
+    createdAt: 1_700_002_000,
+    updatedAt: 1_700_002_000,
+  },
+  {
+    id: "mem-0004",
+    kind: "rule",
+    status: "active",
+    authority: "user_rule",
+    sourceTrust: "user_confirmed",
+    title: "PR 提交前必须跑全量本地测试 + 离线检查",
+    abstractText: "Kodo 自动注入到 pre-push hook, 若跳过会被 PR 检查拒收。",
+    body: null,
+    contentHash: "h-rule-1",
+    confidence: 1,
+    verified: true,
+    conditions: ["stage == pr_open"],
+    sourceUris: ["settings:pre-push"],
+    scopeProjectId: null,
+    scopeRepositoryId: null,
+    scopeBranch: null,
+    useCount: 12,
+    version: 1,
+    createdAt: 1_700_003_000,
+    updatedAt: 1_700_003_000,
+  },
+  {
+    id: "mem-0005",
+    kind: "episodic",
+    status: "candidate",
+    authority: "historical",
+    sourceTrust: "untrusted",
+    title: "5-28 排查 Flink 任务延迟的临时结论",
+    abstractText: "怀疑是 source.db 重新订阅后 heartbeat 没跟上, 监控已加重试; 待下次复发再确认。",
+    body: null,
+    contentHash: "h-epi-5",
+    confidence: 0.4,
+    verified: false,
+    conditions: [],
+    sourceUris: ["session:c3#turn-2"],
+    scopeProjectId: "realtime-lakehouse",
+    scopeRepositoryId: "k2k-rust",
+    scopeBranch: "main",
+    useCount: 0,
+    version: 1,
+    createdAt: 1_700_004_000,
+    updatedAt: 1_700_004_000,
+  },
+];

@@ -1,5 +1,25 @@
-import { archiveFooter, archivedConversations, llmCalls, responseMeta, timeline, type ArchivedConversation, type TimelineRow } from "./demo";
+import {
+  archiveFooter,
+  archivedConversations,
+  demoArtifactRefs,
+  demoItems,
+  demoLlmIo,
+  demoMemoryEntries,
+  demoSpans,
+  llmCalls,
+  responseMeta,
+  timeline,
+  type ArchivedConversation,
+  type TimelineRow,
+} from "./demo";
 import { changedFiles, conversation, project, projects, summary } from "./fixture";
+import type {
+  ArtifactRefDto,
+  FileSpanDto,
+  ItemDto,
+  LlmIoDto,
+  MemoryEntryDto,
+} from "../api";
 import type { ChangedFile, Project } from "./types";
 
 /**
@@ -17,6 +37,18 @@ export type DemoState = {
   summary: typeof summary;
   changedFiles: ChangedFile[];
   timeline: TimelineRow[];
+  /** Item-level fixture that backs the Response Trace "地图" tab on
+   *  /ui-demo/trace when no live session is loaded. */
+  items?: ItemDto[];
+  /** Captured LLM I/O bodies for the demo Model calls. */
+  llmIoCaptures?: LlmIoDto[];
+  /** Captured file-span (before/after) bodies for the demo Edit calls. */
+  spans?: FileSpanDto[];
+  /** Artifact refs (matches what `list_artifacts` returns live). */
+  artifactRefs?: ArtifactRefDto[];
+  /** Memory entries (matches what `memory_list` returns live). The
+   *  Memory inspector on /ui-demo/* reads these via the browser stub. */
+  memoryEntries?: MemoryEntryDto[];
   responseMeta: typeof responseMeta;
   llmCalls: typeof llmCalls;
   archivedConversations: ArchivedConversation[];
@@ -31,6 +63,11 @@ export function loadDemoState(): DemoState {
     summary,
     changedFiles,
     timeline,
+    items: demoItems,
+    llmIoCaptures: demoLlmIo,
+    spans: demoSpans,
+    artifactRefs: demoArtifactRefs,
+    memoryEntries: demoMemoryEntries,
     responseMeta,
     llmCalls,
     archivedConversations,

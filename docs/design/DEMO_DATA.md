@@ -54,6 +54,12 @@ belong to turn 1 — turns 2 and 3 are file-free so those totals stay truthful.
 The turn rail (COMPONENTS §16) needs ≥2 turns to render, which is why the
 fixture holds three.
 
+The Response Trace "地图" tab (`?tab=map`) reads `demo.items` (item-level
+fixture in `apps/desktop/src/data/demo.ts`) row-for-row with `timeline`:
+10 nodes and a sequential spine. Plan dependency edges are covered by the
+trace-map regression fixture. Item 8 is `failed` so the legend's 已失败
+swatch is exercised.
+
 Changed files count (turn 1):
 - 7
 

@@ -225,7 +225,7 @@ fn estimate_tokens(s: &MemorySnippet) -> usize {
     // otherwise. We use a single 4-chars-per-token heuristic; good
     // enough for budget enforcement.
     let chars: usize = s.title.chars().count() + s.abstract_text.chars().count() + 16;
-    (chars + 3) / 4
+    chars.div_ceil(4)
 }
 
 fn exact_token_search(store: &Store, query: &MemoryQuery) -> MemoryResult<Vec<String>> {

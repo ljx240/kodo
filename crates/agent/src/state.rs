@@ -1798,7 +1798,7 @@ mod tests {
         );
         let t = m.handle(AgentEvent::ModelRequestedTools { count: 1 });
         assert!(matches!(t, Transition::Advanced { .. }));
-        let t = m.handle(AgentEvent::ToolsFinished {
+        m.handle(AgentEvent::ToolsFinished {
             results: vec![denied],
         });
         assert_eq!(m.state(), &AgentState::Plan, "denial lands in Plan");

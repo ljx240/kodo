@@ -5,7 +5,6 @@ import {
   type DocumentDetail,
   type KnowledgeHit,
 } from "../knowledgeApi";
-import { KnowledgeSaveDialog } from "../pages/apps/KnowledgeSaveDialog";
 import "./knowledge-conversation.css";
 
 type Props = {
@@ -14,8 +13,6 @@ type Props = {
   turnSeq: number;
   finished: boolean;
   knowledgeUsed: boolean;
-  answerTitle: string;
-  answerText: string | null;
 };
 
 type DetailState = "idle" | "loading" | "ready" | "error";
@@ -39,8 +36,6 @@ export function KnowledgeSources({
   turnSeq,
   finished,
   knowledgeUsed,
-  answerTitle,
-  answerText,
 }: Props) {
   const [hits, setHits] = useState<KnowledgeHit[]>([]);
   const [loading, setLoading] = useState(false);
@@ -49,7 +44,6 @@ export function KnowledgeSources({
   const [detail, setDetail] = useState<DocumentDetail | null>(null);
   const [detailState, setDetailState] = useState<DetailState>("idle");
   const [detailError, setDetailError] = useState<string | null>(null);
-  const [promoteOpen, setPromoteOpen] = useState(false);
   const requestRef = useRef(0);
   const detailRequestRef = useRef(0);
   const viewKey = `${sessionId ?? ""}\u0000${projectPath ?? "personal"}\u0000${turnSeq}`;
@@ -70,7 +64,6 @@ export function KnowledgeSources({
     setDetail(null);
     setDetailState("idle");
     setDetailError(null);
-    setPromoteOpen(false);
     if (!sessionId || !finished || !knowledgeUsed) {
       return () => {
         live = false;
@@ -96,7 +89,7 @@ export function KnowledgeSources({
   }, [sessionId, projectPath, turnSeq, finished, knowledgeUsed]);
 
   useEffect(() => {
-    if (!selected || promoteOpen) return;
+    if (!selected) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -106,7 +99,7 @@ export function KnowledgeSources({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selected, promoteOpen]);
+  }, [selected]);
 
   const openSource = (hit: KnowledgeHit) => {
     const requestId = ++detailRequestRef.current;
@@ -137,9 +130,9 @@ export function KnowledgeSources({
     setDetailError(null);
   };
 
-  const showPromote = Boolean(sessionId && finished && answerText?.trim());
   if (loadedViewKey !== viewKey) return null;
-  if (!sessionId || (!knowledgeUsed && !showPromote) || (!loading && !error && hits.length === 0 && !showPromote)) return null;
+  if (!sessionId || !knowledgeUsed) return null;
+  if (!loading && !error && hits.length === 0) return null;
 
   return (
     <>
@@ -168,19 +161,6 @@ export function KnowledgeSources({
             正在读取本轮资料来源…
           </p>
         ) : null)}
-
-      {showPromote && !promoteOpen && (
-        <div className="knowledge-turn-actions">
-          <button
-            type="button"
-            className="btn btn--sm"
-            data-testid={`knowledge-turn-promote-${turnSeq}`}
-            onClick={() => setPromoteOpen(true)}
-          >
-            将最终回答加入知识库
-          </button>
-        </div>
-      )}
 
       {selected && (
         <div className="knowledge-source-backdrop" data-testid="knowledge-source-backdrop">
@@ -227,15 +207,6 @@ export function KnowledgeSources({
             </div>
           </section>
         </div>
-      )}
-      {promoteOpen && answerText?.trim() && (
-        <KnowledgeSaveDialog
-          title={answerTitle}
-          body={answerText}
-          sourceKind="answer"
-          sourceRef={`${sessionId}:${turnSeq}`}
-          onClose={() => setPromoteOpen(false)}
-        />
       )}
     </>
   );

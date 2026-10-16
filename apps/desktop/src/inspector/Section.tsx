@@ -71,7 +71,31 @@ export function MetaRow({ label, children }: { label: string; children: ReactNod
   );
 }
 
-export function FileRow({ file }: { file: ChangedFile }) {
+export function FileRow({
+  file,
+  onClick,
+}: {
+  file: ChangedFile;
+  /** When provided, the row renders as a button and the parent owns
+   *  the open/diff view (Response Trace artifacts tab opens the same
+   *  FileSpanModal the spans tab uses). */
+  onClick?: () => void;
+}) {
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className="file-row file-row--clickable"
+        onClick={onClick}
+        title={file.path}
+      >
+        <FileText size={14} strokeWidth={1.7} className="file-icon" />
+        <span className="file-path">{file.path}</span>
+        <span className="delta-add">+{file.added}</span>
+        <span className="delta-del">-{file.removed}</span>
+      </button>
+    );
+  }
   return (
     <div className="file-row">
       <FileText size={14} strokeWidth={1.7} className="file-icon" />

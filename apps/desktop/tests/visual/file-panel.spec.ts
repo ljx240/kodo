@@ -352,7 +352,11 @@ test("below 1200px there is no handle — the overlay keeps its own clamp", asyn
   expect(await panelWidth(page)).toBeLessThanOrEqual(340);
 });
 
-test("浏览 opens a native webview and sizes it to the widened panel", async ({ page }) => {
+test("浏览 mounts an embedded iframe inside the widened panel", async ({ page }) => {
+  await page.route("https://example.com/**", (route) => route.fulfill({
+    contentType: "text/html",
+    body: "<h1>Local browse fixture</h1>",
+  }));
   await stubShell(page, filePanelShell());
   await page.goto("/");
   await page.locator(".tree-project-main").click();
@@ -369,16 +373,17 @@ test("浏览 opens a native webview and sizes it to the widened panel", async ({
   await page.locator('[data-testid="browse-url"]').fill("https://example.com/page");
   await page.locator('[data-testid="browse-go"]').click();
 
+  // The browser is now an <iframe> inside the panel DOM — no OS child
+  // window is spawned, no browse_open / browse_set_position IPC fires.
   const frame = page.locator('[data-testid="browse-frame"]');
   await expect(frame).toBeVisible();
-  await expect.poll(() => page.evaluate(() =>
-    (window as unknown as { __browseLog: Array<{ command: string; args?: Record<string, unknown> }> }).__browseLog
-      .find((call) => call.command === "browse_open")?.args?.url,
-  )).toBe("https://example.com/page");
-  await expect.poll(() => page.evaluate(() =>
-    (window as unknown as { __browseLog: Array<{ command: string; args?: Record<string, unknown> }> }).__browseLog
-      .some((call) => call.command === "browse_set_position" && Number(call.args?.width) > 600 && Number(call.args?.height) > 0),
-  )).toBe(true);
+  await expect.poll(() => frame.getAttribute("src")).toBe("https://example.com/page");
+  await expect.poll(() =>
+    page.evaluate(() =>
+      (window as unknown as { __browseLog: Array<{ command: string }> }).__browseLog
+        .filter((call) => call.command === "browse_open" || call.command === "browse_set_position").length,
+    ),
+  ).toBe(0);
   await expect(page.locator('[data-testid="browse-external"]')).toBeVisible();
 
   // Escape demotes to Inspector — the panel stays open (文件 contract).

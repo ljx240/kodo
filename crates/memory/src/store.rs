@@ -34,16 +34,16 @@ pub fn now_secs() -> u64 {
 /// Apply the standard KME pragmas. Called on every connection open.
 fn apply_pragmas(conn: &Connection) -> MemoryResult<()> {
     // WAL is mandatory for read/write concurrency and crash safety.
-    conn.pragma_update(None, "journal_mode", &"WAL")?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
     // 3s matches doc §13.2. Long enough for cross-process syncs, short
     // enough to fail fast in the hot path.
-    conn.pragma_update(None, "busy_timeout", &3000_i64)?;
+    conn.pragma_update(None, "busy_timeout", 3000_i64)?;
     // We use FOREIGN KEY in the schema. SQLite is FK-off by default.
-    conn.pragma_update(None, "foreign_keys", &"ON")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     // synchronous=NORMAL is the WAL default; we make it explicit.
-    conn.pragma_update(None, "synchronous", &"NORMAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
     // Defensive: keep the temp store in memory.
-    conn.pragma_update(None, "temp_store", &"MEMORY")?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     Ok(())
 }
 
@@ -133,7 +133,7 @@ impl Store {
 
     /// Force-run migrations on the file (idempotent).
     pub fn ensure_schema(&self) -> MemoryResult<()> {
-        self.with_conn(|c| apply_migrations(c))
+        self.with_conn(apply_migrations)
     }
 
     // ---- DAO ---------------------------------------------------------------
@@ -231,7 +231,7 @@ impl Store {
                     entry.created_at as i64,
                     entry.updated_at as i64,
                     entry.superseded_by,
-                    new_version as i64,
+                    new_version,
                 ],
             )?;
             // FTS sync. The entry is identified by rowid. We delete

@@ -14,7 +14,7 @@ export type InspectorData = {
   demo: boolean;
   demoState?: DemoState | null;
   live: LiveSnapshot | null;
-  project?: { name: string; path: string } | null;
+  project?: { id: string; name: string; path: string } | null;
 };
 
 function EmptyBody({ note }: { note: string }) {

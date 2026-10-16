@@ -6784,10 +6784,42 @@ mod tests {
     fn review_progress_continues_until_a_report_and_never_fakes_verification() {
         let progress = "已确认项目结构。下一步聚焦信任边界；评分会区分问题和风险。]<]minimax[>[";
         let report = "评分项目：权限边界。评分：80/100。\n问题：README.md:1 缺少取消语义。\n解决方案：补充边界说明。]<]minimax[>[";
+        struct FixtureDir(std::path::PathBuf);
+
+        impl FixtureDir {
+            fn new(case: &str) -> Self {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock after Unix epoch")
+                    .as_nanos();
+                let path = std::env::temp_dir().join(format!(
+                    "kodo-review-report-{}-{case}-{nanos}",
+                    std::process::id()
+                ));
+                std::fs::create_dir(&path)
+                    .unwrap_or_else(|error| panic!("{case}: create fixture: {error}"));
+                Self(path)
+            }
+
+            fn join(&self, name: &str) -> std::path::PathBuf {
+                self.0.join(name)
+            }
+
+            fn path(&self) -> &std::path::Path {
+                &self.0
+            }
+        }
+
+        impl Drop for FixtureDir {
+            fn drop(&mut self) {
+                if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                    eprintln!("fixture cleanup failed: {error}");
+                }
+            }
+        }
+
         for case in ["recovers", "never-reports", "empty-then-read"] {
-            let dir = std::env::temp_dir()
-                .join(format!("kodo-review-report-{}-{case}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
+            let dir = FixtureDir::new(case);
             std::fs::write(dir.join("README.md"), "# Offline fixture\n").unwrap();
             let read = serde_json::json!({"text": serde_json::json!({"tool_calls": [{"id": "r", "name": "read_file", "arguments": {"path": "README.md"}}]}).to_string()});
             let mut responses = vec![read.clone()];
@@ -6817,7 +6849,7 @@ mod tests {
                     + "\n",
             )
             .unwrap();
-            let mut request = temp_request(&dir, Permission::Auto);
+            let mut request = temp_request(dir.path(), Permission::Auto);
             request.message = "为我做一个详细的代码评审，为我输出详细评分，按照该项目情况设定评分项目 然后评分 分析问题和解决方案".into();
             request.provider = Some(Provider::new(
                 "fake",
@@ -6882,7 +6914,6 @@ mod tests {
                     "interim prose leaked into delivery"
                 );
             }
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -7706,10 +7737,12 @@ mod tests {
     /// bypass) and the gate does not depend on `rounds_exhausted()`.
     #[test]
     fn max_final_only_retries_allows_at_least_one_bypass() {
-        assert!(
-            MAX_FINAL_ONLY_RETRIES >= 1,
-            "at least one final-only retry must be allowed"
-        );
+        const {
+            assert!(
+                MAX_FINAL_ONLY_RETRIES >= 1,
+                "at least one final-only retry must be allowed"
+            );
+        }
     }
 
     #[test]
@@ -9930,7 +9963,7 @@ mod tests {
         // Cap gate: 5 MiB PNG with vision=true must NOT inline — it must
         // fall back to the path-only descriptor with inlined="false".
         // A successful inlining here would blow the request body.
-        let (_dir, abs) = temp_attachment("huge.png", &vec![0x89; (5 * 1024 * 1024)]);
+        let (_dir, abs) = temp_attachment("huge.png", &vec![0x89; 5 * 1024 * 1024]);
         let request = RunRequest {
             project: None,
             message: "看一下图".to_owned(),

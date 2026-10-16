@@ -1,5 +1,6 @@
 // Shared helpers for integration tests. Kept in a non-`mod` file so each
 // `tests/*.rs` includes it as a module.
+#![allow(dead_code)] // Each integration test uses a different subset of helpers.
 
 use std::sync::Arc;
 

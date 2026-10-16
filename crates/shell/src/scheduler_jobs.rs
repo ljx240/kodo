@@ -314,7 +314,7 @@ mod tests {
         let report = MemoryOutboxReplay.execute(&serde_json::json!({}), &ctx());
         // Either succeeds (events drained) or fails with the
         // state_dir_unavailable reason code in sandbox CI.
-        if let Some(_) = settings::state_dir() {
+        if settings::state_dir().is_some() {
             assert!(
                 matches!(report.outcome, JobOutcome::Succeeded | JobOutcome::Partial),
                 "unexpected outcome: {:?}",

@@ -2506,3 +2506,190 @@
 .btn--danger:hover:not(:disabled) {
   background: var(--kodo-error-bg);
 }
+
+/* -----------------------------------------------------------------------
+   Trace map (DAG view)
+   - Status carries in `trace-map-node--<status>` classes plus the inner
+     `<text>`-rendered word; colour is secondary, never alone.
+   - Edges: solid for sequential, dashed accent for planStep triggers.
+   - All visuals reuse kodo tokens; no hard-coded colour or shadow.
+   ----------------------------------------------------------------------- */
+
+.trace-map {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kodo-space-3);
+}
+
+.trace-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kodo-space-4);
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-fg-secondary);
+}
+
+.trace-map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kodo-space-2);
+}
+
+.trace-map-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  border: 1px solid var(--kodo-border-strong);
+  background: var(--kodo-bg);
+}
+
+.trace-map-legend-item--running .trace-map-legend-swatch {
+  border-color: var(--kodo-accent);
+  background: var(--kodo-success-bg-soft);
+}
+.trace-map-legend-item--failed .trace-map-legend-swatch {
+  border-color: var(--kodo-error);
+  background: var(--kodo-error-bg);
+}
+.trace-map-legend-item--interrupted .trace-map-legend-swatch {
+  border-color: var(--kodo-warning);
+}
+.trace-map-legend-item--stopped .trace-map-legend-swatch {
+  border-color: var(--kodo-text-muted);
+}
+
+.trace-map-collapsed {
+  margin: 0;
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-fg-decorative);
+}
+
+.trace-map-svg-wrap {
+  /* Cap the canvas so a 60-row sequential chain doesn't dominate the page;
+     internal scroll reveals the rest. The SVG inside fills the visible
+     width and grows vertically to keep its aspect ratio. */
+  max-height: 75vh;
+  overflow: auto;
+  background: var(--kodo-bg-raised);
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius);
+  padding: var(--kodo-space-4);
+}
+
+.trace-map-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-width: 480px;
+  overflow: visible;
+}
+
+.trace-map-node-rect {
+  fill: var(--kodo-bg);
+  stroke: var(--kodo-border);
+  stroke-width: 1;
+  transition:
+    stroke 120ms ease,
+    stroke-width 120ms ease;
+}
+
+.trace-map-node--running .trace-map-node-rect {
+  stroke: var(--kodo-accent);
+}
+.trace-map-node--failed .trace-map-node-rect {
+  stroke: var(--kodo-error);
+}
+.trace-map-node--interrupted .trace-map-node-rect {
+  stroke: var(--kodo-warning);
+}
+.trace-map-node--stopped .trace-map-node-rect {
+  stroke: var(--kodo-text-muted);
+}
+
+.trace-map-node-label {
+  fill: var(--kodo-fg);
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.trace-map-node-status {
+  fill: var(--kodo-fg-secondary);
+  font-size: var(--kodo-font-xs);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.trace-map-node--running .trace-map-node-status {
+  fill: var(--kodo-accent);
+}
+.trace-map-node--failed .trace-map-node-status {
+  fill: var(--kodo-error);
+}
+.trace-map-node--interrupted .trace-map-node-status {
+  fill: var(--kodo-warning);
+}
+.trace-map-node--stopped .trace-map-node-status {
+  fill: var(--kodo-text-muted);
+}
+
+.trace-map-node-detail,
+.trace-map-node-chips {
+  fill: var(--kodo-fg-decorative);
+  font-size: var(--kodo-font-sm);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+.trace-map-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.trace-map-node:focus-visible .trace-map-node-rect {
+  stroke: var(--kodo-accent);
+  stroke-width: 2;
+}
+
+.trace-map-node:hover .trace-map-node-rect {
+  stroke: var(--kodo-border-strong);
+}
+
+.trace-map-edge {
+  fill: none;
+  stroke: var(--kodo-border-strong);
+  stroke-width: 1;
+}
+
+.trace-map-edge--planTrigger {
+  stroke: var(--kodo-accent);
+  stroke-dasharray: 4 3;
+}
+
+.trace-map-edge-arrow {
+  fill: var(--kodo-border-strong);
+}
+
+.trace-map-edge-arrow--trigger {
+  fill: var(--kodo-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trace-map-node-rect {
+    transition: none;
+  }
+}
+
+/* Trace page logs fill the available height — the inspector's 190px cap
+   exists to bound a side panel, not a full-width pre on a Response Trace. */
+.trace-log-pre {
+  max-height: none;
+}
+
+/* Scope hint under the reply card head — clarifies that the Response Trace
+   only covers the single assistant reply the user clicked into, never the
+   whole conversation. */
+.trace-scope-hint {
+  margin: 0;
+  padding: 0 var(--kodo-space-5) var(--kodo-space-3);
+  font-size: var(--kodo-font-sm);
+  color: var(--kodo-fg-secondary);
+}

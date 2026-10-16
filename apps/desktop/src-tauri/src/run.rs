@@ -667,6 +667,28 @@ fn synthesize_fallback_answer(original_message: &str) -> String {
     )
 }
 
+/// Open the on-disk memory store at `<state_dir>/memory/v1/memory.sqlite`
+/// and wrap it in a `MemoryHandle`. Returns `None` if the state directory
+/// is unavailable (HOME unset, sandbox restrictions) — fail-open: the
+/// agent loop continues with the memory channel disabled.
+fn open_memory_handle() -> Option<MemoryHandle> {
+    let state_dir = kodo_core::settings::state_dir()?;
+    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match SqliteMemory::open(&path) {
+        Ok(mem) => Some(mem.into()),
+        Err(e) => {
+            eprintln!(
+                "kodo memory: failed to open store at {}: {e}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,27 +757,5 @@ mod tests {
         .unwrap();
         assert_eq!(encoded["runId"], 7);
         assert_eq!(encoded["type"], "turnStarted");
-    }
-}
-
-/// Open the on-disk memory store at `<state_dir>/memory/v1/memory.sqlite`
-/// and wrap it in a `MemoryHandle`. Returns `None` if the state directory
-/// is unavailable (HOME unset, sandbox restrictions) — fail-open: the
-/// agent loop continues with the memory channel disabled.
-fn open_memory_handle() -> Option<MemoryHandle> {
-    let state_dir = kodo_core::settings::state_dir()?;
-    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match SqliteMemory::open(&path) {
-        Ok(mem) => Some(mem.into()),
-        Err(e) => {
-            eprintln!(
-                "kodo memory: failed to open store at {}: {e}",
-                path.display()
-            );
-            None
-        }
     }
 }

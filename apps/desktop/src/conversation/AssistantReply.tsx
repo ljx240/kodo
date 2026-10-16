@@ -1,7 +1,8 @@
-import { BarChart3, Check, CircleAlert, Copy, RefreshCw, Square } from "lucide-react";
+import { BarChart3, Bookmark, Check, CircleAlert, Copy, RefreshCw, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { DeliveryStatus, VerificationStatus } from "../api";
 import { T } from "../i18n";
+import { KnowledgeSaveDialog } from "../pages/apps/KnowledgeSaveDialog";
 import { ConversationProcess } from "./ConversationProcess";
 import { ChangedFilesSummary } from "./ChangedFilesSummary";
 import { Markdown } from "./Markdown";
@@ -51,6 +52,10 @@ type Props = {
   /** Open a path mentioned in the answer's markdown (inline code) in the
    *  right sidebar. Heuristic only — the click probes before opening. */
   onOpenPath?: ((path: string) => void) | null;
+  /** Session id, used to build the sourceRef when promoting the final
+   *  answer to a knowledge base (sourceRef = `${sessionId}:${turnSeq}`).
+   *  Null in demo / pre-session preview. */
+  sessionId?: string | null;
   /** Paths the user had already modified before this turn. */
   preExisting?: string[];
   /** Paths whose working tree diverged from Kodo's after-hash. */
@@ -85,11 +90,13 @@ export function AssistantReply({
   onOpenFile = null,
   onOpenPath = null,
   undoingChanges = false,
+  sessionId = null,
   preExisting = [],
   conflicts = [],
 }: Props) {
   const [copied, setCopied] = useState(false);
   const [ignoredVerification, setIgnoredVerification] = useState(false);
+  const [promoteOpen, setPromoteOpen] = useState(false);
   const copyTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -143,6 +150,11 @@ export function AssistantReply({
     !pendingQuestion &&
     Boolean(onRegenerate) &&
     Boolean(reply.final || reply.stopped || reply.error || reply.interrupted);
+  // Promote the final answer to a knowledge base. Only when this turn has
+  // settled (not running) and there is a non-empty final to save. Mirrors
+  // KnowledgeSources' old `showPromote` gate.
+  const canPromote = !running && Boolean(sessionId) && Boolean(reply.final?.trim()) && !promoteOpen;
+  const promoteSourceRef = sessionId && typeof turnIndex === "number" ? `${sessionId}:${turnIndex + 1}` : null;
 
   return (
     <article className={findHit ? "reply find-hit" : "reply"} data-turn-index={turnIndex}>
@@ -313,7 +325,7 @@ export function AssistantReply({
           so 复制回复 / 重新生成 / 查看响应轨迹 never hide behind hover
           (2026-09-30). Icon-only: the label moves to aria-label + title,
           same as the message copy button. It shows whichever the turn allows. */}
-      {(canCopy || canRegenerate || onOpenLogs) && (
+      {(canCopy || canRegenerate || onOpenLogs || canPromote) && (
         <div className="reply-actions">
           {canCopy && (
             <button
@@ -351,7 +363,28 @@ export function AssistantReply({
               <BarChart3 size={13} strokeWidth={1.8} />
             </button>
           )}
+          {canPromote && (
+            <button
+              type="button"
+              className="icon-btn icon-btn--sm"
+              data-testid="reply-promote-answer"
+              aria-label={T.action.saveAnswerToKnowledge}
+              title={T.action.saveAnswerToKnowledge}
+              onClick={() => setPromoteOpen(true)}
+            >
+              <Bookmark size={13} strokeWidth={1.8} />
+            </button>
+          )}
         </div>
+      )}
+      {promoteOpen && promoteSourceRef && reply.final?.trim() && (
+        <KnowledgeSaveDialog
+          title={typeof turnIndex === "number" ? `第 ${turnIndex + 1} 轮回答` : "最终回答"}
+          body={reply.final}
+          sourceKind="answer"
+          sourceRef={promoteSourceRef}
+          onClose={() => setPromoteOpen(false)}
+        />
       )}
     </article>
   );

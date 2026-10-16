@@ -180,6 +180,12 @@ function demoProjects(mode: string): Project[] {
   return loadDemoState().projects
     .map((project) => ({
       ...project,
+      // The JSON fixture omits `path`; the desktop shell treats it as the
+      // project on disk. Backfill so path-aware features (Inspector Memory
+      // tab, planStep target resolution) can resolve the active project.
+      // The 「未选择项目」 pseudo group keeps an empty path — it is a
+      // grouping header, not a real project.
+      path: project.path ?? (project.id === "" ? "" : `~/projects/${project.id}`),
       conversations: project.conversations.filter((conversation) => modeOf(conversation) === mode),
     }))
     // The 「未选择项目」 pseudo group exists only to hold projectless

@@ -56,13 +56,13 @@ pub fn compile(
     }
 
     // Require a project_id for pinned entries.
-    if event.extra.get("project_id").is_none() {
+    if !event.extra.contains_key("project_id") {
         return Ok(false);
     }
     let project_id = event.extra.get("project_id").cloned().unwrap_or_default();
 
     // Require a task_id so we can write a working memory.
-    if event.extra.get("task_id").is_none() {
+    if !event.extra.contains_key("task_id") {
         return Ok(false);
     }
 
@@ -78,9 +78,11 @@ pub fn compile(
     let authority = Authority::UserRule;
     let source_trust = SourceTrust::UserConfirmed;
 
-    let mut scope = MemoryScope::default();
-    scope.project_id = Some(project_id);
-    scope.session_id = Some(event.session_id.clone());
+    let mut scope = MemoryScope {
+        project_id: Some(project_id),
+        session_id: Some(event.session_id.clone()),
+        ..Default::default()
+    };
     if let Some(t) = event.extra.get("task_id") {
         scope.task_id = Some(t.clone());
     }
