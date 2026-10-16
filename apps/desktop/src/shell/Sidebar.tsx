@@ -2,7 +2,6 @@ import {
   Archive,
   Check,
   ChevronDown,
-  ChevronRight,
   ExternalLink,
   Folder,
   FolderOpen,
@@ -494,11 +493,10 @@ export function Sidebar({
               >
                 <button type="button" className="tree-project-main" onClick={() => workspace.toggleProject(project.id)}>
                   {project.expanded ? (
-                    <ChevronDown size={14} strokeWidth={2} />
+                    <FolderOpen size={14} strokeWidth={1.5} />
                   ) : (
-                    <ChevronRight size={14} strokeWidth={2} />
+                    <Folder size={14} strokeWidth={1.5} />
                   )}
-                  <Folder size={15} strokeWidth={1.7} />
                   {renaming === project.id ? (
                     <input
                       className="tree-input"
