@@ -1063,6 +1063,23 @@ p {
   color: var(--kodo-error);
 }
 
+/* Consistent micro-feedback on chrome primitives. The shell-wide
+   prefers-reduced-motion rule (line 54) already zeros transition-duration,
+   so motion-sensitive users get an instant snap. */
+.btn,
+.chip,
+.icon-btn,
+.nav-item,
+.menu-item,
+.settings-nav-item {
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.tree-project,
+.tree-conversation {
+  transition: background 0.12s ease;
+}
+
 .code-chip {
   padding: 1px 6px;
   border: 1px solid var(--kodo-border);
