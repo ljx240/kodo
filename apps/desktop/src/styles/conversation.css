@@ -998,9 +998,8 @@ button.changed-file-path:focus-visible {
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-lg);
   background: var(--kodo-canvas);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 3%);
   overflow: hidden;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  transition: border-color 120ms ease;
 }
 
 .composer-box:has(.menu),

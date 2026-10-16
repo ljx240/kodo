@@ -6,7 +6,6 @@
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius);
   background: var(--kodo-canvas);
-  box-shadow: 0 2px 8px rgb(23 32 51 / 3%);
 }
 
 .reply-card-head {
