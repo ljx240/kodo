@@ -1618,7 +1618,7 @@ button.changed-file-path:focus-visible {
   padding: 10px 12px;
   border: 1px dashed var(--kodo-border);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--kodo-canvas) 92%, white);
+  background: color-mix(in srgb, var(--kodo-canvas) 92%, var(--kodo-surface));
 }
 
 .stream-preview .final-text {
