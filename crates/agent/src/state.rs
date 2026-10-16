@@ -27,7 +27,9 @@ pub enum FailReason {
     BudgetExhausted,
     /// Finish was requested but acceptance criteria are unmet.
     AcceptanceUnmet,
-    /// Unrecoverable internal / tool policy failure.
+    /// Required tools remain denied after bounded replanning.
+    PermissionDenied,
+    /// Unrecoverable internal or verification infrastructure failure.
     Unrecoverable,
 }
 
@@ -235,8 +237,8 @@ impl Budget {
     /// Read-only tasks (「为我输出该项目架构」,「总结仓库结构」, etc.) need
     /// 20-30+ tool calls just to map a project — well past the code-mode
     /// default of 32. They never mutate the project or trigger repair cycles,
-    /// so we keep `max_repairs = 0` (fail fast on denials) and lift the tool
-    /// and round caps. Context window also doubles because list-heavy tasks
+    /// so code repair capacity stays zero; denied reads can replan within
+    /// the normal tool and round caps. Context window doubles because list-heavy tasks
     /// accumulate a lot of repo_map output.
     ///
     /// `is_summary_family()` is the predicate callers use to pick the right
@@ -682,13 +684,18 @@ impl AgentMachine {
         // batch must not be punished for an earlier audit entry.
         if self.recent_batch_denied {
             self.recent_batch_denied = false;
+            // Choosing another allowed read is not a code repair. Normal
+            // round/tool limits still bound a model that keeps asking denied tools.
+            if self.budget.is_summary_family() {
+                return Ok(AgentState::Plan);
+            }
             if !self.budget.repairs_exhausted() {
                 self.budget.repairs_used += 1;
                 // Back to Plan so the loop can re-plan around the denial.
                 return Ok(AgentState::Plan);
             }
             return Ok(AgentState::Failed {
-                reason: FailReason::Unrecoverable,
+                reason: FailReason::PermissionDenied,
             });
         }
 
@@ -1317,7 +1324,7 @@ mod tests {
         assert_eq!(
             m.state(),
             &AgentState::Failed {
-                reason: FailReason::Unrecoverable
+                reason: FailReason::PermissionDenied
             }
         );
     }
@@ -1965,6 +1972,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_only_denials_replan_without_repairs_and_still_obey_budget() {
+        let mut m = AgentMachine::new(
+            "Review the source code",
+            Budget {
+                max_rounds: 4,
+                ..Budget::for_summary()
+            },
+        );
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        for index in 0..4 {
+            m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+            if m.state().is_terminal() {
+                break;
+            }
+            let result = if index == 1 {
+                ToolResult::success(
+                    ToolCallId::new("read"),
+                    ToolName::ReadFile.label(),
+                    "source.rs",
+                    "fn main() {}",
+                )
+            } else {
+                ToolResult::failure(
+                    ToolCallId::new(format!("denied-{index}")),
+                    ToolName::RunCommand.label(),
+                    "touch must-not-write.md",
+                    ToolError::permission_denied("read-only policy rejected a mutation"),
+                )
+            };
+            m.handle(AgentEvent::ToolsFinished {
+                results: vec![result],
+            });
+            if index == 0 {
+                assert_eq!(m.state(), &AgentState::Plan, "choose another allowed read");
+            } else if index == 1 {
+                assert_eq!(m.state(), &AgentState::Execute);
+            }
+            assert_eq!(m.budget().repairs_used, 0);
+        }
+        assert_eq!(
+            m.state(),
+            &AgentState::Failed {
+                reason: FailReason::BudgetExhausted
+            }
+        );
+        assert_eq!(m.budget().tool_calls_used, 3);
+        assert_eq!(m.evidence().denied_tools.len(), 2);
+    }
+
     /// The fixed machine still fails closed when repairs are exhausted —
     /// permission denials must not silently extend the run.
     #[test]
@@ -2000,7 +2059,7 @@ mod tests {
         assert_eq!(
             m.state(),
             &AgentState::Failed {
-                reason: FailReason::Unrecoverable
+                reason: FailReason::PermissionDenied
             }
         );
     }
