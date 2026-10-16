@@ -2723,7 +2723,7 @@ fn emit_knowledge_terminal(
 }
 
 fn budget_for_task(task_type: TaskType, project_summary: bool, family: Option<&str>) -> Budget {
-    let mut budget = if project_summary {
+    let mut budget = if project_summary || task_type == TaskType::CodeReview {
         Budget::for_summary()
     } else if task_type == TaskType::Docs {
         Budget::for_document()
@@ -4428,38 +4428,16 @@ pub fn run(
                                 break;
                             }
                             history.push(ProviderMessage::user(format!(
-                                "上一轮是进度说明或不完整报告，任务尚未交付：{}。继续必要的代码读取，随后给出完整报告：评分项目及实际数值评分、问题分析、具体文件:行号、解决方案。不要用下一步计划代替结果，不得编造证据或声称未执行的验证通过。",
+                                "上一轮是进度说明或不完整报告，任务尚未交付：{}。复用已获得的分支、基线、worktree、stash 和 diff 观察，除非现场出现新变化，不要重复 Git 盘点。证据不足时，下一轮实际调用只读工具检查具体源文件和测试；证据充分时，直接给出完整报告：评分项目及实际数值评分、问题分析、具体文件:行号、解决方案。不要只承诺接下来读取，不得编造证据或声称未执行的验证通过。",
                                 report_errors.join("；")
                             )));
                             continue;
                         }
                         if answer.trim().is_empty() {
-                            // Plan-level final-answer gate: read-only review
-                            // skills set `requires_final_answer = true` so the
-                            // loop gets one extra final-only retry before
-                            // giving up. The 2026-10-13 incident landed on a
-                            // model that returned `finish_reason=stop` with
-                            // an empty `text` block and no `reasoning_content`
-                            // trace, so `saw_reasoning` is **not** part of
-                            // the trigger — the gate is the broader
-                            // "needs final report AND no usable text AND
-                            // budget allows AND retries not exhausted". Output
-                            // truncation uses its own bounded recovery so
-                            // we don't suggest "extend output" when the
-                            // signal is "truncated".
+                            // An empty answer does not prove that gathering is done.
+                            // Keep tools while normal budget remains; closing retries
+                            // stay prose-only and bounded even beyond that budget.
                             let burned_reasoning_only = !output_was_truncated(&attempt_finish);
-                            // 2026-10-13 follow-up: the final-only retry must
-                            // not be gated by `rounds_exhausted()`. final-only
-                            // IS the bypass of the normal round budget — the
-                            // whole point is to give the model one more shot
-                            // at landing a final report when the regular round
-                            // budget has run out and the last call came back
-                            // empty. Without this carve-out, the tmu34a-6disnc-0
-                            // re-run hit rounds_used==max_rounds, the gate
-                            // closed, the loop broke with `final_only_retries=0`,
-                            // and the failure_reason classifier fell through to
-                            // the generic `provider_error` shape even though we
-                            // never actually attempted a final-only recovery.
                             if machine.plan().requires_final_answer
                                 && burned_reasoning_only
                                 && final_only_retries < MAX_FINAL_ONLY_RETRIES
@@ -4477,20 +4455,21 @@ pub fn run(
                                     ));
                                 }
                                 notes.push(format!(
-                                    "final-only retry {}/{} (finish_reason={}, saw_reasoning={}): empty answer, asking model to land the report in prose",
+                                    "final-answer retry {}/{} (finish_reason={}, saw_reasoning={}): empty answer, requesting the missing report",
                                     final_only_retries + 1,
                                     MAX_FINAL_ONLY_RETRIES,
                                     attempt_finish,
                                     attempt_saw_reasoning
                                 ));
                                 final_only_retries = final_only_retries.saturating_add(1);
-                                final_only_requested = true;
-                                history.push(ProviderMessage::user(
-                                    "上一轮没有返回可用正文。请直接以 final 消息给出报告（评分 / 关键要素 / 优化建议），\
-                                     不再发起新工具调用，reasoning 请压缩到最少。\
-                                     如需引用代码，必须给出具体的文件:行号。"
-                                        .to_owned(),
-                                ));
+                                final_only_requested =
+                                    final_only_call || machine.budget().any_exhausted();
+                                let hint = if final_only_requested {
+                                    "上一轮没有返回可用正文。请使用已有观察直接以 final 消息给出完整报告（评分 / 关键要素 / 文件:行号 / 优化建议），不再发起新工具调用，reasoning 请压缩到最少。"
+                                } else {
+                                    "上一轮没有返回可用正文，任务尚未完成。证据不足时继续实际调用必要的只读工具，读取具体源文件和测试；复用已获得的 Git 现场观察，除非发生变化，不要再次从分支、worktree、stash 盘点开始。证据充分后直接以 final 消息给出完整报告（评分 / 关键要素 / 文件:行号 / 优化建议），不要用下一步计划代替结果。"
+                                };
+                                history.push(ProviderMessage::user(hint.to_owned()));
                                 continue;
                             }
                             model_gap = Some(
@@ -4541,10 +4520,25 @@ pub fn run(
                     }
 
                     if final_only_call {
+                        // No tool in this batch ran; do not retain orphan native calls.
+                        history.pop();
                         machine.budget_mut().rounds_used =
                             machine.budget().rounds_used.saturating_add(1);
-                        machine.handle(AgentEvent::BudgetExceeded);
-                        break;
+                        answer.clear();
+                        checks.clear();
+                        model_gap = Some(
+                            "模型在最终答复阶段仍请求工具，未返回最终报告；本次工具调用未执行"
+                                .to_owned(),
+                        );
+                        if final_only_retries >= MAX_FINAL_ONLY_RETRIES {
+                            break;
+                        }
+                        final_only_retries += 1;
+                        final_only_requested = true;
+                        history.push(ProviderMessage::user(
+                            "本次工具调用未执行。现在只使用已有观察输出完整最终报告：实际评分、具体文件:行号、问题分析与解决方案；明确证据不足之处，不要再请求工具或输出工具协议。".to_owned(),
+                        ));
+                        continue;
                     }
                     if conversational
                         && !wrote_files
@@ -5516,12 +5510,8 @@ fn empty_answer_detail(finish_reason: &str, saw_reasoning: bool) -> &'static str
     }
 }
 
-/// Maximum number of "final only" recovery calls for a single turn. The
-/// 2026-10-13 incident showed a stuck model can keep returning empty
-/// stop responses forever; without a hard cap the loop burns the entire
-/// budget. One retry catches the common preview-channel reasoning-only
-/// case; a second retry catches the rarer scenario where the first retry's
-/// answer also arrived empty. Anything beyond two is a no-answer failure.
+/// Bounded final-answer recovery for empty text or tool requests during closing.
+/// Normal recovery keeps allowed tools; only closing calls bypass the round cap.
 const MAX_FINAL_ONLY_RETRIES: u32 = 2;
 
 // Successful tool progress resets this streak; the task round budget still applies.
@@ -6774,7 +6764,7 @@ mod tests {
     fn review_progress_continues_until_a_report_and_never_fakes_verification() {
         let progress = "已确认项目结构。下一步聚焦信任边界；评分会区分问题和风险。]<]minimax[>[";
         let report = "评分项目：权限边界。评分：80/100。\n问题：README.md:1 缺少取消语义。\n解决方案：补充边界说明。]<]minimax[>[";
-        for case in ["recovers", "never-reports", "retry-cannot-run-tools"] {
+        for case in ["recovers", "never-reports", "empty-then-read"] {
             let dir = std::env::temp_dir()
                 .join(format!("kodo-review-report-{}-{case}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
@@ -6790,7 +6780,11 @@ mod tests {
                 "never-reports" => {
                     responses.extend((0..20).map(|_| serde_json::json!({"text": progress})))
                 }
-                _ => responses.extend([serde_json::json!({"text": ""}), read]),
+                _ => responses.extend([
+                    serde_json::json!({"text": ""}),
+                    read,
+                    serde_json::json!({"text": report}),
+                ]),
             }
             let script = dir.join("responses.jsonl");
             std::fs::write(
@@ -6854,9 +6848,10 @@ mod tests {
             let (text, delivery, verification) = result.unwrap();
             assert!(!text.contains("minimax"), "{case}: {text}");
             assert_eq!(verification, "not_run", "{case}: {text}");
-            if case == "recovers" {
-                assert!(saw_progress);
+            if case != "never-reports" {
+                assert_eq!(saw_progress, case == "recovers");
                 assert_eq!(calls, 4);
+                assert_eq!(reads, 2, "recovery must allow the missing read");
                 assert_eq!(delivery, "ready", "{text}");
                 assert!(text.contains("评分：80/100") && text.contains("README.md:1"));
             } else {
@@ -6866,15 +6861,187 @@ mod tests {
                     !text.contains("下一步聚焦"),
                     "interim prose leaked into delivery"
                 );
-                if case == "retry-cannot-run-tools" {
-                    assert_eq!(calls, 3);
-                    assert_eq!(
-                        reads, 1,
-                        "final-only retry must not execute the requested tool"
-                    );
-                }
             }
             std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn review_recovery_preserves_read_tools_and_bounds_final_only_requests() {
+        for native in [false, true] {
+            for case in [
+                "early",
+                "repeated-progress",
+                "mutation",
+                "final-tools",
+                "no-final",
+            ] {
+                let root = std::env::temp_dir().join(format!(
+                    "kodo-review-recovery-{}-{native}-{case}",
+                    std::process::id()
+                ));
+                let project = root.join("repo");
+                std::fs::create_dir_all(&project).unwrap();
+                for index in 0..12 {
+                    std::fs::write(
+                        project.join(format!("source-{index}.rs")),
+                        "fn validate() {}\n",
+                    )
+                    .unwrap();
+                }
+                let read = |index: usize| {
+                    serde_json::json!({
+                        "id":format!("read-{index}"),"name":"read_file",
+                        "arguments":{"path":format!("source-{index}.rs")}
+                    })
+                };
+                let tools = |calls: Vec<serde_json::Value>| {
+                    serde_json::json!({
+                        "text":serde_json::json!({"tool_calls":calls}).to_string()
+                    })
+                };
+                let hard_final = matches!(case, "final-tools" | "no-final");
+                let mut responses = if hard_final {
+                    (0..11)
+                        .map(|index| tools(vec![read(index)]))
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![tools(vec![read(0)])]
+                };
+                let progress_count = if case == "repeated-progress" { 5 } else { 0 };
+                for _ in 0..progress_count {
+                    responses.push(serde_json::json!({"text":"我会重新核对分支、基线、worktree、stash，再读取具体代码。"}));
+                }
+                if !hard_final {
+                    responses.push(serde_json::json!({"text":""}));
+                }
+                let mut next = vec![read(if hard_final { 11 } else { 3 })];
+                if case == "mutation" {
+                    next.push(serde_json::json!({"id":"forbidden-write","name":"create_file","arguments":{"path":"must-not-write.md","content":"unsafe"}}));
+                }
+                let final_tool_requests = if case == "no-final" { 3 } else { 1 };
+                responses.extend((0..final_tool_requests).map(|_| tools(next.clone())));
+                if case != "no-final" {
+                    responses.push(serde_json::json!({"text":"评分项目：正确性、安全性、可维护性。评分：80/100。\n问题：source-0.rs:1 缺少输入校验。\n解决方案：增加有效性检查与边界测试。"}));
+                }
+                responses.push(serde_json::json!({"text":"MUST_NOT_CALL_AGAIN"}));
+                let script = root.join("responses.jsonl");
+                std::fs::write(
+                    &script,
+                    responses
+                        .iter()
+                        .map(|reply| format!("{reply}\n"))
+                        .collect::<String>(),
+                )
+                .unwrap();
+                let mut request = temp_request(&project, Permission::Full);
+                request.message = "为我做一个详细的代码评审，为我输出详细评分，按照该项目情况设定评分项目 然后评分 分析问题和解决方案".into();
+                if case == "repeated-progress" {
+                    request.budget_family = Some("extended".into());
+                }
+                request.local_trace = true;
+                let mut provider = Provider::new(
+                    "fake",
+                    "fixture-key",
+                    script.to_string_lossy(),
+                    "fixture-model",
+                );
+                provider.capabilities_override = Some(provider::ProviderCapabilities {
+                    native_tools: native,
+                    ..provider::ProviderCapabilities::text_only()
+                });
+                request.provider = Some(provider);
+                let mut requests = Vec::new();
+                let mut read_paths = Vec::new();
+                let mut result = None;
+                run(&request, &|| true, &|_, _| true, &mut |event| {
+                    match event {
+                        SinkEvent::LocalTrace {
+                            kind: "llm_io",
+                            capture,
+                        } => requests.push(capture["request"].clone()),
+                        SinkEvent::Finished {
+                            step: Step::FileRead { path, .. },
+                            ..
+                        } => read_paths.push(path),
+                        SinkEvent::Finished {
+                            step:
+                                Step::AgentMessage {
+                                    text,
+                                    delivery,
+                                    verification,
+                                    failure_reason,
+                                    ..
+                                },
+                            ..
+                        } => result = Some((text, delivery, verification, failure_reason)),
+                        _ => {}
+                    }
+                    true
+                })
+                .unwrap();
+                let (text, delivery, verification, failure_reason) = result.unwrap();
+                assert_eq!(verification, "not_run", "{native}/{case}: {text}");
+                assert!(
+                    !project.join("must-not-write.md").exists(),
+                    "{native}/{case}"
+                );
+                assert!(
+                    !text.contains("本轮执行预算耗尽"),
+                    "{native}/{case}: {text}"
+                );
+                if case == "no-final" {
+                    assert_eq!(requests.len(), 14, "{native}/{case}");
+                    assert_eq!(delivery, "failed", "{native}/{case}: {text}");
+                    assert_eq!(failure_reason, "no_answer", "{native}/{case}: {text}");
+                } else {
+                    assert_eq!(
+                        requests.len(),
+                        if hard_final { 13 } else { 4 + progress_count },
+                        "{native}/{case}"
+                    );
+                    assert_eq!(delivery, "ready", "{native}/{case}: {text}");
+                    assert!(
+                        text.contains("80/100") && text.contains("source-0.rs:1"),
+                        "{native}/{case}: {text}"
+                    );
+                    assert!(
+                        failure_reason.is_empty(),
+                        "{native}/{case}: {failure_reason}"
+                    );
+                }
+                assert_eq!(
+                    read_paths.len(),
+                    if hard_final { 11 } else { 2 },
+                    "{native}/{case}: {read_paths:?}"
+                );
+                if hard_final {
+                    assert!(
+                        !read_paths.iter().any(|path| path.ends_with("source-11.rs")),
+                        "{native}/{case}"
+                    );
+                    for pending in requests.iter().skip(12) {
+                        assert!(
+                            !pending["messages"].to_string().contains("read-11"),
+                            "orphan native tool call in {native}/{case}"
+                        );
+                    }
+                } else if native {
+                    assert!(
+                        !requests[2 + progress_count]["tools"]
+                            .as_array()
+                            .unwrap()
+                            .is_empty(),
+                        "empty recovery hid valid read tools in {case}"
+                    );
+                }
+                assert!(
+                    std::fs::read_to_string(&script)
+                        .unwrap()
+                        .contains("MUST_NOT_CALL_AGAIN"),
+                    "{native}/{case}"
+                );
+            }
         }
     }
 
@@ -7007,6 +7174,12 @@ mod tests {
             );
         }
         assert!(budget_for_task(TaskType::Feature, true, None).is_summary_family());
+        let review = budget_for_task(TaskType::CodeReview, false, None);
+        assert!(
+            review.is_summary_family(),
+            "read-only reviews need the read-only budget"
+        );
+        assert_eq!((review.max_rounds, review.max_tool_calls), (12, 128));
         assert_eq!(
             budget_for_task(TaskType::Docs, false, None).max_tool_calls,
             128
