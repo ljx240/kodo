@@ -86,7 +86,7 @@ test("已记录轮次只链接真实引用并可查看原文与未核实地提�
   await expect(citations).toContainText("[K1] 接口兼容约定.md");
   await expect(page.getByTestId("knowledge-citation-1-2")).toHaveCount(0);
 
-  await page.getByTestId("knowledge-turn-promote-1").click();
+  await page.getByTestId("reply-promote-answer").first().click();
   await expect(page.getByRole("dialog", { name: "加入知识库" })).toBeVisible();
   await expect(page.getByTestId("knowledge-save-verified")).not.toBeChecked();
   await expect(page.getByRole("dialog", { name: "加入知识库" })).toContainText("来源：会话回答");

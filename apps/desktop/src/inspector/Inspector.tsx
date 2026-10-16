@@ -134,8 +134,7 @@ function contentFor(
     if (tab === "memory") {
       return (
         <MemoryOverview
-          project={project?.path ?? null}
-          onSelectTab={onSelectTab}
+          project={project?.id ?? null}
         />
       );
     }
@@ -330,7 +329,12 @@ export function Inspector({
             ) : (
               contentFor(
                 route,
-                panelActive === "terminal" ? "terminal" : railActive,
+                // The rail only exists while the Inspector panel is on 概览
+                // (panelActive === "summary"); every other panel-layer tab
+                // (terminal / memory / ...) is a whole panel of its own and
+                // should be dispatched to its own section, never to whichever
+                // rail section happens to be stale.
+                panelActive === "summary" ? railActive : panelActive,
                 demo,
                 demoState,
                 live,

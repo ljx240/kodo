@@ -953,7 +953,8 @@ test("a budget-limited plain answer stays failed and long Inspector cards never 
   await expect(page.getByTestId("process-tools")).not.toHaveAttribute("open", "");
 
   const buttons = await page.locator(".reply-actions button").evaluateAll((nodes) => nodes.map((el) => el.getBoundingClientRect().top));
-  expect(buttons).toHaveLength(3);
+  expect(buttons).toHaveLength(4);
+  await expect(page.getByTestId("reply-promote-answer")).toBeVisible();
   expect(Math.max(...buttons) - Math.min(...buttons)).toBeLessThanOrEqual(1);
   for (const width of [1920, 1280, 900]) {
     await page.setViewportSize({ width, height: 700 });

@@ -7,16 +7,13 @@ import {
   type MemoryEntryDto,
 } from "../api";
 import { T } from "../i18n";
-import type { InspectorTab } from "./Inspector";
 
 /** Right-sidebar Memory panel. Same visual density as TraceInspector:
  *  one row per entry, no decorative cards, no second conversation column. */
 export function MemoryOverview({
   project,
-  onSelectTab,
 }: {
   project: string | null;
-  onSelectTab: (tab: InspectorTab) => void;
 }) {
   const [entries, setEntries] = useState<MemoryEntryDto[]>([]);
   const [query, setQuery] = useState("");
@@ -132,13 +129,6 @@ export function MemoryOverview({
           disabled={loading}
         >
           {T.memory.refresh}
-        </button>
-        <button
-          className="btn"
-          type="button"
-          onClick={() => onSelectTab("summary")}
-        >
-          {T.inspector.panel}
         </button>
       </div>
       {error && <p className="setting-hint" role="alert">{error}</p>}

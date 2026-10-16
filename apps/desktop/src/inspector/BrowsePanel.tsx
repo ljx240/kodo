@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ExternalLink } from "lucide-react";
-import { browseClose, browseOpen, browseSetPosition, browseSetUrl, openUrl } from "../api";
+import { ExternalLink, RotateCw } from "lucide-react";
+import { openUrl } from "../api";
 import { useSetting } from "../data/useSetting";
 import { T } from "../i18n";
 
@@ -8,13 +8,11 @@ import { T } from "../i18n";
  *  `parse_safe_external_url` (main.rs); the JS check is a fast first line so
  *  the panel never round-trips with `javascript:` / `data:` / `file:`. */
 const SAFE_URL = /^https?:\/\/[^\s]+$/i;
-/** A native webview that never finishes loading within this window is treated
- *  as refused (network unreachable / server error / CAPTCHA). The webview
- *  itself does not fire a "load failed" event we can observe cross-platform,
- *  so the timeout is the only signal we have. */
+/** A native <iframe> that never finishes loading within this window is treated
+ *  as refused (network unreachable / server error / X-Frame-Options block).
+ *  The frame itself does not fire a "load failed" event we can observe
+ *  cross-origin, so the timeout is the only signal we have. */
 const LOAD_TIMEOUT_MS = 10000;
-/** Drag debounce — resize the child webview once the pointer lands. */
-const RESIZE_DEBOUNCE_MS = 50;
 
 type Props = {
   /** Demote back to 概览 — same Escape/X contract as the 文件 panel. */
@@ -28,11 +26,7 @@ export function BrowsePanel({ onClose }: Props) {
   const [phase, setPhase] = useState<"idle" | "loading" | "loaded" | "blocked">("idle");
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  /** The DOM node the embedded webview is sized to track. `.ins-content--flush`
-   *  lives behind a `<div class="browse">` here, but since flex layout puts
-   *  them at the same rect, observing `.browse` is equivalent — and it stays
-   *  mounted across the URL bar changes that re-key the inner iframe slot. */
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
 
   // Adopt the remembered URL once, on first open; later loads are explicit.
   useEffect(() => {
@@ -43,26 +37,6 @@ export function BrowsePanel({ onClose }: Props) {
     setPhase("loading");
   }, [stored, src]);
 
-  // Create or destroy the embedded webview alongside `src`. Tauri parents the
-  // window to the main webview; we then size it via ResizeObserver below.
-  useEffect(() => {
-    if (!src) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        await browseOpen(src);
-      } catch (error) {
-        if (!cancelled) setError(String(error));
-      }
-    })();
-    return () => {
-      cancelled = true;
-      // The webview stays parented to main; closing on teardown avoids stale
-      // OS surfaces when the inspector unmounts entirely (panel switch away).
-      void browseClose();
-    };
-  }, [src]);
-
   // Same demotion contract as the 文件 panel: Escape steps back to 概览.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -72,38 +46,9 @@ export function BrowsePanel({ onClose }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Keep the embedded webview glued to the panel content rect. The observer
-  // fires every layout tick (panel drag, focus-mode toggle, window resize);
-  // debouncing keeps the IPC off the hot path.
-  useEffect(() => {
-    if (!src) return;
-    const node = containerRef.current;
-    if (!node) return;
-    let pending: number | null = null;
-    const measure = () => {
-      pending = null;
-      const rect = node.getBoundingClientRect();
-      // Coords are relative to the main window's content area, which matches
-      // DOMRect x/y when the OS scale factor is 1 (Tauri reports logical px
-      // by default). At 2x the webview ends up a touch small; the visible
-      // gap is masked by the panel's own background and resizes cleanly on
-      // the next drag tick.
-      void browseSetPosition(rect.left, rect.top, rect.width, rect.height);
-    };
-    const observer = new ResizeObserver(() => {
-      if (pending != null) window.clearTimeout(pending);
-      pending = window.setTimeout(measure, RESIZE_DEBOUNCE_MS);
-    });
-    observer.observe(node);
-    // First measure is synchronous so the initial layout lands without a flash.
-    measure();
-    return () => {
-      observer.disconnect();
-      if (pending != null) window.clearTimeout(pending);
-    };
-  }, [src, reloadKey]);
-
   // No successful load within the window → offer the system-browser fallback.
+  // X-Frame-Options / CSP frame-ancestors will silently fail to render the
+  // page, so a load that never resolves is the user-visible signal.
   useEffect(() => {
     if (phase !== "loading") return;
     const id = window.setTimeout(() => setPhase("blocked"), LOAD_TIMEOUT_MS);
@@ -121,10 +66,6 @@ export function BrowsePanel({ onClose }: Props) {
     setSrc(url);
     setPhase("loading");
     setReloadKey((n) => n + 1);
-    // The new src will re-fire the create/destroy effect above, but on the
-    // *same* URL after a reload we want to force-navigate — explicit set here
-    // keeps the native webview honest when only reloadKey changed.
-    if (src === url) void browseSetUrl(url);
   };
 
   const submit = (event: FormEvent) => {
@@ -132,8 +73,15 @@ export function BrowsePanel({ onClose }: Props) {
     load(draft);
   };
 
+  const reload = () => {
+    if (!src) return;
+    setError(null);
+    setPhase("loading");
+    setReloadKey((n) => n + 1);
+  };
+
   return (
-    <div className="browse" data-testid="browse-panel" ref={containerRef}>
+    <div className="browse" data-testid="browse-panel">
       <form className="browse-bar" onSubmit={submit}>
         <input
           className="browse-input"
@@ -145,6 +93,17 @@ export function BrowsePanel({ onClose }: Props) {
           aria-label={T.inspector.browseUrl}
           onChange={(event) => setDraft(event.target.value)}
         />
+        <button
+          type="button"
+          className="browse-icon-btn"
+          data-testid="browse-reload"
+          title={T.inspector.browseRetry}
+          aria-label={T.inspector.browseRetry}
+          onClick={reload}
+          disabled={!src}
+        >
+          <RotateCw size={14} strokeWidth={1.8} />
+        </button>
         <button type="submit" className="btn btn--primary browse-go" data-testid="browse-go">
           {T.inspector.browseGo}
         </button>
@@ -162,7 +121,7 @@ export function BrowsePanel({ onClose }: Props) {
           <button type="button" className="btn" onClick={() => void openUrl(src)}>
             {T.inspector.browseOpenExternal}
           </button>
-          <button type="button" className="btn" data-testid="browse-retry" onClick={() => load(src)}>
+          <button type="button" className="btn" data-testid="browse-retry" onClick={reload}>
             {T.inspector.browseRetry}
           </button>
         </div>
@@ -174,22 +133,27 @@ export function BrowsePanel({ onClose }: Props) {
         </p>
       )}
 
-      {/* Native webview fills the same slot the iframe used to occupy; the
-          OS-level browser is sized to match this rect by the ResizeObserver
-          above. Cross-origin X-Frame-Options never reach the desktop shell. */}
+      {/* Embedded iframe lives in the DOM — the user asked for the browser
+          to stay inside the inspector column, so we no longer spawn an OS
+          child window. Sites that block framing (X-Frame-Options / CSP
+          frame-ancestors) show the empty page; the load-timeout banner +
+          system-browser button above cover that case. */}
       {src && (
-        <div
+        <iframe
           key={`${src}#${reloadKey}`}
+          ref={frameRef}
           className="browse-frame"
           data-testid="browse-frame"
-          aria-label={T.inspector.browse}
-          role="presentation"
+          src={src}
+          title={T.inspector.browse}
+          // Embedded sites can run their own scripts/forms; top navigation
+          // and popups remain blocked by the sandbox.
+          sandbox="allow-scripts allow-same-origin allow-forms"
+          referrerPolicy="no-referrer"
+          onLoad={() => setPhase("loaded")}
         />
       )}
 
-      {/* The OS webview is opaque to X-Frame-Options, so the system-browser
-          escape hatch is always available — including sites that fail to
-          load (network / TLS / CAPTCHA). */}
       {src && (
         <footer className="browse-foot">
           <button

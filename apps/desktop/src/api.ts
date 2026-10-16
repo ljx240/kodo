@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 // Value edge api → data; data/skills.ts only type-imports from here, so the
 // modules never form a runtime cycle.
 import { DEMO_AGENTS } from "./data/agents";
-import { DEMO_MCP_SERVERS, DEMO_MCP_TOOLS } from "./data/demo";
+import { DEMO_MCP_SERVERS, DEMO_MCP_TOOLS, demoMemoryEntries } from "./data/demo";
 import { DEMO_PROJECT_SKILLS, DEMO_USER_SKILLS } from "./data/skills";
 import {
   DEMO_CALENDAR_EVENTS,
@@ -1079,6 +1079,16 @@ export type MemoryDoctorDto = {
 };
 
 export function memoryStatus(): Promise<MemoryStatusDto> {
+  if (!isDesktop()) {
+    return Promise.resolve({
+      path: "<browser-demo>",
+      rowCounts: { active: 4, candidate: 1 },
+      outboxPending: 0,
+      tombstones: 0,
+      dbSizeBytes: 0,
+      mode: "read_write",
+    });
+  }
   return invoke<MemoryStatusDto>("memory_status", {});
 }
 
@@ -1090,7 +1100,29 @@ export type MemoryListArgs = {
   includeHistory?: boolean;
 };
 
+/**
+ * The Memory engine is a Tauri-side subsystem (SQLite + outbox). Browser
+ * demo routes have no host, so this stub feeds the same rows the inspector
+ * would render in the desktop shell. The filter args are honored so the
+ * search box actually narrows the list.
+ */
 export function memoryList(args: MemoryListArgs): Promise<MemoryEntryDto[]> {
+  if (!isDesktop()) {
+    let rows = demoMemoryEntries.slice();
+    if (args.project) {
+      rows = rows.filter(
+        (entry) =>
+          entry.scopeProjectId === args.project || entry.scopeProjectId === null,
+      );
+    }
+    if (args.kind) rows = rows.filter((entry) => entry.kind === args.kind);
+    if (args.status) rows = rows.filter((entry) => entry.status === args.status);
+    if (args.includeHistory === false) {
+      rows = rows.filter((entry) => entry.status !== "superseded" && entry.status !== "rejected");
+    }
+    if (args.limit && args.limit > 0) rows = rows.slice(0, args.limit);
+    return Promise.resolve(rows);
+  }
   return invoke<MemoryEntryDto[]>("memory_list", { args });
 }
 
@@ -1099,20 +1131,63 @@ export function memorySearch(
   query: string,
   limit?: number,
 ): Promise<MemorySnippetDto[]> {
+  if (!isDesktop()) {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return Promise.resolve([]);
+    const rows = demoMemoryEntries
+      .filter(
+        (entry) =>
+          (!project || entry.scopeProjectId === project || entry.scopeProjectId === null) &&
+          (entry.title.toLowerCase().includes(needle) ||
+            entry.abstractText.toLowerCase().includes(needle) ||
+            entry.kind.toLowerCase().includes(needle)),
+      )
+      .map((entry) => ({
+        id: entry.id,
+        kind: entry.kind,
+        title: entry.title,
+        abstractText: entry.abstractText,
+        sourceUris: entry.sourceUris,
+        validity: "fresh",
+        authority: entry.authority,
+        scopeLabel: entry.scopeProjectId ?? "global",
+      }));
+    return Promise.resolve(limit && limit > 0 ? rows.slice(0, limit) : rows);
+  }
   return invoke<MemorySnippetDto[]>("memory_search", {
     args: { project, query, limit },
   });
 }
 
 export function memoryInspect(id: string): Promise<MemoryEntryDto | null> {
+  if (!isDesktop()) {
+    return Promise.resolve(demoMemoryEntries.find((entry) => entry.id === id) ?? null);
+  }
   return invoke<MemoryEntryDto | null>("memory_inspect", { id });
 }
 
 export function memoryDisable(id: string): Promise<void> {
+  if (!isDesktop()) {
+    // The browser stub has no Tauri-side state to mutate; the inspector
+    // refreshes from the same demo fixture, so this is a clean no-op.
+    return Promise.resolve();
+  }
   return invoke<void>("memory_disable", { id });
 }
 
 export function memoryDoctor(apply: boolean): Promise<MemoryDoctorDto> {
+  if (!isDesktop()) {
+    return Promise.resolve({
+      ok: true,
+      integrity: [],
+      rowCounts: { active: 4, candidate: 1 },
+      outboxPending: 0,
+      outboxReplayed: 0,
+      tombstones: 0,
+      notes: [],
+      dbSizeBytes: 0,
+    });
+  }
   return invoke<MemoryDoctorDto>("memory_doctor", { apply });
 }
 

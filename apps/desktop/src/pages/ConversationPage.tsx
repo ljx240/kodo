@@ -1806,6 +1806,7 @@ export function ConversationPage({
                           onViewFiles={onViewFiles}
                           onOpenLogs={onOpenTrace}
                           fileDiffs={fileDiffs}
+                          sessionId={demo!.conversation.id}
                           // Demo has no project — openReferencedFile falls back to 改动.
                           onOpenPath={(raw) => void openReferencedFile(raw, reply.changes)}
                         />
@@ -1815,8 +1816,6 @@ export function ConversationPage({
                           turnSeq={index + 1}
                           finished
                           knowledgeUsed={new URLSearchParams(window.location.search).get("knowledge-fixture") === "citations"}
-                          answerTitle={`第 ${index + 1} 轮回答`}
-                          answerText={reply.final}
                         />
                       </Fragment>
                     );
@@ -1894,6 +1893,7 @@ export function ConversationPage({
                           }
                           // Inline code paths: probed at click, opened full-tab.
                           onOpenPath={(raw) => void openReferencedFile(raw, reply.changes)}
+                          sessionId={sessionId}
                           preExisting={last ? turnMeta.preExisting : []}
                           conflicts={last ? turnMeta.conflicts : []}
                         />
@@ -1903,8 +1903,6 @@ export function ConversationPage({
                           turnSeq={index + 1}
                           finished={turn.done || turn.stopped || Boolean(turn.error) || !running}
                           knowledgeUsed={turn.knowledgeUsed === true}
-                          answerTitle={`第 ${index + 1} 轮回答`}
-                          answerText={reply.final}
                         />
                       </Fragment>
                     );

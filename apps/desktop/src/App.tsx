@@ -941,7 +941,11 @@ export function App() {
               demo={route.demo}
               demoState={demoState}
               live={liveSnapshot}
-              project={activeProject ? { name: activeProject.name, path: activeProject.path ?? "" } : null}
+              project={
+                activeProject
+                  ? { id: activeProject.id, name: activeProject.name, path: activeProject.path ?? "" }
+                  : null
+              }
               pluginType={route.pluginType}
               archiveSelection={archiveSelection}
               onArchiveRestore={() => {

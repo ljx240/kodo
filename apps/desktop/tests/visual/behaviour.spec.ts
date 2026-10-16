@@ -1236,12 +1236,25 @@ test("the Trace page's three tabs swap the pane, none of them onto nothing", asy
 test("the Trace page's three transparency tabs surface the empty note in demo mode", async ({ page }) => {
   await page.goto("/ui-demo/trace");
 
-  // Demo data has no LLM captures / file spans; the new tabs render their
-  // empty-note copy instead of mounting a viewer.
-  for (const label of ["LLM 输入输出", "思考过程", "文件快照"]) {
+  // Demo state now ships fixtures for LLM I/O captures and file spans (so
+  // the LLM 输入输出 and 文件快照 tabs render real viewers), but no
+  // thinking content — the 思考过程 tab is still expected to fall back
+  // to its empty-note copy.
+  const emptyTabs = ["思考过程"];
+  const contentTabs = ["LLM 输入输出", "文件快照"];
+
+  for (const label of emptyTabs) {
     await page.locator(".page-tab", { hasText: label }).click();
     await expect(page.locator(".page-tab--active")).toHaveText(label);
     await expect(page.locator(".empty-note").first()).toBeVisible();
+  }
+
+  for (const label of contentTabs) {
+    await page.locator(".page-tab", { hasText: label }).click();
+    await expect(page.locator(".page-tab--active")).toHaveText(label);
+    // The tab body must not be the empty-note placeholder; the demo
+    // fixtures are wired through and a real viewer / list is mounted.
+    await expect(page.locator(".empty-note")).toHaveCount(0);
   }
 });
 
