@@ -463,11 +463,6 @@ p {
   text-align: left;
 }
 
-.tree-conversation svg {
-  flex: none;
-  color: var(--kodo-text-secondary);
-}
-
 .tree-conversation-title {
   flex: 1;
   min-width: 0;

@@ -3,7 +3,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Clock,
   ExternalLink,
   Folder,
   FolderOpen,
@@ -183,7 +182,6 @@ export function Sidebar({
             }`}
             onClick={() => onSelectConversation(conversation.id)}
           >
-            <Clock size={14} strokeWidth={1.7} />
             <span className="tree-conversation-title">{conversation.title}</span>
             <span className="tree-conversation-time">{conversation.time}</span>
           </button>
