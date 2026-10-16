@@ -444,7 +444,7 @@
   border: 1px solid var(--kodo-border-strong);
   border-radius: 14px;
   background: var(--kodo-canvas);
-  box-shadow: 0 24px 70px rgb(23 32 51 / 20%);
+  box-shadow: var(--kodo-shadow-modal);
 }
 
 .settings-modal-panel .page-head { min-height: 64px; }

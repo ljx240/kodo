@@ -1010,7 +1010,7 @@ p {
   border: 1px solid var(--kodo-border);
   border-radius: var(--kodo-radius-popover);
   background: var(--kodo-canvas);
-  box-shadow: 0 8px 24px rgb(23 32 51 / 12%);
+  box-shadow: var(--kodo-shadow-popover);
 }
 
 .menu--right {
@@ -2245,7 +2245,7 @@ button.code-chip--link:focus-visible {
   border: 1px solid var(--kodo-border-strong);
   border-radius: 14px;
   background: var(--kodo-canvas);
-  box-shadow: 0 24px 70px rgb(23 32 51 / 20%);
+  box-shadow: var(--kodo-shadow-modal);
 }
 
 .palette-input {
