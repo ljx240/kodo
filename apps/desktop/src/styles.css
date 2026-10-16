@@ -1,3 +1,8 @@
+/* Dead code: main.tsx imports `apps/desktop/src/styles/*.css` directly and
+   never resolves this file. The :root block below sits in the cascade
+   shadow tree but is not applied — kodo tokens come from styles/tokens.css.
+   Kept here only as a stale reference; do not edit values, they are not
+   the source of truth. */
 :root {
   --kodo-canvas: #ffffff;
   --kodo-text: #172033;
