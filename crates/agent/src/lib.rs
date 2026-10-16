@@ -766,7 +766,21 @@ fn external_step(
     }
     let wire = call.name.clone();
     let args_label = tools::redact_secrets(&call.args_label());
-    let detail = format!("{wire} {args_label}");
+    let detail = mcp.connection_config(&wire).map_or_else(
+        || format!("{wire} {args_label}"),
+        |server| {
+            format!(
+                "{wire} {}",
+                tools::redact_secrets(
+                    &serde_json::json!({
+                        "transport": server.transport, "command": server.command,
+                        "args": server.args, "url": server.url,
+                    })
+                    .to_string()
+                )
+            )
+        },
+    );
     let cwd = project.to_string_lossy().into_owned();
     let provisional = Step::Command {
         command: detail.clone(),
@@ -1854,7 +1868,7 @@ fn run_invocations(
             ToolInvocation::External(call) => {
                 // The skill allowlist and Permission both apply to external calls.
                 let args_label = call.args_label();
-                if let Some(sk) = skill {
+                if let Some(sk) = skill.filter(|sk| !mcp_connection_allowed(sk, mcp, &call.name)) {
                     if let Some(denied) = sk.gate(call.id.clone(), &call.name, &args_label) {
                         notes.push(format!(
                             "Skill `{}` 拒绝工具 `{}`（allowed_tools 白名单）",
@@ -2056,6 +2070,35 @@ fn external_defs(mcp: &McpClients) -> Vec<ExternalToolDef> {
             input_schema: tool.input_schema,
         })
         .collect()
+}
+
+fn mcp_connection_allowed(skill: &SkillSpec, mcp: &McpClients, name: &str) -> bool {
+    let Some(server) = mcp.connection_config(name) else {
+        return false;
+    };
+    let prefix = format!("mcp__{}__", server.id);
+    skill.context_strategy != ContextStrategy::ReviewOnly
+        && skill.allowed_external_tools.iter().any(|pattern| {
+            pattern.strip_suffix('*').map_or_else(
+                || pattern.starts_with(&prefix),
+                |allowed| allowed.starts_with(&prefix) || prefix.starts_with(allowed),
+            )
+        })
+}
+
+fn run_registry(request: &RunRequest, skill: Option<&SkillSpec>, mcp: &McpClients) -> ToolRegistry {
+    let base = ToolRegistry::for_mode(request.mode, request.project.is_some());
+    let base = if request.project.is_some() {
+        base.with_externals(external_defs(mcp))
+    } else {
+        base
+    };
+    match skill {
+        Some(sk) => {
+            base.filtered(|name| sk.allows_label(name) || mcp_connection_allowed(sk, mcp, name))
+        }
+        None => base,
+    }
 }
 
 /// One successful model attempt after (optional) streaming failover;
@@ -2963,59 +3006,14 @@ pub fn run(
     } else {
         String::new()
     };
-    // B8: connect the configured MCP servers before the registry is assembled —
-    // their tools enter it as externals under `mcp__<server>__<tool>` names.
-    // The direct-conversation early return already happened (a greeting never
-    // spawns a server), and projectless Q&A stays sealed (DESIGN.md §11): no
-    // project, no connections. One broken server is a zh-CN note, never fatal;
-    // `Drop` tears the transports down (stdio process trees, http best-effort
-    // DELETE) on every exit path from here.
-    let mut permitted_servers = Vec::new();
-    if has_project
-        && !skill.as_ref().is_some_and(|sk| {
-            sk.allowed_external_tools.is_empty()
-                || sk.context_strategy == ContextStrategy::ReviewOnly
-        })
-    {
-        for server in request.mcp_servers.iter().filter(|s| s.enabled) {
-            if !alive() {
-                return Ok(());
-            }
-            let detail = format!("mcp__{}__connect {}", server.id, tools::redact_secrets(&serde_json::json!({ "transport": server.transport, "command": server.command, "args": server.args, "url": server.url }).to_string()));
-            if approve(StepKind::ExternalTool, &detail) {
-                permitted_servers.push(server.clone());
-            } else {
-                notes.push(format!("用户未允许 MCP 连接：{}", server.id));
-            }
-        }
-    }
-    let mut mcp = McpClients::connect_interruptible(&permitted_servers, alive);
-    notes.append(&mut mcp.notes);
-    // Phase 0 second-pass: emit a one-shot MCP status event so the UI
-    // trace shows which servers did NOT start (without forcing the model
-    // to read the MCP block from the system prompt mid-task).
-    if has_project {
-        let hint = mcp.status_hint();
-        if !hint.is_empty() {
-            let _ = emit(SinkEvent::Progress {
-                phase: "mcp".to_owned(),
-                detail: hint,
-            });
-        }
-    }
-    // The mode × project matrix owns the base registry (DESIGN.md §11); a skill
-    // only narrows it further. Tool availability therefore never depends on
-    // which skill files happen to be embedded. MCP tools join as externals and
-    // enter the same skill allowlist as builtins; every call still faces
-    // Permission and separate connection consent.
-    let registry = {
-        let base =
-            ToolRegistry::for_mode(request.mode, has_project).with_externals(external_defs(&mcp));
-        match &skill {
-            Some(sk) => sk.filter_registry(base),
-            None => base,
-        }
+    // A local follow-up must not wait for unrelated external connections.
+    // Discovery goes through the same skill and approval gates as tool calls.
+    let mut mcp = if has_project {
+        McpClients::deferred(&request.mcp_servers)
+    } else {
+        McpClients::default()
     };
+    let mut registry = run_registry(request, skill.as_ref(), &mcp);
     let mut recovery_anchor = String::new();
     let mut plan = if conversational {
         TaskPlan::conversational(&request.message)
@@ -3684,7 +3682,7 @@ pub fn run(
             memory_pack_ref,
             &inlined_images,
         );
-        let schemas = tool_schemas(&registry);
+        let mut schemas = tool_schemas(&registry);
         let native_tools = provider.capabilities().native_tools;
 
         history.insert(1, ProviderMessage::system("## Task checkpoint"));
@@ -4635,6 +4633,17 @@ pub fn run(
                         &changeset,
                     )?;
                     push_tool_results(&mut history, &results, native_tools);
+                    let updated_registry = run_registry(request, skill.as_ref(), &mcp);
+                    if updated_registry.external_definitions() != registry.external_definitions() {
+                        // Keep discovered tools in the prefix that compaction preserves.
+                        history[0] = ProviderMessage::system(history[0].text_of().replacen(
+                            &protocol_instructions(&registry),
+                            &protocol_instructions(&updated_registry),
+                            1,
+                        ));
+                        registry = updated_registry;
+                        schemas = tool_schemas(&registry);
+                    }
                     for result in &results {
                         let paths = result.changed_files.iter().cloned().chain(
                             (result.ok
@@ -8512,6 +8521,119 @@ mod tests {
         assert!(Permission::Full.needs_approval(StepKind::ExternalTool, None));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn mcp_discovery_denial_and_cancellation_never_start_the_server() {
+        let root = std::env::temp_dir().join(format!("kodo-mcp-consent-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let marker = root.join("unexpected-start");
+        let config = mcp::McpServerConfig {
+            id: "guarded".into(),
+            name: "Guarded".into(),
+            enabled: true,
+            transport: mcp::McpTransportKind::Stdio,
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), format!("touch '{}'", marker.display())],
+            env: Default::default(),
+            url: String::new(),
+            headers: Default::default(),
+        };
+        for permission in [Permission::Ask, Permission::Auto, Permission::Full] {
+            for cancel in [false, true] {
+                let request = temp_request(&root, permission);
+                let mut clients = McpClients::deferred(std::slice::from_ref(&config));
+                let live = std::cell::Cell::new(true);
+                let asked = std::cell::Cell::new(false);
+                let (_, result) = external_step(
+                    ExternalCall {
+                        id: ToolCallId::new("connect"),
+                        name: "mcp__guarded__connect".into(),
+                        args: serde_json::json!({}),
+                    },
+                    &root,
+                    &request,
+                    &mut clients,
+                    &|| live.get(),
+                    &|kind, detail| {
+                        assert_eq!(kind, StepKind::ExternalTool);
+                        assert!(detail.contains("/bin/sh") && detail.contains("unexpected-start"));
+                        asked.set(true);
+                        if cancel {
+                            live.set(false);
+                        }
+                        cancel
+                    },
+                    &mut |_| true,
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                assert!(asked.get());
+                assert!(!marker.exists());
+                assert!(clients.connection_config("mcp__guarded__connect").is_some());
+                if !cancel {
+                    assert_eq!(
+                        result.unwrap().error.unwrap().code,
+                        ToolErrorCode::PermissionDenied
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_discovery_respects_skill_scope_and_refreshes_schemas() {
+        let config = mcp::McpServerConfig {
+            id: "fake".into(),
+            name: "Fake".into(),
+            enabled: true,
+            transport: mcp::McpTransportKind::Stdio,
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), mcp::stdio::CANNED_SH_RESPONDER.into()],
+            env: Default::default(),
+            url: String::new(),
+            headers: Default::default(),
+        };
+        let mut other = config.clone();
+        other.id = "other".into();
+        let mut clients = McpClients::deferred(&[config, other]);
+        let mut request = temp_request(Path::new("/tmp/unused-mcp-scope"), Permission::Full);
+        let mut skill = SkillRegistry::builtin().get("docs").unwrap().clone();
+        skill.allowed_external_tools = vec!["mcp__fake__echo".into()];
+        let registry = run_registry(&request, Some(&skill), &clients);
+        assert!(registry.contains_name("mcp__fake__connect"));
+        assert!(!registry.contains_name("mcp__other__connect"));
+        assert!(!registry.contains_name("mcp__fake__echo"));
+        request.project = None;
+        assert!(run_registry(&request, Some(&skill), &clients)
+            .external_definitions()
+            .is_empty());
+        request.project = Some(PathBuf::from("/tmp/unused-mcp-scope"));
+        skill.context_strategy = ContextStrategy::ReviewOnly;
+        assert!(run_registry(&request, Some(&skill), &clients)
+            .external_definitions()
+            .is_empty());
+        skill.context_strategy = ContextStrategy::DocsFocused;
+        let result = clients
+            .call("mcp__fake__connect", serde_json::json!({}))
+            .unwrap();
+        assert!(result.text.contains("mcp__fake__echo"));
+        let registry = run_registry(&request, Some(&skill), &clients);
+        let schemas = tool_schemas(&registry);
+        assert!(schemas
+            .iter()
+            .any(|schema| schema.name == "mcp__fake__echo"));
+        assert!(!schemas
+            .iter()
+            .any(|schema| schema.name == "mcp__fake__connect"));
+        assert!(!registry.contains_name("mcp__other__connect"));
+        skill.allowed_external_tools.clear();
+        assert!(run_registry(&request, Some(&skill), &clients)
+            .external_definitions()
+            .is_empty());
+    }
+
     #[test]
     fn external_outputs_are_redacted_before_observation_and_trace() {
         for case in 0..3 {
@@ -8804,24 +8926,90 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn local_follow_up_keeps_full_permission_without_connecting_unused_mcp() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-local-follow-up-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("script.jsonl");
+        let replies = [
+            serde_json::json!({"text": r##"{"tool_calls":[{"id":"write","name":"write_file","arguments":{"path":"optimization.md","content":"# 优化方案\n先测量，再优化。\n"}}]}"##}),
+            serde_json::json!({"text": r#"{"tool_calls":[{"id":"read","name":"read_file","arguments":{"path":"optimization.md"}}]}"#}),
+            serde_json::json!({"text": "已写入 optimization.md 并回读。"}),
+        ];
+        std::fs::write(
+            &script,
+            replies
+                .iter()
+                .map(|reply| format!("{reply}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let marker = root.join("unexpected-mcp-start");
+        let mut request = temp_request(&root, Permission::Full);
+        request.provider = Some(Provider::new(
+            "fake",
+            "fake-key",
+            script.to_string_lossy(),
+            "fake-model",
+        ));
+        request.mcp_servers = vec![mcp::McpServerConfig {
+            id: "unused".into(),
+            name: "Unused".into(),
+            enabled: true,
+            transport: mcp::McpTransportKind::Stdio,
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), format!("touch '{}'", marker.display())],
+            env: Default::default(),
+            url: String::new(),
+            headers: Default::default(),
+        }];
+        request.message = "你好".into();
+        let approvals = std::cell::RefCell::new(Vec::new());
+        let approve = |kind, detail: &str| {
+            approvals.borrow_mut().push((kind, detail.to_owned()));
+            false
+        };
+        run(&request, &|| true, &approve, &mut |_| true).unwrap();
+        assert!(approvals.borrow().is_empty());
+        request.conversation_history = vec![("你好".into(), "你好，有什么可以帮你？".into())];
+        request.message = "【技能：docs】\n编写优化方案，保存到 optimization.md".into();
+        run(&request, &|| true, &approve, &mut |_| true).unwrap();
+        assert!(
+            approvals.borrow().is_empty(),
+            "local follow-up must not ask for an unused MCP: {:?}",
+            approvals.borrow()
+        );
+        assert!(!marker.exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("optimization.md")).unwrap(),
+            "# 优化方案\n先测量，再优化。\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn run_connects_configured_servers_and_dispatches_wire_calls() {
-        // B8 end-to-end through `run()` itself: `RunRequest.mcp_servers` →
-        // connect → registry externals → the model's `mcp__fake__echo` → Ask
-        // approval → stdio dispatch → "pong" back in the observation → prose
-        // closes the conversational turn.
+        // Model-selected discovery → consent → refreshed registry → external call.
         let dir = std::env::temp_dir().join(format!("kodo-ext-run-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let project = dir.join("repo");
         std::fs::create_dir_all(&project).expect("temp project");
         std::fs::write(project.join("README.md"), "# Demo\n").expect("readme");
-        // Turn 1: the model emits the wire-named call (JSON tool protocol).
-        // Turn 2: prose that ends the conversational run.
+        // Discovery is a separate model round before calling a server tool.
         let script = dir.join("script.jsonl");
+        let connect_line = serde_json::json!({
+            "text": r#"{"tool_calls":[{"id":"connect","name":"mcp__fake__connect","arguments":{}}]}"#
+        });
         let tool_line = serde_json::json!({
             "text": "{\"tool_calls\":[{\"id\":\"1\",\"name\":\"mcp__fake__echo\",\"arguments\":{\"text\":\"hi\"}}]}"
         });
         let prose_line = serde_json::json!({ "text": "查询完成。" });
-        std::fs::write(&script, format!("{tool_line}\n{prose_line}\n")).expect("script");
+        std::fs::write(
+            &script,
+            format!("{connect_line}\n{tool_line}\n{prose_line}\n"),
+        )
+        .expect("script");
         let provider = Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
         let request = RunRequest {
             project: Some(project),
@@ -10984,7 +11172,7 @@ mod tests {
                 )
                 .unwrap();
                 assert!(!marker.exists());
-                assert_eq!(approvals.get(), usize::from(!review));
+                assert_eq!(approvals.get(), 0, "unused servers need no consent");
             }
             std::fs::write(root.join("AGENTS.md"), "x".repeat(64 * 1024 + 1)).unwrap();
             let mut request = temp_request(&root, Permission::Full);

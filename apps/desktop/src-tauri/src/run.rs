@@ -702,6 +702,29 @@ mod tests {
     }
 
     #[test]
+    fn session_allow_survives_turn_cleanup_and_remains_scoped() {
+        let approvals = Approvals::default();
+        let command = r#"mcp__github__connect {"command":"server-a"}"#;
+        let fingerprint = approval_fingerprint(StepKind::ExternalTool, command);
+        approvals.remember_session_allow("s", &fingerprint);
+        let (_ticket, _) = approvals.wait_point("s", 1, 1);
+        approvals.clear_session("s");
+        let next_turn = approvals.clone();
+        assert!(next_turn.is_session_allowed("s", &fingerprint));
+        assert!(!next_turn.is_session_allowed("other", &fingerprint));
+        assert!(!next_turn.is_session_allowed(
+            "s",
+            &approval_fingerprint(
+                StepKind::ExternalTool,
+                r#"mcp__github__connect {"command":"server-b"}"#,
+            )
+        ));
+        assert!(
+            !next_turn.is_session_allowed("s", &approval_fingerprint(StepKind::Command, command))
+        );
+    }
+
+    #[test]
     fn event_envelope_serializes_generation_without_changing_event_shape() {
         let encoded = serde_json::to_value(RunEventEnvelope {
             run_id: 7,

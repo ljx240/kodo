@@ -422,6 +422,7 @@ fn flatten_content(result: &serde_json::Value) -> McpToolResult {
 #[derive(Default)]
 pub struct McpClients {
     clients: Vec<McpClient>,
+    pending: Vec<McpServerConfig>,
     /// zh-CN notes for servers that failed to connect, ready to surface.
     pub notes: Vec<String>,
 }
@@ -437,6 +438,26 @@ fn placeholder_arg(config: &McpServerConfig) -> Option<&str> {
 }
 
 impl McpClients {
+    /// Advertise connection tools without starting processes or contacting servers.
+    pub fn deferred(configs: &[McpServerConfig]) -> Self {
+        Self {
+            pending: configs
+                .iter()
+                .filter(|config| config.enabled)
+                .cloned()
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn connection_config(&self, wire: &str) -> Option<&McpServerConfig> {
+        let (server, tool) = split_wire_name(wire)?;
+        if tool != "connect" {
+            return None;
+        }
+        self.pending.iter().find(|config| config.id == server)
+    }
+
     /// Connects each **enabled** server in configuration order.
     pub fn connect(configs: &[McpServerConfig]) -> Self {
         Self::connect_interruptible(configs, &|| true)
@@ -470,7 +491,11 @@ impl McpClients {
     /// Direct assembly from already-handshaken clients — the test seam.
     #[cfg(test)]
     pub(crate) fn from_clients(clients: Vec<McpClient>, notes: Vec<String>) -> Self {
-        Self { clients, notes }
+        Self {
+            clients,
+            notes,
+            ..Self::default()
+        }
     }
 
     fn push_note(&mut self, server_name: &str, error: &McpError) {
@@ -502,8 +527,7 @@ impl McpClients {
         lines.join("\n")
     }
 
-    /// Every cached tool across connected servers, paired with its wire name,
-    /// in server configuration order.
+    /// Cached tools and deferred connection tools, paired with their wire names.
     pub fn tools(&self) -> Vec<(String, McpTool)> {
         self.clients
             .iter()
@@ -513,6 +537,14 @@ impl McpClients {
                     .iter()
                     .map(|tool| (wire_name(&client.server_id, &tool.name), tool.clone()))
             })
+            .chain(self.pending.iter().map(|config| {
+                let name = wire_name(&config.id, "connect");
+                (name.clone(), McpTool {
+                    name,
+                    description: format!("Discover tools from MCP server {:?}. Connect only when the task needs this external service; local tasks do not need it. Requires user approval before starting the server. The result lists tools available on the next model call.", config.name),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+                })
+            }))
             .collect()
     }
 
@@ -531,6 +563,38 @@ impl McpClients {
         arguments: serde_json::Value,
         alive: &dyn Fn() -> bool,
     ) -> Result<McpToolResult, McpError> {
+        if let Some(config) = self.connection_config(wire).cloned() {
+            if !arguments.as_object().is_some_and(|args| args.is_empty()) {
+                return Err(McpError::Protocol(
+                    "MCP discovery expects an empty object".into(),
+                ));
+            }
+            let mut connected = Self::connect_interruptible(std::slice::from_ref(&config), alive);
+            let detail = connected.status_hint();
+            self.notes.append(&mut connected.notes);
+            let Some(client) = connected.clients.pop() else {
+                return Err(McpError::Transport(if detail.is_empty() {
+                    "MCP connection cancelled".into()
+                } else {
+                    detail
+                }));
+            };
+            let tools: Vec<McpTool> = client
+                .tools()
+                .iter()
+                .cloned()
+                .map(|mut tool| {
+                    tool.name = wire_name(&config.id, &tool.name);
+                    tool
+                })
+                .collect();
+            self.clients.push(client);
+            self.pending.retain(|pending| pending.id != config.id);
+            return Ok(McpToolResult {
+                text: serde_json::json!({"tools": tools}).to_string(),
+                is_error: false,
+            });
+        }
         let (server_id, tool) = split_wire_name(wire)
             .ok_or_else(|| McpError::Protocol(format!("bad wire name {wire}")))?;
         let client = self
@@ -654,6 +718,36 @@ mod tests {
             url: String::new(),
             headers: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn deferred_discovery_is_inert_and_rejects_invalid_or_cancelled_calls() {
+        let config = sample();
+        let mut disabled = config.clone();
+        disabled.id = "off".into();
+        disabled.enabled = false;
+        let mut clients = McpClients::deferred(&[config, disabled]);
+        assert!(clients.is_empty());
+        let tools = clients.tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].0, "mcp__fs__connect");
+        assert!(!serde_json::to_string(&tools).unwrap().contains("t-1234"));
+        assert!(clients.connection_config("mcp__off__connect").is_none());
+        assert!(clients
+            .call("mcp__fs__read_file", serde_json::json!({}))
+            .is_err());
+        assert!(matches!(
+            clients.call(
+                "mcp__fs__connect",
+                serde_json::json!({"command": "ignored"})
+            ),
+            Err(McpError::Protocol(_))
+        ));
+        assert!(clients
+            .call_interruptible("mcp__fs__connect", serde_json::json!({}), &|| false)
+            .is_err());
+        assert!(clients.is_empty());
+        assert!(clients.connection_config("mcp__fs__connect").is_some());
     }
 
     #[test]
