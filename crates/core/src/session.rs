@@ -518,7 +518,7 @@ pub fn knowledge_turns(dir: &Path, id: &str) -> io::Result<std::collections::Has
 fn parse_knowledge_markers(lines: &[String]) -> io::Result<std::collections::HashSet<u64>> {
     let mut used = std::collections::HashSet::new();
     for raw in lines {
-        let fields = line::split(&raw);
+        let fields = line::split(raw);
         if fields.first().is_some_and(|verb| verb == "knowledge.used") {
             let seq = fields
                 .get(1)

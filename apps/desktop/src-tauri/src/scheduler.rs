@@ -57,13 +57,12 @@ struct SchedulerServiceInner {
     /// lives behind an `Arc` and is shared with the tick thread, the
     /// executor threads, and the Tauri command threads.
     scheduler: Arc<Scheduler>,
-    state_dir: PathBuf,
     runs: Runs,
     approvals: Approvals,
     /// Cancellation tokens for in-flight Job runs. Agent runs reuse the
     /// existing `Runs.cancel` path, so they do not appear here.
     job_cancels: JobCancelMap,
-    /// Cancellation flag flipped by [`Self::shutdown`].
+    /// Cancellation flag flipped by [`SchedulerService::shutdown`].
     stop: Arc<AtomicBool>,
     /// Typed `AppHandle` for event emit. Captured at construction time
     /// because the runtime is monomorphic (`tauri::Wry`).
@@ -94,7 +93,6 @@ impl SchedulerService {
         let service = Self {
             inner: Arc::new(SchedulerServiceInner {
                 scheduler: Arc::new(scheduler),
-                state_dir,
                 runs,
                 approvals,
                 job_cancels: Arc::new(Mutex::new(HashMap::new())),
@@ -658,15 +656,6 @@ fn ensure_valid_task(task: &ScheduledTask) -> Result<(), String> {
         return Err("task title is required".into());
     }
     Ok(())
-}
-
-trait TaskKindExt {
-    fn resource_keys(&self) -> Vec<String>;
-}
-impl TaskKindExt for TaskKind {
-    fn resource_keys(&self) -> Vec<String> {
-        TaskKind::resource_keys(self)
-    }
 }
 
 #[cfg(test)]

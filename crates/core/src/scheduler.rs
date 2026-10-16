@@ -564,7 +564,7 @@ fn next_daily(civil: &CivilDateTime, hour: u8, minute: u8) -> CivilDateTime {
         // Next day's same wall time. jiff errors on date overflow (e.g.
         // 9999-12-31); fall back to today so the caller can give up.
         let next_date = today
-            .checked_add(Span::new().try_days(1).unwrap_or(Span::new()))
+            .checked_add(Span::new().try_days(1).unwrap_or_default())
             .unwrap_or(today);
         next_date.at(hour as i8, minute as i8, 0, 0)
     }

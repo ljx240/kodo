@@ -177,11 +177,11 @@ pub fn parse(argv: &[String]) -> Parsed {
     let mut i = 0;
     while i < argv.len() {
         let arg = argv[i].as_str();
-        let mut take_value = |flag: &str| -> Result<String, Parsed> {
+        let mut take_value = |flag: &str| -> Result<String, String> {
             i += 1;
             argv.get(i)
                 .cloned()
-                .ok_or_else(|| Parsed::Error(format!("{flag} 需要一个值")))
+                .ok_or_else(|| format!("{flag} 需要一个值"))
         };
         match arg {
             "-h" | "--help" => return Parsed::Help,
@@ -189,7 +189,7 @@ pub fn parse(argv: &[String]) -> Parsed {
             "-c" | "--continue" => resume_last = true,
             "--project" => match take_value("--project") {
                 Ok(value) => project = Some(PathBuf::from(value)),
-                Err(err) => return err,
+                Err(err) => return Parsed::Error(err),
             },
             "--permission" => match take_value("--permission") {
                 Ok(value) => match value.as_str() {
@@ -200,7 +200,7 @@ pub fn parse(argv: &[String]) -> Parsed {
                         ))
                     }
                 },
-                Err(err) => return err,
+                Err(err) => return Parsed::Error(err),
             },
             "--mode" => match take_value("--mode") {
                 Ok(value) => match value.as_str() {
@@ -209,15 +209,15 @@ pub fn parse(argv: &[String]) -> Parsed {
                         return Parsed::Error(format!("--mode 必须是 work 或 code，收到：{other}"))
                     }
                 },
-                Err(err) => return err,
+                Err(err) => return Parsed::Error(err),
             },
             "--session" => match take_value("--session") {
                 Ok(value) => session = Some(value),
-                Err(err) => return err,
+                Err(err) => return Parsed::Error(err),
             },
             "--model" => match take_value("--model") {
                 Ok(value) => model = Some(value),
-                Err(err) => return err,
+                Err(err) => return Parsed::Error(err),
             },
             other if other.starts_with('-') => {
                 return Parsed::Error(format!("未知参数：{other}"));
@@ -263,41 +263,41 @@ fn parse_memory(argv: &[String]) -> Parsed {
     let mut i = 0;
     while i < argv.len() {
         let arg = argv[i].as_str();
-        let mut take_value = |flag: &str| -> Result<String, Parsed> {
+        let mut take_value = |flag: &str| -> Result<String, String> {
             i += 1;
             argv.get(i)
                 .cloned()
-                .ok_or_else(|| Parsed::Error(format!("{flag} 需要一个值")))
+                .ok_or_else(|| format!("{flag} 需要一个值"))
         };
         match arg {
             "-h" | "--help" => return Parsed::MemoryHelp,
             "--project" => match take_value("--project") {
                 Ok(v) => project = Some(PathBuf::from(v)),
-                Err(e) => return e,
+                Err(e) => return Parsed::Error(e),
             },
             "--limit" => match take_value("--limit") {
                 Ok(v) => match v.parse::<usize>() {
                     Ok(n) => limit = Some(n),
                     Err(_) => return Parsed::Error(format!("--limit 需要正整数：{v}")),
                 },
-                Err(e) => return e,
+                Err(e) => return Parsed::Error(e),
             },
             "--kind" => match take_value("--kind") {
                 Ok(v) => kind = Some(v),
-                Err(e) => return e,
+                Err(e) => return Parsed::Error(e),
             },
             "--status" => match take_value("--status") {
                 Ok(v) => status = Some(v),
-                Err(e) => return e,
+                Err(e) => return Parsed::Error(e),
             },
             "--apply" => apply = true,
             "--backend" => match take_value("--backend") {
                 Ok(v) => embed_backend = Some(v),
-                Err(e) => return e,
+                Err(e) => return Parsed::Error(e),
             },
             "--from" => match take_value("--from") {
                 Ok(v) => embed_from = Some(PathBuf::from(v)),
-                Err(e) => return e,
+                Err(e) => return Parsed::Error(e),
             },
             "--confirm" => promote_confirm = true,
             "--force" => promote_force = true,
@@ -364,11 +364,11 @@ fn parse_schedule(argv: &[String]) -> Parsed {
     let mut i = 0;
     while i < argv.len() {
         let arg = argv[i].as_str();
-        let mut take_value = |flag: &str| -> Result<String, Parsed> {
+        let mut take_value = |flag: &str| -> Result<String, String> {
             i += 1;
             argv.get(i)
                 .cloned()
-                .ok_or_else(|| Parsed::Error(format!("{flag} 需要一个值")))
+                .ok_or_else(|| format!("{flag} 需要一个值"))
         };
         match arg {
             "-h" | "--help" => return Parsed::ScheduleHelp,
@@ -377,7 +377,7 @@ fn parse_schedule(argv: &[String]) -> Parsed {
                     Ok(n) => limit = Some(n),
                     Err(_) => return Parsed::Error(format!("--limit 需要正整数：{v}")),
                 },
-                Err(e) => return e,
+                Err(e) => return Parsed::Error(e),
             },
             "--include-archived" => include_archived = true,
             other if other.starts_with('-') => {
@@ -615,7 +615,7 @@ mod tests {
         let cmd = schedule(&["schedule", "list"]);
         assert_eq!(cmd.verb, Some(ScheduleVerb::List));
         assert_eq!(cmd.task_id, None);
-        assert_eq!(cmd.include_archived, false);
+        assert!(!cmd.include_archived);
         assert_eq!(cmd.limit, None);
     }
 

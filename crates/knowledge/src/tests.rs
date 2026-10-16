@@ -145,7 +145,7 @@ fn project_scope_and_personal_selection_are_explicit() {
             .unwrap(),
         KnowledgeSelection::default()
     );
-    assert_eq!(KnowledgeSelection::default().strict, true);
+    assert!(KnowledgeSelection::default().strict);
 }
 
 #[test]

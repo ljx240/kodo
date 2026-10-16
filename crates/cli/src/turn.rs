@@ -250,6 +250,29 @@ impl TurnContext {
     }
 }
 
+/// Open the on-disk memory store at `$XDG_STATE_HOME/kodo/memory/v1/memory.sqlite`
+/// (falling back to `$HOME/.local/state/kodo/...` per `kodo_core::settings::state_dir`)
+/// and wrap it in a `MemoryHandle`. Returns `None` if the state directory
+/// is unavailable — fail-open: the agent loop continues with the memory
+/// channel disabled. Mirrors the Tauri side's behaviour.
+fn open_memory_handle() -> Option<MemoryHandle> {
+    let state_dir = kodo_core::settings::state_dir()?;
+    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match SqliteMemory::open(&path) {
+        Ok(mem) => Some(mem.into()),
+        Err(e) => {
+            eprintln!(
+                "kodo memory: failed to open store at {}: {e}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,28 +364,5 @@ mod tests {
         assert_eq!(ctx.continue_last().expect("list"), None);
         assert!(ctx.session_id.is_none());
         let _ = fs::remove_dir_all(&root);
-    }
-}
-
-/// Open the on-disk memory store at `$XDG_STATE_HOME/kodo/memory/v1/memory.sqlite`
-/// (falling back to `$HOME/.local/state/kodo/...` per `kodo_core::settings::state_dir`)
-/// and wrap it in a `MemoryHandle`. Returns `None` if the state directory
-/// is unavailable — fail-open: the agent loop continues with the memory
-/// channel disabled. Mirrors the Tauri side's behaviour.
-fn open_memory_handle() -> Option<MemoryHandle> {
-    let state_dir = kodo_core::settings::state_dir()?;
-    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match SqliteMemory::open(&path) {
-        Ok(mem) => Some(mem.into()),
-        Err(e) => {
-            eprintln!(
-                "kodo memory: failed to open store at {}: {e}",
-                path.display()
-            );
-            None
-        }
     }
 }

@@ -648,7 +648,7 @@ mod tests {
             "## requires_final_answer\ntrue",
             "## requires_final_answer\nmaybe",
         );
-        assert!(parse_skill(&on).unwrap().requires_final_answer);
+        assert!(parse_skill(on).unwrap().requires_final_answer);
         assert!(!parse_skill(&off).unwrap().requires_final_answer);
         assert!(!parse_skill(&missing).unwrap().requires_final_answer);
         assert!(parse_skill(&bogus).is_err());

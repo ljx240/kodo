@@ -1253,10 +1253,7 @@ fn strip_trailing_control_tokens(text: &str) -> (String, bool) {
     // MiniMax also emits bracket delimiters instead of pipes (tmue47-61aehc-0).
     let mut out = text.replace("<]minimax[", "<|minimax|");
     let mut saw_token = false;
-    loop {
-        let Some(start) = out.find("<|") else {
-            break;
-        };
+    while let Some(start) = out.find("<|") {
         saw_token = true;
         let Some(end_rel) = out[start + 2..].find("|>") else {
             // Unterminated `<|…` — the safest interpretation is "the model

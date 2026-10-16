@@ -3083,7 +3083,11 @@ mod tests {
         assert_eq!(created.tag_ids, vec![tag.id.clone()]);
 
         store
-            .set_todo_links(&created.id, created.version, &[other.id.clone()])
+            .set_todo_links(
+                &created.id,
+                created.version,
+                std::slice::from_ref(&other.id),
+            )
             .unwrap();
         let current = store.get_todo(&created.id).unwrap().unwrap();
         assert_eq!(current.link_ids, vec![other.id.clone()]);
@@ -3120,7 +3124,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(tagged, AppError::NotFound);
         let tagged = store
-            .set_todo_tags(&first.id, first.version, &[tag.id.clone()])
+            .set_todo_tags(&first.id, first.version, std::slice::from_ref(&tag.id))
             .unwrap();
         assert_eq!(tagged.tag_ids, vec![tag.id.clone()]);
         // Clearing takes them all off again.
@@ -3129,18 +3133,18 @@ mod tests {
 
         // A link shows on both sides, and a self-link is refused.
         let linked = store
-            .set_todo_links(&first.id, cleared.version, &[second.id.clone()])
+            .set_todo_links(&first.id, cleared.version, std::slice::from_ref(&second.id))
             .unwrap();
         assert_eq!(linked.link_ids, vec![second.id.clone()]);
         let back = store.get_todo(&second.id).unwrap().unwrap();
         assert_eq!(back.link_ids, vec![first.id.clone()]);
         assert_eq!(
-            store.set_todo_links(&first.id, linked.version, &[first.id.clone()]),
+            store.set_todo_links(&first.id, linked.version, std::slice::from_ref(&first.id)),
             Err(AppError::InvalidInput)
         );
         // Deleting a tag takes its links with it, leaving no dangling id.
         let linked = store
-            .set_todo_tags(&first.id, linked.version, &[tag.id.clone()])
+            .set_todo_tags(&first.id, linked.version, std::slice::from_ref(&tag.id))
             .unwrap();
         store.delete_todo_tag(&tag.id, tag.version).unwrap();
         let after = store.get_todo(&first.id).unwrap().unwrap();

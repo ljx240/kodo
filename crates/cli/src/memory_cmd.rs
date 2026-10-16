@@ -370,7 +370,7 @@ fn format_value(v: &serde_json::Value, indent: usize) -> String {
             for (i, k) in keys.iter().enumerate() {
                 let val = &map[*k];
                 out.push_str(&format!("{pad}  {k:?}: "));
-                out.push_str(&format_value(val, indent + 2).trim_start());
+                out.push_str(format_value(val, indent + 2).trim_start());
                 if i + 1 < keys.len() {
                     out.push(',');
                 }
@@ -387,14 +387,13 @@ fn run_embed(verb: Option<EmbedVerb>, backend: Option<&str>, from: Option<&Path>
         eprintln!("embed 需要一个子命令：status | warmup | off");
         return 2;
     };
-    let backend = match backend.unwrap_or("local_bge_small_en") {
-        raw => match EmbeddingBackend::parse(raw) {
-            Some(b) => b,
-            None => {
-                eprintln!("未知 backend：{raw}（可选：off | local_bge_small_en | local_bge_small_zh | local_minilm_l6 | local_hash）");
-                return 2;
-            }
-        },
+    let raw = backend.unwrap_or("local_bge_small_en");
+    let backend = match EmbeddingBackend::parse(raw) {
+        Some(b) => b,
+        None => {
+            eprintln!("未知 backend：{raw}（可选：off | local_bge_small_en | local_bge_small_zh | local_minilm_l6 | local_hash）");
+            return 2;
+        }
     };
     match verb {
         EmbedVerb::Status => match model_store::status(backend) {
@@ -587,7 +586,7 @@ fn now_iso8601() -> String {
     // civil-from-days algorithm (Howard Hinnant). UTC only; the
     // provenance header is a machine-readable stamp, not a date.
     let z = (secs / 86_400) as i64;
-    let s = (secs % 86_400) as u64;
+    let s = secs % 86_400;
     let h = s / 3600;
     let m = (s % 3600) / 60;
     let s = s % 60;

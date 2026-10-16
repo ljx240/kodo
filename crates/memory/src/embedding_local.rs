@@ -49,9 +49,9 @@ impl LocalOnnxEmbedding {
         }
         let cached = model_store::status(backend)?;
         if !cached.is_ready() {
-            return Err(MemoryError::IndexUnavailable(format!(
-                "embedding not warmed up; run `kodo memory embed warmup` first"
-            )));
+            return Err(MemoryError::IndexUnavailable(
+                "embedding not warmed up; run `kodo memory embed warmup` first".to_owned(),
+            ));
         }
         // The inference path requires `onnx-inference`. Without it the
         // load call still succeeds in shape (so the type is usable in
@@ -157,8 +157,8 @@ mod download {
     /// an HTML error page saved by mistake (HF returns a small body
     /// for 404s), not the real model. 1 MB is a deliberately loose
     /// threshold so test fixtures (which can be smaller) still pass.
-    const ONNX_MIN_BYTES: u64 = 1 * 1024 * 1024;
-    const TOKENIZER_MIN_BYTES: u64 = 1 * 1024;
+    const ONNX_MIN_BYTES: u64 = 1024 * 1024;
+    const TOKENIZER_MIN_BYTES: u64 = 1024;
 
     /// Resolve the HuggingFace base URL. Honors the standard
     /// `HF_ENDPOINT` env var (same convention as the official
@@ -438,7 +438,7 @@ mod tests {
         let src = std::env::temp_dir().join("kodo-memory-local-warmup-src");
         let _ = std::fs::remove_dir_all(&src);
         std::fs::create_dir_all(&src).unwrap();
-        let onnx_payload: Vec<u8> = (0..(1_100_000u32)).map(|i| (i & 0xFF) as u8).collect();
+        let onnx_payload: Vec<u8> = (0..1_100_000u32).map(|i| (i & 0xFF) as u8).collect();
         let tok_payload = br#"{"added_tokens":[{"id":0,"content":"[PAD]"}],"normalizer":{}}"#;
         // Pad the tokenizer to ≥ 1 KiB.
         let mut tok = Vec::from(&tok_payload[..]);

@@ -7737,10 +7737,12 @@ mod tests {
     /// bypass) and the gate does not depend on `rounds_exhausted()`.
     #[test]
     fn max_final_only_retries_allows_at_least_one_bypass() {
-        assert!(
-            MAX_FINAL_ONLY_RETRIES >= 1,
-            "at least one final-only retry must be allowed"
-        );
+        const {
+            assert!(
+                MAX_FINAL_ONLY_RETRIES >= 1,
+                "at least one final-only retry must be allowed"
+            );
+        }
     }
 
     #[test]
@@ -9961,7 +9963,7 @@ mod tests {
         // Cap gate: 5 MiB PNG with vision=true must NOT inline — it must
         // fall back to the path-only descriptor with inlined="false".
         // A successful inlining here would blow the request body.
-        let (_dir, abs) = temp_attachment("huge.png", &vec![0x89; (5 * 1024 * 1024)]);
+        let (_dir, abs) = temp_attachment("huge.png", &vec![0x89; 5 * 1024 * 1024]);
         let request = RunRequest {
             project: None,
             message: "看一下图".to_owned(),

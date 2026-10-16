@@ -1061,6 +1061,8 @@ fn list_provider_models(
 }
 
 #[tauri::command]
+// Tauri injects service state alongside the existing IPC arguments.
+#[allow(clippy::too_many_arguments)]
 fn send_message(
     app: AppHandle,
     runs: State<'_, Runs>,
@@ -1857,7 +1859,12 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to build Kodo");
 
-    app.run(|_app, _event| {
+    app.run(|app, event| {
+        if matches!(&event, tauri::RunEvent::Exit) {
+            if let Some(service) = app.try_state::<SchedulerService>() {
+                service.shutdown();
+            }
+        }
         // Clicking the dock icon while the window is hidden has to bring it
         // back; without this the hide-to-tray close button would be a one-way
         // door.
@@ -1865,9 +1872,9 @@ fn main() {
         if let tauri::RunEvent::Reopen {
             has_visible_windows: false,
             ..
-        } = _event
+        } = event
         {
-            platform::show_main(_app);
+            platform::show_main(app);
         }
     });
 }

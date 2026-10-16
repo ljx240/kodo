@@ -803,7 +803,7 @@ fn runtime_error(message: String) -> SchedulerError {
 /// store is deliberately out of scope for the first version (the docs §7
 /// require an OS-level dispatch lock; we leave the dispatch lock to the
 /// caller and only guarantee admission within one process).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ResourceGuard {
     inner: Mutex<ResourceInner>,
 }
@@ -848,16 +848,15 @@ impl ResourceGuard {
         let mut inner = self.inner.lock();
         // Per-agent: at most one. We treat each agent resource_key as its
         // own bucket — `agent:/p` vs `agent:/q` are different projects.
-        if resource_keys.iter().any(|k| k.starts_with("agent:")) {
-            if resource_keys
+        if resource_keys.iter().any(|k| k.starts_with("agent:"))
+            && resource_keys
                 .iter()
                 .filter(|k| k.starts_with("agent:"))
                 .filter(|k| inner.keys.contains_key(*k))
                 .count()
                 >= limits.per_agent
-            {
-                return Err(SchedulerError::ResourceBusy);
-            }
+        {
+            return Err(SchedulerError::ResourceBusy);
         }
         for key in resource_keys {
             if inner.keys.contains_key(key) {
@@ -1356,16 +1355,19 @@ impl Scheduler {
                 // Out-of-grace moments were filtered out by `after`; here
                 // we record every remaining passed moment as `skipped`
                 // because the user said "don't run on catch-up".
-                let mut count = 0u32;
-                for fire_at in passed.iter().rev() {
+                for (count, fire_at) in passed.iter().rev().enumerate() {
                     let key = kodo_core::scheduler::occurrence_key(
                         &task.id,
                         task.schedule_generation,
                         *fire_at,
                     );
-                    self.store
-                        .record_skipped(&task.id, &key, *fire_at, "outside_grace", count)?;
-                    count += 1;
+                    self.store.record_skipped(
+                        &task.id,
+                        &key,
+                        *fire_at,
+                        "outside_grace",
+                        count as u32,
+                    )?;
                 }
                 Ok(None)
             }
@@ -1825,7 +1827,7 @@ mod tests {
             unix: base,
             mono: 0,
         });
-        let sched = scheduler(&dir, clock.clone());
+        let _sched = scheduler(&dir, clock.clone());
         // `fire_at` is 60s in the future relative to the clock at create
         // time. Validation requires `fire_at > now`, so we have to give
         // the future moment a slightly later now when we construct the
