@@ -334,36 +334,6 @@ p {
   font-weight: 600;
 }
 
-/* Keep conversation filtering separate from the global quick switcher. */
-.tree-filter-bar {
-  flex: none;
-  padding: 2px 0 10px;
-}
-
-.tree-filter {
-  width: 100%;
-  height: 30px;
-  padding: 0 8px;
-  border: 1px solid var(--kodo-border);
-  border-radius: var(--kodo-radius-sm);
-  background: var(--kodo-canvas);
-  color: var(--kodo-text);
-  font-family: var(--kodo-font-ui);
-  font-size: var(--kodo-font-sm);
-}
-
-.tree-filter::placeholder {
-  color: var(--kodo-text-muted);
-}
-
-/* The filter matched nothing in this group — say it, don't show an empty row. */
-.tree-no-match {
-  margin: 0;
-  padding: 6px 8px;
-  color: var(--kodo-text-muted);
-  font-size: var(--kodo-font-sm);
-}
-
 .tree {
   flex: 1;
   min-height: 0;
