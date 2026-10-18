@@ -324,7 +324,11 @@ pub fn load_agents_in(dir: &Path, skip_builtin_shadow: bool) -> Vec<AgentSpec> {
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !valid_agent_name(stem) {
+        // The reserved name `default` is the project-level default persona
+        // file at `<root>/.kodo/agents/default.md`. It is read through
+        // `load_default_agent`, never through the regular roster — the
+        // shared loader therefore drops it on sight.
+        if !valid_agent_name(stem) || stem == "default" {
             continue;
         }
         let Ok(markdown) = std::fs::read_to_string(&path) else {
@@ -545,6 +549,22 @@ mod tests {
         let loaded = load_user_agents(&dir);
         assert_eq!(loaded.len(), 1, "only custom.md loads: {loaded:?}");
         assert!(load_user_agents(&dir.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_roster_excludes_default_persona_in_both_scopes() {
+        let dir = temp_store("reserved_default");
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join("custom.md"), CUSTOM_AGENT_MD).expect("custom");
+        let default = CUSTOM_AGENT_MD.replace("# Agent: custom", "# Agent: default");
+        assert_eq!(parse_agent(&default).unwrap().name, "default");
+        std::fs::write(dir.join("default.md"), default).expect("default");
+        for skip_builtin_shadow in [false, true] {
+            let loaded = load_agents_in(&dir, skip_builtin_shadow);
+            assert_eq!(loaded.len(), 1, "only custom.md loads: {loaded:?}");
+            assert_eq!(loaded[0].name, "custom");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
