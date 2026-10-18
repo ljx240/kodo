@@ -6125,15 +6125,6 @@ mod tests {
     }
 
     #[test]
-    fn max_output_tokens_is_forwarded_to_provider_clamp() {
-        // main.rs reads max-output-tokens; provider clamps to [256, 8192].
-        let clamped = 4096u32.clamp(256, 8192);
-        assert_eq!(clamped, 4096);
-        assert_eq!(1u32.clamp(256, 8192), 256);
-        assert_eq!(99_999u32.clamp(256, 8192), 8192);
-    }
-
-    #[test]
     fn tool_schemas_map_externals_with_passthrough_input_schema() {
         // Native tool calling picks up MCP tools for free: parameters is the
         // server's inputSchema verbatim.
