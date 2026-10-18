@@ -875,9 +875,10 @@ pub fn chat(
     chat_ir(provider, &ir, &[], max_tokens)
 }
 
-/// Output-token ceiling shared by every provider payload path.
+/// Normalize the output budget without imposing a model-independent ceiling.
+/// The configured provider validates its model's actual output limit.
 pub fn effective_max_tokens(max_tokens: u32) -> u32 {
-    max_tokens.clamp(256, 8192)
+    max_tokens.max(256)
 }
 
 /// Full native (or JSON-fallback) model request.
@@ -979,6 +980,7 @@ pub fn chat_stream(
     mut on_event: impl FnMut(ProviderEvent) -> bool,
 ) -> Result<ChatResponse, ProviderError> {
     let model_id = provider.validate_model()?;
+    let max_tokens = effective_max_tokens(max_tokens);
     let caps = provider.capabilities();
     if !alive() {
         return Err(cancelled_err("cancelled before model request"));
@@ -3935,10 +3937,33 @@ mod tests {
     }
 
     #[test]
-    fn effective_max_tokens_clamps_to_provider_bounds() {
+    fn effective_max_tokens_preserves_configured_output_budget() {
+        assert_eq!(effective_max_tokens(0), 256);
         assert_eq!(effective_max_tokens(1), 256);
         assert_eq!(effective_max_tokens(4096), 4096);
-        assert_eq!(effective_max_tokens(100_000), 8192);
+        assert_eq!(effective_max_tokens(102_400), 102_400);
+        assert_eq!(effective_max_tokens(u32::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn provider_payloads_preserve_large_output_budget() {
+        let messages = [ProviderMessage::user("Review the project")];
+        let tools = [ToolSchema {
+            name: "read_file".into(),
+            description: "Read a file".into(),
+            parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        }];
+        for tools in [&[][..], tools.as_slice()] {
+            for (configured, expected) in [(1, 256), (4096, 4096), (102_400, 102_400)] {
+                let openai =
+                    openai_request_json(&openai_provider(), &messages, tools, configured).unwrap();
+                let anthropic =
+                    anthropic_request_json(&anthropic_provider(), &messages, tools, configured)
+                        .unwrap();
+                assert_eq!(openai["max_tokens"], expected);
+                assert_eq!(anthropic["max_tokens"], expected);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

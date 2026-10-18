@@ -299,7 +299,7 @@ mod tests {
             ("agent-mode", "work"),
             ("default-model", "configured"),
             ("fallback-behavior", "fail"),
-            ("max-output-tokens", "8192"),
+            ("max-output-tokens", "102400"),
             ("context-window-tokens", "64000"),
             ("extended-thinking", "true"),
             ("local-detailed-traces", "true"),
@@ -308,10 +308,20 @@ mod tests {
         let config = ShellConfig::from_sources(Overrides::default(), &read, Some(&creds));
         assert_eq!(config.permission, Permission::Auto);
         assert_eq!(config.mode, AgentMode::Work);
-        assert_eq!(config.max_output_tokens, 8192);
+        assert_eq!(config.max_output_tokens, 102_400);
         assert!(config.extended_thinking && config.local_trace);
         assert!(!config.fallback_to_local);
         let provider = config.provider.unwrap();
+        let payload = kodo_agent::provider::openai_request_json(
+            &provider,
+            &[kodo_agent::provider::ProviderMessage::user(
+                "Review the project",
+            )],
+            &[],
+            config.max_output_tokens,
+        )
+        .unwrap();
+        assert_eq!(payload["max_tokens"], 102_400);
         assert_eq!(provider.resolved_model_id(), "configured");
         assert_eq!(provider.context_window(), 64_000);
         assert!(provider.capabilities().native_tools);
