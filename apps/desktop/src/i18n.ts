@@ -908,7 +908,7 @@ export const T = {
    */
   schedule: {
     title: "定时任务",
-    subtitle: "查看、暂停、归档所有定时任务。创建与编辑请在桌面端使用完整表单。",
+    subtitle: "安排重复工作，集中查看每次执行的进度和结果。",
     list: {
       title: "任务",
       empty: "还没有定时任务。",
@@ -958,6 +958,7 @@ export const T = {
     errors: {
       storage_unavailable: "存储不可用，请稍后重试。",
       invalid_schedule: "时间规则不合法。",
+      invalid_input: "请检查任务名称、执行项目和执行内容。",
       revision_conflict: "配置已被修改，请刷新后重试。",
       unknown_task: "任务不存在或已归档。",
       resource_busy: "资源被占用，无法执行。",
@@ -966,6 +967,20 @@ export const T = {
       no_live_run: "没有正在执行的运行。",
       unknown: "操作失败，请稍后重试。",
     },
+    reasons: {
+      resource_busy: "项目或资源正在使用中。",
+      overlap: "上一次执行尚未结束。",
+      overlap_skip: "上一次执行尚未结束，已跳过本次。",
+      unknown_job_type: "后台作业不可用。",
+      state_dir_unavailable: "本地数据目录不可用。",
+      mark_started_failed: "无法记录运行开始状态。",
+      cancelled: "已请求取消。",
+      timeout: "执行超过时间限制。",
+      interrupted: "应用退出导致执行中断。",
+      authorization_required: "需要授权后才能继续。",
+    },
+    delivery: { ready: "已交付", partial: "部分交付", blocked: "需要处理", failed: "失败" },
+    verification: { not_run: "未验证", notRun: "未验证", passed: "已通过", failed: "未通过", blocked: "受阻", running: "验证中" },
     jobTypes: {
       title: "已注册 job_type",
       empty: "还没有注册任何作业。",

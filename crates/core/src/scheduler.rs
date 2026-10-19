@@ -92,11 +92,18 @@ impl Clock for FixedClock {
 /// that involve human-meaningful local time carry an IANA timezone name so
 /// the user sees "09:00 in Asia/Shanghai" instead of "01:00 UTC".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Schedule {
     /// One shot at `fire_at` (UTC seconds). The task finishes after the run
     /// completes; manual re-trigger forms a new run, never a replay of this one.
-    Once { fire_at: UnixSeconds },
+    Once {
+        #[serde(alias = "fire_at")]
+        fire_at: UnixSeconds,
+    },
     /// Every `interval_seconds` starting at `anchor` (UTC). The next occurrence
     /// is `anchor + k * interval_seconds` for the smallest `k` with
     /// `anchor + k * interval_seconds > after`. Execution duration does **not**
@@ -104,6 +111,7 @@ pub enum Schedule {
     /// [`OverlapPolicy`], not by recalculating the schedule.
     Interval {
         anchor: UnixSeconds,
+        #[serde(alias = "interval_seconds")]
         interval_seconds: u64,
     },
     /// Every day at `hour:minute` in `tz_name`. DST gaps skip; DST overlaps
@@ -111,6 +119,7 @@ pub enum Schedule {
     Daily {
         hour: u8,
         minute: u8,
+        #[serde(alias = "tz_name")]
         tz_name: String,
     },
     /// The given weekdays (ISO: 1=Mon … 7=Sun) at `hour:minute` in `tz_name`.
@@ -118,6 +127,7 @@ pub enum Schedule {
         weekdays: Vec<u8>,
         hour: u8,
         minute: u8,
+        #[serde(alias = "tz_name")]
         tz_name: String,
     },
 }
@@ -197,7 +207,11 @@ pub enum Outcome {
 
 /// What a task is: drive the agent loop, or call a registered job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum TaskKind {
     /// Run the existing agent driver with this message on this project.
     Agent {
@@ -208,15 +222,18 @@ pub enum TaskKind {
         personas: Vec<String>,
         /// Budget family override (`None` = per-intent default,
         /// `Some("summary")` = lift to read-only-summary caps).
+        #[serde(alias = "budget_family")]
         budget_family: Option<String>,
         /// Resource key for shared admission. Defaults to the normalized
         /// project path; an empty string means "no shared resource" (only the
         /// global concurrency limit applies).
+        #[serde(alias = "resource_key")]
         resource_key: Option<String>,
     },
     /// Invoke a registered job handler. Params are JSON-encoded and validated
     /// by the registered handler.
     Job {
+        #[serde(alias = "job_type")]
         job_type: String,
         params: serde_json::Value,
         /// Declared resources (e.g. `"memory:v1"`, `"workspace:/p"`).
@@ -685,6 +702,58 @@ pub enum TriggerSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipc_schedule_fields_are_camel_case_and_legacy_records_remain_readable() {
+        for (legacy, wire) in [
+            (
+                r#"{"kind":"once","fire_at":1704067260}"#,
+                r#"{"kind":"once","fireAt":1704067260}"#,
+            ),
+            (
+                r#"{"kind":"interval","anchor":1704067200,"interval_seconds":60}"#,
+                r#"{"kind":"interval","anchor":1704067200,"intervalSeconds":60}"#,
+            ),
+            (
+                r#"{"kind":"daily","hour":9,"minute":0,"tz_name":"Asia/Shanghai"}"#,
+                r#"{"kind":"daily","hour":9,"minute":0,"tzName":"Asia/Shanghai"}"#,
+            ),
+            (
+                r#"{"kind":"weekly","weekdays":[1,5],"hour":9,"minute":0,"tz_name":"UTC"}"#,
+                r#"{"kind":"weekly","weekdays":[1,5],"hour":9,"minute":0,"tzName":"UTC"}"#,
+            ),
+        ] {
+            let stored: Schedule = serde_json::from_str(legacy).unwrap();
+            let requested: Schedule = serde_json::from_str(wire).unwrap();
+            assert_eq!(stored, requested);
+            assert_eq!(
+                serde_json::to_value(stored).unwrap(),
+                serde_json::from_str::<serde_json::Value>(wire).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn ipc_task_fields_preserve_legacy_job_and_agent_configuration() {
+        for (legacy, wire) in [
+            (
+                r#"{"kind":"job","job_type":"workspace_refresh","params":{},"resources":["workspace"]}"#,
+                r#"{"kind":"job","jobType":"workspace_refresh","params":{},"resources":["workspace"]}"#,
+            ),
+            (
+                r#"{"kind":"agent","project":"/p","message":"review","personas":["reviewer"],"budget_family":"summary","resource_key":"/p"}"#,
+                r#"{"kind":"agent","project":"/p","message":"review","personas":["reviewer"],"budgetFamily":"summary","resourceKey":"/p"}"#,
+            ),
+        ] {
+            let stored: TaskKind = serde_json::from_str(legacy).unwrap();
+            let requested: TaskKind = serde_json::from_str(wire).unwrap();
+            assert_eq!(stored, requested);
+            assert_eq!(
+                serde_json::to_value(stored).unwrap(),
+                serde_json::from_str::<serde_json::Value>(wire).unwrap()
+            );
+        }
+    }
 
     /// `2024-01-01 00:00:00 UTC`.
     fn anchor() -> UnixSeconds {

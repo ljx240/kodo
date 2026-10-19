@@ -53,8 +53,8 @@ test("scheduled task details fit narrow windows and lifecycle actions remain ava
   await page.goto("/schedule");
   const task = page.getByTestId("schedule-row-schedule-check");
   await expect(task).toContainText("每日工作区状态检查");
-  await task.getByRole("button", { name: "运行历史", exact: true }).click();
-  await expect(task.locator(".schedule-runs")).toContainText("run-check");
+  await task.getByRole("button", { name: /^运行历史/ }).click();
+  await expect(task.getByTestId("schedule-run-run-check")).toContainText("执行中");
   for (const theme of ["light", "dark"]) {
     await page.locator(".sidebar-foot").getByRole("button", { name: "设置", exact: true }).click();
     await page.locator(".settings-modal .settings-nav").getByRole("button", { name: "外观", exact: true }).click();
@@ -86,7 +86,7 @@ test("scheduled task details fit narrow windows and lifecycle actions remain ava
     }
   }
   await task.getByRole("button", { name: "立即执行", exact: true }).click();
-  await task.getByRole("button", { name: "取消", exact: true }).click();
+  await task.getByRole("button", { name: "取消本次", exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { __scheduleLog: string[] }).__scheduleLog))
     .toEqual(["run_scheduled_task_now", "cancel_task_run"]);
   await task.getByRole("button", { name: "暂停", exact: true }).click();
@@ -96,7 +96,7 @@ test("scheduled task details fit narrow windows and lifecycle actions remain ava
   await expect(task.getByRole("button", { name: "恢复", exact: true })).toBeEnabled();
   await task.getByRole("button", { name: "归档", exact: true }).click();
   await expect(task).toHaveCount(0);
-  await expect(page.getByRole("status")).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "没有符合条件的任务。" })).toBeVisible();
 });
 
 test("todo controls stay inside narrow cards and summary labels stay on one line", async ({ page }) => {
