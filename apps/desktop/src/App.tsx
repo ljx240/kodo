@@ -891,7 +891,17 @@ export function App() {
               onOpenArchive={() => navigate(workspace.live ? "/archive" : "/ui-demo/archive")}
             />
           )}
-          {route.name === "schedule" && <SchedulerPage demo={route.demo} />}
+          {route.name === "schedule" && (
+            <SchedulerPage
+              demo={route.demo}
+              projects={workspace.projects.flatMap((project) => project.path ? [{ name: project.name, path: project.path }] : [])}
+              onOpenConversation={async (id) => {
+                await workspace.refresh();
+                setAgentMode("code");
+                openConversation(id);
+              }}
+            />
+          )}
           {/* 工作台 and its apps are self-contained pages: the Inspector rail
               has nothing to add to them, so the route is excluded below too. */}
           {route.name === "workbench" && <WorkbenchPage route={route} />}

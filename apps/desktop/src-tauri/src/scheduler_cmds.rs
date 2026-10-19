@@ -70,7 +70,11 @@ pub fn preview_schedule(
     schedule: Schedule,
     after: Option<UnixSeconds>,
 ) -> Result<Vec<UnixSeconds>, String> {
-    service.preview_schedule(&schedule, after.unwrap_or(0))
+    let after = after.unwrap_or_else(|| {
+        use kodo_core::scheduler::{Clock, SystemClock};
+        SystemClock.now_unix()
+    });
+    service.preview_schedule(&schedule, after)
 }
 
 #[tauri::command]

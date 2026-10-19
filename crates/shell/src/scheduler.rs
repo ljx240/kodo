@@ -331,7 +331,7 @@ impl SchedulerStore {
     pub fn set_state(&self, task_id: &str, state: TaskState) -> Result<(), SchedulerError> {
         let conn = self.conn.lock();
         conn.execute(
-            "UPDATE scheduled_tasks SET state = ?, updated_at = ? WHERE id = ?",
+            "UPDATE scheduled_tasks SET state = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
             params![task_state_str(state), unix_now(), task_id],
         )?;
         Ok(())
@@ -1152,10 +1152,15 @@ impl Scheduler {
         task.revision = 1;
         task.schedule_generation = 1;
         task.archived = false;
+        if self.store.get_task(&task.id)?.is_some() {
+            return Err(SchedulerError::RevisionConflict);
+        }
         validate(&task.schedule, now).map_err(|_| SchedulerError::InvalidSchedule)?;
         self.store.upsert_task(&task)?;
         self.refresh_next_fire_at(&task.id)?;
-        Ok(task)
+        self.store
+            .get_task(&task.id)?
+            .ok_or(SchedulerError::UnknownTask)
     }
 
     /// Update an existing task. `expected_revision` prevents lost updates
@@ -1171,6 +1176,9 @@ impl Scheduler {
         if previous.revision != expected_revision {
             return Err(SchedulerError::RevisionConflict);
         }
+        if previous.archived {
+            return Err(SchedulerError::UnknownTask);
+        }
         let now = self.clock.now_unix();
         task.created_at = previous.created_at;
         task.updated_at = now;
@@ -1184,9 +1192,15 @@ impl Scheduler {
             task.schedule_generation = previous.schedule_generation;
         }
         validate(&task.schedule, now).map_err(|_| SchedulerError::InvalidSchedule)?;
+        let refresh = previous.schedule != task.schedule || previous.state != task.state;
+        task.next_fire_at = previous.next_fire_at;
         self.store.upsert_task(&task)?;
-        self.refresh_next_fire_at(&task.id)?;
-        Ok(task)
+        if refresh {
+            self.refresh_next_fire_at(&task.id)?;
+        }
+        self.store
+            .get_task(&task.id)?
+            .ok_or(SchedulerError::UnknownTask)
     }
 
     pub fn set_enabled(
@@ -1196,7 +1210,11 @@ impl Scheduler {
     ) -> Result<ScheduledTask, SchedulerError> {
         // Read first so an unknown id returns UnknownTask instead of a
         // silent state row update on a non-existent task.
-        if self.store.get_task(task_id)?.is_none() {
+        if self
+            .store
+            .get_task(task_id)?
+            .is_none_or(|task| task.archived)
+        {
             return Err(SchedulerError::UnknownTask);
         }
         let new_state = if enabled {
@@ -1217,7 +1235,13 @@ impl Scheduler {
         };
         // Refuse to archive while a live run owns the task's resources;
         // the caller cancels first and re-archives once finished.
-        if task.state == TaskState::Enabled {
+        if task.state == TaskState::Enabled
+            || self
+                .store
+                .list_inflight()?
+                .iter()
+                .any(|run| run.task_id == task_id)
+        {
             return Err(SchedulerError::ResourceBusy);
         }
         self.store.archive_task(task_id)?;
@@ -1320,6 +1344,11 @@ impl Scheduler {
         if !inserted {
             return Err(SchedulerError::AlreadyFinished);
         }
+        // A manual trial is independent of the saved schedule, even for paused
+        // or completed tasks. Only scheduled occurrences consume the cursor.
+        if run.trigger_source == TriggerSource::Manual {
+            return Ok(DispatchedRun { run, task });
+        }
         // Advance the cursor. For `Once`, the next fire is `None`. For
         // everything else, it is the second occurrence strictly after the
         // one we just consumed.
@@ -1338,56 +1367,68 @@ impl Scheduler {
         task: &ScheduledTask,
         now: UnixSeconds,
     ) -> Result<Option<DuePlan>, SchedulerError> {
-        // Walk the next N occurrences strictly after `now - grace`. Split
-        // into "passed" (at or before `now`) and "future" (after `now`).
-        // This is the same calculator the GUI uses for the live preview,
-        // so the two can never disagree about what is due.
-        let grace = task.grace_seconds.max(self.config.max_grace_seconds);
-        let after = now.saturating_sub(grace as i64);
-        let upcoming = next_occurrences(&task.schedule, after, PREVIEW_COUNT + 1)
-            .map_err(|_| SchedulerError::InvalidSchedule)?;
-        let passed: Vec<UnixSeconds> = upcoming.iter().copied().filter(|ts| *ts <= now).collect();
-        if passed.is_empty() {
+        let Some(first) = task.next_fire_at.filter(|next| *next <= now) else {
+            return Ok(None);
+        };
+        let (fire_at, skipped_count) = if let Schedule::Interval {
+            interval_seconds, ..
+        } = task.schedule
+        {
+            let step =
+                i64::try_from(interval_seconds).map_err(|_| SchedulerError::InvalidSchedule)?;
+            if step < 60 {
+                return Err(SchedulerError::InvalidSchedule);
+            }
+            let skipped = now.saturating_sub(first) / step;
+            (first + skipped * step, skipped.min(u32::MAX as i64) as u32)
+        } else {
+            let mut last = first;
+            let mut skipped = 0_u32;
+            while let Some(next) = next_occurrences(&task.schedule, last, 1)
+                .map_err(|_| SchedulerError::InvalidSchedule)?
+                .into_iter()
+                .next()
+            {
+                if next > now {
+                    break;
+                }
+                last = next;
+                skipped = skipped.saturating_add(1);
+            }
+            (last, skipped)
+        };
+        let grace = if task.grace_seconds == 0 {
+            self.config.max_grace_seconds
+        } else {
+            task.grace_seconds
+        };
+        let late = now.saturating_sub(fire_at) as u64;
+        // A one-second tick can arrive just after the intended second. Skip
+        // means skip downtime, not disable every normal scheduled occurrence.
+        if late > grace || (task.misfire_policy == MisfirePolicy::Skip && late > 1) {
+            let key =
+                kodo_core::scheduler::occurrence_key(&task.id, task.schedule_generation, fire_at);
+            self.store
+                .record_skipped(&task.id, &key, fire_at, "outside_grace", skipped_count)?;
+            let next = next_occurrences(&task.schedule, fire_at, 1)
+                .map_err(|_| SchedulerError::InvalidSchedule)?
+                .into_iter()
+                .next();
+            self.store.set_next_fire_at(&task.id, next)?;
+            if matches!(task.schedule, Schedule::Once { .. }) {
+                self.store.set_state(&task.id, TaskState::Finished)?;
+            }
             return Ok(None);
         }
-        match task.misfire_policy {
-            MisfirePolicy::Skip => {
-                // Out-of-grace moments were filtered out by `after`; here
-                // we record every remaining passed moment as `skipped`
-                // because the user said "don't run on catch-up".
-                for (count, fire_at) in passed.iter().rev().enumerate() {
-                    let key = kodo_core::scheduler::occurrence_key(
-                        &task.id,
-                        task.schedule_generation,
-                        *fire_at,
-                    );
-                    self.store.record_skipped(
-                        &task.id,
-                        &key,
-                        *fire_at,
-                        "outside_grace",
-                        count as u32,
-                    )?;
-                }
-                Ok(None)
-            }
-            MisfirePolicy::LatestOnce | MisfirePolicy::Coalesce => {
-                // The latest moment we have not yet fired. Earlier
-                // moments collapse into a single `skipped_count`.
-                let fire_at = *passed.last().expect("non-empty");
-                let key = kodo_core::scheduler::occurrence_key(
-                    &task.id,
-                    task.schedule_generation,
-                    fire_at,
-                );
-                let skipped = (passed.len() as u32).saturating_sub(1);
-                Ok(Some(DuePlan {
-                    scheduled_for: fire_at,
-                    occurrence_key: key,
-                    skipped_count: skipped,
-                }))
-            }
-        }
+        Ok(Some(DuePlan {
+            scheduled_for: fire_at,
+            occurrence_key: kodo_core::scheduler::occurrence_key(
+                &task.id,
+                task.schedule_generation,
+                fire_at,
+            ),
+            skipped_count,
+        }))
     }
 
     pub fn try_admit(
@@ -1434,6 +1475,18 @@ impl Scheduler {
             error_summary,
         )?;
         release(handle, &self.resources);
+        if let Some(run) = self.store.get_run(run_id)? {
+            if run.trigger_source == TriggerSource::Scheduled {
+                if let Some(task) = self.store.get_task(&run.task_id)? {
+                    if task.schedule_generation == run.schedule_generation
+                        && matches!(task.schedule, Schedule::Once { .. })
+                        && task.state == TaskState::Enabled
+                    {
+                        self.store.set_state(&task.id, TaskState::Finished)?;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1555,6 +1608,199 @@ mod tests {
     use super::*;
     use kodo_core::scheduler::FixedClock;
     use tempfile::TempDir;
+
+    #[test]
+    fn manual_trials_and_title_edits_preserve_the_saved_cursor() {
+        let dir = TempDir::new().unwrap();
+        let base = 1_700_000_000;
+        let sched = scheduler(
+            &dir,
+            Arc::new(FixedClock {
+                unix: base,
+                mono: 0,
+            }),
+        );
+        let task = sample_task(
+            base,
+            Schedule::Interval {
+                anchor: base + 30,
+                interval_seconds: 60,
+            },
+        );
+        let created = sched.create_task(task).unwrap();
+        assert_eq!(created.next_fire_at, Some(base + 30));
+        sched.enqueue_manual("t1", "trial").unwrap();
+        assert_eq!(
+            sched.store.get_task("t1").unwrap().unwrap().next_fire_at,
+            Some(base + 30)
+        );
+        let mut edited = created.clone();
+        edited.title = "renamed".into();
+        edited.next_fire_at = None; // A stale client cannot erase the cursor.
+        let updated = sched.update_task(created.revision, edited).unwrap();
+        assert_eq!(updated.next_fire_at, Some(base + 30));
+        assert!(matches!(
+            sched.create_task(created),
+            Err(SchedulerError::RevisionConflict)
+        ));
+    }
+
+    #[test]
+    fn interval_catchup_uses_latest_slot_after_more_than_six_occurrences() {
+        let dir = TempDir::new().unwrap();
+        let base = 1_700_000_000;
+        let sched = scheduler(
+            &dir,
+            Arc::new(FixedClock {
+                unix: base + 3605,
+                mono: 0,
+            }),
+        );
+        let mut task = sample_task(
+            base,
+            Schedule::Interval {
+                anchor: base + 60,
+                interval_seconds: 60,
+            },
+        );
+        task.next_fire_at = Some(base + 60);
+        task.grace_seconds = 10;
+        sched.store.upsert_task(&task).unwrap();
+        let plan = sched.tick().unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].run.scheduled_for, base + 3600);
+        assert_eq!(plan[0].run.skipped_count, 59);
+        assert_eq!(
+            sched.store.get_task("t1").unwrap().unwrap().next_fire_at,
+            Some(base + 3660)
+        );
+        assert!(sched.tick().unwrap().is_empty());
+    }
+
+    #[test]
+    fn skip_policy_runs_on_time_and_small_grace_is_respected() {
+        let dir = TempDir::new().unwrap();
+        let base = 1_700_000_000;
+        let sched = scheduler(
+            &dir,
+            Arc::new(FixedClock {
+                unix: base + 65,
+                mono: 0,
+            }),
+        );
+        let mut task = sample_task(
+            base,
+            Schedule::Interval {
+                anchor: base + 60,
+                interval_seconds: 60,
+            },
+        );
+        task.next_fire_at = Some(base + 60);
+        task.grace_seconds = 2;
+        sched.store.upsert_task(&task).unwrap();
+        assert!(sched.tick().unwrap().is_empty());
+        assert_eq!(
+            sched.store.list_runs("t1", 10).unwrap()[0].outcome,
+            Some(Outcome::Skipped)
+        );
+        task.misfire_policy = MisfirePolicy::Skip;
+        task.schedule = Schedule::Interval {
+            anchor: base + 65,
+            interval_seconds: 60,
+        };
+        task.next_fire_at = Some(base + 65);
+        task.schedule_generation += 1;
+        sched.store.upsert_task(&task).unwrap();
+        assert_eq!(
+            sched.tick().unwrap().len(),
+            1,
+            "skip must still run an on-time slot"
+        );
+    }
+
+    #[test]
+    fn scheduled_once_finishes_and_manual_once_does_not_consume_schedule() {
+        let dir = TempDir::new().unwrap();
+        let base = 1_700_000_000;
+        let sched = scheduler(
+            &dir,
+            Arc::new(FixedClock {
+                unix: base + 61,
+                mono: 0,
+            }),
+        );
+        let mut task = sample_task(base, Schedule::Once { fire_at: base + 60 });
+        task.next_fire_at = Some(base + 60);
+        sched.store.upsert_task(&task).unwrap();
+        sched.enqueue_manual("t1", "trial").unwrap();
+        assert_eq!(
+            sched.store.get_task("t1").unwrap().unwrap().next_fire_at,
+            Some(base + 60)
+        );
+        let run = sched.tick().unwrap().remove(0).run;
+        let handle = sched.try_admit(&run.id, &[]).unwrap();
+        sched.mark_started(&run.id).unwrap();
+        sched
+            .mark_finished(
+                &run.id,
+                Outcome::Succeeded,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                handle,
+            )
+            .unwrap();
+        assert_eq!(
+            sched.store.get_task("t1").unwrap().unwrap().state,
+            TaskState::Finished
+        );
+    }
+
+    #[test]
+    fn archive_refuses_live_runs_and_archived_tasks_cannot_be_reenabled() {
+        let dir = TempDir::new().unwrap();
+        let base = 1_700_000_000;
+        let sched = scheduler(
+            &dir,
+            Arc::new(FixedClock {
+                unix: base,
+                mono: 0,
+            }),
+        );
+        sched
+            .create_task(sample_task(base, Schedule::Once { fire_at: base + 60 }))
+            .unwrap();
+        let run = sched.enqueue_manual("t1", "trial").unwrap().run;
+        let paused = sched.set_enabled("t1", false).unwrap();
+        assert_eq!(paused.revision, 2);
+        assert!(matches!(
+            sched.archive_task("t1"),
+            Err(SchedulerError::ResourceBusy)
+        ));
+        let handle = sched.try_admit(&run.id, &[]).unwrap();
+        sched.mark_started(&run.id).unwrap();
+        sched
+            .mark_finished(
+                &run.id,
+                Outcome::Succeeded,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                handle,
+            )
+            .unwrap();
+        sched.archive_task("t1").unwrap();
+        assert!(matches!(
+            sched.set_enabled("t1", true),
+            Err(SchedulerError::UnknownTask)
+        ));
+    }
 
     fn open_store(tag: &str) -> (TempDir, SchedulerStore) {
         let dir = TempDir::new().unwrap();
@@ -1790,7 +2036,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = 1_700_000_000;
         let clock = Arc::new(FixedClock {
-            unix: base + 7200, // 2 hours past anchor
+            unix: base + 7205, // 2 hours and 5 seconds past anchor
             mono: 0,
         });
         let sched = scheduler(&dir, clock.clone());
@@ -1803,7 +2049,10 @@ mod tests {
         );
         let mut task = task;
         task.misfire_policy = MisfirePolicy::Skip;
-        sched.create_task(task).unwrap();
+        task.next_fire_at = Some(base);
+        // Simulate a stored task after downtime, rather than a newly-created
+        // task whose first occurrence is intentionally in the future.
+        sched.store.upsert_task(&task).unwrap();
 
         let plan = sched.tick().unwrap();
         assert!(plan.is_empty(), "skip misfire should not enqueue anything");

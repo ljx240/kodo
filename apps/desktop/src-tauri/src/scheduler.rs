@@ -154,6 +154,11 @@ impl SchedulerService {
 
     pub fn create_task(&self, mut task: ScheduledTask) -> Result<ScheduledTask, String> {
         ensure_valid_task(&task)?;
+        if let TaskKind::Job { job_type, .. } = &task.task {
+            if self.scheduler().jobs().get(job_type).is_none() {
+                return Err("unknown_job".into());
+            }
+        }
         let now = unix_now();
         task.created_at = now;
         task.updated_at = now;
@@ -171,6 +176,11 @@ impl SchedulerService {
         mut task: ScheduledTask,
     ) -> Result<ScheduledTask, String> {
         ensure_valid_task(&task)?;
+        if let TaskKind::Job { job_type, .. } = &task.task {
+            if self.scheduler().jobs().get(job_type).is_none() {
+                return Err("unknown_job".into());
+            }
+        }
         let now = unix_now();
         task.updated_at = now;
         let updated = self
@@ -254,29 +264,7 @@ impl SchedulerService {
     /// is the seam where the Tauri-specific machinery (sessions, Runs,
     /// Approvals, event emit) meets the storage-agnostic dispatcher.
     fn dispatch_run(&self, dispatched: DispatchedRun) {
-        let resource_keys = dispatched.task.task.resource_keys();
-        let handle = match self
-            .inner
-            .scheduler
-            .try_admit(&dispatched.run.id, &resource_keys)
-        {
-            Ok(handle) => handle,
-            Err(error) => {
-                eprintln!(
-                    "kodo scheduler: refused to dispatch run {}: {error}",
-                    dispatched.run.id
-                );
-                return;
-            }
-        };
-        match &dispatched.task.task {
-            TaskKind::Agent { .. } => {
-                spawn_agent_run(self.inner.clone(), dispatched, handle);
-            }
-            TaskKind::Job { .. } => {
-                spawn_job_run(self.inner.clone(), dispatched, handle);
-            }
-        }
+        dispatch_via_inner(&self.inner, dispatched);
     }
 
     fn emit_task_changed(&self, task: &ScheduledTask) {
@@ -318,6 +306,21 @@ fn dispatch_via_inner(inner: &Arc<SchedulerServiceInner>, dispatched: Dispatched
                 "kodo scheduler: refused to dispatch run {}: {error}",
                 dispatched.run.id
             );
+            // A refused execution has no live executor. Persist a terminal
+            // result so the history never leaves it looking queued forever.
+            let reason = error.to_string();
+            let _ = inner.scheduler.store().mark_finished(
+                &dispatched.run.id,
+                unix_now(),
+                Outcome::Skipped,
+                None,
+                None,
+                None,
+                None,
+                Some(&reason),
+                None,
+            );
+            emit_run_changed(&inner.app, &inner.scheduler, &dispatched.run.id);
             return;
         }
     };
@@ -649,11 +652,20 @@ fn truncate(text: &str, max: usize) -> String {
 }
 
 fn ensure_valid_task(task: &ScheduledTask) -> Result<(), String> {
-    if task.id.is_empty() {
-        return Err("task id is required".into());
+    if task.id.trim().is_empty() || task.title.trim().is_empty() || task.timeout_seconds == Some(0)
+    {
+        return Err("invalid_input".into());
     }
-    if task.title.trim().is_empty() {
-        return Err("task title is required".into());
+    match &task.task {
+        TaskKind::Agent {
+            project, message, ..
+        } if project.trim().is_empty() || message.trim().is_empty() => {
+            return Err("invalid_input".into());
+        }
+        TaskKind::Job { job_type, .. } if job_type.trim().is_empty() => {
+            return Err("invalid_input".into());
+        }
+        _ => {}
     }
     Ok(())
 }
