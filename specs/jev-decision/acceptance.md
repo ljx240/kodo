@@ -234,7 +234,7 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 
 ## 6. Git 现场
 
-**已合入本地 `main`**（用户明确授权"合并至main"）。**未推送**：本次授权只到本地合并，`git push` 与创建 PR 均未执行。
+**已合入并推送到 `main`**（用户先授权"合并至main"，随后授权"全部代码 分支 worktree 都合并到main并提交推送"）。推送结果：`c0f67a3..f3073b7  main -> main`；`main` 与 `origin/main` 同为 `f3073b7`。**未创建 PR**，未删除远端分支。
 
 > **并发记录（2026-10-20 22:40）**：本任务进行期间，另一个会话把 `fix/work-reliability` 分支合并进了 `main`（合并提交 `46b9f53 merge(work): …`），其合并基点正是本任务的 `a9304ea`。本任务的提交全部保留在 `main` 历史中，未被覆盖；本轮修复在合并后的树上重新验证通过。
 
@@ -251,7 +251,7 @@ main HEAD：4189423 merge(decision): recover a truncated decision settings recor
   9a92f1f fix(decision): recover a truncated settings record instead of failing
 合并前基线：c0f67a310cb7dea1761f14e017381407a0e07a81（= 合并前 main = 合并前缓存 origin/main）
 缓存 origin/main：c0f67a310cb7dea1761f14e017381407a0e07a81 —— 本次未 fetch，远程新鲜度未核验
-main 相对 origin/main：ahead 23（含并发合入的 `fix/work-reliability` 一支；全部未推送）
+main 相对 origin/main：0（已同步，全部已推送）
 git branch --no-merged main：（空）
 任务分支 feat/jev-decision：已合入后按 AGENTS.md §2 删除（三个提交均保留在 main 的历史里）
 git stash list：7 条，全部为会话开始前既有，未 pop / drop / clear
@@ -303,7 +303,7 @@ worktree：
   specs/jev-decision/{spec,plan,tasks,acceptance}.md
 ```
 
-**本任务没有执行**：提交、合并、推送、创建 PR、删除分支/worktree/stash、修改远程。
+**本任务执行了**：提交、合并到 `main`、推送 `main`、删除已合并的本地分支、移除已完成的 worktree。**未执行**：创建 PR、删除远端分支、清理 stash、修改远端的任何其他内容。
 
 ---
 
@@ -311,7 +311,7 @@ worktree：
 
 ### 剩余工作
 
-1. **远程交付**：`main` 已在本地包含本任务，但**尚未推送**，也没有 PR。远程同步与 PR 需要单独授权；本地合并的"远程新鲜度未核验"状态仍然成立。
+1. **PR**：没有创建。`main` 已推送（`f3073b7`），但按项目惯例仍应走 PR 流程由他人评审；如需 PR，请单独授权。
 2. **视觉与交互回归**：按 `docs/design/UI_ACCEPTANCE.md` 为设置小节、发送预览、Inspector 决策记录补 `apps/desktop/tests/visual/` 用例，并在参考视口（1586×992 / 1440×900 / 1920×1080 / 2560×1440）截图核对。
 3. **语料扩量与冻结**：120→600、60→300，并冻结标签。
 4. **真实模型评测**：见第 5 节，需要单独授权。
