@@ -9,6 +9,7 @@
 //! [`protocol::ToolInvocation`] values.
 
 pub mod agents;
+pub mod attachment;
 pub mod checkpoint;
 mod classify;
 pub mod compaction;
@@ -24,6 +25,7 @@ pub mod plan;
 pub mod process;
 pub mod protocol;
 pub mod provider;
+pub mod read_receipt;
 mod recovery;
 pub mod repomap;
 mod repository_instructions;
@@ -63,7 +65,8 @@ use base64::Engine as _;
 use skill::{SkillRegistry, SkillSpec};
 use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason, Transition};
 use tools::{
-    classify_command_risk, command_run, search_files, write_project_file, CommandOutcomeKind,
+    classify_command_risk, command_run, search_files, write_project_file_checked,
+    CommandOutcomeKind,
 };
 use verify::{
     failure_triage_eligible, FailureClass, FinalStatus, RepairDecision, VerificationPlan,
@@ -1004,45 +1007,43 @@ fn write_step(
         return Ok((keep, Some(result)));
     }
 
-    // A whole-file write replaces everything it does not contain. If this turn
-    // never saw the existing bytes, the model is deleting content it has not
-    // read — the shape that turns a "fix" into a truncated file.
-    if !dedup.has_seen(path)
-        && tools::resolve_in_project(project, path)
-            .map(|target| target.is_file())
-            .unwrap_or(false)
-    {
-        let seen = trace_file_text(project, path);
-        if seen.as_deref().is_none_or(|text| !text.trim().is_empty()) {
-            let advice = match &seen {
-                Some(text) => format!(
-                    "`{path}` 已存在 {} 行，本轮还没有读取过它。先 read_file 看清现有内容再整体重写；\
-                     只改局部请改用 apply_patch 或 replace_range。",
-                    text.lines().count()
-                ),
-                None => format!(
-                    "`{path}` 已存在但本轮读不到它的内容。先 read_file 确认现有内容再整体重写；\
-                     只改局部请改用 apply_patch 或 replace_range。"
-                ),
-            };
-            notes.push(format!("拒绝覆盖未读取的 `{path}`"));
-            let denied = Step::FileChange {
-                changes: vec![FileDelta {
-                    path: path.to_owned(),
-                    added: 0,
-                    removed: 0,
-                }],
-                file_span_ref: None,
-            };
-            let keep = finish_step(denied, 0, true, emit);
-            let result = ToolResult::failure(
-                call_id,
-                ToolName::WriteFile.label(),
-                path,
-                ToolError::patch_conflict(advice),
-            );
-            return Ok((keep, Some(result)));
-        }
+    // A whole-file write replaces everything it does not contain. The gate is
+    // a *complete read of the current version this turn* — not "the path was
+    // touched at some point". A 120-line window of a 201-line file, a read
+    // whose observation was clipped, or a read that the file has since
+    // outgrown all refuse the overwrite.
+    let current_version = tools::file_version(project, path).ok().flatten();
+    // An existing but empty file has nothing to lose; keep it writable without
+    // a prior read (the model is creating content, not deleting any).
+    let empty_existing = tools::resolve_in_project(project, path)
+        .ok()
+        .filter(|target| target.is_file())
+        .and_then(|target| std::fs::metadata(&target).ok())
+        .map(|meta| meta.len() == 0)
+        .unwrap_or(false);
+    let gate_version = if empty_existing {
+        None
+    } else {
+        current_version.as_deref()
+    };
+    if let Some(advice) = dedup.overwrite_block(path, gate_version) {
+        notes.push(format!("拒绝覆盖未完整读取的 `{path}`"));
+        let denied = Step::FileChange {
+            changes: vec![FileDelta {
+                path: path.to_owned(),
+                added: 0,
+                removed: 0,
+            }],
+            file_span_ref: None,
+        };
+        let keep = finish_step(denied, 0, true, emit);
+        let result = ToolResult::failure(
+            call_id,
+            ToolName::WriteFile.label(),
+            path,
+            ToolError::patch_conflict(advice),
+        );
+        return Ok((keep, Some(result)));
     }
 
     let provisional = Step::FileChange {
@@ -1058,13 +1059,25 @@ fn write_step(
     }
     let before = request.local_trace.then(|| trace_file_text(project, path));
     let began = Instant::now();
-    match write_project_file(project, path, content) {
-        Ok((rel, added, removed)) => {
+    // Pin the write to the version the turn actually read. `None` means "no
+    // precondition" — a new file, an empty file, or a repair of bytes this
+    // turn authored itself.
+    let expect_version = dedup
+        .receipt(path)
+        .filter(|receipt| receipt.complete)
+        .map(|receipt| receipt.version.clone());
+    match write_project_file_checked(project, path, content, expect_version.as_deref()) {
+        Ok((rel, added, removed, version)) => {
             let duration_ms = began.elapsed().as_millis() as u64;
             notes.push(format!("写入 `{rel}` (+{added} -{removed})"));
             // The model just authored these bytes, so rewriting the file again
             // in this turn is a repair, not a blind overwrite.
-            dedup.note_seen(&rel);
+            let representation = if crate::office::is_docx(&rel) {
+                read_receipt::Representation::DocxText
+            } else {
+                read_receipt::Representation::RawText
+            };
+            dedup.note_authored(&rel, representation, version, Some(content.lines().count()));
             if let Some(before) = before {
                 emit_file_trace(project, path, before, &call_id.to_string(), emit);
             }
@@ -1093,6 +1106,9 @@ fn write_step(
             notes.push(format!("写入 `{path}` 失败：{error}"));
             let path_error = if error.contains("escape") || error.contains("absolute") {
                 ToolError::path_escape(error.clone())
+            } else if error.contains("stale_source") {
+                // The file changed under the turn: a conflict, not a crash.
+                ToolError::patch_conflict(error.clone())
             } else {
                 ToolError::execution(error.clone())
             };
@@ -1101,6 +1117,25 @@ fn write_step(
             Ok((finish_step(provisional, 0, true, emit), Some(result)))
         }
     }
+}
+
+/// A local edit is refused when this turn read the file and it changed since.
+///
+/// `apply_patch` / `replace_range` carry their own anchor preconditions, but an
+/// anchor can still match text the model never saw in its new position. When
+/// the turn holds a receipt for an older version, the edit is stale by
+/// definition and the model must re-read first.
+fn stale_edit_block(dedup: &dedup::TurnDedup, project: &Path, path: &str) -> Option<String> {
+    let receipt = dedup.receipt(path)?;
+    let current = tools::file_version(project, path).ok().flatten()?;
+    if receipt.version == current {
+        return None;
+    }
+    Some(format!(
+        "stale_source: `{path}` 在本轮读取后已被修改（读取版本 {}，当前版本 {current}）；未写入。\
+         请重新 read_file 确认最新内容后再修改。",
+        receipt.version
+    ))
 }
 
 /// Runs one typed tool call and returns (keep, observation).
@@ -1374,18 +1409,20 @@ fn execute_tool_call(
                         ),
                     )
                 }
-                Ok(full) => match tools::read_text_result(full, 120) {
-                    Ok(text) => {
-                        // Whole-file writes are only allowed for content this
-                        // turn has actually seen.
-                        dedup.note_seen(path);
+                Ok(full) => match tools::read_outcome(full, None, 120, None) {
+                    Ok(outcome) => {
+                        // Only a delivered observation earns a receipt, and the
+                        // receipt records the range + version actually shown —
+                        // a 120-line window of a longer file is NOT a read of
+                        // that file.
+                        dedup.note_read_receipt(outcome.receipt(path));
                         (
-                            text.clone(),
+                            outcome.text.clone(),
                             ToolResult::success(
                                 call.id.clone(),
                                 ToolName::ReadFile.label(),
                                 path.clone(),
-                                text,
+                                outcome.text,
                             ),
                         )
                     }
@@ -1436,6 +1473,7 @@ fn execute_tool_call(
             call.id.clone(),
             ToolName::ApplyPatch,
             path,
+            dedup,
             project,
             request,
             approve,
@@ -1466,6 +1504,7 @@ fn execute_tool_call(
             call.id.clone(),
             ToolName::ReplaceRange,
             path,
+            dedup,
             project,
             request,
             approve,
@@ -1488,6 +1527,7 @@ fn execute_tool_call(
             call.id.clone(),
             ToolName::CreateFile,
             path,
+            dedup,
             project,
             request,
             approve,
@@ -1500,6 +1540,7 @@ fn execute_tool_call(
             call.id.clone(),
             ToolName::DeleteFile,
             path,
+            dedup,
             project,
             request,
             approve,
@@ -1761,16 +1802,23 @@ fn execute_tool_call(
                         ToolError::path_escape(error),
                     ),
                 ),
-                Ok(full) => match tools::read_text_range(&full, *start_line, *end_line, 6000) {
-                    Ok(text) => {
-                        dedup.note_seen(path);
+                Ok(full) => match tools::read_outcome(
+                    &full,
+                    Some(*start_line),
+                    end_line.saturating_sub(*start_line).saturating_add(1),
+                    Some(6000),
+                ) {
+                    Ok(outcome) => {
+                        // A range read registers exactly the range it
+                        // delivered — it never marks the whole path as read.
+                        dedup.note_read_receipt(outcome.receipt(path));
                         (
-                            text.clone(),
+                            outcome.text.clone(),
                             ToolResult::success(
                                 call.id.clone(),
                                 ToolName::ReadRange.label(),
                                 path.clone(),
-                                text,
+                                outcome.text,
                             ),
                         )
                     }
@@ -1817,6 +1865,7 @@ fn patch_approval_step(
     call_id: ToolCallId,
     name: ToolName,
     path: &str,
+    dedup: &dedup::TurnDedup,
     project: &Path,
     request: &RunRequest,
     approve: &Approve,
@@ -1827,6 +1876,32 @@ fn patch_approval_step(
 ) -> StepOutcome {
     if !alive() {
         return Ok((false, None));
+    }
+    // Editing a file that changed since this turn read it means editing text
+    // the model never saw. Refuse before approval so the user is not asked to
+    // approve a stale write.
+    if matches!(name, ToolName::ApplyPatch | ToolName::ReplaceRange) {
+        if let Some(block) = stale_edit_block(dedup, project, path) {
+            notes.push(format!("拒绝基于过期读取的 `{path}` 修改"));
+            let denied = Step::FileChange {
+                changes: vec![FileDelta {
+                    path: path.to_owned(),
+                    added: 0,
+                    removed: 0,
+                }],
+                file_span_ref: None,
+            };
+            let keep = finish_step(denied, 0, true, emit);
+            return Ok((
+                keep,
+                Some(ToolResult::failure(
+                    call_id,
+                    name.label(),
+                    path.to_owned(),
+                    ToolError::patch_conflict(block),
+                )),
+            ));
+        }
     }
     let label = format!("{} {path}", name.label());
     if request
@@ -5250,6 +5325,20 @@ pub fn run(
         if wrote_files {
             checks.push("已写入项目内文件".to_owned());
         }
+        // Machine-checked vs human-review (FR-007): a free-form requirement
+        // the runtime cannot grade is surfaced as a review item, never as a
+        // passed check. The answer stays honest about what was verified.
+        if let Some(report) = machine.last_acceptance() {
+            for item in &report.pending_review {
+                checks.push(format!("需人工核对：{item}"));
+            }
+            // Format limits (T021–T023): what this run could not guarantee.
+            // Stated next to the checks so "已生成" never implies "格式保留"
+            // or "公式已重算".
+            for note in &report.notes {
+                checks.push(format!("需注意：{note}"));
+            }
+        }
         // Keep the verification state visible in the answer text itself:
         // consumers that only read the final message (evals, benchmarks)
         // must never have to infer it from side channels. Conversational
@@ -8238,6 +8327,334 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// AC-001: a 201-line document read through the 120-line window is a
+    /// *partial* read. A whole-file rewrite would delete the unseen tail, so it
+    /// is refused and the file keeps all 201 lines.
+    #[test]
+    fn partial_read_cannot_unlock_whole_file_overwrite() {
+        let dir = std::env::temp_dir().join(format!("kodo-partial-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut original = String::new();
+        for line in 1..=201 {
+            original.push_str(&format!("line {line}\n"));
+        }
+        original.push_str("TAIL-MARKER-KEEP-ME\n");
+        let original_lines = original.lines().count();
+        assert!(original_lines > 201);
+        std::fs::write(dir.join("doc.md"), &original).unwrap();
+
+        let request = temp_request(&dir, Permission::Ask);
+        let mut notes = Vec::new();
+        let mut dedup = dedup::TurnDedup::new();
+        let read = ToolCall {
+            id: ToolCallId::new("r1"),
+            name: ToolName::ReadFile,
+            args: ToolArgs::ReadFile {
+                path: "doc.md".to_owned(),
+            },
+        };
+        let (_, obs) = execute_tool_call(
+            &read,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |event| {
+                let _ = event;
+                true
+            },
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("execute");
+        let obs = obs.expect("read observation");
+        assert!(obs.ok);
+        assert!(
+            !obs.output.contains("TAIL-MARKER-KEEP-ME"),
+            "the 120-line window must not contain the tail"
+        );
+        let receipt = dedup.receipt("doc.md").expect("receipt");
+        assert!(!receipt.complete, "a clipped read is not a complete read");
+
+        let write = ToolCall {
+            id: ToolCallId::new("w1"),
+            name: ToolName::WriteFile,
+            args: ToolArgs::WriteFile {
+                path: "doc.md".to_owned(),
+                content: "# 摘要\n补充了一段摘要。\n".to_owned(),
+            },
+        };
+        let (_, result) = execute_tool_call(
+            &write,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |event| {
+                let _ = event;
+                true
+            },
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("execute");
+        let result = result.expect("observation");
+        assert!(!result.ok, "partial read must not unlock a whole rewrite");
+        assert_eq!(
+            result.error.as_ref().unwrap().code,
+            ToolErrorCode::PatchConflict
+        );
+        assert!(
+            result
+                .error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("read_range"),
+            "the refusal must name the way out: {:?}",
+            result.error
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("doc.md")).unwrap(),
+            original,
+            "the refused write must not touch the file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC-002: contiguous ranges over the same version form a complete read, so
+    /// the overwrite becomes a repair instead of a guess.
+    #[test]
+    fn contiguous_range_read_completes_the_overwrite_gate() {
+        let dir = std::env::temp_dir().join(format!("kodo-range-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let original: String = (1..=201).map(|line| format!("line {line}\n")).collect();
+        std::fs::write(dir.join("doc.md"), &original).unwrap();
+        let request = temp_request(&dir, Permission::Ask);
+        let mut notes = Vec::new();
+        let mut dedup = dedup::TurnDedup::new();
+        let calls = vec![
+            ToolCall {
+                id: ToolCallId::new("r1"),
+                name: ToolName::ReadFile,
+                args: ToolArgs::ReadFile {
+                    path: "doc.md".to_owned(),
+                },
+            },
+            ToolCall {
+                id: ToolCallId::new("r2"),
+                name: ToolName::ReadRange,
+                args: ToolArgs::ReadRange {
+                    path: "doc.md".to_owned(),
+                    start_line: 121,
+                    end_line: 201,
+                },
+            },
+        ];
+        for call in &calls {
+            let (_, obs) = execute_tool_call(
+                call,
+                &dir,
+                &request,
+                &|| true,
+                &|_, _| true,
+                &mut |event| {
+                    let _ = event;
+                    true
+                },
+                &mut notes,
+                &mut dedup,
+            )
+            .expect("execute");
+            assert!(obs.expect("observation").ok);
+        }
+        assert!(
+            dedup.receipt("doc.md").expect("receipt").complete,
+            "1-120 plus 121-201 covers the whole file"
+        );
+        let write = ToolCall {
+            id: ToolCallId::new("w1"),
+            name: ToolName::WriteFile,
+            args: ToolArgs::WriteFile {
+                path: "doc.md".to_owned(),
+                content: "# 摘要\n补充摘要，保留全文。\n".to_owned(),
+            },
+        };
+        let (_, result) = execute_tool_call(
+            &write,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |event| {
+                let _ = event;
+                true
+            },
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("execute");
+        assert!(
+            result.expect("observation").ok,
+            "a complete read makes the rewrite legal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC-003: the file changed after the read. Both the whole-file write and a
+    /// local patch are refused, and the external edit survives.
+    #[test]
+    fn external_edit_after_read_blocks_write_and_patch() {
+        let dir = std::env::temp_dir().join(format!("kodo-stale-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.md"), "alpha\nbeta\n").unwrap();
+        let request = temp_request(&dir, Permission::Ask);
+        let mut notes = Vec::new();
+        let mut dedup = dedup::TurnDedup::new();
+        let read = ToolCall {
+            id: ToolCallId::new("r1"),
+            name: ToolName::ReadFile,
+            args: ToolArgs::ReadFile {
+                path: "note.md".to_owned(),
+            },
+        };
+        let (_, obs) = execute_tool_call(
+            &read,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |event| {
+                let _ = event;
+                true
+            },
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("execute");
+        assert!(obs.expect("observation").ok);
+
+        // Another editor writes the file while the turn holds the old version.
+        let external = "alpha\nbeta\ngamma-from-user\n";
+        std::fs::write(dir.join("note.md"), external).unwrap();
+
+        let write = ToolCall {
+            id: ToolCallId::new("w1"),
+            name: ToolName::WriteFile,
+            args: ToolArgs::WriteFile {
+                path: "note.md".to_owned(),
+                content: "alpha\nbeta\n".to_owned(),
+            },
+        };
+        let (_, result) = execute_tool_call(
+            &write,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |event| {
+                let _ = event;
+                true
+            },
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("execute");
+        let result = result.expect("observation");
+        assert!(!result.ok);
+        assert!(
+            result.error.as_ref().unwrap().message.contains("已被修改"),
+            "{:?}",
+            result.error
+        );
+
+        let patch = ToolCall {
+            id: ToolCallId::new("p1"),
+            name: ToolName::ApplyPatch,
+            args: ToolArgs::ApplyPatch {
+                path: "note.md".to_owned(),
+                old: "beta".to_owned(),
+                new: "BETA".to_owned(),
+                start_line: None,
+            },
+        };
+        let (_, result) = execute_tool_call(
+            &patch,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |event| {
+                let _ = event;
+                true
+            },
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("execute");
+        let result = result.expect("observation");
+        assert!(!result.ok, "a stale patch must be refused");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("note.md")).unwrap(),
+            external,
+            "the external edit must survive both refusals"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC-007 end to end: the target file exists with old content, the run
+    /// executes no tool at all, and the model claims success. The delivery must
+    /// not be `ready`, and the file must be byte-identical afterwards.
+    #[test]
+    fn stale_file_is_not_a_delivered_update_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("kodo-stale-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = "old unrelated body\n";
+        std::fs::write(dir.join("stale.md"), original).unwrap();
+        let script = dir.join("stale_script.jsonl");
+        let body = serde_json::json!({ "text": "已完成更新，内容已保存。" });
+        let turns = std::iter::repeat_n(body.to_string(), 24)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&script, format!("{turns}\n")).unwrap();
+
+        let mut request = temp_request(&dir, Permission::Ask);
+        request.mode = AgentMode::Work;
+        request.message = "请更新 `stale.md`".to_owned();
+        request.fallback_to_local = false;
+        request.provider = Some(Provider::new(
+            "fake",
+            "fake-key",
+            script.to_string_lossy(),
+            "fake-model",
+        ));
+        let mut deliveries: Vec<String> = Vec::new();
+        let _ = run(&request, &|| true, &|_, _| true, &mut |event| {
+            if let SinkEvent::Finished {
+                step: Step::AgentMessage { delivery, .. },
+                ..
+            } = &event
+            {
+                deliveries.push(delivery.clone());
+            }
+            true
+        });
+        assert!(
+            !deliveries.iter().any(|d| d == "ready"),
+            "an untouched old file must not be reported as this run's delivery: {deliveries:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("stale.md")).unwrap(),
+            original,
+            "no tool ran, so the file must be untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A brand-new file is never a blind overwrite, and an empty existing file
     /// has nothing to lose.
     #[test]
@@ -8277,8 +8694,13 @@ mod tests {
                 "{path} must be writable without a prior read"
             );
         }
-        // The file the model just wrote counts as seen, so a rewrite is allowed.
-        assert!(dedup.has_seen("src/fresh.rs"));
+        // The file the model just wrote counts as authored, so a rewrite is
+        // allowed without re-reading.
+        let receipt = dedup.receipt("src/fresh.rs").expect("authored receipt");
+        assert!(
+            receipt.complete,
+            "an authored file is complete by definition"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

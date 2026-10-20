@@ -183,6 +183,21 @@ pub struct TaskPlan {
     pub deliverable_bar: bool,
     pub expected_outputs: Vec<String>,
     pub requires_file_output: bool,
+    /// What the user asked to do with `expected_outputs` (create/update/reuse).
+    /// Old persisted plans have no field — they read as `None`, which keeps the
+    /// legacy "any this-turn write satisfies it" behaviour.
+    #[serde(default)]
+    pub output_operation: OutputOperation,
+    /// Input material named in the request. Never a deliverable.
+    #[serde(default)]
+    pub output_sources: Vec<String>,
+    /// Format limits stated before any write happens (T021–T023): a DOCX
+    /// update is a whole-document rewrite, a spreadsheet write stores cell
+    /// values (never formula results), and PDF/PPTX outputs have no readback
+    /// validator. Rendered into the plan and echoed in the answer's checks, so
+    /// the user hears it before the model burns a turn on it.
+    #[serde(default)]
+    pub output_notes: Vec<String>,
     /// Plan-level contract: the run must produce a final assistant message
     /// before it can leave the loop. Set by `code-review` / `review-only`
     /// skills so a long reasoning run that ends with an empty `text` block
@@ -192,74 +207,433 @@ pub struct TaskPlan {
     pub requires_final_answer: bool,
 }
 
-impl TaskPlan {
-    pub fn set_output_contract(&mut self, message: &str) {
-        let lower = message.to_ascii_lowercase();
-        let markers = [
-            "write", "create", "save", "export", "generate", "update", "输出", "保存", "生成",
-            "写入", "创建", "导出", "更新",
-        ];
-        let start = markers
-            .iter()
-            .filter_map(|m| lower.rfind(m).map(|i| i + m.len()))
-            .max();
-        let Some(start) = start else {
-            return;
-        };
-        let tail = &message[start..];
-        let tail = tail.split(" from ").next().unwrap_or(tail);
-        self.expected_outputs = tail
-            .split(|c: char| {
-                c.is_whitespace()
-                    || matches!(
-                        c,
-                        '`' | '\''
-                            | '"'
-                            | '，'
-                            | ','
-                            | '。'
-                            | ';'
-                            | '；'
-                            | '('
-                            | ')'
-                            | '（'
-                            | '）'
-                            | ':'
-                            | '：'
-                    )
-            })
-            .filter_map(|word| {
-                let word = word
-                    .trim_matches(['.', '!', '?'])
-                    .trim_start_matches("到")
-                    .trim_start_matches("为");
-                let ext = std::path::Path::new(word)
-                    .extension()?
-                    .to_str()?
-                    .to_lowercase();
-                if [
-                    "md", "txt", "csv", "tsv", "json", "html", "docx", "xlsx", "pdf", "pptx",
-                ]
-                .contains(&ext.as_str())
-                    && !word.contains("://")
-                {
-                    Some(word.to_owned())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        self.expected_outputs.sort();
-        self.expected_outputs.dedup();
-        self.requires_file_output = self.deliverable_bar
-            && (!self.expected_outputs.is_empty()
-                || [
-                    "文件", "保存", "导出", "file", "docx", "xlsx", "pdf", "pptx",
-                ]
-                .iter()
-                .any(|k| lower.contains(k)));
+/// What the user asked the run to do with the target file.
+///
+/// Kept separate from `expected_outputs` so the delivery gate can tell
+/// "create this" from "update this" and from "reuse the existing one".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OutputOperation {
+    #[default]
+    None,
+    Create,
+    Update,
+    Reuse,
+}
+
+impl OutputOperation {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Reuse => "reuse",
+        }
     }
 
+    pub fn is_file_task(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// Layer 1 of the delivery contract: what the user asked for.
+///
+/// Sources (material the answer is based on) are never deliverables. A message
+/// that merely names a file — "解释 report.md" — is not a file task.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OutputContract {
+    pub targets: Vec<String>,
+    pub sources: Vec<String>,
+    pub operation: OutputOperation,
+    pub requires_file_output: bool,
+}
+
+/// Extensions this runtime can actually produce or read back.
+const OUTPUT_EXTS: &[&str] = &[
+    "md", "markdown", "txt", "csv", "tsv", "json", "html", "htm", "docx", "xlsx", "xls", "pdf",
+    "pptx",
+];
+
+const CREATE_VERBS: &[&str] = &[
+    "生成",
+    "创建",
+    "新建",
+    "写一份",
+    "写一个",
+    "写个",
+    "起草",
+    "整理成",
+    "汇总成",
+    "做成",
+    "输出",
+    "导出",
+    "保存",
+    "写入",
+    "write",
+    "create",
+    "generate",
+    "save",
+    "export",
+    "produce",
+    "draft",
+];
+
+const UPDATE_VERBS: &[&str] = &[
+    "更新", "修改", "补充", "追加", "完善", "修订", "改成", "改为", "补全", "刷新", "重写",
+    "update", "edit", "revise", "append", "rewrite", "modify", "amend",
+];
+
+const REUSE_VERBS: &[&str] = &["复用", "沿用", "直接使用", "使用已有", "reuse", "re-use"];
+
+/// "Based on X, produce Y" markers. Anything between the source marker and the
+/// target marker is input material, not an output.
+const SOURCE_MARKERS: &[&str] = &[
+    "基于",
+    "根据",
+    "参考",
+    "依据",
+    "读取",
+    "按照",
+    "from ",
+    "based on ",
+    "given ",
+];
+
+const TARGET_MARKERS: &[&str] = &[
+    "整理成",
+    "汇总成",
+    "做成",
+    "生成",
+    "输出到",
+    "输出为",
+    "输出",
+    "保存到",
+    "保存为",
+    "保存",
+    "写成",
+    "转成",
+    "导出为",
+    "导出",
+    "另存为",
+    "写到",
+    "写入",
+    "into ",
+    " to ",
+];
+
+const FILE_NOUNS: &[&str] = &[
+    "文件",
+    "文档",
+    "报告",
+    "表格",
+    "附件",
+    "file",
+    "document",
+    "report",
+    "spreadsheet",
+];
+
+fn has_ext(path: &str) -> bool {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase);
+    matches!(ext, Some(ext) if OUTPUT_EXTS.contains(&ext.as_str()))
+}
+
+/// A token is a plausible output path: known extension, no URL, no newline.
+fn looks_like_output_path(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    !candidate.is_empty()
+        && !candidate.contains("://")
+        && !candidate.contains('\n')
+        && !candidate.contains("```")
+        && candidate.chars().count() <= 200
+        && has_ext(candidate)
+}
+
+/// Paths inside backticks/quotes, in message order. Quoting is how a user keeps
+/// spaces and CJK characters in a filename (`季度 报告.md`).
+fn extract_quoted_paths(message: &str) -> Vec<(usize, usize, String)> {
+    let chars: Vec<(usize, char)> = message.char_indices().collect();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let (offset, open) = chars[index];
+        let close = match open {
+            '`' => Some('`'),
+            '"' => Some('"'),
+            '\'' => Some('\''),
+            '“' => Some('”'),
+            '「' => Some('」'),
+            _ => None,
+        };
+        let Some(close) = close else {
+            index += 1;
+            continue;
+        };
+        let found = (index + 1..chars.len()).find(|&j| chars[j].1 == close);
+        if let Some(end_index) = found {
+            let start = offset + open.len_utf8();
+            let end = chars[end_index].0;
+            let span = &message[start..end];
+            if looks_like_output_path(span) {
+                out.push((offset, end, span.trim().to_owned()));
+            }
+            index = end_index + 1;
+        } else {
+            index += 1;
+        }
+    }
+    out
+}
+
+/// Unquoted tokens that end in a known output extension. A quoted span is never
+/// re-read as a bare token, so `季度 报告.md` keeps its space.
+fn extract_bare_paths(message: &str, quoted: &[(usize, usize, String)]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    let flush = |start: &mut Option<usize>, end: usize, out: &mut Vec<(usize, String)>| {
+        if let Some(from) = start.take() {
+            let token = &message[from..end];
+            if looks_like_output_path(token) {
+                out.push((from, token.trim().to_owned()));
+            }
+        }
+    };
+    for (offset, ch) in message.char_indices() {
+        let separator = ch.is_whitespace()
+            || matches!(
+                ch,
+                '，' | '。'
+                    | '；'
+                    | '、'
+                    | '：'
+                    | ','
+                    | ';'
+                    | ':'
+                    | '('
+                    | ')'
+                    | '（'
+                    | '）'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | '“'
+                    | '”'
+                    | '「'
+                    | '」'
+                    | '！'
+                    | '？'
+                    | '!'
+                    | '?'
+                    | '<'
+                    | '>'
+            );
+        if separator {
+            flush(&mut start, offset, &mut out);
+        } else if start.is_none() {
+            start = Some(offset);
+        }
+    }
+    flush(&mut start, message.len(), &mut out);
+    // A token that lives inside a quoted span is part of that path, not a
+    // second target: `季度 报告.md` must never also yield `报告.md`.
+    out.retain(|(offset, path)| {
+        let end = offset + path.len();
+        !quoted.iter().any(|(q_start, q_end, q_path)| {
+            q_path == path || (*offset >= *q_start && end <= *q_end)
+        })
+    });
+    out
+}
+
+fn earliest_marker(message: &str, markers: &[&str]) -> Option<usize> {
+    markers
+        .iter()
+        .filter_map(|marker| message.find(marker))
+        .min()
+}
+
+/// Parse the delivery contract from the whole message.
+///
+/// Order-independent: a target named *before* the verb ("请将 `a.md` 更新")
+/// counts exactly like one named after it. Sources are separated from targets
+/// by the "based on X, produce Y" shape rather than by position alone.
+pub fn parse_output_contract(message: &str) -> OutputContract {
+    let lower = message.to_lowercase();
+    let quoted = extract_quoted_paths(message);
+    let mut candidates: Vec<(usize, String)> = quoted
+        .iter()
+        .map(|(offset, _, path)| (*offset, path.clone()))
+        .collect();
+    candidates.extend(extract_bare_paths(message, &quoted));
+    candidates.sort_by_key(|(offset, _)| *offset);
+    // Same path named twice is one target.
+    let mut seen = std::collections::BTreeSet::new();
+    candidates.retain(|(_, path)| seen.insert(path.clone()));
+
+    let has_create = CREATE_VERBS.iter().any(|verb| lower.contains(verb));
+    let has_update = UPDATE_VERBS.iter().any(|verb| lower.contains(verb));
+    let has_reuse = REUSE_VERBS.iter().any(|verb| lower.contains(verb));
+    let operation = if has_reuse {
+        OutputOperation::Reuse
+    } else if has_update {
+        OutputOperation::Update
+    } else if has_create {
+        OutputOperation::Create
+    } else {
+        OutputOperation::None
+    };
+
+    // Source vs target: material named between "based on" and "produce" is
+    // input. Without a source marker every named path is a target.
+    let source_at = earliest_marker(&lower, SOURCE_MARKERS);
+    let target_at = source_at.and_then(|from| {
+        TARGET_MARKERS
+            .iter()
+            .filter_map(|marker| lower[from..].find(marker).map(|i| from + i))
+            .min()
+    });
+    let (sources, targets) = match (source_at, target_at) {
+        (Some(from), Some(to)) => {
+            let mut sources = Vec::new();
+            let mut targets = Vec::new();
+            for (offset, path) in &candidates {
+                if *offset >= from && *offset < to {
+                    sources.push(path.clone());
+                } else if *offset >= to {
+                    targets.push(path.clone());
+                } else {
+                    targets.push(path.clone());
+                }
+            }
+            (sources, targets)
+        }
+        _ => (
+            Vec::new(),
+            candidates.iter().map(|(_, p)| p.clone()).collect(),
+        ),
+    };
+
+    // A question that names no target is a question, not a file task. "如何
+    // 生成 PDF？" must not become a delivery gate.
+    let question = is_question(message);
+    let file_noun = FILE_NOUNS.iter().any(|noun| lower.contains(noun));
+    let requires_file_output =
+        operation.is_file_task() && (!targets.is_empty() || (file_noun && !question));
+
+    OutputContract {
+        targets,
+        sources,
+        operation,
+        requires_file_output,
+    }
+}
+
+/// Format limits that must be stated before a write happens (T021–T023).
+///
+/// `None` means the format carries no caveat worth stating. These are not
+/// warnings bolted on afterwards: the plan renders them, so the model knows
+/// the limit while it is still choosing a format, and the answer's checks echo
+/// them to the user.
+pub fn output_note(
+    path: &str,
+    operation: OutputOperation,
+    preserve_format: bool,
+) -> Option<String> {
+    if let Some(label) = crate::attachment::unsupported_format(path) {
+        return Some(format!(
+            "`{path}` 是 {label} 格式，本轮没有回读校验器；请改为 DOCX/Markdown/CSV 等可校验格式，或明确接受“无法校验”的交付"
+        ));
+    }
+    if crate::office::is_docx(path) {
+        return Some(match operation {
+            OutputOperation::Create => {
+                format!("`{path}` 将按 Markdown 结构生成新的 DOCX（新建，无原格式可保留）")
+            }
+            _ if preserve_format => format!(
+                "无法在保留原格式的前提下修改 `{path}`：本轮 DOCX 写入是整篇重写，原有样式、表格与页眉会丢失；请先确认是否接受重写"
+            ),
+            _ => format!("`{path}` 将被整篇重写，不保留原有样式与表格结构"),
+        });
+    }
+    if crate::office::is_spreadsheet(path) {
+        return Some(format!(
+            "`{path}` 写入的是单元格文本值；公式不会被计算或重算"
+        ));
+    }
+    None
+}
+
+/// True when the request asks for the original formatting to survive an edit.
+pub fn asks_to_preserve_format(message: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "保留格式",
+        "保留原格式",
+        "保持格式",
+        "保持原格式",
+        "不要改变格式",
+        "不改格式",
+        "keep formatting",
+        "preserve formatting",
+        "keep the format",
+        "keep the formatting",
+    ];
+    let lower = message.to_lowercase();
+    MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
+/// Interrogative shape — used only to keep plain Q&A out of the delivery gate,
+/// never to weaken an explicit "write this file" request.
+fn is_question(message: &str) -> bool {
+    let trimmed = message.trim();
+    if trimmed.ends_with('?') || trimmed.ends_with('？') {
+        return true;
+    }
+    let lower = trimmed.to_lowercase();
+    [
+        "是什么",
+        "什么是",
+        "如何",
+        "怎么",
+        "为什么",
+        "解释",
+        "介绍",
+        "有什么区别",
+        "what is",
+        "how do",
+        "how to",
+        "why ",
+        "explain",
+        "difference between",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+impl TaskPlan {
+    /// Layer 1 of the delivery contract (see [`parse_output_contract`]).
+    pub fn set_output_contract(&mut self, message: &str) {
+        let contract = parse_output_contract(message);
+        let preserve = asks_to_preserve_format(message);
+        // Stated at plan time, before any write: the model chooses a format
+        // knowing what can and cannot be verified afterwards.
+        self.output_notes = contract
+            .targets
+            .iter()
+            .filter_map(|path| output_note(path, contract.operation, preserve))
+            .collect();
+        self.expected_outputs = contract.targets;
+        self.output_sources = contract.sources;
+        self.output_operation = contract.operation;
+        self.requires_file_output = self.deliverable_bar && contract.requires_file_output;
+    }
+
+    /// Layer 2 + 3: does the file this run produced satisfy the contract?
+    ///
+    /// A deliverable must be **written in this turn** (or explicitly reused),
+    /// and the bytes on disk now must pass the format readback. An old file
+    /// that happens to exist proves nothing about this run.
     pub fn validate_deliverables(
         &self,
         project: &std::path::Path,
@@ -268,18 +642,42 @@ impl TaskPlan {
         if !self.requires_file_output {
             return Vec::new();
         }
-        let paths = if self.expected_outputs.is_empty() {
-            written
+        let normalize = |path: &str| {
+            let trimmed = path.trim();
+            trimmed
+                .strip_prefix("./")
+                .unwrap_or(trimmed)
+                .trim_start_matches('/')
+                .to_owned()
+        };
+        let written_set: std::collections::BTreeSet<String> =
+            written.iter().map(|p| normalize(p)).collect();
+        let paths: Vec<String> = if self.expected_outputs.is_empty() {
+            written.to_vec()
         } else {
-            &self.expected_outputs
+            self.expected_outputs.clone()
         };
         if paths.is_empty() {
-            return vec!["no output file was produced".into()];
+            return vec!["no output file was produced this turn".into()];
         }
         paths
             .iter()
             .filter_map(|path| {
                 let result = (|| -> Result<(), String> {
+                    // This-turn write evidence. "The file exists" is not
+                    // evidence that this run updated it (I-02).
+                    let reused = self.output_operation == OutputOperation::Reuse;
+                    if !reused && !written_set.contains(&normalize(path)) {
+                        return Err(
+                            "本轮没有写入该文件；已存在的旧文件不等于本轮交付，请实际生成或修改后再交付"
+                                .into(),
+                        );
+                    }
+                    if let Some(label) = crate::attachment::unsupported_format(path) {
+                        return Err(format!(
+                            "{label} 格式没有回读校验器，本轮不能作为已交付成果；请改用可校验格式"
+                        ));
+                    }
                     let full = crate::tools::resolve_in_project(project, path)?;
                     let size = std::fs::metadata(&full).map_err(|e| e.to_string())?.len();
                     if size == 0 {
@@ -309,11 +707,6 @@ impl TaskPlan {
                         if path.to_lowercase().ends_with(".json") {
                             serde_json::from_str::<serde_json::Value>(&content)
                                 .map_err(|e| e.to_string())?;
-                        }
-                        if path.to_lowercase().ends_with(".pdf")
-                            || path.to_lowercase().ends_with(".pptx")
-                        {
-                            return Err("this document format has no readback validator".into());
                         }
                     }
                     Ok(())
@@ -350,6 +743,9 @@ impl TaskPlan {
             deliverable_bar: true,
             expected_outputs: Vec::new(),
             requires_file_output: false,
+            output_operation: OutputOperation::None,
+            output_sources: Vec::new(),
+            output_notes: Vec::new(),
             requires_final_answer: false,
         }
     }
@@ -481,6 +877,9 @@ impl TaskPlan {
             deliverable_bar: false,
             expected_outputs: Vec::new(),
             requires_file_output: false,
+            output_operation: OutputOperation::None,
+            output_sources: Vec::new(),
+            output_notes: Vec::new(),
             requires_final_answer: false,
         }
     }
@@ -540,6 +939,9 @@ impl TaskPlan {
             deliverable_bar: true,
             expected_outputs: Vec::new(),
             requires_file_output: false,
+            output_operation: OutputOperation::None,
+            output_sources: Vec::new(),
+            output_notes: Vec::new(),
             requires_final_answer: false,
         }
     }
@@ -683,6 +1085,9 @@ impl TaskPlan {
             deliverable_bar: false,
             expected_outputs: Vec::new(),
             requires_file_output: false,
+            output_operation: OutputOperation::None,
+            output_sources: Vec::new(),
+            output_notes: Vec::new(),
             requires_final_answer: false,
         })
     }
@@ -692,6 +1097,9 @@ impl TaskPlan {
         let mut out = String::from("## Current plan\n");
         if self.requires_file_output {
             out.push_str(&format!("- File delivery requires nonempty, valid files and readback; expected outputs: {:?}\n", self.expected_outputs));
+        }
+        for note in &self.output_notes {
+            out.push_str(&format!("- output note: {note}\n"));
         }
         if self.requires_final_answer {
             out.push_str(
@@ -1193,13 +1601,28 @@ impl TaskPlan {
                     Some(errors) => failures.extend(errors.iter().cloned()),
                 }
             }
-            for criterion in &self.criteria {
-                passed.push(criterion.description.clone());
+            // Only what the runtime actually checked may be reported as
+            // passed. Free-form quality criteria (tone, faithfulness,
+            // completeness of argument) cannot be graded by the machine, so
+            // they go to the human-review list — never to `passed` (FR-007).
+            let mut passed = passed;
+            if self.requires_file_output && failures.is_empty() {
+                passed.push(format!(
+                    "本轮已写入并通过回读检查：{}",
+                    self.expected_outputs.join("、")
+                ));
             }
+            let pending_review: Vec<String> = self
+                .criteria
+                .iter()
+                .map(|c| c.description.clone())
+                .collect();
             return AcceptanceReport {
                 ok: failures.is_empty(),
                 passed,
                 failures,
+                pending_review,
+                notes: self.output_notes.clone(),
             };
         }
 
@@ -1360,6 +1783,8 @@ impl TaskPlan {
                     .all(|c| c.is_met() || !c.is_unresolved()),
             passed,
             failures,
+            pending_review: Vec::new(),
+            notes: self.output_notes.clone(),
         }
     }
 }
@@ -1651,6 +2076,13 @@ pub struct AcceptanceReport {
     pub ok: bool,
     pub passed: Vec<String>,
     pub failures: Vec<String>,
+    /// Requirements the machine cannot verify (prose quality, faithfulness,
+    /// layout). Reported for human review; never counted as `passed`.
+    pub pending_review: Vec<String>,
+    /// Format limits that were true for this run (T021–T023): a DOCX rewrite,
+    /// spreadsheet values instead of formula results, an unverifiable format.
+    /// Facts, not checks.
+    pub notes: Vec<String>,
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -2233,7 +2665,22 @@ mod tests {
         };
         let report = plan.evaluate_acceptance(&evidence);
         assert!(report.ok, "claim is the delivery: {:?}", report.failures);
-        assert!(report.passed.iter().any(|p| p.contains("answers the user")));
+        // 2026-10-20 (FR-007): a free-form quality criterion cannot be graded
+        // by tools, so it is reported for human review — the runtime no longer
+        // moves it into `passed`.
+        assert!(
+            report
+                .pending_review
+                .iter()
+                .any(|p| p.contains("answers the user")),
+            "free-form criteria belong to the human-review list: {:?}",
+            report.pending_review
+        );
+        assert!(
+            !report.passed.iter().any(|p| p.contains("answers the user")),
+            "an unverified subjective standard must never read as passed: {:?}",
+            report.passed
+        );
         // The claim never injects observations.
         assert!(evidence.bag.items.is_empty());
         assert!(evidence.files_written.is_empty());
@@ -2246,6 +2693,250 @@ mod tests {
         plan.requires_verify = false;
         let report = plan.evaluate_acceptance(&AcceptanceEvidence::default());
         assert!(!report.ok, "no claim → no delivery: {:?}", report.passed);
+    }
+
+    // ---- Output contract (FR-004 / AC-005 / AC-006) ----
+
+    fn contract(message: &str) -> OutputContract {
+        parse_output_contract(message)
+    }
+
+    #[test]
+    fn quoted_target_keeps_its_space_and_cjk_name() {
+        let parsed = contract("请把总结保存到 `季度 报告.md`");
+        assert_eq!(parsed.targets, vec!["季度 报告.md".to_owned()]);
+        assert_eq!(parsed.operation, OutputOperation::Create);
+        assert!(parsed.requires_file_output);
+    }
+
+    #[test]
+    fn verb_after_the_path_still_locks_the_target() {
+        // I-03: the old parser only read the tail after the last verb, so
+        // "请将 `missing.md` 更新" produced no requirement at all.
+        let parsed = contract("请将 `missing.md` 更新");
+        assert_eq!(parsed.targets, vec!["missing.md".to_owned()]);
+        assert_eq!(parsed.operation, OutputOperation::Update);
+        assert!(parsed.requires_file_output);
+    }
+
+    #[test]
+    fn source_and_target_are_separated() {
+        let parsed = contract("基于 `input.docx` 生成 `output.md`");
+        assert_eq!(parsed.sources, vec!["input.docx".to_owned()]);
+        assert_eq!(parsed.targets, vec!["output.md".to_owned()]);
+        let parsed = contract("请根据 report.md 整理成 summary.md");
+        assert_eq!(parsed.sources, vec!["report.md".to_owned()]);
+        assert_eq!(parsed.targets, vec!["summary.md".to_owned()]);
+    }
+
+    #[test]
+    fn plain_questions_do_not_become_file_tasks() {
+        for message in [
+            "PDF 是什么格式？",
+            "解释 report.md 里这段的意思",
+            "如何生成 PDF？",
+            "介绍一下什么是数据仓库",
+        ] {
+            let parsed = contract(message);
+            assert!(
+                !parsed.requires_file_output,
+                "{message} must stay a question: {parsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_targets_are_all_kept() {
+        let parsed = contract("请更新 `a.md`，并把结果保存到 `b.md`");
+        assert!(parsed.targets.contains(&"a.md".to_owned()));
+        assert!(parsed.targets.contains(&"b.md".to_owned()));
+        assert!(parsed.requires_file_output);
+    }
+
+    #[test]
+    fn unnamed_file_request_still_requires_a_deliverable() {
+        let parsed = contract("帮我生成一份季度报告");
+        assert!(parsed.targets.is_empty());
+        assert!(parsed.requires_file_output);
+    }
+
+    fn deliverable_plan(message: &str) -> TaskPlan {
+        let mut plan = TaskPlan::from_task(message);
+        plan.deliverable_bar = true;
+        plan.requires_verify = false;
+        plan.set_output_contract(message);
+        plan
+    }
+
+    #[test]
+    fn existing_old_file_is_not_this_turn_delivery() {
+        // AC-007: the file exists with old content and the run wrote nothing.
+        let dir = std::env::temp_dir().join(format!("kodo-deliverable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stale.md"), "old unrelated body\n").unwrap();
+        let plan = deliverable_plan("请更新 `stale.md`");
+        let errors = plan.validate_deliverables(&dir, &[]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("本轮没有写入"),
+            "the reason must be specific: {errors:?}"
+        );
+        // The same run with real write evidence passes.
+        let errors = plan.validate_deliverables(&dir, &["stale.md".to_owned()]);
+        assert!(errors.is_empty(), "{errors:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_target_fails_even_when_the_message_names_it() {
+        let dir =
+            std::env::temp_dir().join(format!("kodo-deliverable-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = deliverable_plan("请将 `missing.md` 更新");
+        assert!(plan.requires_file_output, "the file intent must survive");
+        let errors = plan.validate_deliverables(&dir, &[]);
+        assert!(!errors.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_reuse_does_not_require_a_write() {
+        let dir = std::env::temp_dir().join(format!("kodo-reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("kept.md"), "# existing\n").unwrap();
+        let plan = deliverable_plan("请复用已有的 `kept.md` 作为结果");
+        assert_eq!(plan.output_operation, OutputOperation::Reuse);
+        let errors = plan.validate_deliverables(&dir, &[]);
+        assert!(errors.is_empty(), "{errors:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_plan_json_without_operation_still_deserializes() {
+        let plan = TaskPlan::from_task("write a report");
+        let mut value = serde_json::to_value(&plan).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("output_operation");
+        object.remove("output_sources");
+        object.remove("output_notes");
+        let restored: TaskPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.output_operation, OutputOperation::None);
+        assert!(restored.output_sources.is_empty());
+        assert!(restored.output_notes.is_empty());
+    }
+
+    // ---- Format limits stated before a write (T021–T023) ----
+
+    #[test]
+    fn an_unsupported_format_is_named_at_plan_time() {
+        let plan = deliverable_plan("把季度数据整理成 `report.pdf`");
+        assert!(
+            plan.output_notes.iter().any(|n| n.contains("PDF")),
+            "{:?}",
+            plan.output_notes
+        );
+        assert!(
+            plan.output_notes
+                .iter()
+                .any(|n| n.contains("没有回读校验器")),
+            "the limit must be stated, not implied: {:?}",
+            plan.output_notes
+        );
+        // And it reaches the model while it can still choose another format.
+        let rendered = plan.to_prompt_block();
+        assert!(rendered.contains("output note:"), "{rendered}");
+        assert!(rendered.contains("PDF"), "{rendered}");
+    }
+
+    #[test]
+    fn a_docx_create_is_not_an_edit_and_an_edit_is_a_rewrite() {
+        let create = deliverable_plan("生成 `summary.docx`");
+        assert!(
+            create
+                .output_notes
+                .iter()
+                .any(|n| n.contains("生成新的 DOCX")),
+            "{:?}",
+            create.output_notes
+        );
+
+        let update = deliverable_plan("修改 `summary.docx` 补充结论");
+        assert!(
+            update.output_notes.iter().any(|n| n.contains("整篇重写")),
+            "an update must not look like a format-preserving edit: {:?}",
+            update.output_notes
+        );
+        assert!(
+            !update.output_notes.iter().any(|n| n.contains("生成新的")),
+            "{:?}",
+            update.output_notes
+        );
+    }
+
+    #[test]
+    fn a_format_preserving_docx_edit_is_refused_instead_of_silently_reformatted() {
+        let plan = deliverable_plan("修改 `summary.docx` 补充结论，保留原格式");
+        assert!(
+            plan.output_notes
+                .iter()
+                .any(|n| n.contains("无法在保留原格式的前提下修改")),
+            "{:?}",
+            plan.output_notes
+        );
+        assert!(asks_to_preserve_format(
+            "修改 summary.docx 补充结论，保留格式"
+        ));
+        assert!(asks_to_preserve_format("edit it, keep the formatting"));
+        assert!(!asks_to_preserve_format("修改 summary.docx 补充结论"));
+    }
+
+    #[test]
+    fn a_spreadsheet_write_never_claims_formula_results() {
+        let plan = deliverable_plan("把明细整理成 `data.xlsx`");
+        assert!(
+            plan.output_notes
+                .iter()
+                .any(|n| n.contains("公式不会被计算或重算")),
+            "{:?}",
+            plan.output_notes
+        );
+    }
+
+    #[test]
+    fn an_unverifiable_output_fails_delivery_even_when_the_file_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "kodo-plan-pdf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("report.pdf"), b"%PDF-1.7 not really").unwrap();
+        let plan = deliverable_plan("生成 `report.pdf`");
+        assert!(plan.requires_file_output);
+        let errors = plan.validate_deliverables(&root, &["report.pdf".to_string()]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("没有回读校验器"), "{errors:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn notes_reach_the_answer_checks_without_becoming_passed_checks() {
+        let mut plan = deliverable_plan("把明细整理成 `data.xlsx`");
+        plan.requires_file_output = false;
+        let report = plan.evaluate_acceptance(&AcceptanceEvidence::default());
+        assert_eq!(report.notes.len(), 1, "{:?}", report.notes);
+        assert!(report.notes[0].contains("公式不会被计算"));
+        assert!(
+            !report.passed.iter().any(|p| p.contains("公式")),
+            "a format limit is a note, never a passed check: {:?}",
+            report.passed
+        );
     }
 
     #[test]
