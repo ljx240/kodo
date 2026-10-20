@@ -22,6 +22,7 @@ use run::{ApprovalChoice, Approvals, Runs, StartArgs};
 mod knowledge;
 mod platform;
 mod run;
+mod terminal;
 mod view;
 use knowledge::{
     knowledge_confirm_import, knowledge_create_base, knowledge_delete_document,
@@ -35,6 +36,8 @@ mod memory;
 use memory::{
     memory_disable, memory_doctor, memory_inspect, memory_list, memory_search, memory_status,
 };
+
+use terminal::{terminal_close, terminal_open, terminal_resize, terminal_write, Terminals};
 
 mod apps;
 use apps::{
@@ -1652,6 +1655,7 @@ fn main() {
         .manage(BrowseWebview::default())
         .manage(AppService::boot())
         .manage(KnowledgeService::boot())
+        .manage(Terminals::default())
         .setup(|app| {
             // Native surfaces come up first: the status item is independent of
             // both the scheduler and the workbench, so it has to exist even
@@ -1843,6 +1847,10 @@ fn main() {
             reveal_result_file,
             reveal_state_dir,
             set_menu_state,
+            terminal_open,
+            terminal_write,
+            terminal_resize,
+            terminal_close,
         ]);
 
     // The app menu bar exists only on macOS: `Menu::default` was the only thing

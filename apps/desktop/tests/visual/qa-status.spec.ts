@@ -922,7 +922,7 @@ test("zh-CN copy: step labels and actions come from the central map", async ({ p
   await expect(first.locator('[data-testid="answer-axes"]')).toHaveText(
     "回答：已生成 · 验证：已通过",
   );
-  await expect(page.locator('[data-testid="topbar-files"]')).toHaveAttribute("aria-label", "查看项目文件");
+  await expect(page.locator('[data-testid="topbar-terminal"]')).toHaveAttribute("aria-label", "终端");
 });
 
 

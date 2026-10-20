@@ -88,8 +88,6 @@ type Props = {
    *  App uses this to render the live count on the TopBar Memory chip.
    *  `null` = no event this turn (engine off). */
   onMemoryRecalled?: (count: number) => void;
-  /** Top-bar 文件 icon pulse (App); each increment opens the file viewer. */
-  openFilesRequest?: number;
   /** Opens App's right-sidebar 文件 panel (demo / no project → onViewFiles). */
   onOpenFilePanel?: (request: FilePanelRequest) => void;
   /** Publishes the per-file diff map up so the panel can render 变更 tabs. */
@@ -223,7 +221,6 @@ export function ConversationPage({
   onOpenTrace,
   onConvActions,
   onMemoryRecalled,
-  openFilesRequest = 0,
   onOpenFilePanel,
   onFileDiffs,
   onSnapshot,
@@ -333,18 +330,6 @@ export function ConversationPage({
       openFilePanel(rel, "full", changes);
     }
   };
-  // Top-bar 文件 icon: browse project files (no preselection — the tree is the
-  // point). Fires per request only; the closure is fresh on each pulse because
-  // the prop change is what triggers the render.
-  useEffect(() => {
-    if (!openFilesRequest) return;
-    if (demoMode || !projectPath) {
-      onViewFiles();
-      return;
-    }
-    const last = turns.length > 0 ? toReply(turns[turns.length - 1], false, false) : null;
-    openFilePanel(null, "full", last?.changes ?? []);
-  }, [openFilesRequest]);
   /** False after Stop — late TextDelta races must not repaint the preview. */
   const acceptStreamRef = useRef(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);

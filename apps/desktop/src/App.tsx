@@ -32,6 +32,7 @@ import { Inspector, type FilePanelRequest, type InspectorTab } from "./inspector
 import { BrowsePanel } from "./inspector/BrowsePanel";
 import { PanelResizer, clampWidth, CONVERSATION_WIDTH_MIN, WIDTH_MIN } from "./inspector/PanelResizer";
 import { FileViewer } from "./conversation/FileViewer";
+import { TerminalPanel } from "./terminal/TerminalPanel";
 import type { ArchiveSelection } from "./inspector/ArchiveInspector";
 import { ArchivePage } from "./pages/ArchivePage";
 import { ConversationPage } from "./pages/ConversationPage";
@@ -135,8 +136,8 @@ export function App() {
     setDragWidth(null);
     if (route.name === "conversation") setInspectorFocusMode(!focusModeActive);
   };
-  /** Incremented by the top-bar 文件 icon; ConversationPage opens its viewer. */
-  const [openFilesRequest, setOpenFilesRequest] = useState(0);
+  /** Bottom terminal panel visibility; the session lives with the panel. */
+  const [terminalOpen, setTerminalOpen] = useState(false);
   /** Rename/archive entry points published by ConversationPage for the TopBar. */
   const [convActions, setConvActions] = useState<ConvActions | null>(null);
   /** Memory recall summary for the active turn. `-1` means "engine off"
@@ -572,6 +573,12 @@ export function App() {
     navigate(workspace.live ? "/trace" : "/ui-demo/trace");
   };
 
+  // The terminal belongs to the conversation stage; leaving it tears the
+  // session down instead of leaving a hidden shell running.
+  useEffect(() => {
+    if (route.name !== "conversation") setTerminalOpen(false);
+  }, [route.name]);
+
   /** One path for "open this conversation" — sidebar rows and ⌘K share it. */
   const openConversation = (id: string) => {
     setActiveConversationId(id);
@@ -764,8 +771,9 @@ export function App() {
             onToggleSidebar={() => setSidebarVisible((value) => !value)}
             onNewTask={() => void newChat()}
             onOpenSettings={() => setSettingsOpen(true)}
-            onOpenFiles={
-              route.name === "conversation" ? () => setOpenFilesRequest((n) => n + 1) : undefined
+            terminalOpen={route.name === "conversation" && terminalOpen}
+            onToggleTerminal={
+              route.name === "conversation" ? () => setTerminalOpen((open) => !open) : undefined
             }
             route={route.name}
             crumbProject={projectName}
@@ -814,7 +822,6 @@ export function App() {
               onSelectProviderModel={selectProviderModel}
               onViewFiles={openFiles}
               onOpenTrace={openTrace}
-              openFilesRequest={openFilesRequest}
               onOpenFilePanel={openFilePanel}
               onFileDiffs={setFileDiffs}
               onSnapshot={onSnapshot}
@@ -993,6 +1000,14 @@ export function App() {
             />
           )}
         </div>
+
+        {route.name === "conversation" && terminalOpen && (
+          <TerminalPanel
+            key={activeProject?.path ?? "terminal-home"}
+            projectPath={activeProject?.path ?? ""}
+            onClose={() => setTerminalOpen(false)}
+          />
+        )}
       </div>
 
       {/* First launch only; resolves its own setting so nothing flashes. */}

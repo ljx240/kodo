@@ -1,0 +1,174 @@
+/* Bottom terminal: tabbed, split panes of PTY-backed shells. */
+
+.terminal-panel {
+  flex: none;
+  height: clamp(200px, 36vh, 560px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--kodo-border);
+  background: var(--kodo-canvas);
+}
+
+.terminal-head {
+  flex: none;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--kodo-border);
+  background: var(--kodo-sidebar);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+}
+
+.terminal-tabs {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.terminal-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.terminal-tab {
+  flex: none;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  border-right: 1px solid var(--kodo-border);
+  color: var(--kodo-text-secondary);
+}
+
+.terminal-tab--active {
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  box-shadow: inset 0 -2px 0 var(--kodo-accent);
+}
+
+.terminal-tab-label {
+  height: 100%;
+  max-width: 150px;
+  padding: 0 4px 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.terminal-tab-label:focus-visible {
+  outline: 1px solid var(--kodo-accent);
+  outline-offset: -2px;
+}
+
+.terminal-tab-close {
+  width: 18px;
+  height: 18px;
+  margin-right: 4px;
+  color: inherit;
+  opacity: 0.55;
+}
+
+.terminal-tab:hover .terminal-tab-close,
+.terminal-tab--active .terminal-tab-close {
+  opacity: 1;
+}
+
+.terminal-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.terminal-actions-divider {
+  width: 1px;
+  height: 14px;
+  margin: 0 4px;
+  background: var(--kodo-border);
+}
+
+.terminal-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.terminal-panes {
+  position: absolute;
+  inset: 0;
+}
+
+.terminal-panes[hidden] {
+  display: none;
+}
+
+.terminal-pane {
+  position: absolute;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  background: var(--kodo-canvas);
+}
+
+.terminal-pane--active {
+  outline: 1px solid var(--kodo-accent);
+  outline-offset: -1px;
+}
+
+.terminal-host {
+  position: absolute;
+  inset: 0;
+  padding: 6px 10px 8px;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+.terminal-pane-status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-xs);
+}
+
+.terminal-pane-status--error {
+  color: var(--kodo-error);
+}
+
+.terminal-pane-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 2;
+  background: var(--kodo-canvas);
+  border: 1px solid var(--kodo-border);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.terminal-pane:hover .terminal-pane-close,
+.terminal-pane:focus-within .terminal-pane-close,
+.terminal-pane-close:focus-visible {
+  opacity: 1;
+}
+
+.terminal-unavailable {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+}

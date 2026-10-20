@@ -7,6 +7,7 @@ import "./styles/conversation.css";
 import "./styles/inspector.css";
 import "./styles/pages.css";
 import "./styles/todo.css";
+import "./styles/terminal.css";
 import "./styles/highlight.css";
 
 const root = document.getElementById("root");

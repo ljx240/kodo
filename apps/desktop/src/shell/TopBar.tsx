@@ -14,6 +14,7 @@ import {
   Pencil,
   Puzzle,
   Settings,
+  Terminal,
   X,
 } from "lucide-react";
 import { T } from "../i18n";
@@ -40,8 +41,9 @@ type Props = {
   /** New Task — only needed while the sidebar itself is collapsed. */
   onNewTask: () => void;
   onOpenSettings: () => void;
-  /** Project file browser entry (conversation route only). */
-  onOpenFiles?: () => void;
+  /** Bottom terminal toggle (conversation route only). */
+  terminalOpen?: boolean;
+  onToggleTerminal?: () => void;
   route: RouteName;
   /** Project / conversation breadcrumb (LAYOUT §3); omitted on non-conversation routes. */
   crumbProject?: string | null;
@@ -72,7 +74,8 @@ export function TopBar({
   onToggleSidebar,
   onNewTask,
   onOpenSettings,
-  onOpenFiles,
+  terminalOpen = false,
+  onToggleTerminal,
   route,
   crumbProject,
   crumbTitle,
@@ -325,16 +328,17 @@ export function TopBar({
             </Menu>
           </>
         )}
-        {route === "conversation" && onOpenFiles && (
+        {route === "conversation" && onToggleTerminal && (
           <button
             type="button"
-            className="icon-btn icon-btn--boxed"
-            aria-label={T.nav.viewFiles}
-            title={T.nav.viewFiles}
-            data-testid="topbar-files"
-            onClick={onOpenFiles}
+            className={`icon-btn icon-btn--boxed${terminalOpen ? " icon-btn--active" : ""}`}
+            aria-label={T.nav.terminal}
+            title={T.nav.terminal}
+            aria-pressed={terminalOpen}
+            data-testid="topbar-terminal"
+            onClick={onToggleTerminal}
           >
-            <Folder size={16} strokeWidth={1.7} />
+            <Terminal size={16} strokeWidth={1.7} />
           </button>
         )}
         <button

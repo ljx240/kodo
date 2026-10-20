@@ -826,45 +826,52 @@ test("a changed-file row opens the file viewer at that file", async ({ page }) =
   await expect(page.locator(".ins-panel")).toBeVisible();
 });
 
-test("the top-bar file icon opens the project file browser", async ({ page }) => {
-  await stubShell(page, fileTurnShell());
-  await page.goto("/");
-  await page.locator(".tree-project-main").click();
-  await page.locator(".tree-conversation").click();
-
-  await page.locator('[data-testid="topbar-files"]').click();
-  await expect(page.locator('[data-testid="file-viewer"]')).toBeVisible();
-
-  // Browse entry: the tree is the point — nothing is preselected.
-  await expect(page.locator('[data-testid="viewer-tree"]')).toBeVisible();
-  await expect(page.locator('[data-testid="file-viewer"]')).toContainText("在左侧选择一个文件查看");
-
-  // Picking a changed file opens on its 变更; the full body is one tab away.
-  await page.locator('[data-testid="tree-file-src/app.ts"]').click();
-  await expect(page.locator('[data-testid="viewer-path"]')).toHaveText("src/app.ts");
-  await expect(page.locator('[data-testid="viewer-diff"]')).toContainText("const a = 0;");
-  await page.locator('[data-testid="file-tab-full"]').click();
-  await expect(page.locator('[data-testid="viewer-code"]')).toContainText("const a = 1;");
-
-  await page.locator('[data-testid="inspector-close"]').click();
-  await expect(page.locator('[data-testid="file-viewer"]')).toHaveCount(0);
-  await expect(page.locator(".ins-panel")).toBeVisible();
-});
-
-test("the top-bar file icon falls back to Inspector Files in demo mode", async ({ page }) => {
+test("the top-bar terminal icon opens the bottom terminal panel", async ({ page }) => {
   await page.goto("/ui-demo/conversation");
   await page.waitForLoadState("networkidle");
 
-  await page.locator('[data-testid="topbar-files"]').click();
-  await expect(page.locator(".ins-panel")).toBeVisible();
-  await expect(page.locator(".ins-section-title")).toHaveText(["修改文件"]);
-  await expect(page.locator('[data-testid="rail-files"]')).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator('[data-testid="file-viewer"]')).toHaveCount(0);
-  // The 文件 chip stays unselected — demo has no file bodies to show.
-  await expect(page.locator(".ins-tab", { hasText: "文件" })).toHaveAttribute(
-    "aria-selected",
-    "false",
+  await page.locator('[data-testid="topbar-terminal"]').click();
+  await expect(page.locator('[data-testid="terminal-panel"]')).toBeVisible();
+  await expect(page.locator('[data-testid="terminal-panel"]')).toContainText(
+    "终端仅在桌面应用中可用。",
   );
+  await expect(page.locator('[data-testid="topbar-files"]')).toHaveCount(0);
+
+  await page.locator('[data-testid="terminal-panel"] button[aria-label="关闭"]').click();
+  await expect(page.locator('[data-testid="terminal-panel"]')).toHaveCount(0);
+});
+
+test("terminal tabs and splits share the bottom panel", async ({ page }) => {
+  await page.goto("/ui-demo/conversation");
+  await page.waitForLoadState("networkidle");
+  await page.locator('[data-testid="topbar-terminal"]').click();
+
+  const tabs = page.locator('[data-testid="terminal-tab"]');
+  const panes = page.locator('[data-testid="terminal-pane"]:visible');
+  await expect(tabs).toHaveCount(1);
+  await expect(panes).toHaveCount(1);
+
+  await page.locator('[data-testid="terminal-new"]').click();
+  await expect(tabs).toHaveCount(2);
+  await expect(tabs.nth(1)).toHaveAttribute("aria-selected", "true");
+  await expect(panes).toHaveCount(1);
+
+  await page.locator('[data-testid="terminal-split-right"]').click();
+  await expect(panes).toHaveCount(2);
+  await page.locator('[data-testid="terminal-split-down"]').click();
+  await expect(panes).toHaveCount(3);
+
+  // The hover-only X removes just that split, not the tab.
+  const lastPane = panes.last();
+  await lastPane.hover();
+  await lastPane.locator('[data-testid="terminal-pane-close"]').click();
+  await expect(panes).toHaveCount(2);
+
+  // Closing a tab drops its panes and keeps the remaining tab.
+  await page.locator('[data-testid="terminal-tab-close"]').nth(1).click();
+  await expect(tabs).toHaveCount(1);
+  await expect(panes).toHaveCount(1);
+  await expect(page.locator('[data-testid="terminal-panel"]')).toBeVisible();
 });
 
 test("a created file shows its change content even with no stored diff body", async ({ page }) => {
