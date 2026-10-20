@@ -801,6 +801,8 @@ export const T = {
     splitDown: "向下分屏",
     closeTab: (name: string) => `关闭 ${name}`,
     closePane: "关闭当前分屏",
+    resizePane: "调整分屏大小（双击恢复均分）",
+    resizePanel: "拖动调整终端高度",
   },
   inspector: {
     panel: "Inspector",

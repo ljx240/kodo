@@ -2,9 +2,16 @@ export type SplitDirection = "row" | "column";
 
 export type PaneLeaf = { kind: "leaf"; id: string };
 
-export type PaneNode =
-  | PaneLeaf
-  | { kind: "split"; direction: SplitDirection; children: [PaneNode, PaneNode] };
+export type PaneSplit = {
+  kind: "split";
+  id: string;
+  direction: SplitDirection;
+  /** Share of the split box given to the first child, clamped by the caller. */
+  ratio: number;
+  children: [PaneNode, PaneNode];
+};
+
+export type PaneNode = PaneLeaf | PaneSplit;
 
 export type TerminalTab = {
   id: string;
@@ -40,13 +47,33 @@ export function splitPane(
 ): PaneNode {
   if (node.kind === "leaf") {
     if (node.id !== targetId) return node;
-    return { kind: "split", direction, children: [node, next] };
+    return {
+      kind: "split",
+      id: newId("split"),
+      direction,
+      ratio: 0.5,
+      children: [node, next],
+    };
   }
   return {
     ...node,
     children: [
       splitPane(node.children[0], targetId, next, direction),
       splitPane(node.children[1], targetId, next, direction),
+    ],
+  };
+}
+
+export function setSplitRatio(node: PaneNode, splitId: string, ratio: number): PaneNode {
+  if (node.kind === "leaf") return node;
+  if (node.id === splitId) {
+    return { ...node, ratio: Math.min(0.9, Math.max(0.1, ratio)) };
+  }
+  return {
+    ...node,
+    children: [
+      setSplitRatio(node.children[0], splitId, ratio),
+      setSplitRatio(node.children[1], splitId, ratio),
     ],
   };
 }
@@ -84,15 +111,57 @@ export function paneLayout(
   if (node.kind === "leaf") return [{ pane: node, rect }];
   const [first, second] = node.children;
   if (node.direction === "row") {
-    const half = rect.width / 2;
+    const width = rect.width * node.ratio;
     return [
-      ...paneLayout(first, { ...rect, width: half }),
-      ...paneLayout(second, { ...rect, left: rect.left + half, width: half }),
+      ...paneLayout(first, { ...rect, width }),
+      ...paneLayout(second, {
+        ...rect,
+        left: rect.left + width,
+        width: rect.width - width,
+      }),
     ];
   }
-  const half = rect.height / 2;
+  const height = rect.height * node.ratio;
   return [
-    ...paneLayout(first, { ...rect, height: half }),
-    ...paneLayout(second, { ...rect, top: rect.top + half, height: half }),
+    ...paneLayout(first, { ...rect, height }),
+    ...paneLayout(second, {
+      ...rect,
+      top: rect.top + height,
+      height: rect.height - height,
+    }),
+  ];
+}
+
+export type SplitHandle = {
+  split: PaneSplit;
+  /** The box the split divides; the handle sits on its ratio boundary. */
+  rect: PaneRect;
+};
+
+/** Every split boundary, outermost first, ready to render as drag targets. */
+export function splitHandles(node: PaneNode, rect: PaneRect = FULL): SplitHandle[] {
+  if (node.kind === "leaf") return [];
+  const [first, second] = node.children;
+  if (node.direction === "row") {
+    const width = rect.width * node.ratio;
+    return [
+      { split: node, rect },
+      ...splitHandles(first, { ...rect, width }),
+      ...splitHandles(second, {
+        ...rect,
+        left: rect.left + width,
+        width: rect.width - width,
+      }),
+    ];
+  }
+  const height = rect.height * node.ratio;
+  return [
+    { split: node, rect },
+    ...splitHandles(first, { ...rect, height }),
+    ...splitHandles(second, {
+      ...rect,
+      top: rect.top + height,
+      height: rect.height - height,
+    }),
   ];
 }

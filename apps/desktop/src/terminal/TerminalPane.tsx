@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import "@xterm/xterm/css/xterm.css";
 import {
   closeTerminal,
   isDesktop,
@@ -20,19 +19,56 @@ function cssVar(style: CSSStyleDeclaration, name: string, fallback: string): str
   return style.getPropertyValue(name).trim() || fallback;
 }
 
+const LIGHT_ANSI = {
+  black: "#242424",
+  red: "#b91c2a",
+  green: "#116329",
+  yellow: "#984308",
+  blue: "#0550ae",
+  magenta: "#7542b4",
+  cyan: "#0f6f75",
+  white: "#606060",
+  brightBlack: "#8c959f",
+  brightRed: "#cf222e",
+  brightGreen: "#1a7f37",
+  brightYellow: "#9a6700",
+  brightBlue: "#218bff",
+  brightMagenta: "#a475f9",
+  brightCyan: "#3192aa",
+  brightWhite: "#242424",
+};
+
+const DARK_ANSI = {
+  black: "#484848",
+  red: "#ff7b72",
+  green: "#3fb950",
+  yellow: "#d29922",
+  blue: "#79c0ff",
+  magenta: "#d2a8ff",
+  cyan: "#56d4dd",
+  white: "#b9b9b9",
+  brightBlack: "#828282",
+  brightRed: "#ffa198",
+  brightGreen: "#56d364",
+  brightYellow: "#e3b341",
+  brightBlue: "#a5d6ff",
+  brightMagenta: "#e2c5ff",
+  brightCyan: "#76e3ea",
+  brightWhite: "#eeeeee",
+};
+
 /** xterm paints on a canvas, so it cannot read CSS variables itself. */
 function terminalTheme(): ITheme {
-  const style = getComputedStyle(document.documentElement);
+  const root = document.documentElement;
+  const style = getComputedStyle(root);
+  const dark = root.dataset.theme === "dark";
   return {
-    background: cssVar(style, "--kodo-canvas", "#ffffff"),
-    foreground: cssVar(style, "--kodo-text", "#242424"),
+    background: cssVar(style, "--kodo-canvas", dark ? "#1c1c1c" : "#ffffff"),
+    foreground: cssVar(style, "--kodo-text", dark ? "#eeeeee" : "#242424"),
     cursor: cssVar(style, "--kodo-accent", "#176b60"),
     cursorAccent: cssVar(style, "--kodo-canvas", "#ffffff"),
     selectionBackground: cssVar(style, "--kodo-selected", "#e7e7e7"),
-    black: cssVar(style, "--kodo-text", "#242424"),
-    brightBlack: cssVar(style, "--kodo-text-secondary", "#606060"),
-    white: cssVar(style, "--kodo-text", "#242424"),
-    brightWhite: cssVar(style, "--kodo-text", "#242424"),
+    ...(dark ? DARK_ANSI : LIGHT_ANSI),
   };
 }
 
@@ -104,7 +140,7 @@ export function TerminalPane({
       fontFamily:
         getComputedStyle(document.documentElement).getPropertyValue("--kodo-font-mono").trim() ||
         "monospace",
-      fontSize: 12,
+      fontSize: 13,
       lineHeight: 1.25,
       scrollback: 5000,
       theme: terminalTheme(),
@@ -230,10 +266,6 @@ export function TerminalPane({
     top: `${rect.top}%`,
     width: `${rect.width}%`,
     height: `${rect.height}%`,
-    borderRight:
-      rect.left + rect.width < 99.999 ? "1px solid var(--kodo-border)" : undefined,
-    borderBottom:
-      rect.top + rect.height < 99.999 ? "1px solid var(--kodo-border)" : undefined,
   };
 
   return (
