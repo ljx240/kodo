@@ -3,17 +3,29 @@ import { invoke } from "@tauri-apps/api/core";
 /** Mirrors `kodo_shell::decision::DecisionSettingsView`. The credential never
  *  comes back as plaintext — only a mask and a boolean. */
 export type DecisionSettingsDto = {
+  /** `typeSafe` or `openRouter`. */
+  provider: string;
   mode: string;
   model: string;
   taskRouteEnabled: boolean;
   failureTriageEnabled: boolean;
   hasCredential: boolean;
   credentialMask: string;
+  /** The credential state of every provider. */
+  credentials: DecisionCredentialDto[];
   configError: string | null;
   configGeneration: number;
   /** The default configuration as JSON. The form starts from this so the
    *  numeric limits live in exactly one place. */
   defaultsJson: string;
+};
+
+/** The credential state of one provider. */
+export type DecisionCredentialDto = {
+  provider: string;
+  id: string;
+  hasCredential: boolean;
+  credentialMask: string;
 };
 
 /** The one outbound request the user is asked about. The body is the exact
@@ -41,6 +53,8 @@ export type DecisionRecordDto = {
   schema: string;
   requestId: string;
   mode: string;
+  /** `typeSafe` or `openRouter` — the service that answered. */
+  provider: string;
   model: string;
   policyVersion: string;
   status: string;
@@ -65,6 +79,7 @@ function isDesktop(): boolean {
  *  sync with `kodo_agent::decision::DecisionSettings::default()`. */
 const DEFAULT_SETTINGS_JSON = JSON.stringify({
   schemaVersion: 1,
+  provider: "typeSafe",
   mode: "off",
   model: "jev-1.13.0",
   scenarios: { taskRoute: false, failureTriage: false },
@@ -81,12 +96,17 @@ const DEFAULT_SETTINGS_JSON = JSON.stringify({
  *  `vite dev`). The feature is off and no credential is stored, so nothing
  *  can be sent. */
 const BROWSER_SETTINGS: DecisionSettingsDto = {
+  provider: "typeSafe",
   mode: "off",
   model: "jev-1.13.0",
   taskRouteEnabled: false,
   failureTriageEnabled: false,
   hasCredential: false,
   credentialMask: "",
+  credentials: [
+    { provider: "typeSafe", id: "jev", hasCredential: false, credentialMask: "" },
+    { provider: "openRouter", id: "openrouter", hasCredential: false, credentialMask: "" },
+  ],
   configError: null,
   configGeneration: 1,
   defaultsJson: DEFAULT_SETTINGS_JSON,
@@ -108,16 +128,19 @@ export function decisionSaveSettings(settings: string): Promise<number | null> {
   return invoke<number>("decision_save_settings", { settings });
 }
 
-/** Store the decision credential. The plaintext never comes back. */
-export function decisionSetCredential(secret: string): Promise<number | null> {
+/** Store a provider's decision credential. The plaintext never comes back. */
+export function decisionSetCredential(
+  provider: string,
+  secret: string,
+): Promise<number | null> {
   if (!isDesktop()) return Promise.resolve(BROWSER_SETTINGS.configGeneration);
-  return invoke<number>("decision_set_credential", { secret });
+  return invoke<number>("decision_set_credential", { provider, secret });
 }
 
-/** Remove the decision credential. */
-export function decisionClearCredential(): Promise<number | null> {
+/** Remove one provider's decision credential. */
+export function decisionClearCredential(provider: string): Promise<number | null> {
   if (!isDesktop()) return Promise.resolve(BROWSER_SETTINGS.configGeneration);
-  return invoke<number>("decision_clear_credential");
+  return invoke<number>("decision_clear_credential", { provider });
 }
 
 /** Answer one pending send preview. The request id is the only thing the
@@ -211,6 +234,7 @@ export function parseDecisionRecord(diagnostics: string | null | undefined): Dec
     schema: record.schema,
     requestId: record.requestId ?? "",
     mode: record.mode ?? "off",
+    provider: record.provider ?? "typeSafe",
     model: record.model ?? "",
     policyVersion: record.policyVersion ?? "",
     status: record.status ?? "skipped",

@@ -40,6 +40,7 @@ export function DecisionRecordsSection({ items }: { items: ItemDto[] | undefined
           <article className="decision-record" key={`${record.requestId}-${record.status}`}>
             <div className="decision-record-head">
               <strong>{statusLabel(record)}</strong>
+              <span>{T.decision.providers[record.provider as "typeSafe" | "openRouter"] ?? record.provider}</span>
               <span>{record.model}</span>
               <span>
                 {T.decision.scenarioLabel} {record.suggestion ?? record.baseline ?? "—"}
@@ -60,7 +61,12 @@ export function DecisionRecordsSection({ items }: { items: ItemDto[] | undefined
             )}
             {record.rejectedReason && (
               <div className="decision-record-head">
-                <span>{T.decision.rejectedLabel} {record.rejectedReason}</span>
+                <span>
+                  {T.decision.rejectedLabel}{" "}
+                  {T.decision.rejectedReasons[
+                    record.rejectedReason as keyof typeof T.decision.rejectedReasons
+                  ] ?? record.rejectedReason}
+                </span>
               </div>
             )}
             {record.skipCode && (

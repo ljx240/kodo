@@ -17,6 +17,13 @@ test("决策辅助设置小节展示模式、场景开关与显式外发说明",
   // The outbound notice is part of the contract: the user must be told
   // that this feature sends data to a third party.
   await expect(page.getByTestId("decision-settings")).toContainText("TypeSafe");
+  // The service source is a first-class choice: one at a time, never an
+  // automatic fallback to the other.
+  await expect(page.getByTestId("decision-provider-typeSafe")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(page.getByTestId("decision-provider-openRouter")).toBeVisible();
   await expect(page.getByTestId("decision-mode-off")).toHaveAttribute("aria-checked", "true");
   await expect(page.getByTestId("decision-mode-observe")).toBeVisible();
   await expect(page.getByTestId("decision-mode-assist")).toBeVisible();
@@ -24,6 +31,23 @@ test("决策辅助设置小节展示模式、场景开关与显式外发说明",
   // The scenarios start off; a saved credential never turns them on.
   await expect(page.getByTestId("decision-credential-save")).toBeDisabled();
   await expect(page.getByTestId("decision-credential-clear")).toBeDisabled();
+});
+
+test("切换服务来源会换掉模型并各自记住密钥", async ({ page }) => {
+  await page.goto("/ui-demo/settings");
+  await page.getByRole("button", { name: "决策辅助" }).click();
+
+  await page.getByTestId("decision-provider-openRouter").click();
+  await expect(page.getByTestId("decision-provider-openRouter")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  // The model id means something different per provider, so the default
+  // follows the provider.
+  await expect(page.getByTestId("decision-model")).toHaveValue("openai/gpt-4o-mini");
+
+  await page.getByTestId("decision-provider-typeSafe").click();
+  await expect(page.getByTestId("decision-model")).toHaveValue("jev-1.13.0");
 });
 
 test("发送预览展示完整请求内容并默认聚焦到跳过", async ({ page }) => {

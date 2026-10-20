@@ -22,6 +22,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kodo_agent::decision::DecisionProvider;
 use kodo_shell::decision::{
     DecisionConsent, DecisionConsentAnswer, DecisionPreview, DecisionService,
 };
@@ -50,17 +51,24 @@ pub fn decision_save_settings(settings: String) -> Result<u64, String> {
     save_decision_settings(&settings)
 }
 
-/// Store the decision credential. The plaintext never comes back out.
+/// Store a provider's decision credential.
+///
+/// The provider names which key this is: TypeSafe and OpenRouter keys live
+/// under their own ids, so one service's key is never sent to the other.
 #[tauri::command]
-pub fn decision_set_credential(secret: String) -> Result<u64, String> {
-    save_decision_credential(&secret)
+pub fn decision_set_credential(provider: String, secret: String) -> Result<u64, String> {
+    let provider = DecisionProvider::parse(&provider)
+        .ok_or_else(|| format!("unknown decision provider `{provider}`"))?;
+    save_decision_credential(provider, &secret)
 }
 
-/// Remove the decision credential. Other credential families are
-/// untouched.
+/// Remove one provider's decision credential. The other provider's key and
+/// every other credential family are untouched.
 #[tauri::command]
-pub fn decision_clear_credential() -> Result<u64, String> {
-    clear_decision_credential()
+pub fn decision_clear_credential(provider: String) -> Result<u64, String> {
+    let provider = DecisionProvider::parse(&provider)
+        .ok_or_else(|| format!("unknown decision provider `{provider}`"))?;
+    clear_decision_credential(provider)
 }
 
 /// Answer a pending send preview.
@@ -337,7 +345,7 @@ mod tests {
     fn test_service() -> Arc<DecisionService> {
         Arc::new(DecisionService::new(
             config(),
-            DecisionClient::for_local_endpoint("http://127.0.0.1:1"),
+            DecisionClient::for_local_endpoint(DecisionProvider::TypeSafe, "http://127.0.0.1:1"),
             Arc::new(DecisionConsentForTest),
             "s",
             1,

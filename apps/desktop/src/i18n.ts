@@ -1384,6 +1384,13 @@ export const T = {
     saved: "已保存决策辅助配置。",
     outboundNotice:
       "此功能会向 TypeSafe 发送您逐次批准的内容。每次发送前都会显示完整预览；不批准就不会发送。",
+    providerLabel: "服务来源",
+    providerHint:
+      "官方 Jev（TypeSafe）或 OpenRouter 路由。两者一次只启用一个；失败不会自动换到另一个。",
+    providers: {
+      typeSafe: "官方 Jev",
+      openRouter: "OpenRouter",
+    },
     modeLabel: "启用状态",
     modeHint: "关闭时不会发起任何请求；观察只记录建议；采纳按场景分别生效。",
     modes: {
@@ -1421,6 +1428,12 @@ export const T = {
     durationLabel: "耗时",
     consentWaitLabel: "等待确认",
     rejectedLabel: "未采纳原因：",
+    rejectedReasons: {
+      observe_mode: "观察模式只记录建议",
+      below_threshold: "未达到采纳门槛",
+      unknown_option: "建议不在可采纳的类别内",
+      uncalibrated: "缺少概率分布",
+    },
     skipLabel: "跳过原因：",
     fallbackLabel: "回退原因：",
     statusApplied: "已采纳",

@@ -10,10 +10,12 @@ import { Field, Switch } from "../shell/controls";
 import { T } from "../i18n";
 
 type Mode = "off" | "observe" | "assist";
+type Provider = "typeSafe" | "openRouter";
 
 /** The settings form's own state. It starts from the backend's defaults so
  *  the numeric limits live in exactly one place. */
 type Form = {
+  provider: Provider;
   mode: Mode;
   model: string;
   taskRoute: boolean;
@@ -36,7 +38,11 @@ function toForm(dto: DecisionSettingsDto): Form {
   const mode = (["off", "observe", "assist"] as const).includes(dto.mode as Mode)
     ? (dto.mode as Mode)
     : "off";
+  const provider = (["typeSafe", "openRouter"] as const).includes(dto.provider as Provider)
+    ? (dto.provider as Provider)
+    : "typeSafe";
   return {
+    provider,
     mode,
     model: dto.model || base.model || "jev-1.13.0",
     taskRoute: dto.taskRouteEnabled,
@@ -53,6 +59,7 @@ function toForm(dto: DecisionSettingsDto): Form {
 function toJson(form: Form): string {
   return JSON.stringify({
     schemaVersion: 1,
+    provider: form.provider,
     mode: form.mode,
     model: form.model,
     scenarios: { taskRoute: form.taskRoute, failureTriage: form.failureTriage },
@@ -65,6 +72,12 @@ function toJson(form: Form): string {
     policyVersion: "kodo-jev-v1",
   });
 }
+
+/** The model each provider starts from. */
+const PROVIDER_DEFAULT_MODEL: Record<Provider, string> = {
+  typeSafe: "jev-1.13.0",
+  openRouter: "openai/gpt-4o-mini",
+};
 
 export function DecisionSettingsBody() {
   const [dto, setDto] = useState<DecisionSettingsDto | null>(null);
@@ -102,11 +115,12 @@ export function DecisionSettingsBody() {
 
   const storeSecret = async () => {
     if (!secret.trim()) return;
+    const provider = form?.provider ?? "typeSafe";
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      await decisionSetCredential(secret);
+      await decisionSetCredential(provider, secret);
       setSecret("");
       setNotice(T.decision.credentialSaved);
       await reload();
@@ -118,11 +132,12 @@ export function DecisionSettingsBody() {
   };
 
   const clearSecret = async () => {
+    const provider = form?.provider ?? "typeSafe";
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      await decisionClearCredential();
+      await decisionClearCredential(provider);
       setNotice(T.decision.credentialCleared);
       await reload();
     } catch (reason) {
@@ -136,6 +151,11 @@ export function DecisionSettingsBody() {
     return <p className="empty-note">{T.decision.loading}</p>;
   }
 
+  // The key belongs to the selected provider: TypeSafe and OpenRouter keys
+  // live under their own ids.
+  const credentialState =
+    dto?.credentials.find((entry) => entry.provider === form.provider) ?? null;
+
   const set = <K extends keyof Form>(key: K, value: Form[K]) =>
     setForm((current) => (current ? { ...current, [key]: value } : current));
 
@@ -148,6 +168,30 @@ export function DecisionSettingsBody() {
           {dto.configError}
         </p>
       )}
+
+      <Field label={T.decision.providerLabel} hint={T.decision.providerHint} wide>
+        <div className="decision-mode" role="radiogroup" aria-label={T.decision.providerLabel}>
+          {(["typeSafe", "openRouter"] as const).map((provider) => (
+            <button
+              key={provider}
+              type="button"
+              role="radio"
+              aria-checked={form.provider === provider}
+              className={`decision-mode-option${form.provider === provider ? " decision-mode-option--on" : ""}`}
+              data-testid={`decision-provider-${provider}`}
+              disabled={busy}
+              onClick={() => {
+                set("provider", provider);
+                // The model id means different things per provider, so the
+                // default follows the provider.
+                set("model", PROVIDER_DEFAULT_MODEL[provider]);
+              }}
+            >
+              {T.decision.providers[provider]}
+            </button>
+          ))}
+        </div>
+      </Field>
 
       <Field label={T.decision.modeLabel} hint={T.decision.modeHint} wide>
         <div className="decision-mode" role="radiogroup" aria-label={T.decision.modeLabel}>
@@ -200,7 +244,11 @@ export function DecisionSettingsBody() {
             className="input"
             type="password"
             value={secret}
-            placeholder={dto?.hasCredential ? dto.credentialMask : T.decision.credentialPlaceholder}
+            placeholder={
+              credentialState?.hasCredential
+                ? credentialState.credentialMask
+                : T.decision.credentialPlaceholder
+            }
             data-testid="decision-credential"
             disabled={busy}
             onChange={(event) => setSecret(event.target.value)}
@@ -218,7 +266,7 @@ export function DecisionSettingsBody() {
             type="button"
             className="btn"
             data-testid="decision-credential-clear"
-            disabled={busy || !dto?.hasCredential}
+            disabled={busy || !credentialState?.hasCredential}
             onClick={() => void clearSecret()}
           >
             {T.decision.credentialClear}
