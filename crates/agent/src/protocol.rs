@@ -114,6 +114,7 @@ impl ToolName {
 pub enum ToolArgs {
     Search {
         query: String,
+        glob: Option<String>,
     },
     ReadFile {
         path: String,
@@ -192,6 +193,7 @@ impl ToolArgs {
                 // field so the model fills them all next attempt instead
                 // of guessing one at a time. (Phase 0 second-pass.)
                 query: require_string_with_schema(args, "query", "search", &["query"])?,
+                glob: optional_string(args, "glob")?,
             }),
             ToolName::ReadFile => Ok(Self::ReadFile {
                 path: require_string(args, "path")?,
@@ -252,7 +254,10 @@ impl ToolArgs {
     /// Compact human label used in observations / approval prompts.
     pub fn label(&self) -> String {
         match self {
-            Self::Search { query } => query.clone(),
+            Self::Search { query, glob } => match glob {
+                Some(pattern) => format!("{query} (glob: {pattern})"),
+                None => query.clone(),
+            },
             Self::ReadFile { path } | Self::DeleteFile { path } => path.clone(),
             Self::WriteFile { path, .. } | Self::CreateFile { path, .. } => path.clone(),
             Self::RunCommand { command } => command.clone(),
@@ -735,11 +740,12 @@ impl ToolRegistry {
             defs: vec![
                 ToolDefinition {
                     name: "search",
-                    description: "Search project files for a text pattern. Returns matching file paths.",
+                    description: "Search project files for a text pattern. Returns each hit as `path:line` with the matched line; an optional glob narrows which files are searched.",
                     input_schema: serde_json::json!({
                         "type": "object",
                         "properties": {
-                            "query": { "type": "string", "description": "Text pattern to search for" }
+                            "query": { "type": "string", "description": "Text pattern to search for" },
+                            "glob": { "type": "string", "description": "Optional filename filter such as *.rs or src/**/*.ts" }
                         },
                         "required": ["query"],
                         "additionalProperties": false
@@ -2245,7 +2251,8 @@ mod tests {
                         assert_eq!(
                             call.args,
                             ToolArgs::Search {
-                                query: "--kodo-canvas".to_owned()
+                                query: "--kodo-canvas".to_owned(),
+                                glob: None,
                             }
                         );
                     }
@@ -2292,7 +2299,8 @@ mod tests {
                         assert_eq!(
                             call.args,
                             ToolArgs::Search {
-                                query: "router".to_owned()
+                                query: "router".to_owned(),
+                                glob: None,
                             }
                         );
                     }
@@ -2357,7 +2365,8 @@ mod tests {
                 assert_eq!(
                     c1.args,
                     ToolArgs::Search {
-                        query: "fn main".into()
+                        query: "fn main".into(),
+                        glob: None,
                     }
                 );
             }

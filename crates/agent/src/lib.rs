@@ -1041,7 +1041,7 @@ fn execute_tool_call(
             emit,
             notes,
         ),
-        (ToolName::Search, ToolArgs::Search { query }) => {
+        (ToolName::Search, ToolArgs::Search { query, glob }) => {
             if !alive() {
                 return Ok((false, None));
             }
@@ -1053,7 +1053,7 @@ fn execute_tool_call(
                 return Ok((false, None));
             }
             let began = Instant::now();
-            let detail = search_files(project, query);
+            let detail = search_files(project, query, glob.as_deref());
             let duration_ms = began.elapsed().as_millis() as u64;
             if !alive() {
                 return Ok((false, None));
@@ -1586,7 +1586,7 @@ fn execute_tool_call(
             let refs = map.find_references(name);
             let detail = if refs.is_empty() {
                 // Last resort: file-level lexical search, labeled as fallback.
-                let fallback = search_files(project, name);
+                let fallback = search_files(project, name, None);
                 if fallback.starts_with('0') {
                     "0 references".to_owned()
                 } else {
@@ -2799,6 +2799,11 @@ fn budget_for_task(task_type: TaskType, project_summary: bool, family: Option<&s
         Budget::for_summary()
     } else if task_type == TaskType::Docs {
         Budget::for_document()
+    } else if matches!(
+        task_type,
+        TaskType::BugFix | TaskType::Feature | TaskType::Test | TaskType::Refactor
+    ) {
+        Budget::for_code()
     } else {
         Budget::default()
     };
@@ -3453,7 +3458,7 @@ pub fn run(
         }
 
         // Optional short git search observation (kept for compatibility with plan Read subtask).
-        let legacy_detail = search_files(project, &context_query);
+        let legacy_detail = search_files(project, &context_query, None);
         pre_observations.push(ToolResult::success(
             ToolCallId::new("pre_search"),
             ToolName::Search.label(),
@@ -4359,8 +4364,11 @@ pub fn run(
                                         ToolArgs::ReadFile { path } => {
                                             serde_json::json!({ "path": path })
                                         }
-                                        ToolArgs::Search { query } => {
-                                            serde_json::json!({ "query": query })
+                                        ToolArgs::Search { query, glob } => {
+                                            match glob {
+                                                Some(pattern) => serde_json::json!({ "query": query, "glob": pattern }),
+                                                None => serde_json::json!({ "query": query }),
+                                            }
                                         }
                                         ToolArgs::WriteFile { path, content } => {
                                             serde_json::json!({ "path": path, "content": content })
@@ -7463,10 +7471,18 @@ mod tests {
             budget_for_task(TaskType::Docs, false, None).max_tool_calls,
             128
         );
+        let code = budget_for_task(TaskType::Feature, false, Some("unknown"));
         assert_eq!(
-            budget_for_task(TaskType::Feature, false, Some("unknown")).max_tool_calls,
-            32
+            (code.max_rounds, code.max_tool_calls),
+            (10, 64),
+            "code work gets read → edit → verify → repair room"
         );
+        assert_eq!(
+            code.max_repair_wall_ms, 300_000,
+            "one cargo test cycle must not consume the whole repair budget"
+        );
+        assert_eq!(code.max_repairs, Budget::default().max_repairs);
+        assert!(!code.is_summary_family(), "code repairs stay available");
         let budget = Budget {
             rounds_used: 2,
             tool_calls_used: 23,
