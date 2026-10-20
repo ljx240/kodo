@@ -994,6 +994,10 @@ impl Default for JobCancellation {
 
 /// Context passed to a job. Carries the run id, the deadline (a wall-clock
 /// instant) and the cancellation token. Job handlers must respect both.
+///
+/// `Clone` so a caller can move one copy into a worker thread while keeping
+/// the original to observe cancellation from the outside.
+#[derive(Debug, Clone)]
 pub struct JobContext {
     pub run_id: String,
     pub deadline: Option<UnixSeconds>,
