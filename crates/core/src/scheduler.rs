@@ -220,6 +220,12 @@ pub enum TaskKind {
         /// Persona chain to attach (resolved by the desktop shell at run time).
         /// Empty means "no persona for this run".
         personas: Vec<String>,
+        /// Work/Code semantics the user scheduled. Stored as the wire label
+        /// (`"work"` / `"code"`) because `kodo-core` must not depend on the
+        /// agent crate. `None` = a task written before the field existed:
+        /// it keeps the old behaviour (Code), never silently upgraded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
         /// Budget family override (`None` = per-intent default,
         /// `Some("summary")` = lift to read-only-summary caps).
         #[serde(alias = "budget_family")]
@@ -255,6 +261,17 @@ impl TaskKind {
                 .filter(|r| !r.is_empty())
                 .map(|r| format!("job:{r}"))
                 .collect(),
+        }
+    }
+
+    /// Scheduled agent mode label (`"work"` / `"code"`).
+    ///
+    /// `None` means the task predates the field: the host keeps the legacy
+    /// Code behaviour instead of guessing what the user meant.
+    pub fn agent_mode(&self) -> Option<&str> {
+        match self {
+            TaskKind::Agent { mode, .. } => mode.as_deref().filter(|m| !m.trim().is_empty()),
+            TaskKind::Job { .. } => None,
         }
     }
 }
@@ -976,6 +993,7 @@ mod tests {
             project: "/p".into(),
             message: "go".into(),
             personas: vec![],
+            mode: None,
             budget_family: None,
             resource_key: Some("/p".into()),
         };
@@ -985,6 +1003,7 @@ mod tests {
             project: "/p".into(),
             message: "go".into(),
             personas: vec![],
+            mode: None,
             budget_family: None,
             resource_key: None,
         };

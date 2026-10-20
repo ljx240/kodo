@@ -372,6 +372,7 @@ fn task_kind_label(kind: &kodo_core::scheduler::TaskKind) -> String {
             message,
             personas,
             budget_family,
+            mode,
             resource_key,
         } => {
             let personas = if personas.is_empty() {
@@ -380,9 +381,12 @@ fn task_kind_label(kind: &kodo_core::scheduler::TaskKind) -> String {
                 personas.join(",")
             };
             let budget = budget_family.clone().unwrap_or_else(|| "—".to_owned());
+            // A task written before the field existed has no mode; it runs on
+            // the legacy Code path, so that is what the label says.
+            let mode = mode.clone().unwrap_or_else(|| "code".to_owned());
             let resource = resource_key.clone().unwrap_or_else(|| "—".to_owned());
             format!(
-                "agent(project={project}, personas={personas}, budget={budget}, resource={resource}, message={message:?})"
+                "agent(project={project}, mode={mode}, personas={personas}, budget={budget}, resource={resource}, message={message:?})"
             )
         }
         Job {
@@ -507,6 +511,7 @@ mod tests {
             project: "/tmp/p".into(),
             message: "hello".into(),
             personas: vec!["p1".into()],
+            mode: None,
             budget_family: None,
             resource_key: Some("/tmp/p".into()),
         };
