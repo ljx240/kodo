@@ -240,7 +240,7 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 
 ```text
 当前分支：main
-main HEAD：1d1faef merge(decision): fix the settings record format and the OpenRouter default model
+main HEAD：4189423 merge(decision): recover a truncated decision settings record
 本任务提交：
   aaa9a84 docs(decision): add the Jev decision specification
   bd5bd60 feat(decision): add the optional Jev decision assistant
@@ -248,9 +248,10 @@ main HEAD：1d1faef merge(decision): fix the settings record format and the Open
   0b1f96e docs(decision): record the local merge into main
   e8381f6 feat(decision): let the decision service talk to OpenRouter
   15c8718 fix(decision): store the settings record on one line and pick a new default model
+  9a92f1f fix(decision): recover a truncated settings record instead of failing
 合并前基线：c0f67a310cb7dea1761f14e017381407a0e07a81（= 合并前 main = 合并前缓存 origin/main）
 缓存 origin/main：c0f67a310cb7dea1761f14e017381407a0e07a81 —— 本次未 fetch，远程新鲜度未核验
-main 相对 origin/main：ahead 11（6 个任务提交 + 3 个合并提交 + 2 个记录提交；全部未推送）
+main 相对 origin/main：ahead 23（含并发合入的 `fix/work-reliability` 一支；全部未推送）
 git branch --no-merged main：（空）
 任务分支 feat/jev-decision：已合入后按 AGENTS.md §2 删除（三个提交均保留在 main 的历史里）
 git stash list：7 条，全部为会话开始前既有，未 pop / drop / clear
@@ -331,7 +332,7 @@ playwright --project=behaviour --grep "决策辅助设置小节|发送预览展�
 
 ### 恢复路径
 
-- 全部实现已提交并合入本地 `main`（`1d1faef`），提交在 main 的历史里可追溯；`git stash` 未使用。
-- 任务分支 `feat/jev-decision`、`feat/jev-openrouter`、`fix/jev-settings-record` 均已在合入后删除；要单独查看任务边界可用 `git log c0f67a3..1d1faef`。
+- 全部实现已提交并合入本地 `main`（`4189423`），提交在 main 的历史里可追溯；`git stash` 未使用。
+- 任务分支 `feat/jev-decision`、`feat/jev-openrouter`、`fix/jev-settings-record`、`fix/jev-recover-truncated-record` 均已在合入后删除；要单独查看任务边界可用 `git log c0f67a3..4189423`。
 - 7 条 stash 与第二个 worktree 的未提交改动保持原样，未被本任务改动。
 - 文档：`specs/jev-decision/` 四件套是下一次续接的入口；续接时先重新读 `crates/agent/src/decision.rs` 与 `crates/shell/src/decision.rs` 的当前内容（本文档记录的行号可能已过时）。
