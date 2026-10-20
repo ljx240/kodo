@@ -12,9 +12,15 @@ workload runs once with `memory: None` (the baseline) and once with
 that counts; absolute token counts, latency, and accuracy are
 secondary.
 
-The replay harness lives in `evals/`. Today it runs the legacy
-`online_benchmark` and `agent_benchmark` suites with paired runs;
-P2 extends the harness with memory-specific cases (see §3).
+The paired-replay harness itself is **not implemented yet**. What exists
+today is the input data (5 workloads under
+`evals/benchmark/memory/workloads/`, see §Workload design) and an honest
+stub: `kodo memory benchmark` (`crates/cli/src/memory_cmd.rs`) prints
+"Benchmark harness not yet implemented" plus the commands that do work,
+and produces no numbers. The legacy `agent_benchmark` /
+`online_benchmark` suites under `crates/agent/tests/` are coding-agent
+suites; they are not paired and no memory runner reads them. Nothing
+under `evals/` consumes the workloads.
 
 ## Gates (from the implementation plan)
 
@@ -57,7 +63,11 @@ are explicit in the implementation plan §18:
 
 1. The candidate strategy is implemented behind a feature flag.
 2. A benchmark workload exists in `evals/benchmark/memory/` that
-   exercises the strategy on at least 50 real-ish tasks.
+   exercises the strategy on at least 50 real-ish tasks. **Met on
+   data, not on count**: 5 workloads are on disk (§Workload design),
+   so the 50-task bar still needs either more workloads or recorded
+   per-strategy repeats — the runner decides which, and the report
+   says so in `samples`.
 3. The candidate strategy improves at least one of:
    - **Recall@10** (fraction of relevant memories in the top 10 of
      the pack) by ≥ 5 percentage points over the BM25 baseline.
@@ -70,32 +80,41 @@ are explicit in the implementation plan §18:
 
 Until all four are met, the P2 strategy stays behind the feature
 flag and is not enabled by default. **No fabricated numbers.** The
-harness prints `not yet implemented — see
-docs/memory/EVALUATION.md` if the workload is not yet wired.
+CLI verb prints `Benchmark harness not yet implemented — see
+docs/memory/EVALUATION.md` today; it must keep printing an honest
+stub until a runner can produce the JSON below.
 
 ## Workload design
 
-The P2 workload will live in
-`evals/benchmark/memory/workloads/`. Each workload is a
-self-contained directory:
+The workloads **do** live in `evals/benchmark/memory/workloads/` —
+5 directories, prepared and reviewed as data, and read by no runner
+yet. Each workload is a self-contained directory:
 
 - `task.md` — the human-readable task prompt.
 - `seed/` — the project as it should look at the start of the run
-  (small enough to fit in a git repo).
+  (small enough to fit in a git repo): `seed/repo/` plus a
+  `seed/MEMORY.md` of prior memory entries, including one quarantined
+  prompt-injection attempt so a candidate can be caught promoting it.
 - `expected.json` — the entries the engine *should* produce after a
-  paired replay; the harness diffs the candidate's output against
-  this list.
-- `scoring.toml` — the weights for recall / cost / success.
+  paired replay, plus the `expected_recall_ids` and the status
+  assertions; the harness diffs the candidate's output against this.
+- `scoring.toml` — the weights (recall 0.4 / end-task success 0.4 /
+  first-turn tokens 0.1 / no-regressions 0.1, pass at combined ≥ 0.6
+  with no individual score below 0.3).
+- `verify.sh` — the end-task oracle `scoring.toml` scores.
 
-P2 ships 5 workloads: "explain a flaky test", "refactor a duplicated
+The 5 workloads are: "explain a flaky test", "refactor a duplicated
 helper", "find an unused dep", "port a CLI flag to a config key",
 and "diagnose a memory-leak symptom". Each is a 2-turn run with a
 short, deterministic answer.
 
 ## Reporting template
 
-A P2 benchmark run produces a JSON file at
-`evals/out/<date>-<strategy>.json`:
+A P2 benchmark run **will** produce a JSON file at
+`evals/out/<date>-<strategy>.json`. No such file exists: `evals/out/`
+is gitignored and today holds only the coding harness's live forensics
+directories (`live-<ts>-<pid>/`, see `evals/README.md`). The shape a
+future memory runner must write:
 
 ```json
 {
@@ -151,7 +170,7 @@ can show "warmup required" in the UI.
 
 | outcome | default | when to flip |
 |---|---|---|
-| local embedding ≥ +0.05 `recall_at_10` vs `Off` on ≥ 4/5 workloads, with `regressions: []` | may move `LocalBgeSmallEn` from off-by-default to on-by-default | after at least one full paired-replay run lands a result in `evals/out/` |
+| local embedding ≥ +0.05 `recall_at_10` vs `Off` on ≥ 4/5 workloads, with `regressions: []` | may move `LocalBgeSmallEn` from off-by-default to on-by-default | after at least one full paired-replay run lands a result in `evals/out/` — none has landed, so this row has never fired |
 | local embedding neutral or worse | **stays off by default**; remains opt-in | always |
 
 The flip is itself a Gate D change — a new commit that (a) updates

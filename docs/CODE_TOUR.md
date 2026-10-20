@@ -52,11 +52,15 @@
   经 `ToolInvocation::External` 进入既有 registry / 权限 / 轨迹管道；GUI 的
   工具清单经 `mcp_list_tools` 命令一次性连接读取（密钥只在 shell 进程内合并）。
 - `repomap.rs` / `evidence.rs` / `context.rs` — 仓库地图、证据收集、上下文构建。
+- `dedup.rs` — 单轮生命周期的重复调用去重，同时记录"本轮已经读到内容"的路径
+  集合（sight）。`write_file` 用它做覆盖守卫：整文件写入一个**已存在且本轮没读过**
+  的文件会被拒绝（`PatchConflict`，回合继续），提示先 `read_file` 或改用
+  `apply_patch` / `replace_range`；新建文件和空文件不受影响。
 - `lib.rs` — 导出 `FileDelta`、`SinkEvent`、`Step`、`StepKind`、`Permission` 等。
 
 ## 4. Shell 层：`apps/desktop/src-tauri`
 
-核心是 `src/run.rs`（约 574 行）的**运行驱动器**：线程、日志写入、审批会合点。
+核心是 `src/run.rs`（约 970 行）的**运行驱动器**：线程、日志写入、审批会合点。
 
 - **`Runs`** — 用 `HashSet<String>` 跟踪活跃 run，防止同一会话重复启动。
 - **`Approvals`** — 审批机制核心：
@@ -102,8 +106,15 @@ GUI 发起 run
 
 - **Secure by Default**：默认 `ask` 档位，危险命令与写文件必须审批；
   UI 只显示掩码 Key（`••••abcd`），不回传明文。
+- **两段验证**：Code 模式的系统提示要求模型自己取证（回读改动区域、跑最小范围
+  的 `cargo check -p` / 单条测试 / `npm run typecheck`）；`verify.rs` 的 Verify
+  门按计划执行验证命令（修复回合后重跑定向命令），它是兜底，不替代模型侧的证据。
+- 评测：`evals/`（`cargo run -p kodo-evals`）。Layer A 确定性检查 + Layer B
+  夹具题；夹具分两个语料，`fixtures/`（30 题，仓库极小）与 `fixtures-real/`
+  （4 个 171–216 行、11–12 文件、带 `package.json` 与自有测试套件的真实规模工程，
+  `--suite real`）。基线始终跑满两个语料，live 需要显式 `--live`。
 - 验证命令：
   - `cargo test -p kodo-core -p kodo-agent`
   - `cd apps/desktop && npm run typecheck`
-  - `npx playwright test`（有意改 UI 后 `npx playwright test --update-snapshots`）
-- 设计规范见 `docs/design/`（`CLAUDE.md`、`LAYOUT.md`、`UI_ACCEPTANCE.md` 等）。
+  - `npm run test:visual`（有意改 UI 后用 `npm run test:visual:update` 刷新快照）
+- 设计规范见 `docs/design/`（`DESIGN.md`、`LAYOUT.md`、`UI_ACCEPTANCE.md` 等）。
