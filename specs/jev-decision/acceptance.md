@@ -177,6 +177,15 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 
 **未验证**：OpenRouter 的真实连通性、真实模型的字母服从率与 logprobs 可用性、各路由器的限流与价格 —— 都需要单独授权的联网评测。
 
+## 3.2 默认模型与存储格式修正（2026-10-20 追加）
+
+| 问题 | 原因 | 修正 | 证据 |
+| --- | --- | --- | --- |
+| OpenRouter 默认模型 | 按用户要求 | `typesafe/jev-1.14`（官方端点仍固定 `jev-1.13.0`） | `the_openrouter_default_model_is_the_typesafe_one`、前端「切换服务来源」用例 |
+| 保存配置报错 `jev-decision: EOF while parsing an object at line 1 column 1` | `settings.log` 是行式 `key=value`，而记录用 `to_string_pretty` 写成多行；读回时只剩第一行 `{` | 存盘前用 `DecisionSettings::to_json()` 归一化成**单行** JSON，并拒绝含换行的值 | `a_saved_record_can_be_read_back`、`a_pretty_printed_record_is_normalized_before_it_is_written`、`a_damaged_record_says_how_to_repair_it` |
+
+**用户现场的修复方式**：本机 `settings.log` 里已有三条被截断的 `jev-decision={` 记录（此前每次保存各留一条）。修复后的版本**重新保存一次配置**即可 —— 追加日志取最后一次值，新记录会覆盖读取结果，旧的截断记录留在日志里不影响读取（`parse_line` 不含 `=` 的行直接忽略）。代码不再改写用户数据。
+
 **接入 OpenRouter 带来的新风险（尚未评估）**：官方 Jev 给出的是服务自己标注的概率；OpenRouter 给出的是 chat 模型首 token 的 token 概率经选项字母归一化后的分布。两者都**不是**"准确率"，但后者对模型的服从度、分词器与提示词更敏感。因此 OpenRouter 路径在质量门评测里应当**单独统计**，不能与官方路径合并成一个指标。
 
 ## 4. 尚未通过 / 未验证的项
