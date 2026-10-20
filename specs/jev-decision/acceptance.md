@@ -239,8 +239,9 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 > **并发记录（2026-10-20 22:40）**：本任务进行期间，另一个会话把 `fix/work-reliability` 分支合并进了 `main`（合并提交 `46b9f53 merge(work): …`），其合并基点正是本任务的 `a9304ea`。本任务的提交全部保留在 `main` 历史中，未被覆盖；本轮修复在合并后的树上重新验证通过。
 
 ```text
-当前分支：main
-main HEAD：4189423 merge(decision): recover a truncated decision settings record
+当前分支：main（唯一分支）
+main HEAD：05c0ca8 docs(decision): record the consolidated and pushed state
+origin/main：与本地一致（已推送）
 本任务提交：
   aaa9a84 docs(decision): add the Jev decision specification
   bd5bd60 feat(decision): add the optional Jev decision assistant
@@ -249,26 +250,32 @@ main HEAD：4189423 merge(decision): recover a truncated decision settings recor
   e8381f6 feat(decision): let the decision service talk to OpenRouter
   15c8718 fix(decision): store the settings record on one line and pick a new default model
   9a92f1f fix(decision): recover a truncated settings record instead of failing
-合并前基线：c0f67a310cb7dea1761f14e017381407a0e07a81（= 合并前 main = 合并前缓存 origin/main）
-缓存 origin/main：c0f67a310cb7dea1761f14e017381407a0e07a81 —— 本次未 fetch，远程新鲜度未核验
-main 相对 origin/main：0（已同步，全部已推送）
+本任务合并前的基线：c0f67a310cb7dea1761f14e017381407a0e07a81
+推送结果：c0f67a3..f3073b7  main -> main
 git branch --no-merged main：（空）
-任务分支 feat/jev-decision：已合入后按 AGENTS.md §2 删除（三个提交均保留在 main 的历史里）
+git branch -r --no-merged main：（空 —— 远端的 feat/scheduled-task-experience
+  与 fix/output-token-limit 也都已包含在 main 里）
+本地分支：仅 main
 git stash list：7 条，全部为会话开始前既有，未 pop / drop / clear
 ```
 
 合并方式：`--no-ff`，无冲突，保留任务边界。合并后重跑了改动范围对应的验证（见下）。
 
-worktree：
+worktree（清理后）：
 
 ```text
-/Users/lijianxue/work/WorkSpace/kodo                    91eb96b [main]
-/Users/lijianxue/WorkBuddy/Worktrees/kodo/main-df55d246 c0f67a3 [fix/work-reliability]
+/Users/lijianxue/work/WorkSpace/kodo  05c0ca8 [main]
 ```
 
-**归属未确认的既有现场（本任务未触碰）**：第二个 worktree 有未提交改动 —— `crates/agent/src/dedup.rs`、`crates/agent/src/lib.rs`、`crates/agent/src/tools.rs` 已修改，`crates/agent/src/read_receipt.rs` 未跟踪。它们在另一个目录，本任务不覆盖、不暂存、不提交、不清理。注意 `crates/agent/src/lib.rs` 与本任务改动的是同一个文件的不同区域：若该 worktree 的改动后续要合入 `main`，需要逐段核对冲突。
+`fix/work-reliability` 与 `workbuddy/main-df55d246` 两个已合并的本地分支已删除；
+`fix/work-reliability` 所在的 worktree 已移除（它的代码早已随 `46b9f53 merge(work)` 进入 `main`）。
 
-未提交文件清单：
+**那个 worktree 里唯一剩下的未跟踪内容**是另一个会话的笔记
+`.workbuddy-ai/memory/2026-10-20.md`（非产品代码）。它已逐字节校验后**保全**在
+`/Users/lijianxue/WorkBuddy/Worktrees/kodo/main-df55d246-workbuddy-notes/`，
+worktree 内的那份副本才被清理。
+
+本任务改动过的文件清单（已全部提交并推送）：
 
 ```text
 修改（20）：
