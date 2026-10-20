@@ -1280,6 +1280,31 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn sensitive_path_blocks_kodo_directory_and_keeps_pasted_sibling_open() {
+        // 2026-10-19 regression: the composer saves pasted images to
+        // `<project>/.pasted/` (a sibling of `.kodo/`, NOT a child).
+        // `is_sensitive_relative_path` MUST keep `.pasted/` reachable
+        // while still refusing `.kodo/` — a `.kodo/.pasted/` layout would
+        // break the agent's `read_file` calls on pasted attachments.
+        assert!(
+            is_sensitive_relative_path(".kodo/pasted-1234.png"),
+            "any path segment literally named .kodo must be refused"
+        );
+        assert!(
+            is_sensitive_relative_path(".kodo/.pasted/foo.png"),
+            "nested `.kodo/.pasted/` must also be refused (the broken layout)"
+        );
+        assert!(
+            !is_sensitive_relative_path(".pasted/pasted-1234.png"),
+            ".pasted/ is a sibling of .kodo/ and must stay reachable"
+        );
+        assert!(
+            !is_sensitive_relative_path(".pasted"),
+            "the directory itself must be reachable"
+        );
+    }
+
+    #[test]
     fn dangerous_commands_are_flagged() {
         assert!(is_dangerous_command("rm -rf build"));
         assert!(is_dangerous_command("sudo ls"));

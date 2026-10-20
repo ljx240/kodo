@@ -513,6 +513,13 @@ pub struct RunRequest {
     /// Project-relative paths pinned as context for this turn (not file bodies).
     /// Absolute paths are allowed for external attachments.
     pub pinned_context: Vec<String>,
+    /// Paths the user attached through an explicit action (paste / drop with
+    /// no shell-known filesystem path). These ride the multimodal inlining
+    /// branch even when the active model lacks vision — the user's intent
+    /// is the strong signal; the `vision_ok` gate applies to auto-attached
+    /// and history-inherited contexts only. One force-inline per pasted path
+    /// matches the user's intent to analyze it.
+    pub pinned_force_inline: Vec<String>,
     pub provider: Option<Provider>,
     pub permission: Permission,
     pub mode: AgentMode,
@@ -3173,30 +3180,20 @@ pub fn run(
                 if exists {
                     // Image inlining branch (2026-10-13): image attachments
                     // reach the model as a multimodal content block when
-                    //   * `ProviderCapabilities::vision` is on,
                     //   * the extension is one we know how to encode (png /
                     //     jpg / gif / webp), and
                     //   * the file is at most 4 MiB (mirrors the desktop
                     //     probe's preview cap; a 50 MiB png would explode
                     //     the request body otherwise).
-                    // All three gates falling short → fall back to the
-                    // legacy path-only descriptor (pdf/docx/ppt/oversize).
-                    let inlined_image = if vision_ok {
-                        attachment_mime_from_ext(rel).and_then(|media_type| {
-                            let path = allowed_path.as_deref()?;
-                            let bytes = std::fs::read(path).ok()?;
-                            if bytes.len() as u64 > ATTACHMENT_IMAGE_INLINE_MAX_BYTES {
-                                None
-                            } else {
-                                Some(ContentBlock::Image {
-                                    media_type: media_type.to_owned(),
-                                    data_base64: BASE64_ENGINE.encode(&bytes),
-                                })
-                            }
-                        })
-                    } else {
-                        None
-                    };
+                    // Vision-capable providers get this for free
+                    // (`vision_ok`); pasted/dropped images additionally
+                    // bypass the gate via `pinned_force_inline` so the
+                    // user's explicit attach intent is honored even when
+                    // their saved provider config still carries the older
+                    // conservative vision flag.
+                    let force_inline = request.pinned_force_inline.iter().any(|p| p == rel);
+                    let inlined_image =
+                        inline_pinned_image(rel, allowed_path.as_deref(), vision_ok, force_inline);
 
                     if let Some(image) = inlined_image {
                         notes.push(format!("已内联图片 `{rel}`"));
@@ -3233,16 +3230,32 @@ pub fn run(
                             .and_then(|p| p.metadata().ok())
                             .map(|m| m.len())
                             .unwrap_or(0);
-                        pre_observations.push(ToolResult::success(
-                            ToolCallId::new(format!("pin_bin_{rel}")),
-                            ToolName::ReadFile.label(),
-                            rel.clone(),
+                        // Image + vision-incapable model: name the limitation
+                        // explicitly. Without this, the model tends to invent
+                        // an apologetic-sounding reply ("I see the file but
+                        // cannot read pixels…") that misleads the user about
+                        // what actually happened. Office/PDF/other keep the
+                        // original "binary/Office 格式" descriptor.
+                        let is_image = attachment_mime_from_ext(rel).is_some();
+                        let observation_text = if is_image {
+                            format!(
+                                "<attachment path=\"{rel}\" inlined=\"false\" kind=\"image\" bytes=\"{bytes}\" />\n\
+                                 [已附带图像附件（{bytes} 字节）。当前模型不接受图像输入，本轮未读取像素；\n\
+                                  请基于文件名/大小回答，需要像素分析请换用支持视觉的模型或粘贴报错文字。]\n",
+                            )
+                        } else {
                             format!(
                                 "<attachment path=\"{rel}\" inlined=\"false\" kind=\"{}\" bytes=\"{bytes}\" />\n\
                                  [已附带附件：内容未内联（二进制/Office 格式），本轮无法读取其正文；\n\
                                   文件类型与路径如上，回答请以附件为准并说明这一限制。]\n",
                                 attachment_kind_label(rel),
-                            ),
+                            )
+                        };
+                        pre_observations.push(ToolResult::success(
+                            ToolCallId::new(format!("pin_bin_{rel}")),
+                            ToolName::ReadFile.label(),
+                            rel.clone(),
+                            observation_text,
                         ));
                     }
                 } else {
@@ -5503,6 +5516,31 @@ fn attachment_mime_from_ext(path: &str) -> Option<&'static str> {
 /// `inlined="false"` note, never to a 50 MB base64 surprise on the wire.
 const ATTACHMENT_IMAGE_INLINE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Encode one pinned attachment as a multimodal image block. The vision gate
+/// applies unless the user explicitly force-inlined the path (paste / drop);
+/// the extension whitelist and size cap always apply. `None` means the caller
+/// falls back to the path-only descriptor.
+fn inline_pinned_image(
+    rel: &str,
+    path: Option<&std::path::Path>,
+    vision_ok: bool,
+    force_inline: bool,
+) -> Option<ContentBlock> {
+    if !(vision_ok || force_inline) {
+        return None;
+    }
+    let media_type = attachment_mime_from_ext(rel)?;
+    let path = path?;
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() as u64 > ATTACHMENT_IMAGE_INLINE_MAX_BYTES {
+        return None;
+    }
+    Some(ContentBlock::Image {
+        media_type: media_type.to_owned(),
+        data_base64: BASE64_ENGINE.encode(&bytes),
+    })
+}
+
 /// Why a run fell back to a local (no-model) answer. Drives the opener, the
 /// detail line and the closer so every branch tells the truth — only a
 /// genuinely missing provider may claim "not configured".
@@ -6567,6 +6605,7 @@ mod tests {
             message: "test".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission,
             mode: AgentMode::Code,
@@ -9204,6 +9243,7 @@ mod tests {
             message: "介绍下什么是数据仓库".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: Some(provider),
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -9522,6 +9562,7 @@ mod tests {
             message: "帮我写一份周报总结".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission: Permission::Ask,
             mode: AgentMode::Work,
@@ -9562,6 +9603,7 @@ mod tests {
             message: "修复未知表路由".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -9603,6 +9645,7 @@ mod tests {
             message: "介绍下什么是数据仓库".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -9677,6 +9720,7 @@ mod tests {
             message: "介绍下什么是缴费基数".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: vec![abs],
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -9735,6 +9779,7 @@ mod tests {
             message: "你好".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: vec![abs],
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -9784,6 +9829,7 @@ mod tests {
             message: "你好".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -9836,6 +9882,7 @@ mod tests {
             message: "分析并为我解释一下这个文档".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: vec![abs],
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -9880,6 +9927,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn office_attachment_observation_keeps_existing_wording() {
+        // Control: the new image-specific branch does not steal the
+        // existing office descriptor. .docx stays a "binary/Office 格式"
+        // note (no vision framing) in the offline fallback answer.
+        let (_dir, abs) = temp_attachment("plan.docx", b"fake docx bytes");
+        let request = RunRequest {
+            project: None,
+            message: "总结一下这个附件".to_owned(),
+            conversation_history: Vec::new(),
+            pinned_context: vec![abs],
+            pinned_force_inline: Vec::new(),
+            provider: None,
+            permission: Permission::Ask,
+            mode: AgentMode::Code,
+            fallback_to_local: true,
+            max_output_tokens: 512,
+            extended_thinking: false,
+            local_trace: false,
+            session_id: None,
+            user_skills_dir: None,
+            mcp_servers: Vec::new(),
+            agent_instructions: None,
+            personas: vec![],
+            budget_family: None,
+            memory: None,
+            knowledge_context: None,
+        };
+        let mut texts: Vec<String> = Vec::new();
+        let mut emit = |event: SinkEvent| {
+            if let SinkEvent::Started {
+                step: Step::AgentMessage { text, .. },
+            } = event
+            {
+                texts.push(text);
+            }
+            true
+        };
+        run(&request, &|| true, &|_, _| true, &mut emit).expect("office attachment run");
+        assert_eq!(texts.len(), 1);
+        // The notes path stays the same for non-image fallbacks. The
+        // image-specific vision framing (currently emitted to
+        // pre_observations only) never reaches the canned answer.
+        assert!(
+            texts[0].contains("已附带附件"),
+            "office descriptor note unchanged: {}",
+            texts[0]
+        );
+    }
+
     /// Build a vision-capable Provider override. The provider-test fake is
     /// wired through a local `script.jsonl`, but the inlining test cares
     /// about the *capability flag*, not the network round trip — so we
@@ -9913,6 +10010,7 @@ mod tests {
             message: "描述一下这张图".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -9960,6 +10058,7 @@ mod tests {
             message: "看一下图".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: vec![abs.clone()],
+            pinned_force_inline: Vec::new(),
             provider: Some(vision_provider()),
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -10006,6 +10105,49 @@ mod tests {
     }
 
     #[test]
+    fn image_attachment_force_inline_bypasses_vision_gate() {
+        // 2026-10-19: when the user explicitly attaches an image (paste /
+        // drop-without-path), `pinned_force_inline` bypasses the
+        // `vision_ok` gate so the agent inlines the bytes anyway. The
+        // producer lives in `inline_pinned_image`; exercise the gate there
+        // so this test fails if the OR regresses (a hand-built
+        // `ContentBlock::Image` would keep passing no matter what).
+        let (_dir, abs) = temp_attachment("pasted.png", &[0x89, b'P', b'N', b'G', 0, 0, 0, 0]);
+        let path = std::path::Path::new(&abs);
+        assert!(
+            inline_pinned_image("pasted.png", Some(path), false, false).is_none(),
+            "vision off + no explicit attach must fall back to the descriptor"
+        );
+        assert!(
+            matches!(
+                inline_pinned_image("pasted.png", Some(path), false, true),
+                Some(ContentBlock::Image { ref media_type, .. }) if media_type == "image/png"
+            ),
+            "force-inline must bypass the vision gate"
+        );
+        assert!(
+            matches!(
+                inline_pinned_image("pasted.png", Some(path), true, false),
+                Some(ContentBlock::Image { .. })
+            ),
+            "vision-capable providers still inline without an explicit attach"
+        );
+        // The size cap is independent of the bypass: a huge pasted image
+        // must not blow up the request body.
+        let (_big_dir, big) = temp_attachment("huge-pasted.png", &vec![0x89; 5 * 1024 * 1024]);
+        assert!(
+            inline_pinned_image(
+                "huge-pasted.png",
+                Some(std::path::Path::new(&big)),
+                false,
+                true
+            )
+            .is_none(),
+            "force-inline must respect the 4 MiB cap"
+        );
+    }
+
+    #[test]
     fn projectless_xlsx_attachment_inlines_extracted_cells() {
         // Layer 2 × Layer 3 together: on the conversational arm a pinned
         // xlsx must extract into a real content observation (钉住上下文 pin),
@@ -10017,6 +10159,7 @@ mod tests {
             message: "分析并为我解释一下这个文档".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: vec![abs],
+            pinned_force_inline: Vec::new(),
             provider: None,
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -10148,6 +10291,7 @@ mod tests {
             message: "介绍下什么是数据仓库".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: Some(provider),
             permission: Permission::Ask,
             mode: AgentMode::Code,
@@ -10219,6 +10363,7 @@ mod tests {
             message: "介绍下什么是数据仓库".to_owned(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: Some(provider),
             permission: Permission::Ask,
             mode: AgentMode::Code,

@@ -1140,6 +1140,7 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             message: prompt.clone(),
             conversation_history: Vec::new(),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: Some(provider.clone()),
             permission: Permission::Full,
             mode: AgentMode::Code,
