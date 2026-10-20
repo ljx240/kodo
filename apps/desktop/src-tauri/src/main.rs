@@ -1304,6 +1304,7 @@ fn send_message(
             personas,
             budget_family,
             decision,
+            terminal: None,
         })
     })();
     let args = match prepared {

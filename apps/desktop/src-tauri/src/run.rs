@@ -384,6 +384,48 @@ pub struct StartArgs {
     /// inherit a desktop approval, and it must not open a prompt that
     /// nobody is there to answer.
     pub decision: Option<agent::DecisionHandle>,
+    /// Trusted terminal summary channel.
+    ///
+    /// `start()` returns as soon as the thread is spawned, which says nothing
+    /// about the turn. A caller that must record a *real* terminal state (the
+    /// scheduler) passes a sender here and waits for the summary the executor
+    /// builds from the actual `SinkEvent` stream. Interactive callers pass
+    /// `None` and keep relying on the UI event stream.
+    pub terminal: Option<Sender<TurnTerminal>>,
+}
+
+/// How a run actually ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnTerminalKind {
+    /// The agent loop returned and a terminal answer was recorded.
+    Completed,
+    /// The user (or a scheduler deadline) stopped it; the loop confirmed exit.
+    Stopped,
+    /// The loop returned an error.
+    Failed,
+}
+
+/// Trusted terminal summary for one run, built from real events only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnTerminal {
+    pub kind: TurnTerminalKind,
+    /// Last terminal answer's delivery axis (`ready` / `partial` / `failed` /
+    /// `blocked`), empty when the run never produced an answer.
+    pub delivery: String,
+    pub verification: String,
+    pub failure_reason: String,
+}
+
+impl TurnTerminal {
+    fn new(kind: TurnTerminalKind, answer: Option<(String, String, String)>) -> Self {
+        let (delivery, verification, failure_reason) = answer.unwrap_or_default();
+        Self {
+            kind,
+            delivery,
+            verification,
+            failure_reason,
+        }
+    }
 }
 
 pub fn start(
@@ -548,6 +590,10 @@ pub fn start(
         let answered: std::sync::Arc<std::sync::atomic::AtomicBool> =
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let answered_for_sink = answered.clone();
+        // Last terminal answer's axes, kept for the trusted terminal summary.
+        let last_answer: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
+        let last_answer_for_sink = last_answer.clone();
+        let terminal = args.terminal.clone();
 
         let mut sink = move |event: SinkEvent| -> bool {
             if !record_token.is_live() {
@@ -719,6 +765,13 @@ pub fn start(
                     // it to surface a forced-terminal body, and the user
                     // must not see a second synthesised message on top.
                     answered_for_sink.store(true, std::sync::atomic::Ordering::SeqCst);
+                    *last_answer_for_sink
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((
+                        delivery.clone(),
+                        verification.clone(),
+                        failure_reason.clone(),
+                    ));
                     emit_run(
                         &record_app,
                         &record_token,
@@ -774,6 +827,13 @@ pub fn start(
         // inherited by the next turn.
         decisions.release_run(&args.id);
         decisions.clear_session(&args.id);
+        let terminal_kind = if result.is_err() {
+            TurnTerminalKind::Failed
+        } else if !token.is_live() {
+            TurnTerminalKind::Stopped
+        } else {
+            TurnTerminalKind::Completed
+        };
 
         match result {
             Ok(()) => {
@@ -829,6 +889,16 @@ pub fn start(
             }
         }
         runs.release(&args.id, &token);
+        // Publish the trusted terminal summary *after* the run mapping is
+        // released, so a waiter that wakes up cannot observe a half-finished
+        // cleanup. A dropped receiver (interactive runs) is not an error.
+        if let Some(tx) = terminal {
+            let answer = last_answer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let _ = tx.send(TurnTerminal::new(terminal_kind, answer));
+        }
     });
 
     Ok(())

@@ -39,7 +39,6 @@ use crate::run::{self, Approvals, Runs, StartArgs};
 
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 const AGENT_RUN_PERMISSION: Permission = Permission::Ask;
-const AGENT_RUN_MODE: kodo_agent::AgentMode = kodo_agent::AgentMode::Code;
 
 type JobCancelMap = Arc<Mutex<HashMap<String, JobCancellation>>>;
 
@@ -59,9 +58,12 @@ struct SchedulerServiceInner {
     scheduler: Arc<Scheduler>,
     runs: Runs,
     approvals: Approvals,
-    /// Cancellation tokens for in-flight Job runs. Agent runs reuse the
-    /// existing `Runs.cancel` path, so they do not appear here.
+    /// Cancellation tokens for in-flight Job runs.
     job_cancels: JobCancelMap,
+    /// scheduler run id → the real session id that executes it. Cancel and
+    /// the result link both resolve through this map instead of assuming the
+    /// two ids are the same string.
+    run_sessions: Arc<Mutex<HashMap<String, String>>>,
     /// Cancellation flag flipped by [`SchedulerService::shutdown`].
     stop: Arc<AtomicBool>,
     /// Typed `AppHandle` for event emit. Captured at construction time
@@ -96,6 +98,7 @@ impl SchedulerService {
                 runs,
                 approvals,
                 job_cancels: Arc::new(Mutex::new(HashMap::new())),
+                run_sessions: Arc::new(Mutex::new(HashMap::new())),
                 stop: Arc::new(AtomicBool::new(false)),
                 app,
             }),
@@ -237,9 +240,15 @@ impl SchedulerService {
             .scheduler()
             .request_cancel(run_id)
             .map_err(scheduler_error_to_string)?;
-        // The session id equals the run id for Agent runs (see
-        // `dispatch_run`); flip the live flag in case it is still held.
-        self.inner.runs.cancel(run_id);
+        // Cancel the *execution* behind this scheduler run: the live run is
+        // registered under its session id, which the executor published in
+        // `run_sessions` before starting. Cancelling the run id itself only
+        // ever worked by accident (I-04/I-05).
+        let session_id = self.inner.run_sessions.lock().get(run_id).cloned();
+        if let Some(session_id) = session_id {
+            self.inner.runs.cancel(&session_id);
+            self.inner.approvals.clear_session(&session_id);
+        }
         if let Some(token) = self.inner.job_cancels.lock().remove(run_id) {
             token.cancel();
         }
@@ -339,44 +348,204 @@ fn spawn_agent_run(
     dispatched: DispatchedRun,
     handle: ResourceHandle,
 ) {
-    let (project, message, budget_family) = match dispatched.task.task {
+    let (project, message, budget_family, mode_label, persona_names) = match &dispatched.task.task {
         TaskKind::Agent {
             project,
             message,
             budget_family,
+            personas,
+            mode,
             ..
-        } => (project, message, budget_family),
+        } => (
+            project.clone(),
+            message.clone(),
+            budget_family.clone(),
+            mode.clone(),
+            personas.clone(),
+        ),
         _ => unreachable!("spawn_agent_run called with a Job task"),
     };
     let run_id = dispatched.run.id.clone();
-    let task_id = dispatched.task.id.clone();
-    let scheduled_for = dispatched.run.scheduled_for;
-    let session_id = format!("sched-{task_id}-{scheduled_for}");
+    let timeout_seconds = dispatched.task.timeout_seconds;
     thread::Builder::new()
-        .name(format!("kodo-sched-agent-{}", run_id))
+        .name(format!("kodo-sched-agent-{run_id}"))
         .spawn(move || {
             execute_agent_run(
                 inner,
                 run_id,
-                task_id,
-                session_id,
                 project,
                 message,
                 budget_family,
+                mode_label,
+                persona_names,
+                timeout_seconds,
                 handle,
             );
         })
         .expect("failed to spawn agent run thread");
 }
 
+/// A session created for one scheduled occurrence.
+///
+/// `session::open` mints the id; the host must use that id everywhere
+/// (log dir, run record, approval, cancel) instead of inventing a parallel
+/// one — two ids for one execution was the whole of I-05.
+struct PreparedSession {
+    id: String,
+    dir: PathBuf,
+}
+
+fn prepare_session(
+    project: &std::path::Path,
+    message: &str,
+    mode: kodo_core::session::Mode,
+) -> Result<PreparedSession, String> {
+    let dir = kodo_core::session::dir().ok_or_else(|| "state directory unavailable".to_string())?;
+    prepare_session_in(&dir, project, message, mode)
+}
+
+/// The real work of `prepare_session`, with the state directory injected so
+/// the same code path can be driven from a temporary directory in tests.
+fn prepare_session_in(
+    dir: &std::path::Path,
+    project: &std::path::Path,
+    message: &str,
+    mode: kodo_core::session::Mode,
+) -> Result<PreparedSession, String> {
+    use kodo_core::session;
+    let title = truncate(message, 80);
+    let id = session::open(dir, project, &title, session::now(), mode)
+        .map_err(|error| format!("session::open failed: {error}"))?;
+    session::record_ask(dir, &id, session::now(), message)
+        .map_err(|error| format!("record_ask failed: {error}"))?;
+    Ok(PreparedSession {
+        id,
+        dir: dir.to_path_buf(),
+    })
+}
+
+/// Resolve the persona names stored on the task through the same registry the
+/// interactive composer uses. A missing name is a specific error, never a
+/// silent fallback to another role.
+fn resolve_personas(
+    names: &[String],
+    project: &std::path::Path,
+) -> Result<Vec<kodo_agent::PersonaBlock>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let user_dir = crate::agents_dir()?;
+    let project_dir = crate::project_agents_dir(Some(&project.to_string_lossy()));
+    resolve_personas_in(&user_dir, project_dir.as_deref(), names)
+}
+
+/// `resolve_personas` with both registry roots injected.
+fn resolve_personas_in(
+    user_dir: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
+    names: &[String],
+) -> Result<Vec<kodo_agent::PersonaBlock>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    kodo_agent::agents::resolve_chain(user_dir, project_dir, names)
+        .map(|chain| {
+            chain
+                .into_iter()
+                .map(kodo_agent::PersonaBlock::from)
+                .collect()
+        })
+        .map_err(|error| format!("persona_unresolved: {error}"))
+}
+
+/// Mode labels come from the persisted task. `work` is the only label that
+/// switches modes; everything else (including tasks written before the field
+/// existed) stays on the legacy Code path.
+fn map_mode(label: Option<&str>) -> (kodo_agent::AgentMode, kodo_core::session::Mode) {
+    match label {
+        Some("work") => (kodo_agent::AgentMode::Work, kodo_core::session::Mode::Work),
+        _ => (kodo_agent::AgentMode::Code, kodo_core::session::Mode::Code),
+    }
+}
+
+/// How long a cancelled run gets to confirm it stopped before the scheduler
+/// records `cancelled` anyway (the run handle is then reported as unconfirmed).
+const CANCEL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wait for the executor's trusted terminal summary.
+///
+/// Returns `(terminal, timed_out)`. Without a deadline this is a plain
+/// blocking wait — the executor always sends one summary (or drops the
+/// sender, which disconnects the channel). With a deadline the timer lives in
+/// the *wait*, not in a sleeping thread that must be joined, so a fast run
+/// returns immediately (I-06).
+fn wait_for_terminal(
+    rx: &std::sync::mpsc::Receiver<run::TurnTerminal>,
+    deadline: Option<std::time::Instant>,
+    grace: Duration,
+    cancel: impl FnOnce(),
+) -> (Option<run::TurnTerminal>, bool) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let Some(deadline) = deadline else {
+        return (rx.recv().ok(), false);
+    };
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    match rx.recv_timeout(remaining) {
+        Ok(terminal) => (Some(terminal), false),
+        Err(RecvTimeoutError::Disconnected) => (None, false),
+        Err(RecvTimeoutError::Timeout) => {
+            cancel();
+            match rx.recv_timeout(grace) {
+                Ok(terminal) => (Some(terminal), true),
+                // The executor did not confirm within the grace window. Record
+                // the deadline honestly; the handle is released so the next
+                // occurrence is not blocked forever.
+                Err(_) => (None, true),
+            }
+        }
+    }
+}
+
+/// Map a real terminal summary to the scheduler's outcome vocabulary.
+///
+/// `Ok` alone is not success: only `delivery == "ready"` counts as delivered.
+fn terminal_outcome(
+    timed_out: bool,
+    terminal: Option<&run::TurnTerminal>,
+) -> (Outcome, Option<&'static str>, Option<&'static str>) {
+    if timed_out {
+        return (Outcome::TimedOut, None, Some("timed_out"));
+    }
+    let Some(terminal) = terminal else {
+        return (
+            Outcome::Interrupted,
+            None,
+            Some("executor_exited_without_terminal"),
+        );
+    };
+    match terminal.kind {
+        run::TurnTerminalKind::Failed => (Outcome::Failed, Some("none"), Some("agent_run_error")),
+        run::TurnTerminalKind::Stopped => (Outcome::Cancelled, Some("partial"), Some("cancelled")),
+        run::TurnTerminalKind::Completed => match terminal.delivery.as_str() {
+            "ready" => (Outcome::Succeeded, Some("delivered"), None),
+            "partial" => (Outcome::Partial, Some("partial"), Some("partial_delivery")),
+            "blocked" => (Outcome::Blocked, Some("blocked"), Some("awaiting_user")),
+            "failed" | "" => (Outcome::Failed, Some("none"), Some("no_delivery")),
+            _ => (Outcome::Partial, Some("partial"), Some("unknown_delivery")),
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_agent_run(
     inner: Arc<SchedulerServiceInner>,
     run_id: String,
-    _task_id: String,
-    session_id: String,
     project: String,
     message: String,
     budget_family: Option<String>,
+    mode_label: Option<String>,
+    persona_names: Vec<String>,
+    timeout_seconds: Option<u64>,
     handle: ResourceHandle,
 ) {
     let scheduler = inner.scheduler.clone();
@@ -384,22 +553,55 @@ fn execute_agent_run(
     let approvals = inner.approvals.clone();
     let app = inner.app.clone();
     let project_path = PathBuf::from(&project);
+    // Scheduled work keeps the mode the user chose. A task written before the
+    // field existed stays on the legacy Code path.
+    let (agent_mode, session_mode) = map_mode(mode_label.as_deref());
 
-    if let Err(error) = ensure_session(&session_id, &project_path, &message) {
-        let _ = scheduler.store().mark_finished(
-            &run_id,
-            unix_now(),
-            Outcome::Failed,
-            None,
-            None,
-            None,
-            None,
-            Some("session_open_failed"),
-            Some(&error),
-        );
-        emit_run_changed(&app, &scheduler, &run_id);
-        return;
-    }
+    let prepared = match prepare_session(&project_path, &message, session_mode) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = scheduler.store().mark_finished(
+                &run_id,
+                unix_now(),
+                Outcome::Failed,
+                None,
+                None,
+                None,
+                None,
+                Some("session_open_failed"),
+                Some(&truncate(&error, 240)),
+            );
+            emit_run_changed(&app, &scheduler, &run_id);
+            return;
+        }
+    };
+    let session_id = prepared.id.clone();
+    // run → session mapping: cancel and the result link both go through it.
+    inner
+        .run_sessions
+        .lock()
+        .insert(run_id.clone(), session_id.clone());
+
+    let personas = match resolve_personas(&persona_names, &project_path) {
+        Ok(personas) => personas,
+        Err(error) => {
+            let _ = scheduler.store().mark_finished(
+                &run_id,
+                unix_now(),
+                Outcome::Failed,
+                None,
+                None,
+                Some(&session_id),
+                None,
+                Some("persona_unresolved"),
+                Some(&truncate(&error, 240)),
+            );
+            inner.run_sessions.lock().remove(&run_id);
+            emit_run_changed(&app, &scheduler, &run_id);
+            return;
+        }
+    };
+
     let token = match runs.begin(&session_id) {
         Some(token) => token,
         None => {
@@ -409,11 +611,13 @@ fn execute_agent_run(
                 Outcome::Skipped,
                 None,
                 None,
-                None,
+                Some(&session_id),
                 None,
                 Some("run_already_active"),
                 Some("session already has a run in flight"),
             );
+            inner.run_sessions.lock().remove(&run_id);
+            emit_run_changed(&app, &scheduler, &run_id);
             return;
         }
     };
@@ -425,18 +629,20 @@ fn execute_agent_run(
             Outcome::Failed,
             None,
             None,
-            None,
+            Some(&session_id),
             None,
             Some("mark_started_failed"),
             Some(&format!("{error}")),
         );
+        inner.run_sessions.lock().remove(&run_id);
         return;
     }
     emit_run_changed(&app, &scheduler, &run_id);
 
     let config = kodo_shell::ShellConfig::load(kodo_shell::Overrides::default());
+    let (terminal_tx, terminal_rx) = std::sync::mpsc::channel();
     let start_args = StartArgs {
-        dir: PathBuf::new(),
+        dir: prepared.dir,
         id: session_id.clone(),
         project: Some(project_path.clone()),
         message,
@@ -445,27 +651,26 @@ fn execute_agent_run(
         context: Vec::new(),
         force_inline: Vec::new(),
         provider: config.provider,
+        // Scheduled triggers never expand permissions: Ask stays the default
+        // regardless of mode, persona or trigger source.
         permission: AGENT_RUN_PERMISSION,
-        mode: AGENT_RUN_MODE,
+        mode: agent_mode,
         fallback_to_local: config.fallback_to_local,
         max_output_tokens: config.max_output_tokens,
         extended_thinking: config.extended_thinking,
         local_trace: config.local_trace,
         mcp_servers: config.mcp_servers,
         agent_instructions: None,
-        // Scheduled runs use the persona names declared on the task; the
-        // agent driver resolves them through the same registry the
-        // session "plugins" UI uses. Empty list = no persona for this
-        // run.
-        personas: Vec::new(),
+        personas,
         budget_family,
         // Background runs do not consult the decision service.
         decision: None,
+        terminal: Some(terminal_tx),
     };
     // A scheduled run never gets a decision handle: it cannot ask a human
     // for permission, and it must not inherit a desktop approval.
     let decisions: tauri::State<'_, crate::decision::DecisionRegistry> = app.state();
-    let result = run::start(
+    let started = run::start(
         &app,
         &runs,
         &approvals,
@@ -473,27 +678,60 @@ fn execute_agent_run(
         start_args,
         token.clone(),
     );
-    let outcome = match &result {
-        Ok(()) => Outcome::Succeeded,
-        Err(_) => Outcome::Failed,
+    let (terminal, timed_out) = match started {
+        Ok(()) => {
+            let deadline =
+                timeout_seconds.map(|secs| std::time::Instant::now() + Duration::from_secs(secs));
+            wait_for_terminal(&terminal_rx, deadline, CANCEL_CONFIRM_TIMEOUT, || {
+                // Same execution the run registered: cancel by session id and
+                // wake an approval wait (the loop polls `is_live`).
+                runs.cancel(&session_id);
+                approvals.clear_session(&session_id);
+            })
+        }
+        Err(error) => {
+            let _ = scheduler.store().mark_finished(
+                &run_id,
+                unix_now(),
+                Outcome::Failed,
+                None,
+                None,
+                Some(&session_id),
+                None,
+                Some("start_failed"),
+                Some(&truncate(&error, 240)),
+            );
+            runs.release(&session_id, &token);
+            inner.run_sessions.lock().remove(&run_id);
+            emit_run_changed(&app, &scheduler, &run_id);
+            return;
+        }
     };
-    let reason_code = result
+
+    let (outcome, delivery, reason) = terminal_outcome(timed_out, terminal.as_ref());
+    let error_summary = terminal
         .as_ref()
-        .err()
-        .map(|e| format!("agent_run_error: {e}"));
-    let error_summary = result.as_ref().err().map(|e| truncate(e, 240));
-    let _ = scheduler.mark_finished(
+        .map(|t| t.failure_reason.clone())
+        .filter(|reason| !reason.is_empty())
+        .or_else(|| reason.map(str::to_owned));
+    if let Err(error) = scheduler.mark_finished(
         &run_id,
         outcome,
-        Some(if result.is_ok() { "delivered" } else { "none" }),
-        Some("approved_run"),
+        delivery,
+        terminal.as_ref().map(|t| t.verification.as_str()),
         Some(&session_id),
         Some(&session_id),
-        reason_code.as_deref(),
+        reason,
         error_summary.as_deref(),
         handle,
-    );
+    ) {
+        // Terminal write failed: keep the run mapping and do not pretend the
+        // run succeeded. The resource handle was consumed by the failed call,
+        // so the next occurrence stays blocked until an operator intervenes.
+        eprintln!("kodo scheduler: failed to persist terminal state for {run_id}: {error}");
+    }
     runs.release(&session_id, &token);
+    inner.run_sessions.lock().remove(&run_id);
     emit_run_changed(&app, &scheduler, &run_id);
 }
 
@@ -563,7 +801,13 @@ fn spawn_job_run(
                 cancel: cancel.clone(),
             };
             let report: JobReport = if let Some(secs) = timeout {
-                run_with_timeout(job.as_ref(), &params, &ctx, Duration::from_secs(secs))
+                run_with_timeout(
+                    job.clone(),
+                    params.clone(),
+                    ctx.clone(),
+                    Duration::from_secs(secs),
+                    JOB_CANCEL_GRACE,
+                )
             } else {
                 job.execute(&params, &ctx)
             };
@@ -585,57 +829,92 @@ fn spawn_job_run(
         .expect("failed to spawn job run thread");
 }
 
-fn run_with_timeout(
-    job: &dyn Job,
-    params: &serde_json::Value,
-    ctx: &JobContext,
-    timeout: Duration,
-) -> JobReport {
-    // Cooperative timeout: the job checks `cancel` itself. We arm the
-    // cancel flag once the deadline elapses; the job's next check turns
-    // the report into a partial / cancelled one.
-    let cancel = ctx.cancel.clone();
-    let armed = Arc::new(AtomicBool::new(false));
-    let armed_for_thread = armed.clone();
-    let cancel_for_thread = cancel.clone();
-    let timer = thread::spawn(move || {
-        thread::sleep(timeout);
-        armed_for_thread.store(true, Ordering::SeqCst);
-        cancel_for_thread.cancel();
-    });
-    let report = job.execute(params, ctx);
-    let _ = timer.join();
-    if armed.load(Ordering::SeqCst) && matches!(report.outcome, kodo_shell::JobOutcome::Succeeded) {
-        JobReport {
-            outcome: kodo_shell::JobOutcome::Partial,
-            reason_code: Some("timed_out".into()),
-            summary: Some("job did not finish before its deadline".into()),
-            ..report
-        }
-    } else {
-        report
-    }
-}
+/// How long a cooperative job gets to return after the deadline fired.
+const JOB_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
-fn ensure_session(
-    session_id: &str,
-    project: &std::path::Path,
-    message: &str,
-) -> Result<(), String> {
-    use kodo_core::session::{self, Mode};
-    let Some(dir) = session::dir() else {
-        return Err("state directory unavailable".into());
+/// Run one job with a wall-clock deadline.
+///
+/// The job runs on a worker thread and the *wait* is bounded — there is no
+/// sleeping timer that has to be joined afterwards. A job that finishes in
+/// 200 ms returns in 200 ms even with a 60 s deadline (I-06: the old shape
+/// always waited the full timeout and then relabelled the success as
+/// `timed_out`).
+///
+/// Timeout is cooperative: at the deadline we flip the job's cancel flag and
+/// wait a short grace period for the job to observe it. A job that ignores it
+/// is reported as `timed_out` with `confirmed=false` in the summary rather
+/// than pretending it was stopped.
+fn run_with_timeout(
+    job: Arc<dyn Job>,
+    params: serde_json::Value,
+    ctx: JobContext,
+    timeout: Duration,
+    grace: Duration,
+) -> JobReport {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = {
+        let ctx = ctx.clone();
+        thread::Builder::new()
+            .name(format!("kodo-job-{}", ctx.run_id))
+            .spawn(move || {
+                let report = job.execute(&params, &ctx);
+                let _ = tx.send(report);
+            })
     };
-    let summary = truncate(message, 80);
-    if let Err(error) = session::open(&dir, project, &summary, session::now(), Mode::Code) {
-        let text = format!("{error}");
-        if !text.contains("exists") && !text.contains("already") {
-            return Err(format!("session::open failed: {text}"));
-        }
+    if let Err(error) = worker {
+        return JobReport {
+            outcome: kodo_shell::JobOutcome::Failed,
+            processed: 0,
+            succeeded: 0,
+            failed: 0,
+            reason_code: Some("job_spawn_failed".into()),
+            summary: Some(format!("could not start the job: {error}")),
+            report_ref: None,
+        };
     }
-    session::record_ask(&dir, session_id, session::now(), message)
-        .map_err(|e| format!("record_ask failed: {e}"))?;
-    Ok(())
+    match rx.recv_timeout(timeout) {
+        Ok(report) => report,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // Single cancel signal at the deadline.
+            ctx.cancel.cancel();
+            match rx.recv_timeout(grace) {
+                Ok(report) => JobReport {
+                    outcome: kodo_shell::JobOutcome::Partial,
+                    reason_code: Some("timed_out".into()),
+                    summary: Some(format!(
+                        "job stopped after its deadline{}",
+                        report
+                            .summary
+                            .as_deref()
+                            .map(|s| format!(": {s}"))
+                            .unwrap_or_default()
+                    )),
+                    ..report
+                },
+                Err(_) => JobReport {
+                    outcome: kodo_shell::JobOutcome::Partial,
+                    processed: 0,
+                    succeeded: 0,
+                    failed: 0,
+                    reason_code: Some("timed_out".into()),
+                    summary: Some(
+                        "deadline passed and the job did not confirm it stopped (uncooperative job)"
+                            .into(),
+                    ),
+                    report_ref: None,
+                },
+            }
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => JobReport {
+            outcome: kodo_shell::JobOutcome::Failed,
+            processed: 0,
+            succeeded: 0,
+            failed: 0,
+            reason_code: Some("job_panicked".into()),
+            summary: Some("job thread exited without a report".into()),
+            report_ref: None,
+        },
+    }
 }
 
 fn emit_run_changed(app: &AppHandle<tauri::Wry>, scheduler: &Scheduler, run_id: &str) {
@@ -694,6 +973,7 @@ mod tests {
             project: "/p".into(),
             message: "hi".into(),
             personas: Vec::new(),
+            mode: None,
             budget_family: None,
             resource_key: Some("agent:/p".into()),
         };
@@ -759,5 +1039,502 @@ mod tests {
             next_fire_at: None,
             archived: false,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // M2 — host lifecycle seams (T009–T016)
+    //
+    // These drive the real production functions (`prepare_session_in`,
+    // `resolve_personas_in`, `wait_for_terminal`, `terminal_outcome`,
+    // `run_with_timeout`, `Scheduler::mark_finished`) rather than a mock of
+    // the IPC layer. Only the Tauri `AppHandle` — which needs a webview —
+    // stays out of the picture; everything that decides an outcome is here.
+    // -----------------------------------------------------------------------
+
+    use std::sync::atomic::AtomicU64;
+
+    /// Fresh temp dir per test, name-scoped so parallel tests never collide.
+    fn scratch(tag: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "kodo-sched-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn terminal(kind: run::TurnTerminalKind, delivery: &str) -> run::TurnTerminal {
+        run::TurnTerminal {
+            kind,
+            delivery: delivery.into(),
+            verification: String::new(),
+            failure_reason: String::new(),
+        }
+    }
+
+    fn scheduler_in(dir: &std::path::Path, unix: UnixSeconds) -> Scheduler {
+        let clock: Arc<dyn Clock> = Arc::new(kodo_core::scheduler::FixedClock { unix, mono: 0 });
+        Scheduler::open(dir, clock).expect("scheduler")
+    }
+
+    /// A job task the store will accept: `Once` must be in the future, so the
+    /// fire instant is a full hour past the fixed clock.
+    fn job_task(id: &str) -> ScheduledTask {
+        let mut task = make_valid_task();
+        task.id = id.into();
+        task.schedule = Schedule::Once {
+            fire_at: 1_700_003_600,
+        };
+        task.task = TaskKind::Job {
+            job_type: "demo".into(),
+            params: serde_json::json!({}),
+            resources: vec!["workspace:/p".into()],
+        };
+        task
+    }
+
+    /// T012: `run::start` returning `Ok` is not success. Only the terminal
+    /// summary's `ready` delivery is.
+    #[test]
+    fn a_ready_delivery_is_the_only_success() {
+        use run::TurnTerminalKind::{Completed, Failed, Stopped};
+        let cases = [
+            (Completed, "ready", Outcome::Succeeded),
+            (Completed, "partial", Outcome::Partial),
+            (Completed, "blocked", Outcome::Blocked),
+            (Completed, "failed", Outcome::Failed),
+            (Completed, "", Outcome::Failed),
+            (Completed, "something-new", Outcome::Partial),
+            (Stopped, "partial", Outcome::Cancelled),
+            (Stopped, "ready", Outcome::Cancelled),
+            (Failed, "ready", Outcome::Failed),
+        ];
+        for (kind, delivery, expected) in cases {
+            let summary = terminal(kind, delivery);
+            let (outcome, _, _) = terminal_outcome(false, Some(&summary));
+            assert_eq!(outcome, expected, "{kind:?}/{delivery}");
+        }
+        let summary = terminal(Completed, "ready");
+        let (_, delivery_axis, reason) = terminal_outcome(false, Some(&summary));
+        assert_eq!(delivery_axis, Some("delivered"));
+        assert_eq!(reason, None);
+    }
+
+    /// T013: a deadline outranks a late answer — the run did not finish in
+    /// time, so it is `timed_out` even though the executor eventually said
+    /// `ready`.
+    #[test]
+    fn a_deadline_outranks_a_late_ready_answer() {
+        let summary = terminal(run::TurnTerminalKind::Completed, "ready");
+        let (outcome, delivery, reason) = terminal_outcome(true, Some(&summary));
+        assert_eq!(outcome, Outcome::TimedOut);
+        assert_eq!(delivery, None);
+        assert_eq!(reason, Some("timed_out"));
+    }
+
+    /// T016: an executor that exited without a terminal summary must never be
+    /// recorded as success.
+    #[test]
+    fn a_missing_terminal_is_interrupted_never_success() {
+        let (outcome, delivery, reason) = terminal_outcome(false, None);
+        assert_eq!(outcome, Outcome::Interrupted);
+        assert_eq!(delivery, None);
+        assert_eq!(reason, Some("executor_exited_without_terminal"));
+    }
+
+    /// I-06 / T013: a run that answers immediately returns immediately, even
+    /// with a 30 s deadline, and is not cancelled on the way out.
+    #[test]
+    fn a_fast_run_does_not_wait_for_its_deadline() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(terminal(run::TurnTerminalKind::Completed, "ready"))
+            .expect("send");
+        let started = std::time::Instant::now();
+        let deadline = started + Duration::from_secs(30);
+        let (got, timed_out) =
+            wait_for_terminal(&rx, Some(deadline), Duration::from_millis(50), || {
+                panic!("a run that already finished must not be cancelled")
+            });
+        assert!(!timed_out);
+        assert_eq!(got.map(|t| t.delivery), Some("ready".to_string()));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "waited {:?} for a 30 s deadline",
+            started.elapsed()
+        );
+    }
+
+    /// T013: at the deadline the *same* execution is cancelled, and a job that
+    /// never confirms is still reported as timed out rather than hanging.
+    #[test]
+    fn a_deadline_cancels_the_same_execution_and_reports_timed_out() {
+        let (_tx, rx) = std::sync::mpsc::channel::<run::TurnTerminal>();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let deadline = std::time::Instant::now() + Duration::from_millis(60);
+        let (got, timed_out) =
+            wait_for_terminal(&rx, Some(deadline), Duration::from_millis(120), move || {
+                flag.store(true, Ordering::SeqCst);
+            });
+        assert!(timed_out, "an unconfirmed stop is still a timeout");
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "the deadline must signal cancel on the running execution"
+        );
+        assert!(got.is_none());
+    }
+
+    /// T013: a cooperative stop that confirms within the grace window keeps
+    /// its own summary, but the outcome is still `timed_out`.
+    #[test]
+    fn a_cancelled_run_that_confirms_keeps_its_summary() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            let _ = tx.send(terminal(run::TurnTerminalKind::Stopped, "partial"));
+        });
+        let deadline = std::time::Instant::now() + Duration::from_millis(40);
+        let (got, timed_out) =
+            wait_for_terminal(&rx, Some(deadline), Duration::from_secs(5), || {});
+        assert!(timed_out);
+        assert_eq!(got.map(|t| t.kind), Some(run::TurnTerminalKind::Stopped));
+        worker.join().expect("worker");
+    }
+
+    /// T016: a dropped channel is "the executor vanished", not a timeout.
+    #[test]
+    fn a_dropped_executor_channel_is_not_a_timeout() {
+        let (tx, rx) = std::sync::mpsc::channel::<run::TurnTerminal>();
+        drop(tx);
+        let (got, timed_out) = wait_for_terminal(&rx, None, Duration::from_millis(10), || {});
+        assert!(!timed_out);
+        assert!(got.is_none());
+    }
+
+    enum Behaviour {
+        Instant,
+        Cooperative,
+        Deaf,
+        Panic,
+    }
+
+    struct FakeJob(Behaviour);
+
+    fn report(outcome: kodo_shell::JobOutcome) -> JobReport {
+        JobReport {
+            outcome,
+            processed: 1,
+            succeeded: 0,
+            failed: 0,
+            reason_code: None,
+            summary: None,
+            report_ref: None,
+        }
+    }
+
+    impl Job for FakeJob {
+        fn job_type(&self) -> &str {
+            "fake"
+        }
+        fn execute(&self, _params: &serde_json::Value, ctx: &JobContext) -> JobReport {
+            match self.0 {
+                Behaviour::Instant => report(kodo_shell::JobOutcome::Succeeded),
+                Behaviour::Cooperative => {
+                    let until = std::time::Instant::now() + Duration::from_secs(3);
+                    while std::time::Instant::now() < until {
+                        if ctx.cancel.is_cancelled() {
+                            let mut report = report(kodo_shell::JobOutcome::Partial);
+                            report.reason_code = Some("cancelled".into());
+                            return report;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    report(kodo_shell::JobOutcome::Succeeded)
+                }
+                Behaviour::Deaf => {
+                    thread::sleep(Duration::from_secs(2));
+                    report(kodo_shell::JobOutcome::Succeeded)
+                }
+                Behaviour::Panic => panic!("job blew up"),
+            }
+        }
+    }
+
+    fn job_context(run_id: &str) -> JobContext {
+        JobContext {
+            run_id: run_id.into(),
+            deadline: None,
+            cancel: JobCancellation::new(),
+        }
+    }
+
+    /// I-06 / T013: the old shape always waited the full timeout and then
+    /// relabelled the finished job as `timed_out`.
+    #[test]
+    fn a_fast_job_is_not_relabelled_timed_out() {
+        let job: Arc<dyn Job> = Arc::new(FakeJob(Behaviour::Instant));
+        let started = std::time::Instant::now();
+        let report = run_with_timeout(
+            job,
+            serde_json::json!({}),
+            job_context("fast"),
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+        );
+        assert_eq!(report.outcome, kodo_shell::JobOutcome::Succeeded);
+        assert_eq!(report.reason_code, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a 1 ms job waited {:?} against a 60 s deadline",
+            started.elapsed()
+        );
+    }
+
+    /// T013: a cooperative job observes the cancel flag and its partial work is
+    /// recorded as `timed_out`, not as a silent success.
+    #[test]
+    fn a_cooperative_job_stops_at_the_deadline() {
+        let job: Arc<dyn Job> = Arc::new(FakeJob(Behaviour::Cooperative));
+        let report = run_with_timeout(
+            job,
+            serde_json::json!({}),
+            job_context("coop"),
+            Duration::from_millis(60),
+            Duration::from_secs(5),
+        );
+        assert_eq!(report.outcome, kodo_shell::JobOutcome::Partial);
+        assert_eq!(report.reason_code.as_deref(), Some("timed_out"));
+    }
+
+    /// T016: a job that ignores cancellation is reported honestly instead of
+    /// being claimed as stopped.
+    #[test]
+    fn an_uncooperative_job_is_reported_as_unconfirmed() {
+        let job: Arc<dyn Job> = Arc::new(FakeJob(Behaviour::Deaf));
+        let report = run_with_timeout(
+            job,
+            serde_json::json!({}),
+            job_context("deaf"),
+            Duration::from_millis(60),
+            Duration::from_millis(80),
+        );
+        assert_eq!(report.outcome, kodo_shell::JobOutcome::Partial);
+        assert_eq!(report.reason_code.as_deref(), Some("timed_out"));
+        assert!(
+            report
+                .summary
+                .as_deref()
+                .is_some_and(|s| s.contains("uncooperative")),
+            "summary was {:?}",
+            report.summary
+        );
+    }
+
+    /// T016: a panicking job becomes a failed run, not a stuck one.
+    #[test]
+    fn a_panicking_job_is_reported_as_failed() {
+        let job: Arc<dyn Job> = Arc::new(FakeJob(Behaviour::Panic));
+        let report = run_with_timeout(
+            job,
+            serde_json::json!({}),
+            job_context("panic"),
+            Duration::from_secs(5),
+            Duration::from_millis(80),
+        );
+        assert_eq!(report.outcome, kodo_shell::JobOutcome::Failed);
+        assert_eq!(report.reason_code.as_deref(), Some("job_panicked"));
+    }
+
+    /// T010: the session id used by the run is the one `session::open`
+    /// minted, and it names a real log with the ask already recorded.
+    #[test]
+    fn a_scheduled_run_uses_the_session_id_the_core_minted() {
+        let dir = scratch("session");
+        let project = scratch("project");
+        let prepared = prepare_session_in(
+            &dir,
+            &project,
+            "整理季度报告",
+            kodo_core::session::Mode::Work,
+        )
+        .expect("session");
+        assert!(!prepared.id.is_empty());
+        assert_eq!(prepared.dir, dir);
+        assert!(
+            dir.join(format!("{}.log", prepared.id)).exists(),
+            "the id must name a real session log"
+        );
+        let session = kodo_core::session::load(&dir, &prepared.id).expect("load");
+        assert_eq!(session.mode, kodo_core::session::Mode::Work);
+        assert_eq!(session.project, project);
+        assert_eq!(
+            session.turns.first().map(|turn| turn.ask.as_str()),
+            Some("整理季度报告")
+        );
+
+        // Two occurrences are two sessions: the id is never recycled.
+        let second = prepare_session_in(&dir, &project, "第二轮", kodo_core::session::Mode::Code)
+            .expect("second session");
+        assert_ne!(second.id, prepared.id);
+    }
+
+    /// T014: the stored mode label survives, and a task written before the
+    /// field existed stays on the legacy Code path.
+    #[test]
+    fn scheduled_mode_survives_and_legacy_tasks_stay_on_code() {
+        assert_eq!(
+            map_mode(Some("work")),
+            (kodo_agent::AgentMode::Work, kodo_core::session::Mode::Work)
+        );
+        assert_eq!(
+            map_mode(Some("code")),
+            (kodo_agent::AgentMode::Code, kodo_core::session::Mode::Code)
+        );
+        assert_eq!(
+            map_mode(None),
+            (kodo_agent::AgentMode::Code, kodo_core::session::Mode::Code)
+        );
+        // An unknown label never silently becomes Work.
+        assert_eq!(
+            map_mode(Some("something-new")),
+            (kodo_agent::AgentMode::Code, kodo_core::session::Mode::Code)
+        );
+    }
+
+    /// T014: personas are resolved through the same registry the composer
+    /// uses, and an unknown name is a specific error rather than a fallback.
+    #[test]
+    fn scheduled_personas_resolve_through_the_same_registry() {
+        let user = scratch("agents-user");
+        let project = scratch("agents-project");
+        std::fs::write(
+            user.join("sched-auditor.md"),
+            "# Agent: sched-auditor\n## description\nScheduled auditor.\n\
+             ## instructions\nSCHEDULED-PERSONA.\n",
+        )
+        .expect("write persona");
+
+        let chain = vec!["sched-auditor".to_string()];
+        let resolved = resolve_personas_in(&user, Some(&project), &chain).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "sched-auditor");
+        assert!(
+            resolved[0].instructions.contains("SCHEDULED-PERSONA"),
+            "instructions were {:?}",
+            resolved[0].instructions
+        );
+
+        let ghost = vec!["ghost".to_string()];
+        let error = resolve_personas_in(&user, Some(&project), &ghost).expect_err("unknown name");
+        assert!(error.starts_with("persona_unresolved:"), "{error}");
+
+        // No personas is not an error and never injects a default role.
+        assert!(resolve_personas_in(&user, Some(&project), &[])
+            .expect("empty")
+            .is_empty());
+    }
+
+    /// T015: scheduled triggers never expand permissions.
+    #[test]
+    fn scheduled_runs_keep_the_ask_permission() {
+        assert_eq!(AGENT_RUN_PERMISSION, Permission::Ask);
+    }
+
+    /// T015/T016: the resource key stays taken until the terminal row is
+    /// written, and the run record carries the same session id.
+    #[test]
+    fn the_resource_lock_is_held_until_the_terminal_row_is_written() {
+        let dir = scratch("lock");
+        let scheduler = scheduler_in(&dir, 1_700_000_000);
+        let task = scheduler.create_task(job_task("t-lock")).expect("create");
+        let dispatched = scheduler.enqueue_manual(&task.id, "req-1").expect("manual");
+        let keys = dispatched.task.task.resource_keys();
+        let handle = scheduler
+            .try_admit(&dispatched.run.id, &keys)
+            .expect("admit");
+        scheduler
+            .mark_started(&dispatched.run.id)
+            .expect("mark started");
+
+        // In flight: the same key is busy.
+        assert!(matches!(
+            scheduler.try_admit("other-run", &keys),
+            Err(SchedulerError::ResourceBusy)
+        ));
+
+        scheduler
+            .mark_finished(
+                &dispatched.run.id,
+                Outcome::Succeeded,
+                Some("delivered"),
+                None,
+                Some("sess-1"),
+                Some("sess-1"),
+                None,
+                None,
+                handle,
+            )
+            .expect("finish");
+
+        let run = scheduler
+            .store()
+            .get_run(&dispatched.run.id)
+            .expect("get run")
+            .expect("row");
+        assert_eq!(run.outcome, Some(Outcome::Succeeded));
+        assert_eq!(run.session_id.as_deref(), Some("sess-1"));
+        assert!(
+            scheduler.try_admit("other-run", &keys).is_ok(),
+            "the key must be free only after the terminal row landed"
+        );
+    }
+
+    /// T016: a run left `running` by a crash is recovered as interrupted on
+    /// the next start, so the task is not blocked forever.
+    #[test]
+    fn a_run_left_running_by_a_crash_is_recovered_as_interrupted() {
+        let dir = scratch("recover");
+        let first = scheduler_in(&dir, 1_700_000_000);
+        let task = first.create_task(job_task("t-recover")).expect("create");
+        let dispatched = first.enqueue_manual(&task.id, "req-1").expect("manual");
+        let keys = dispatched.task.task.resource_keys();
+        let _handle = first.try_admit(&dispatched.run.id, &keys).expect("admit");
+        first.mark_started(&dispatched.run.id).expect("started");
+        // Process dies here: no mark_finished, no release.
+
+        let second = scheduler_in(&dir, 1_700_000_500);
+        let recovered = recover_inflight(second.store(), 1_700_000_500).expect("recover");
+        assert_eq!(recovered, 1);
+        let run = second
+            .store()
+            .get_run(&dispatched.run.id)
+            .expect("get run")
+            .expect("row");
+        assert_eq!(run.outcome, Some(Outcome::Interrupted));
+        assert!(run.finished_at.is_some());
+    }
+
+    /// T016: releasing with a stale token must not evict a newer run.
+    #[test]
+    fn releasing_a_stale_generation_leaves_the_newer_run() {
+        let runs = Runs::default();
+        let stale = runs.begin("s").expect("first");
+        runs.cancel("s");
+        runs.release("s", &stale);
+        assert!(!runs.has_run("s"));
+
+        let fresh = runs.begin("s").expect("second");
+        // A late `release` from the earlier generation arrives now.
+        runs.release("s", &stale);
+        assert!(
+            runs.has_run("s"),
+            "a stale release must not evict the current generation"
+        );
+        assert!(fresh.is_live());
+        runs.release("s", &fresh);
+        assert!(!runs.has_run("s"));
     }
 }

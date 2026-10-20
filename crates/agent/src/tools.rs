@@ -378,39 +378,128 @@ pub fn read_text(path: &Path, max_lines: usize) -> String {
     read_text_result(path, max_lines).unwrap_or_else(|error| format!("(无法读取: {error})"))
 }
 
-pub(crate) fn read_text_result(path: &Path, max_lines: usize) -> Result<String, String> {
-    if crate::office::is_docx(&path.to_string_lossy()) {
-        let doc = crate::office::read_docx(path, max_lines.saturating_mul(120))?;
-        return Ok(if doc.truncated {
-            format!("{}\n…（DOCX 正文已截断）", doc.text)
+/// Character budget for DOCX body / spreadsheet cell extraction.
+///
+/// Extraction is done once at a generous budget and then sliced by line, so
+/// "continue reading from line N" means the same thing for text, DOCX and
+/// sheets, and never re-reads the head to fake a continuation.
+const EXTRACT_BUDGET_CHARS: usize = 4 * 1024 * 1024;
+
+/// Structured result of one read: what the model received, which range, of
+/// which representation, at which source version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOutcome {
+    pub text: String,
+    pub representation: crate::read_receipt::Representation,
+    pub version: String,
+    pub total_units: Option<usize>,
+    /// 1-based inclusive range actually delivered.
+    pub shown: (usize, usize),
+    /// The *delivery* was clipped: extraction budget, character cap, or an
+    /// incomplete observation. A window that simply ends before the last line
+    /// is not "clipped" — the range itself is accurate, it is just partial.
+    pub truncated: bool,
+}
+
+impl ReadOutcome {
+    /// Build the receipt this read earns. `complete` is derived from the
+    /// delivered range, never asserted by the caller.
+    pub fn receipt(&self, path: &str) -> crate::read_receipt::ReadReceipt {
+        let mut receipt =
+            crate::read_receipt::ReadReceipt::new(path, self.representation, self.version.clone())
+                .with_total(self.total_units);
+        if self.total_units == Some(0) {
+            receipt.complete = true;
         } else {
-            doc.text
+            receipt.add_range(self.shown.0, self.shown.1);
+        }
+        if self.truncated {
+            receipt.note_truncated();
+        }
+        receipt
+    }
+}
+
+/// Read a file for the model, with an optional 1-based start line.
+///
+/// The returned range is exactly what the caller may put in context: a
+/// truncated window never claims the whole file.
+pub fn read_outcome(
+    path: &Path,
+    start_line: Option<usize>,
+    max_lines: usize,
+    max_chars: Option<usize>,
+) -> Result<ReadOutcome, String> {
+    use crate::read_receipt::Representation;
+    let (body, representation, mut clipped) = if crate::office::is_docx(&path.to_string_lossy()) {
+        let doc = crate::office::read_docx(path, EXTRACT_BUDGET_CHARS)?;
+        (doc.text, Representation::DocxText, doc.truncated)
+    } else if crate::office::is_spreadsheet(&path.to_string_lossy()) {
+        let sheet = crate::office::read_spreadsheet(path, EXTRACT_BUDGET_CHARS)?;
+        (sheet.text, Representation::SheetCells, sheet.truncated)
+    } else {
+        let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+        if meta.len() > 8 * 1024 * 1024 {
+            return Err("text file exceeds 8 MiB".into());
+        }
+        let raw = fs::read(path).map_err(|e| e.to_string())?;
+        if raw.contains(&0) {
+            return Err("binary file refused".into());
+        }
+        let text = String::from_utf8(raw).map_err(|e| e.to_string())?;
+        (text, Representation::RawText, false)
+    };
+    // Digest the source bytes, not the extracted text: a DOCX that changed
+    // only in styles/images still counts as a new version for overwrite
+    // purposes.
+    let version = crate::read_receipt::version_of(&fs::read(path).map_err(|e| e.to_string())?);
+    let lines: Vec<&str> = body.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return Ok(ReadOutcome {
+            text: String::new(),
+            representation,
+            version,
+            total_units: Some(0),
+            shown: (1, 0),
+            truncated: false,
         });
     }
-    if crate::office::is_spreadsheet(&path.to_string_lossy()) {
-        let sheet = crate::office::read_spreadsheet(path, max_lines.saturating_mul(120))?;
-        let mut text = sheet.text;
-        if sheet.truncated {
-            text.push_str(&format!(
-                "\n… 表格内容按预算截断（{} 个 sheet）",
-                sheet.sheets
-            ));
+    let start = start_line.unwrap_or(1).clamp(1, total);
+    let end = start
+        .saturating_add(max_lines.max(1).saturating_sub(1))
+        .min(total);
+    let mut text = lines[start - 1..end].join("\n");
+    // A character cap is a second truncation surface: if it fires, the model
+    // did not receive the requested lines and the read cannot be complete.
+    if let Some(cap) = max_chars {
+        if text.chars().count() > cap {
+            text = text.chars().take(cap).collect();
+            clipped = true;
         }
-        return Ok(text);
     }
-    if fs::metadata(path).map_err(|e| e.to_string())?.len() > 8 * 1024 * 1024 {
-        return Err("text file exceeds 8 MiB".into());
+    // One sentence for the model *and* the UI (T017): the window, the total,
+    // and whether continuing can still reach the rest. The desktop shows the
+    // same string from `attachment::view_of`, so a partial read cannot look
+    // complete on one side.
+    if end < total || clipped {
+        let (_, note) =
+            crate::attachment::describe(representation, Some(total), (start, end), clipped);
+        text.push_str("\n… ");
+        text.push_str(&note);
     }
-    let raw = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if raw.as_bytes().contains(&0) {
-        return Err("binary file refused".into());
-    }
-    let mut text = raw.lines().take(max_lines).collect::<Vec<_>>().join("\n");
-    let total = raw.lines().count();
-    if total > max_lines {
-        text.push_str(&format!("\n… 共 {total} 行"));
-    }
-    Ok(text)
+    Ok(ReadOutcome {
+        text,
+        representation,
+        version,
+        total_units: Some(total),
+        shown: (start, end),
+        truncated: clipped,
+    })
+}
+
+pub(crate) fn read_text_result(path: &Path, max_lines: usize) -> Result<String, String> {
+    read_outcome(path, None, max_lines, None).map(|outcome| outcome.text)
 }
 
 /// Outcome of a local command run (mapped from [`ProcessStatus`]).
@@ -1293,11 +1382,59 @@ pub fn write_project_file(
     relative: &str,
     content: &str,
 ) -> Result<(String, u32, u32), String> {
+    write_project_file_checked(project, relative, content, None)
+        .map(|(path, added, removed, _version)| (path, added, removed))
+}
+
+/// Current content version of a project file (`None` when it does not exist).
+pub fn file_version(project: &Path, relative: &str) -> Result<Option<String>, String> {
+    let full = resolve_in_project(project, relative)?;
+    match fs::read(&full) {
+        Ok(bytes) => Ok(Some(crate::read_receipt::version_of(&bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Atomic, version-checked write.
+///
+/// `expect_version` is the digest the caller observed when it read the file.
+/// When it is `Some`, the write only lands if the file still has those bytes:
+/// the check runs before staging and again immediately before the rename, so
+/// a concurrent external edit is refused instead of silently overwritten.
+/// A failed write leaves the original file untouched and removes only the
+/// temporary file this call created.
+pub fn write_project_file_checked(
+    project: &Path,
+    relative: &str,
+    content: &str,
+    expect_version: Option<&str>,
+) -> Result<(String, u32, u32, String), String> {
     let full = resolve_in_project(project, relative)?;
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let docx = crate::office::is_docx(relative);
+    let current = match fs::read(&full) {
+        Ok(bytes) => Some(crate::read_receipt::version_of(&bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    if let Some(expected) = expect_version {
+        match &current {
+            Some(now) if now == expected => {}
+            Some(now) => {
+                return Err(format!(
+                    "stale_source: `{relative}` 在读取后已被修改（读取版本 {expected}，当前版本 {now}）；未写入，请重新读取后再修改"
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "stale_source: `{relative}` 在读取后已被删除或移动；未写入，请重新确认目标文件"
+                ))
+            }
+        }
+    }
     let old = if docx {
         crate::office::read_docx(&full, 2 * 1024 * 1024)
             .map(|doc| doc.text)
@@ -1306,12 +1443,51 @@ pub fn write_project_file(
         fs::read_to_string(&full).unwrap_or_default()
     };
     let (added, removed) = crate::patch::line_diff_counts(&old, content);
-    if docx {
-        crate::office::write_docx(&full, content)?;
-    } else {
-        fs::write(&full, content).map_err(|e| e.to_string())?;
+    let staged = stage_file(&full, relative, content, docx)?;
+    // Second check: narrows (does not close) the external-write window between
+    // the precondition and the rename. A standard cross-platform rename cannot
+    // offer a true compare-and-swap to other editors.
+    if let Some(expected) = expect_version {
+        let now = fs::read(&full)
+            .ok()
+            .map(|bytes| crate::read_receipt::version_of(&bytes));
+        if now.as_deref() != Some(expected) {
+            let _ = fs::remove_file(&staged);
+            return Err(format!(
+                "stale_source: `{relative}` 在写入前发生变化；未覆盖，请重新读取后再修改"
+            ));
+        }
     }
-    Ok((relative.trim().to_owned(), added, removed))
+    if let Err(error) = fs::rename(&staged, &full) {
+        let _ = fs::remove_file(&staged);
+        return Err(format!("写入失败，原文件保持不变：{error}"));
+    }
+    let version = crate::read_receipt::version_of(&fs::read(&full).map_err(|e| e.to_string())?);
+    Ok((relative.trim().to_owned(), added, removed, version))
+}
+
+/// Write `content` to a sibling temp file and return its path.
+fn stage_file(full: &Path, relative: &str, content: &str, docx: bool) -> Result<PathBuf, String> {
+    let parent = full.parent().unwrap_or_else(|| Path::new("."));
+    let name = full
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "output".to_owned());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let staged = parent.join(format!(".{name}.kodo-tmp-{}-{nanos}", std::process::id()));
+    let result = if docx {
+        crate::office::write_docx(&staged, content)
+    } else {
+        fs::write(&staged, content).map_err(|e| e.to_string())
+    };
+    if let Err(error) = result {
+        let _ = fs::remove_file(&staged);
+        return Err(format!("写入 `{relative}` 失败，原文件保持不变：{error}"));
+    }
+    Ok(staged)
 }
 
 /// Verification command for a project layout, if any.
@@ -1478,6 +1654,55 @@ mod tests {
         let text = read_text(&path, 2);
         assert!(text.contains("a"));
         assert!(text.contains("…"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// AC-004: a write that fails while staging leaves the original file intact
+    /// and does not leave a temp file behind.
+    #[test]
+    fn failed_write_keeps_the_original_and_cleans_its_temp_file() {
+        let dir = std::env::temp_dir().join(format!("kodo-fail-write-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let original = "# 原标题\n正文\n";
+        fs::write(dir.join("doc.md"), original).unwrap();
+        // Empty DOCX content is refused by the office writer before staging.
+        let error = write_project_file_checked(&dir, "doc.docx", "   ", None)
+            .expect_err("an empty DOCX must be refused");
+        assert!(error.contains("失败") || error.contains("empty"), "{error}");
+        assert_eq!(
+            fs::read_to_string(dir.join("doc.md")).unwrap(),
+            original,
+            "an unrelated file must be untouched"
+        );
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains("kodo-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The version precondition refuses a stale overwrite at the file layer too
+    /// (not only in the agent's ledger).
+    #[test]
+    fn version_precondition_refuses_a_stale_overwrite() {
+        let dir = std::env::temp_dir().join(format!("kodo-version-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.md"), "one\n").unwrap();
+        let stale = file_version(&dir, "a.md").unwrap().unwrap();
+        fs::write(dir.join("a.md"), "one\ntwo\n").unwrap();
+        let error = write_project_file_checked(&dir, "a.md", "replaced\n", Some(&stale))
+            .expect_err("stale version must be refused");
+        assert!(error.contains("stale_source"), "{error}");
+        assert_eq!(
+            fs::read_to_string(dir.join("a.md")).unwrap(),
+            "one\ntwo\n",
+            "the external edit must survive"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
