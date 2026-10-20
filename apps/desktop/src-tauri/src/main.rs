@@ -426,6 +426,19 @@ fn load_session(runs: State<'_, Runs>, id: String) -> Result<SessionView, String
     load(&dir, &id)
 }
 
+/// Authoritative live state for a conversation the GUI is opening. The log is
+/// the source of truth for finished steps; this fills the gap for a turn that
+/// is still running (and for an approval that was requested while the user was
+/// looking at another conversation).
+#[tauri::command]
+fn run_state(
+    runs: State<'_, Runs>,
+    approvals: State<'_, Approvals>,
+    id: String,
+) -> run::RunStateView {
+    runs.state(&id, approvals.pending(&id))
+}
+
 #[tauri::command]
 fn retitle_session(id: String, title: String) -> Result<SessionView, String> {
     let dir = sessions()?;
@@ -1728,6 +1741,7 @@ fn main() {
             reveal_file,
             open_session,
             load_session,
+            run_state,
             retitle_session,
             archive_session,
             restore_session,

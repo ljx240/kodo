@@ -191,6 +191,8 @@ export type Core = {
   session?: unknown;
   /** Additional sessions keyed by id for project-switching tests. */
   sessions?: Record<string, unknown>;
+  /** `run_state` answers keyed by session id (live run facts). */
+  runStates?: Record<string, Record<string, unknown>>;
   /** What `git_branch` reports. */
   branch?: string | null;
   /** `list_archived` payload. */
@@ -362,6 +364,9 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     const settingsLog: Array<{ key: string; value: string }> = [];
     (window as unknown as { __settingsLog?: unknown }).__settingsLog = settingsLog;
     let session = config.session ?? null;
+    const sessionsById = { ...(config.sessions ?? {}) } as Record<string, unknown>;
+    const runStates = { ...(config.runStates ?? {}) } as Record<string, Record<string, unknown>>;
+    let loadDelay = 0;
     let workspace = config.workspace ?? { projects: [], sessions: [] };
     const files = config.files ?? ["src/app.ts", "src/util.ts", "README.md", "package.json"];
     const sendLog: Array<{
@@ -556,10 +561,21 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             if (config.workspace === null)
               throw "HOME is not set, so there is nowhere to keep the project list";
             return workspace;
-          case "load_session":
+          case "load_session": {
+            const payload = sessionsById[String(args?.id ?? "")] ?? session;
+            if (loadDelay) {
+              await new Promise((resolve) => setTimeout(resolve, loadDelay));
+            }
+            return payload;
+          }
+          case "run_state":
             return (
-              (config.sessions as Record<string, unknown> | undefined)?.[String(args?.id ?? "")] ??
-              session
+              runStates[String(args?.id ?? "")] ?? {
+                running: false,
+                startedAt: null,
+                progress: null,
+                approval: null,
+              }
             );
           case "git_branch":
             return config.branch ?? null;
@@ -1656,6 +1672,24 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
         callback({ event: "run:event", id: 1, payload });
     };
 
+    // Runtime knobs for switch-away-and-back tests: a live run changes the
+    // persisted log and its live facts while the user is on another session.
+    (window as unknown as { __setRunState: unknown }).__setRunState = (
+      id: string,
+      state: Record<string, unknown>,
+    ) => {
+      runStates[id] = state;
+    };
+    (window as unknown as { __setSession: unknown }).__setSession = (
+      id: string,
+      payload: unknown,
+    ) => {
+      sessionsById[id] = payload;
+    };
+    (window as unknown as { __setLoadDelay: unknown }).__setLoadDelay = (ms: number) => {
+      loadDelay = ms;
+    };
+
     // The event plugin's local registry — `listen`'s unlisten calls this before
     // its invoke. Without it StrictMode's double-mount leaves two live handlers
     // and every event applies twice.
@@ -1677,6 +1711,41 @@ export function emit(page: Page, payload: unknown): Promise<void> {
   return page.evaluate(
     (value) => (window as unknown as { __emit: (payload: unknown) => void }).__emit(value),
     payload,
+  );
+}
+
+/** Updates the `run_state` answer for a session (switch-away-and-back tests). */
+export function setRunState(page: Page, id: string, state: unknown): Promise<void> {
+  return page.evaluate(
+    ([sessionId, value]) =>
+      (
+        window as unknown as {
+          __setRunState: (id: string, state: unknown) => void;
+        }
+      ).__setRunState(sessionId, value),
+    [id, state] as const,
+  );
+}
+
+/** Updates the `load_session` payload for a session. */
+export function setSession(page: Page, id: string, payload: unknown): Promise<void> {
+  return page.evaluate(
+    ([sessionId, value]) =>
+      (
+        window as unknown as {
+          __setSession: (id: string, payload: unknown) => void;
+        }
+      ).__setSession(sessionId, value),
+    [id, payload] as const,
+  );
+}
+
+/** Slows `load_session` down to open the log-load / event-replay race. */
+export function setLoadDelay(page: Page, ms: number): Promise<void> {
+  return page.evaluate(
+    (value) =>
+      (window as unknown as { __setLoadDelay: (ms: number) => void }).__setLoadDelay(value),
+    ms,
   );
 }
 

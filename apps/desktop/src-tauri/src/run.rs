@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter};
 
@@ -28,12 +28,71 @@ pub use kodo_shell::ApprovalChoice;
 pub struct RunToken {
     generation: u64,
     alive: Arc<AtomicBool>,
+    started_at: u64,
+    progress: Arc<Mutex<Option<RunProgressView>>>,
 }
 
 impl RunToken {
     pub fn is_live(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
     }
+
+    fn set_progress(&self, phase: &str, detail: &str) {
+        let mut current = self
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = Some(RunProgressView {
+            phase: phase.to_owned(),
+            detail: detail.to_owned(),
+        });
+    }
+}
+
+/// The phase line a reopened conversation shows for a still-running turn.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunProgressView {
+    pub phase: String,
+    pub detail: String,
+}
+
+/// A step blocked on the user, mirrored here so switching away and back does
+/// not lose the approval card (the original `approvalRequest` event is not
+/// replayed by the runner).
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingApprovalView {
+    pub run_id: u64,
+    pub step: u32,
+    pub kind: String,
+    pub detail: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub risk_category: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Authoritative live facts for one session. `approval` is only populated for
+/// the generation that currently owns the session.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStateView {
+    pub running: bool,
+    pub started_at: Option<u64>,
+    pub progress: Option<RunProgressView>,
+    pub approval: Option<PendingApprovalView>,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Default, Clone)]
@@ -54,12 +113,39 @@ impl Runs {
         let token = RunToken {
             generation: GENERATION.fetch_add(1, Ordering::SeqCst),
             alive: Arc::new(AtomicBool::new(true)),
+            started_at: now_ms(),
+            progress: Arc::new(Mutex::new(None)),
         };
         runs.insert(id.to_owned(), token.clone());
         Some(token)
     }
     pub fn has_run(&self, id: &str) -> bool {
         self.lock().contains_key(id)
+    }
+    /// Read-only snapshot for a conversation that is being reopened. A stale
+    /// approval from an earlier generation is filtered out here rather than
+    /// trusted to cleanup timing.
+    pub fn state(&self, id: &str, approval: Option<PendingApprovalView>) -> RunStateView {
+        let runs = self.lock();
+        let Some(token) = runs.get(id) else {
+            return RunStateView {
+                running: false,
+                started_at: None,
+                progress: None,
+                approval: None,
+            };
+        };
+        let progress = token
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        RunStateView {
+            running: true,
+            started_at: Some(token.started_at),
+            progress,
+            approval: approval.filter(|pending| pending.run_id == token.generation),
+        }
     }
     pub fn cancel(&self, id: &str) {
         if let Some(token) = self.lock().get(id) {
@@ -109,11 +195,15 @@ fn emit_run(app: &AppHandle, token: &RunToken, event: RunEvent) {
 type WaitMap = HashMap<(String, u64, u32), Sender<ApprovalChoice>>;
 type AllowMap = HashMap<String, HashSet<String>>;
 
+type PendingMap = HashMap<String, PendingApprovalView>;
+
 #[derive(Default, Clone)]
 pub struct Approvals {
     waits: Arc<Mutex<WaitMap>>,
     /// session id → command fingerprints the user allowed for the whole session.
     session_allows: Arc<Mutex<AllowMap>>,
+    /// session id → the approval card currently blocking that run.
+    pending: Arc<Mutex<PendingMap>>,
 }
 
 impl Approvals {
@@ -127,6 +217,32 @@ impl Approvals {
         self.session_allows
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn pendings(&self) -> MutexGuard<'_, PendingMap> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn set_pending(&self, session: &str, approval: PendingApprovalView) {
+        self.pendings().insert(session.to_owned(), approval);
+    }
+
+    pub fn pending(&self, session: &str) -> Option<PendingApprovalView> {
+        self.pendings().get(session).cloned()
+    }
+
+    /// Drop the card only when it still belongs to this generation + step —
+    /// a late ticket from a cancelled run must not clear its successor's card.
+    fn clear_pending(&self, session: &str, generation: u64, step: u32) {
+        let mut pending = self.pendings();
+        let owned = pending
+            .get(session)
+            .is_some_and(|view| view.run_id == generation && view.step == step);
+        if owned {
+            pending.remove(session);
+        }
     }
 
     pub fn wait_point(
@@ -157,7 +273,10 @@ impl Approvals {
         choice: ApprovalChoice,
     ) -> bool {
         match self.waits().remove(&(session.to_owned(), generation, step)) {
-            Some(tx) => tx.send(choice).is_ok(),
+            Some(tx) => {
+                self.clear_pending(session, generation, step);
+                tx.send(choice).is_ok()
+            }
             None => false,
         }
     }
@@ -178,6 +297,7 @@ impl Approvals {
 
     pub fn clear_session(&self, session: &str) {
         self.waits().retain(|(id, _, _), _| id != session);
+        self.pendings().remove(session);
     }
 }
 
@@ -193,6 +313,8 @@ impl Drop for ApprovalTicket {
         self.map
             .waits()
             .remove(&(self.session.clone(), self.generation, self.step));
+        self.map
+            .clear_pending(&self.session, self.generation, self.step);
     }
 }
 
@@ -304,15 +426,32 @@ pub fn start(
                 };
                 let cwd = approve_project.to_string_lossy().into_owned();
                 let safe_command = kodo_agent::tools::redact_secrets(command);
+                let kind_label = step_kind_label(kind).to_owned();
+                let detail = format!("{safe_command}  ·  {reason}");
+                // Mirror the request before emitting: a conversation that is
+                // not open right now still needs this card when it comes back.
+                approve_approvals.set_pending(
+                    &approve_id,
+                    PendingApprovalView {
+                        run_id: approve_token.generation,
+                        step,
+                        kind: kind_label.clone(),
+                        detail: detail.clone(),
+                        command: safe_command.clone(),
+                        cwd: cwd.clone(),
+                        risk_category: risk_category.to_owned(),
+                        reason: reason.to_owned(),
+                    },
+                );
                 emit_run(
                     &approve_app,
                     &approve_token,
                     RunEvent::ApprovalRequest {
                         session: approve_id.clone(),
                         step,
-                        kind: step_kind_label(kind).to_owned(),
-                        detail: format!("{safe_command}  ·  {reason}"),
-                        command: safe_command.clone(),
+                        kind: kind_label,
+                        detail,
+                        command: safe_command,
                         cwd,
                         risk_category: risk_category.to_owned(),
                         reason: reason.to_owned(),
@@ -395,6 +534,7 @@ pub fn start(
                     );
                 }
                 SinkEvent::Progress { phase, detail } => {
+                    record_token.set_progress(&phase, &detail);
                     emit_run(
                         &record_app,
                         &record_token,
@@ -744,6 +884,68 @@ mod tests {
         assert!(
             !next_turn.is_session_allowed("s", &approval_fingerprint(StepKind::Command, command))
         );
+    }
+
+    fn pending(run_id: u64, step: u32) -> PendingApprovalView {
+        PendingApprovalView {
+            run_id,
+            step,
+            kind: "Command".into(),
+            detail: "cargo test  ·  safe".into(),
+            command: "cargo test".into(),
+            cwd: "/tmp/project".into(),
+            risk_category: "Safe".into(),
+            reason: "tests".into(),
+        }
+    }
+
+    #[test]
+    fn run_state_reports_started_at_progress_and_pending_approval() {
+        let runs = Runs::default();
+        let approvals = Approvals::default();
+        let idle = runs.state("s", approvals.pending("s"));
+        assert!(!idle.running);
+        assert!(idle.started_at.is_none());
+
+        let token = runs.begin("s").unwrap();
+        token.set_progress("execute", "cargo test");
+        approvals.set_pending("s", pending(token.generation, 1));
+        let live = runs.state("s", approvals.pending("s"));
+        assert!(live.running);
+        assert!(live.started_at.is_some_and(|started| started > 0));
+        assert_eq!(live.progress.unwrap().phase, "execute");
+        let approval = live.approval.expect("pending approval is visible");
+        assert_eq!(approval.run_id, token.generation);
+        assert_eq!(approval.step, 1);
+
+        // A card from an older generation is not surfaced for this run.
+        approvals.set_pending("s", pending(token.generation + 1, 2));
+        assert!(runs.state("s", approvals.pending("s")).approval.is_none());
+        approvals.clear_session("s");
+        assert!(runs.state("s", approvals.pending("s")).approval.is_none());
+
+        runs.release("s", &token);
+        assert!(!runs.state("s", approvals.pending("s")).running);
+    }
+
+    #[test]
+    fn pending_approval_clears_without_touching_a_successor() {
+        let approvals = Approvals::default();
+        let (ticket, _rx) = approvals.wait_point("s", 1, 1);
+        approvals.set_pending("s", pending(1, 1));
+        assert!(approvals.pending("s").is_some());
+        assert!(approvals.resolve("s", 1, 1, ApprovalChoice::AllowOnce));
+        assert!(approvals.pending("s").is_none());
+        drop(ticket);
+
+        // A late ticket from generation 1 must not clear generation 2's card.
+        let (stale, _) = approvals.wait_point("s", 1, 2);
+        let (_current, _) = approvals.wait_point("s", 2, 1);
+        approvals.set_pending("s", pending(2, 1));
+        drop(stale);
+        assert_eq!(approvals.pending("s").unwrap().run_id, 2);
+        approvals.clear_session("s");
+        assert!(approvals.pending("s").is_none());
     }
 
     #[test]

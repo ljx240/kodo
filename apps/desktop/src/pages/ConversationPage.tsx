@@ -9,6 +9,7 @@ import {
   onRunEvent,
   probeContextFile,
   respondApproval,
+  runState,
   sendMessage,
   stopRun,
   taskFeedback,
@@ -424,18 +425,65 @@ export function ConversationPage({
       return;
     }
 
+    // Do not keep the previous conversation's live flag while this one loads.
+    setRunning(false);
+    setRunStartedAt(null);
+    setApproval(null);
+    setProgress(null);
+    // A run can be live while the user is elsewhere. The log carries every
+    // finished step; `run_state` adds the facts the log cannot: still running,
+    // elapsed clock, latest phase, and a pending approval. Events arriving
+    // during this window are buffered and replayed after the log lands so a
+    // step finishing in the gap is never lost.
+    const loading = { session: conversationId, events: [] as RunEventDto[] };
+    loadingEventsRef.current = loading;
     let alive = true;
-    void loadSession(conversationId).then((loaded) => {
-      if (!alive || !loaded) return;
+    void (async () => {
+      const live = await runState(conversationId);
+      const loaded = await loadSession(conversationId);
+      if (!alive || !loaded) {
+        if (loadingEventsRef.current === loading) loadingEventsRef.current = null;
+        return;
+      }
       setTurns(loaded.turns);
       setTitle(loaded.title);
-      // Reopened sessions start "not running". A step still marked running in
-      // the log is a killed run — toReply paints that as interrupted. If the
-      // driver is still live, run:event will set running again on the next step.
-      setRunning(false);
-    });
+      const last = loaded.turns.length > 0 ? loaded.turns[loaded.turns.length - 1] : null;
+      const logFinished = Boolean(last && (last.done || last.stopped || last.error));
+      // A run that already wrote its terminal envelope may still be registered
+      // for a few milliseconds; the approval branch is the one case where a
+      // finished-looking log still needs the live UI.
+      if (live?.running && (!logFinished || live.approval)) {
+        setRunning(true);
+        setRunStartedAt(live.startedAt ?? Date.now());
+        setApproval(
+          live.approval
+            ? {
+                runId: live.approval.runId,
+                step: live.approval.step,
+                kind: live.approval.kind,
+                detail: live.approval.detail,
+                cwd: live.approval.cwd,
+                riskCategory: live.approval.riskCategory,
+                reason: live.approval.reason,
+              }
+            : null,
+        );
+        setProgress(
+          live.approval ? { phase: "等待审批", detail: "请确认后继续执行" } : live.progress,
+        );
+      } else {
+        setRunning(false);
+        setRunStartedAt(null);
+        setApproval(null);
+      }
+      if (loadingEventsRef.current === loading) {
+        loadingEventsRef.current = null;
+        for (const event of loading.events) handleEventRef.current(event);
+      }
+    })();
     return () => {
       alive = false;
+      if (loadingEventsRef.current === loading) loadingEventsRef.current = null;
     };
   }, [conversationId, demoMode, onSnapshot, createdConversationId]);
 
@@ -636,6 +684,9 @@ export function ConversationPage({
   const createInFlightRef = useRef(false);
   const runGenerationsRef = useRef(new Map<string, number>());
   const racedEventsRef = useRef<RunEventDto[]>([]);
+  /** Run events for the conversation currently being loaded. Replayed after
+   *  its log snapshot is applied, so a step that finishes mid-load survives. */
+  const loadingEventsRef = useRef<{ session: string; events: RunEventDto[] } | null>(null);
   const handleEventRef = useRef<(event: RunEventDto) => void>(() => {});
   const stopRequestedRef = useRef(false);
 
@@ -1259,6 +1310,12 @@ export function ConversationPage({
     let stop: (() => void) | null = null;
 
     void onRunEvent((event) => {
+      const loading = loadingEventsRef.current;
+      if (loading && event.session === loading.session) {
+        loading.events.push(event);
+        if (loading.events.length > 500) loading.events.shift();
+        return;
+      }
       const current = sessionIdRef.current;
       if (current && event.session === current) {
         handleEventRef.current(event);
