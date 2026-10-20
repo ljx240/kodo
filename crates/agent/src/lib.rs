@@ -3794,11 +3794,18 @@ pub fn run(
                     break;
                 }
                 if plan.commands.is_empty() {
-                    notes.push("验证失败：当前 Skill 策略与项目没有可执行的验证命令".to_owned());
+                    // No verification commands exist for this project/skill
+                    // policy (e.g. a docs-only repo). That is "verification not
+                    // applicable", not an environment failure: close the verify
+                    // gate, finish, and report honestly as not verified.
+                    notes.push(
+                        "该项目与 Skill 策略没有可执行的验证命令，验证按“不适用”处理；任务完成但未经验证。"
+                            .to_owned(),
+                    );
                     if let Some(evidence) = machine.evidence_mut() {
-                        evidence.mark_verify_plan(false, Vec::new(), true);
+                        evidence.mark_verify_not_applicable();
                     }
-                    machine.handle(AgentEvent::VerifyFinished { ok: false });
+                    machine.handle(AgentEvent::VerifyFinished { ok: true });
                     continue;
                 }
 
@@ -4900,6 +4907,9 @@ pub fn run(
             _ => {
                 if verified {
                     FinalStatus::Verified
+                } else if machine.evidence().verify_not_applicable {
+                    // "verified" would be a lie when not a single command ran.
+                    FinalStatus::NotVerified
                 } else if provider_error_seen {
                     FinalStatus::ProviderError
                 } else if machine.evidence().verify_infra_failure {
