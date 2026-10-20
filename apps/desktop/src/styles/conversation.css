@@ -1072,8 +1072,16 @@ button.changed-file-path:focus-visible {
   font: inherit;
   font-size: var(--kodo-font-chat);
   line-height: 1.5;
+  color: var(--kodo-text);
   resize: none;
   overflow-y: auto;
+}
+
+/* Dark theme: pure white input + placeholder so the draft stays readable on
+   the dark composer surface (textarea UA defaults leave it dim). */
+[data-theme="dark"] .composer-input,
+[data-theme="dark"] .composer-input::placeholder {
+  color: #ffffff;
 }
 
 /* No ring around the draft box — the outer composer border already frames it.
