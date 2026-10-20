@@ -282,6 +282,29 @@ type RunEventPayload =
 
 export type RunEventDto = RunEventPayload & { runId?: number };
 
+export type RunProgressDto = { phase: string; detail: string };
+
+/** Mirrors `run::PendingApprovalView` — enough to re-render the approval bar
+ *  after the conversation is reopened. */
+export type PendingApprovalDto = {
+  runId: number;
+  step: number;
+  kind: string;
+  detail: string;
+  command: string;
+  cwd: string;
+  riskCategory: string;
+  reason: string;
+};
+
+/** Authoritative live state for a conversation that is being opened. */
+export type RunStateDto = {
+  running: boolean;
+  startedAt: number | null;
+  progress: RunProgressDto | null;
+  approval: PendingApprovalDto | null;
+};
+
 export const RUN_EVENT = "run:event";
 
 function read<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
@@ -524,6 +547,13 @@ export function openSession(project: string, title: string): Promise<SessionDto 
 
 export function loadSession(id: string): Promise<SessionDto | null> {
   return read<SessionDto>("load_session", { id });
+}
+
+/** Live run facts for a session. Read on open so switching away mid-run does
+ *  not turn a live turn into an "interrupted" one (and so an approval raised
+ *  while the user was elsewhere can still be answered). */
+export function runState(id: string): Promise<RunStateDto | null> {
+  return read<RunStateDto>("run_state", { id });
 }
 
 export function retitleSession(id: string, title: string): Promise<SessionDto | null> {
