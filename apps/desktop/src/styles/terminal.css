@@ -10,6 +10,43 @@
   background: var(--kodo-canvas);
 }
 
+/* The panel's top edge doubles as a drag grip for its height. */
+.terminal-resize {
+  flex: none;
+  position: relative;
+  height: 4px;
+  background: var(--kodo-sidebar);
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.terminal-resize::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 28px;
+  height: 2px;
+  margin: -1px 0 0 -14px;
+  border-radius: 2px;
+  background: var(--kodo-border-strong);
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background-color 120ms ease;
+}
+
+.terminal-resize:hover::after,
+.terminal-resize:focus-visible::after {
+  background: var(--kodo-accent);
+  opacity: 1;
+}
+
+.terminal-resize:focus-visible,
+.terminal-divider:focus-visible {
+  outline: none;
+}
+
 .terminal-head {
   flex: none;
   height: 32px;
@@ -133,6 +170,72 @@
   height: 100%;
 }
 
+/* xterm.css paints the viewport black for its dark default; the pane (and
+   the xterm theme) already supply the canvas colour. */
+.terminal-host .xterm .xterm-viewport {
+  background-color: transparent;
+}
+
+/* xterm.css usually hides this off-screen textarea. Keep it hidden even if
+   that stylesheet is missing (stale dev bundle), or a native input box with
+   a resize grip appears at the cursor. */
+.terminal-host .xterm-helper-textarea {
+  opacity: 0 !important;
+  outline: none !important;
+  border: 0 !important;
+  resize: none !important;
+}
+
+.terminal-host .xterm .composition-view {
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+}
+
+/* Split boundaries: a 7px hit area with a hairline that tracks the ratio. */
+.terminal-divider {
+  position: absolute;
+  z-index: 3;
+  touch-action: none;
+}
+
+.terminal-divider--row {
+  width: 7px;
+  margin-left: -3px;
+  cursor: col-resize;
+}
+
+.terminal-divider--column {
+  height: 7px;
+  margin-top: -3px;
+  cursor: row-resize;
+}
+
+.terminal-divider::after {
+  content: "";
+  position: absolute;
+  background: var(--kodo-border);
+  transition: background-color 120ms ease;
+}
+
+.terminal-divider--row::after {
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.terminal-divider--column::after {
+  top: 3px;
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+.terminal-divider:hover::after,
+.terminal-divider:focus-visible::after {
+  background: var(--kodo-accent);
+}
+
 .terminal-pane-status {
   position: absolute;
   inset: 0;
@@ -154,14 +257,29 @@
   z-index: 2;
   background: var(--kodo-canvas);
   border: 1px solid var(--kodo-border);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
   opacity: 0;
+  pointer-events: none;
   transition: opacity 120ms ease;
 }
 
 .terminal-pane:hover .terminal-pane-close,
-.terminal-pane:focus-within .terminal-pane-close,
 .terminal-pane-close:focus-visible {
   opacity: 1;
+  pointer-events: auto;
+}
+
+/* While dragging a divider the pointer usually leaves its 7px strip. */
+body.terminal-dimensioning {
+  user-select: none;
+}
+
+body.terminal-dimensioning--col {
+  cursor: col-resize;
+}
+
+body.terminal-dimensioning--row {
+  cursor: row-resize;
 }
 
 .terminal-unavailable {

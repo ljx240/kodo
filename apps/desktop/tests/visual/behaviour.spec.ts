@@ -863,7 +863,15 @@ test("terminal tabs and splits share the bottom panel", async ({ page }) => {
 
   // The hover-only X removes just that split, not the tab.
   const lastPane = panes.last();
+  await expect(lastPane.locator('[data-testid="terminal-pane-close"]')).toHaveCSS(
+    "opacity",
+    "0",
+  );
   await lastPane.hover();
+  await expect(lastPane.locator('[data-testid="terminal-pane-close"]')).toHaveCSS(
+    "opacity",
+    "1",
+  );
   await lastPane.locator('[data-testid="terminal-pane-close"]').click();
   await expect(panes).toHaveCount(2);
 
@@ -872,6 +880,73 @@ test("terminal tabs and splits share the bottom panel", async ({ page }) => {
   await expect(tabs).toHaveCount(1);
   await expect(panes).toHaveCount(1);
   await expect(page.locator('[data-testid="terminal-panel"]')).toBeVisible();
+});
+
+test("terminal split boundaries drag and reset on double click", async ({ page }) => {
+  await page.goto("/ui-demo/conversation");
+  await page.waitForLoadState("networkidle");
+  await page.locator('[data-testid="topbar-terminal"]').click();
+  await page.locator('[data-testid="terminal-split-right"]').click();
+
+  const panes = page.locator('[data-testid="terminal-pane"]:visible');
+  const divider = page.locator('[data-testid="terminal-divider"]').first();
+  await expect(panes).toHaveCount(2);
+  await expect(divider).toHaveCount(1);
+
+  const before = await panes.nth(0).boundingBox();
+  const handle = await divider.boundingBox();
+  if (!before || !handle) throw new Error("terminal split geometry missing");
+  const handleX = handle.x + handle.width / 2;
+  const handleY = handle.y + handle.height / 2;
+
+  await page.mouse.move(handleX, handleY);
+  await page.mouse.down();
+  await page.mouse.move(handleX + 140, handleY, { steps: 6 });
+  await page.mouse.up();
+
+  await expect
+    .poll(async () => (await panes.nth(0).boundingBox())?.width ?? 0)
+    .toBeGreaterThan(before.width + 100);
+
+  // A double click restores the even split.
+  await divider.dblclick();
+  await expect
+    .poll(async () => {
+      const [left, right] = await Promise.all([
+        panes.nth(0).boundingBox(),
+        panes.nth(1).boundingBox(),
+      ]);
+      return left && right ? Math.abs(left.width - right.width) : Infinity;
+    })
+    .toBeLessThan(4);
+});
+
+test("the bottom terminal height drags and survives a close", async ({ page }) => {
+  await page.goto("/ui-demo/conversation");
+  await page.waitForLoadState("networkidle");
+  await page.locator('[data-testid="topbar-terminal"]').click();
+
+  const panel = page.locator('[data-testid="terminal-panel"]');
+  const before = await panel.boundingBox();
+  const grip = await page.locator(".terminal-resize").boundingBox();
+  if (!before || !grip) throw new Error("terminal panel geometry missing");
+
+  await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(grip.x + grip.width / 2, grip.y - 90, { steps: 6 });
+  await page.mouse.up();
+
+  await expect
+    .poll(async () => (await panel.boundingBox())?.height ?? 0)
+    .toBeGreaterThan(before.height + 60);
+
+  // The chosen height is stored and restored with the panel.
+  await page.locator('[data-testid="terminal-close"]').click();
+  await expect(panel).toHaveCount(0);
+  await page.locator('[data-testid="topbar-terminal"]').click();
+  await expect
+    .poll(async () => (await panel.boundingBox())?.height ?? 0)
+    .toBeGreaterThan(before.height + 60);
 });
 
 test("a created file shows its change content even with no stored diff body", async ({ page }) => {
