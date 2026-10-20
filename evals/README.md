@@ -49,6 +49,26 @@ Unfixed bug/feature/refactor/config oracles must **fail**.
 `blocked-1-impossible` and `impossible-1-no-creds` must **pass** on baseline
 (no fabricated deploy/verified artifacts).
 
+The two scope manifests are load-bearing, so the baselines check them too:
+every declared expected path must name a real file in `repo/`, every editable
+fixture must declare at least one, and the two no-edit fixtures must declare
+none. (`bug-1/2/3` declared `src/sum.js`, `src/name.js`, `src/clamp.js` for as
+long as nothing read the file — the fixtures keep their sources at the root.)
+
+### Scope manifests
+
+- `expected_files.txt` — repo-relative files the fix is expected to **modify**.
+  Files a task is supposed to *create* are asserted by `oracle.sh`, not here.
+  The live runner diffs the work copy against `repo/` and reports
+  `expected_files_missing` (oracle green, declared file untouched) and
+  `scope_extra_files` (changes outside the declaration). Both are diagnostics:
+  a different-but-correct fix location must not be turned into a failure the
+  oracle does not know about.
+- `forbidden.txt` — a path that exists must stay byte-identical; a path that is
+  **absent** must not be created. The second form is how fixtures express
+  "do not fabricate `secret.env` / `vendor/lib.js` / `CHANGELOG.md`", and the
+  live runner now enforces both halves.
+
 ## Live runner
 
 ```bash
@@ -57,8 +77,14 @@ export KODO_EVAL_MODEL_ID=...
 export KODO_EVAL_API_KEY=...            # never printed
 export KODO_EVAL_ENDPOINT=https://...   # optional
 export KODO_EVAL_MAX_OUTPUT_TOKENS=8192 # optional, default 8192
-cargo run -p kodo-evals -- --live --tasks 30
+cargo run -p kodo-evals -- --live --tasks 30 --repeat 2
 ```
+
+`--repeat N` (clamped to 1..=10) runs every selected fixture N times. One
+sample cannot tell a flaky agent from a weak model, so the run also reports
+`variance: pass_at_n / pass_always / unstable`. All rates keep a **per-run**
+denominator (`live_tasks` counts runs, `live_fixtures` counts distinct
+fixtures), so repeated runs stay comparable with the single-sample history.
 
 `KODO_EVAL_MAX_OUTPUT_TOKENS` exists because the harness previously hardcoded a
 2048 ceiling while the product ships 102400 (desktop) / 4096 (CLI). A capped
@@ -76,12 +102,13 @@ Never fill live fields from a fake provider.
 
 ### Failure forensics
 
-A fixture whose oracle fails (or that touches a `forbidden.txt` path) is **not**
-deleted. Its workdir, full step trace, final answer and a `changes.diff` against
-the baseline repo are copied to:
+A fixture whose oracle fails, that touches a `forbidden.txt` path, or whose run
+never landed a model answer is **not** deleted. Its workdir, full step trace,
+final answer and a `changes.diff` against the baseline repo are copied to:
 
 ```
-evals/out/live-<ts>-<pid>/<fixture-id>/
+evals/out/live-<ts>-<pid>/<fixture-id>/            # --repeat 1
+evals/out/live-<ts>-<pid>/<fixture-id>-run<k>/     # --repeat >1
 ```
 
 That directory is gitignored — it can contain provider output. Passing fixtures
@@ -89,19 +116,30 @@ are removed as before. `live_status` prints the run directory.
 
 ## Metrics
 
-- task_success (oracle) — counted only from `oracle.sh`
+- task_success (oracle) — counted only from `oracle.sh`, and **never** credited
+  to an aborted run
+- aborted_runs — provider outage, crash, empty final, state-machine error
+  (`failure_reason` in `provider_error` / `unrecoverable` / `no_answer` /
+  `state_machine_error`, or no model call ever landed a finish reason). An
+  untouched `blocked-1-impossible` goes green exactly *because* nothing ran, so
+  scoring it as solved would let a dead endpoint "pass" the eval
 - acceptance_success — agent's final `delivery == "ready"`
 - verification_success — agent's final `verification == "passed"`
-- agent_verdicts — `not_verified` / `verify_failed` / `blocked`
-- failure_taxonomy — `budget_exhausted` / `acceptance_unmet` / `provider_error` / other
+- self_report — `claims` vs `oracle_confirmed` and the gap between them
+- agent_verdicts — `not_verified` / `verify_failed` / `blocked` (a blocked run
+  is counted once, not once for delivery and once for verification)
+- failure_taxonomy — `budget` / `acceptance` / `provider` / `truncated` /
+  `permission` / `no_answer` / `other`
 - false_completion / false_completion_rate — oracle failed **and** the agent
   claimed a verified or ready answer. Deterministic acceptance-gate rejections
   are reported separately as `gate_selftest_rejections` and never enter this rate
-- files_changed / unnecessary_files_changed
+- expected_files_missing / scope_extra_files / unnecessary_files_changed
 - tool_calls / failed_tool_calls / repair_attempts
 - model_calls / input_tokens / output_tokens / truncated_calls /
   fallback_protocol_calls / latency
-- **per-split** development and holdout rates
+- variance — `pass_at_n` / `pass_always` / `unstable` when `--repeat > 1`
+- **per-split** development and holdout rates, including per-split `claims` and
+  `verify` so a holdout self-report gap cannot hide in the development average
 
 ## Beta-0 gates (thresholds fixed; do not weaken oracles)
 

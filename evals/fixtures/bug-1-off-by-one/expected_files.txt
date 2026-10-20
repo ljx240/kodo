@@ -1,1 +1,1 @@
-src/sum.js
+sum.js
