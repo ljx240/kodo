@@ -31,6 +31,7 @@ tauri-plugin-opener = "2"
 # resource guard and job-cancel registry; pulling it directly here
 # avoids a second std::sync::Mutex layer in the Tauri binding.
 parking_lot = "0.12"
+portable-pty = "0.9.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

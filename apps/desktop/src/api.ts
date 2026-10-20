@@ -989,6 +989,55 @@ export function onRunEvent(handler: (event: RunEventDto) => void): Promise<() =>
   return listen<RunEventDto>(RUN_EVENT, (event) => handler(event.payload));
 }
 
+// ---- Bottom terminal (PTY) -------------------------------------------------
+
+export type TerminalDataEvent = {
+  id: string;
+  data: string;
+};
+
+export type TerminalExitEvent = {
+  id: string;
+  /** Absent when the shell was terminated by a signal. */
+  code: number | null;
+};
+
+/** Spawn an interactive shell in `cwd` (falling back to the home directory).
+ *  Returns the session id used by the write/resize/close commands. */
+export function openTerminal(
+  cwd: string | null,
+  cols: number,
+  rows: number,
+): Promise<string | null> {
+  return write<string>("terminal_open", { cwd, cols, rows });
+}
+
+export function writeTerminal(id: string, data: string): Promise<void | null> {
+  return write<void>("terminal_write", { id, data });
+}
+
+export function resizeTerminal(id: string, cols: number, rows: number): Promise<void | null> {
+  return write<void>("terminal_resize", { id, cols, rows });
+}
+
+export function closeTerminal(id: string): Promise<void | null> {
+  return write<void>("terminal_close", { id });
+}
+
+export function onTerminalData(
+  handler: (event: TerminalDataEvent) => void,
+): Promise<() => void> {
+  if (!isDesktop()) return Promise.resolve(() => {});
+  return listen<TerminalDataEvent>("terminal:data", (event) => handler(event.payload));
+}
+
+export function onTerminalExit(
+  handler: (event: TerminalExitEvent) => void,
+): Promise<() => void> {
+  if (!isDesktop()) return Promise.resolve(() => {});
+  return listen<TerminalExitEvent>("terminal:exit", (event) => handler(event.payload));
+}
+
 // ---- Native platform shell (macOS menu bar + status item) -----------------
 
 /**
