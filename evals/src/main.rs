@@ -37,6 +37,15 @@ fn main() {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(15);
     let repeat = parse_repeat(&args[1..]);
+    // `--suite real` selects `evals/fixtures-real/`; the default corpus stays
+    // the fast 30-task set.
+    let suite = args
+        .iter()
+        .position(|a| a == "--suite")
+        .and_then(|i| args.get(i + 1))
+        .filter(|value| !value.starts_with('-'))
+        .map(|value| value.to_owned())
+        .unwrap_or_else(|| DEFAULT_SUITE.to_owned());
 
     println!("kodo-evals deterministic layer");
     let mut report = EvalReport::default();
@@ -46,9 +55,10 @@ fn main() {
     println!("\nkodo-evals fixture layer (Layer B)");
     run_fixture_baselines(&mut report);
     if live {
-        run_fixture_live(tasks_n, repeat, &mut report);
+        run_fixture_live(&suite, tasks_n, repeat, &mut report);
     } else {
         report.live_status = "NOT RUN — --live not requested".into();
+        report.live_suite = "n/a (live not run)".into();
         report
             .notes
             .push(format!("LIVE EVAL: {}", report.live_status));
@@ -136,6 +146,9 @@ struct EvalReport {
     baseline_passed: usize,
     baseline_failures: usize,
     live_status: String,
+    /// Which corpus a live run drew its fixtures from (`--suite`). "default" is
+    /// the fast toy-scale set; "real" is the multi-file project set.
+    live_suite: String,
     live_tasks: usize,
     live_success: usize,
     live_false_completions: usize,
@@ -221,6 +234,7 @@ impl EvalReport {
             self.gate_selftest_rejections
         );
         println!("live: {}", self.live_status);
+        println!("live_suite: {}", self.live_suite);
         println!("live_tasks: {} (runs)", self.live_tasks);
         if self.live_fixtures > 0 {
             println!(
@@ -425,8 +439,16 @@ impl EvalReport {
     }
 }
 
-fn load_splits() -> (Vec<String>, Vec<String>, Vec<String>) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("splits.json");
+/// Per-suite splits. The default corpus keeps `splits.json`; a named corpus
+/// reads `splits-<suite>.json`, so a fixture id can never sit in two coverage
+/// checks at once.
+fn load_splits(suite: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let file = if suite == DEFAULT_SUITE {
+        "splits.json".to_owned()
+    } else {
+        format!("splits-{suite}.json")
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(file);
     let Ok(text) = std::fs::read_to_string(&path) else {
         return (Vec::new(), Vec::new(), Vec::new());
     };
@@ -465,14 +487,15 @@ fn parse_path_list(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Kodo's own state, git metadata and the harness's temp oracle script are not
-/// user dirt and must not count as scope deviations.
+/// Kodo's own state, git metadata and the harness's temp scripts are not user
+/// dirt and must not count as scope deviations.
 fn is_noise_path(rel: &str) -> bool {
     rel == ".kodo"
         || rel.starts_with(".kodo/")
         || rel == ".git"
         || rel.starts_with(".git/")
         || rel == ".oracle-run.sh"
+        || rel == ".script-run.sh"
 }
 
 fn walk_files(root: &Path, dir: &Path, out: &mut std::collections::BTreeSet<String>) {
@@ -1458,16 +1481,75 @@ fn fixture_git_repo(name: &str) -> PathBuf {
     dir
 }
 
-fn fixtures_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+/// The toy-scale corpus that has always gated the harness.
+const DEFAULT_SUITE: &str = "default";
+
+/// A suite is a fixture corpus. `default` is `evals/fixtures/` — single-file
+/// repos a model can fix by eye. `real` is `evals/fixtures-real/`: multi-file
+/// projects with a package.json, a test runner and 150-250 lines of plausible
+/// noise, so retrieval depth and edit precision get measured instead of being
+/// assumed from a 5-line file.
+fn suite_root(suite: &str) -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if suite == DEFAULT_SUITE {
+        manifest.join("fixtures")
+    } else {
+        manifest.join(format!("fixtures-{suite}"))
+    }
 }
 
-/// Layer B baselines: each fixture has prompt+oracle; unfixed bug/feature
-/// oracles must fail; the blocked task oracle must pass without agent edits.
+/// Every corpus on disk: `default` first, then each `fixtures-<suite>/`
+/// directory. Baselines run over all of them so a second corpus cannot rot
+/// quietly next to a green report.
+fn suite_names() -> Vec<String> {
+    let mut extras: Vec<String> = std::fs::read_dir(env!("CARGO_MANIFEST_DIR"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter_map(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .strip_prefix("fixtures-")
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    extras.sort();
+    let mut names = vec![DEFAULT_SUITE.to_owned()];
+    names.extend(extras);
+    names
+}
+
+/// Layer B baselines over **every** corpus on disk, so a second suite cannot
+/// rot quietly next to a green report.
 fn run_fixture_baselines(report: &mut EvalReport) {
-    let root = fixtures_root();
+    for suite in suite_names() {
+        run_suite_baselines(&suite, report);
+    }
+}
+
+/// Each fixture has prompt+oracle; unfixed bug/feature oracles must fail; the
+/// blocked task oracle must pass without agent edits.
+fn run_suite_baselines(suite: &str, report: &mut EvalReport) {
+    // Corpus-level check names keep the historical spelling for `default` so
+    // reports stay comparable run to run; another suite is suffixed.
+    let named = |key: &str| -> String {
+        if suite == DEFAULT_SUITE {
+            key.to_owned()
+        } else {
+            format!("{key}_{suite}")
+        }
+    };
+    let root = suite_root(suite);
     let Ok(entries) = std::fs::read_dir(&root) else {
-        report.baseline("fixtures_directory_exists", false, "evals/fixtures missing");
+        report.baseline(
+            &named("fixtures_directory_exists"),
+            false,
+            &format!("{} missing", root.display()),
+        );
         return;
     };
     let mut ids: Vec<String> = entries
@@ -1476,16 +1558,19 @@ fn run_fixture_baselines(report: &mut EvalReport) {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     ids.sort();
+    // The toy corpus is a 30-task gate; a named suite only has to be big enough
+    // to say something about scale.
+    let minimum = if suite == DEFAULT_SUITE { 30 } else { 4 };
     report.baseline(
-        "fixture_count_at_least_30",
-        ids.len() >= 30,
+        &named(&format!("fixture_count_at_least_{minimum}")),
+        ids.len() >= minimum,
         &format!("only {} fixtures", ids.len()),
     );
 
     // Split integrity: every fixture in exactly one of development/holdout.
-    let (dev, holdout, regressions) = load_splits();
+    let (dev, holdout, regressions) = load_splits(suite);
     report.baseline(
-        "splits_defined",
+        &named("splits_defined"),
         !dev.is_empty() && !holdout.is_empty(),
         &format!("dev={} holdout={}", dev.len(), holdout.len()),
     );
@@ -1496,13 +1581,13 @@ fn run_fixture_baselines(report: &mut EvalReport) {
     let mut all = ids.clone();
     all.sort();
     report.baseline(
-        "splits_cover_all_fixtures",
+        &named("splits_cover_all_fixtures"),
         union == all,
         &format!("split_union={} fixtures={}", union.len(), all.len()),
     );
     let overlap = dev.iter().filter(|d| holdout.contains(d)).count();
     report.baseline(
-        "splits_no_overlap",
+        &named("splits_no_overlap"),
         overlap == 0,
         &format!("overlap={overlap}"),
     );
@@ -1544,6 +1629,26 @@ fn run_fixture_baselines(report: &mut EvalReport) {
                 !passed,
                 "oracle unexpectedly passed on unfixed fixture",
             );
+        }
+
+        // "Fails before the fix" says nothing about the oracle ever being
+        // satisfiable. A fixture with a `solution.sh` — the reviewer's canonical
+        // fix — is applied to a throwaway copy and must turn the oracle green,
+        // so an unsolvable task is caught here instead of showing up as a 0%
+        // live score.
+        if dir.join("solution.sh").is_file() {
+            let work =
+                std::env::temp_dir().join(format!("kodo_sol_eval_{id}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&work);
+            let green = copy_dir(&dir.join("repo"), &work)
+                && run_script(&dir.join("solution.sh"), &work)
+                && run_oracle(&dir, &work);
+            report.baseline(
+                &format!("fixture_{id}_canonical_solution_passes"),
+                green,
+                "the canonical fix does not satisfy the oracle — unsolvable fixture",
+            );
+            let _ = std::fs::remove_dir_all(&work);
         }
 
         // The scope manifests only matter if the live runner reads them and the
@@ -1631,12 +1736,12 @@ impl TaskRun {
 /// Re-run the fixture oracle against the edited copy. Oracle scripts resolve
 /// their repo as `$(dirname "$0")/repo`, so the harness rewrites that to the
 /// throwaway work dir before invoking it.
-fn run_oracle(fixture: &Path, work: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(fixture.join("oracle.sh")) else {
+fn run_script(script: &Path, work: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(script) else {
         return false;
     };
     let wrapped = text.replace("$(dirname \"$0\")/repo", &work.display().to_string());
-    let tmp = work.join(".oracle-run.sh");
+    let tmp = work.join(".script-run.sh");
     if std::fs::write(&tmp, wrapped).is_err() {
         return false;
     }
@@ -1647,6 +1752,10 @@ fn run_oracle(fixture: &Path, work: &Path) -> bool {
         .unwrap_or(false);
     let _ = std::fs::remove_file(&tmp);
     ok
+}
+
+fn run_oracle(fixture: &Path, work: &Path) -> bool {
+    run_script(&fixture.join("oracle.sh"), work)
 }
 
 /// Copy the edited repo plus its trace to `evals/out/<run-id>/…` so a red
@@ -2026,7 +2135,8 @@ fn run_one_live_task(
 /// `repeat` runs every fixture N times. One sample cannot tell a flaky agent
 /// from a weak model, so the pass@N / always / unstable triple is reported
 /// alongside the per-run rates.
-fn run_fixture_live(tasks_n: usize, repeat: usize, report: &mut EvalReport) {
+fn run_fixture_live(suite: &str, tasks_n: usize, repeat: usize, report: &mut EvalReport) {
+    report.live_suite = suite.to_owned();
     let provider_type = std::env::var("KODO_EVAL_PROVIDER").unwrap_or_default();
     let model_id = std::env::var("KODO_EVAL_MODEL_ID").unwrap_or_default();
     let api_key = std::env::var("KODO_EVAL_API_KEY").unwrap_or_default();
@@ -2045,8 +2155,19 @@ fn run_fixture_live(tasks_n: usize, repeat: usize, report: &mut EvalReport) {
         return;
     }
 
-    let root = fixtures_root();
-    let (development, holdout, regressions) = load_splits();
+    let root = suite_root(suite);
+    // An unknown `--suite` must not silently become a zero-task live run that
+    // reads as "nothing failed".
+    if !root.is_dir() {
+        report.live_status = format!("NOT RUN — unknown suite \"{suite}\"");
+        report.notes.push(format!(
+            "LIVE EVAL: {} (available: {})",
+            report.live_status,
+            suite_names().join(", ")
+        ));
+        return;
+    }
+    let (development, holdout, regressions) = load_splits(suite);
     let mut ids: Vec<String> = std::fs::read_dir(&root)
         .map(|it| {
             it.flatten()
@@ -2072,12 +2193,18 @@ fn run_fixture_live(tasks_n: usize, repeat: usize, report: &mut EvalReport) {
     report.live_repeat = repeat.max(1);
 
     let run_id = format!(
-        "live-{}-{}",
+        "live-{}-{}{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        std::process::id()
+        std::process::id(),
+        // The default corpus keeps the historical directory name.
+        if suite == DEFAULT_SUITE {
+            String::new()
+        } else {
+            format!("-{suite}")
+        }
     );
     let out_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("out")

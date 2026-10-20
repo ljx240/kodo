@@ -1,0 +1,4 @@
+docs/spec.md
+test/stock.test.js
+test/reservations.test.js
+test/support.test.js
