@@ -207,19 +207,29 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 
 ## 6. Git 现场
 
+**已合入本地 `main`**（用户明确授权"合并至main"）。**未推送**：本次授权只到本地合并，`git push` 与创建 PR 均未执行。
+
 ```text
-当前分支：feat/jev-decision（从本地 main 创建）
-基线：     c0f67a310cb7dea1761f14e017381407a0e07a81
-本地 main：c0f67a310cb7dea1761f14e017381407a0e07a81
-缓存 origin/main：c0f67a310cb7dea1761f14e017381407a0e07a81（本次未 fetch，远程新鲜度未核验）
-git branch --no-merged main：（空 —— 本任务尚未提交）
+当前分支：main
+main HEAD：91eb96b merge(decision): integrate the optional Jev decision assistant
+本任务提交：
+  aaa9a84 docs(decision): add the Jev decision specification
+  bd5bd60 feat(decision): add the optional Jev decision assistant
+  c4e52b3 docs(decision): add the Jev decision acceptance record
+合并前基线：c0f67a310cb7dea1761f14e017381407a0e07a81（= 合并前 main = 合并前缓存 origin/main）
+缓存 origin/main：c0f67a310cb7dea1761f14e017381407a0e07a81 —— 本次未 fetch，远程新鲜度未核验
+main 相对 origin/main：ahead 5（3 个任务提交 + 1 个合并提交 + 1 个本记录提交；全部未推送）
+git branch --no-merged main：（空）
+任务分支 feat/jev-decision：已合入后按 AGENTS.md §2 删除（三个提交均保留在 main 的历史里）
 git stash list：7 条，全部为会话开始前既有，未 pop / drop / clear
 ```
+
+合并方式：`--no-ff`，无冲突，保留任务边界。合并后重跑了改动范围对应的验证（见下）。
 
 worktree：
 
 ```text
-/Users/lijianxue/work/WorkSpace/kodo                    c0f67a3 [feat/jev-decision]
+/Users/lijianxue/work/WorkSpace/kodo                    91eb96b [main]
 /Users/lijianxue/WorkBuddy/Worktrees/kodo/main-df55d246 c0f67a3 [fix/work-reliability]
 ```
 
@@ -268,7 +278,7 @@ worktree：
 
 ### 剩余工作
 
-1. **提交与集成**：本任务的改动全部在工作区，未提交。按 AGENTS.md，合并前需要提交到 `feat/jev-decision`、合入 `main`、跑匹配范围的验证。当前不满足"完成门"（代码尚未存在于 `main`）。
+1. **远程交付**：`main` 已在本地包含本任务，但**尚未推送**，也没有 PR。远程同步与 PR 需要单独授权；本地合并的"远程新鲜度未核验"状态仍然成立。
 2. **视觉与交互回归**：按 `docs/design/UI_ACCEPTANCE.md` 为设置小节、发送预览、Inspector 决策记录补 `apps/desktop/tests/visual/` 用例，并在参考视口（1586×992 / 1440×900 / 1920×1080 / 2560×1440）截图核对。
 3. **语料扩量与冻结**：120→600、60→300，并冻结标签。
 4. **真实模型评测**：见第 5 节，需要单独授权。
@@ -276,9 +286,20 @@ worktree：
 6. **取消回收与并发上限的专项实测**：受控网络下测量 ureq 的取消回收行为，决定是否保留远程路径。
 7. **连接检查按钮**：设计 §11.1 要求"用户显式点击才发起"；本次没有实现该命令，真实外发需要单独授权。
 
+### 合并后复验（合并树上重跑）
+
+```text
+cargo fmt --all -- --check                → FMT OK
+cargo check --offline --locked --workspace --all-targets → Finished
+cargo test --offline --locked --workspace → total passed: 1027  failed: 0
+npm --prefix apps/desktop run typecheck   → (exit 0)
+npm --prefix apps/desktop run build       → ✓ built in 2.39s
+playwright --project=behaviour --grep "决策辅助设置小节|发送预览展示完整请求内容|each Settings category swaps the detail pane" → 3 passed
+```
+
 ### 恢复路径
 
-- 全部实现都在工作区（未提交），`git diff` 与未跟踪文件即为完整状态；`git stash` / `git reset` 均未使用。
-- 分支 `feat/jev-decision` 基于 `c0f67a3`，无独有提交；随时可以 `git switch main` 后再切回。
+- 全部实现已提交并合入本地 `main`（`91eb96b`），三个提交在 main 的历史里可追溯；`git stash` 未使用。
+- 分支 `feat/jev-decision` 已删除；要单独查看任务边界可用 `git log c0f67a3..91eb96b`。
 - 7 条 stash 与第二个 worktree 的未提交改动保持原样，未被本任务改动。
 - 文档：`specs/jev-decision/` 四件套是下一次续接的入口；续接时先重新读 `crates/agent/src/decision.rs` 与 `crates/shell/src/decision.rs` 的当前内容（本文档记录的行号可能已过时）。
