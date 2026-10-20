@@ -3750,26 +3750,33 @@ pub fn run(
                     })
                     .map(|c| (c.id.clone(), c.description.clone()))
                     .collect();
+                let repro_commands = machine.plan().repro_commands.clone();
                 let mut plan = VerificationRunner::build_plan(
                     project,
                     &verify_criteria,
                     &changed,
                     task_type.label(),
+                    &repro_commands,
                 );
-                // Skill policy may replace the command list, but we keep
-                // criterion bindings from build_plan where possible.
+                // Skill policy may narrow the command list, but a skill that
+                // merely has *nothing to infer* for this project must not erase
+                // the evidence-derived plan. Only an explicit "verify nothing"
+                // policy (docs / review) clears it.
                 if let Some(sk) = &skill {
-                    let skill_cmds = sk.verification_commands(&verifier, project);
-                    if skill_cmds.is_empty() {
+                    if sk.verifies_nothing() {
                         plan.commands.clear();
                     } else {
-                        let skill_set: Vec<String> =
-                            skill_cmds.iter().map(|c| c.command.clone()).collect();
-                        plan.commands.retain(|pc| {
-                            skill_set.iter().any(|s| {
-                                *s == pc.command.command || s.contains(&pc.command.command)
-                            })
-                        });
+                        let skill_cmds = sk.verification_commands(&verifier, project);
+                        if !skill_cmds.is_empty() {
+                            let skill_set: Vec<String> =
+                                skill_cmds.iter().map(|c| c.command.clone()).collect();
+                            plan.commands.retain(|pc| {
+                                pc.tier == VerifyTier::ExactRegression
+                                    || skill_set.iter().any(|s| {
+                                        *s == pc.command.command || s.contains(&pc.command.command)
+                                    })
+                            });
+                        }
                     }
                 }
                 if last_verify_plan.as_ref() != Some(&plan) {

@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Category of a verification command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,6 +557,148 @@ impl Default for VerificationRunner {
     }
 }
 
+/// How far upward a changed path may search for the manifest that owns it.
+const MAX_PKG_WALK_DEPTH: usize = 4;
+/// At most this many packages take part in one verification plan.
+const MAX_PKG_DIRS: usize = 3;
+
+/// Project-relative directories (`.` for the root) that own `marker` for the
+/// given changed paths, nearest ancestor first. Deliberately layout-agnostic:
+/// nothing about `crates/` or `apps/desktop/` is assumed.
+fn nearest_pkg_dirs(project: &Path, changed_files: &[String], marker: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let owns = |rel: &str| {
+        crate::tools::resolve_in_project(project, rel)
+            .ok()
+            .filter(|p| p.is_file())
+            .is_some()
+    };
+    for path in changed_files {
+        let normalized = path.trim_start_matches("./").replace('\\', "/");
+        let mut dir = PathBuf::from(&normalized);
+        for _ in 0..MAX_PKG_WALK_DEPTH {
+            if !dir.pop() {
+                break;
+            }
+            let rel_dir = dir.to_string_lossy().replace('\\', "/");
+            let candidate = if rel_dir.is_empty() {
+                marker.to_owned()
+            } else {
+                format!("{rel_dir}/{marker}")
+            };
+            if owns(&candidate) {
+                let key = if rel_dir.is_empty() {
+                    ".".into()
+                } else {
+                    rel_dir
+                };
+                if !out.contains(&key) {
+                    out.push(key);
+                }
+                break;
+            }
+        }
+    }
+    if out.is_empty() && owns(marker) {
+        out.push(".".to_owned());
+    }
+    out.truncate(MAX_PKG_DIRS);
+    out
+}
+
+/// Package name declared by `<rel_dir>/Cargo.toml`, falling back to the
+/// directory name. Only the `[package]` section is considered, so dependency
+/// entries cannot be mistaken for the package name.
+fn cargo_pkg_name(project: &Path, rel_dir: &str) -> String {
+    let manifest_rel = if rel_dir == "." {
+        "Cargo.toml".to_owned()
+    } else {
+        format!("{rel_dir}/Cargo.toml")
+    };
+    let fallback = || {
+        if rel_dir == "." || rel_dir == "/" {
+            project
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "root".to_owned())
+        } else {
+            rel_dir.rsplit('/').next().unwrap_or(rel_dir).to_owned()
+        }
+    };
+    let Ok(path) = crate::tools::resolve_in_project(project, &manifest_rel) else {
+        return fallback();
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return fallback();
+    };
+    let mut in_package = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("name")
+            .and_then(|r| r.trim_start().strip_prefix('='))
+        {
+            let name = rest.trim().trim_matches('"').trim_matches('\'');
+            if !name.is_empty() {
+                return name.to_owned();
+            }
+        }
+    }
+    fallback()
+}
+
+/// Run one named test with whatever runner the project actually uses.
+/// Returns `None` when there is no recognizable runner, so the plan degrades to
+/// evidence-derived commands instead of inventing a Rust command for a JS repo.
+fn test_command_for_filter(
+    project: &Path,
+    changed_files: &[String],
+    filter: &str,
+) -> Option<String> {
+    // The filter is interpolated into a shell command: keep it to test-name
+    // characters so a criterion description can never smuggle arguments.
+    let safe = !filter.is_empty()
+        && filter
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'));
+    if !safe {
+        return None;
+    }
+    let has_file = |rel: &str| {
+        crate::tools::resolve_in_project(project, rel)
+            .ok()
+            .filter(|p| p.is_file())
+            .is_some()
+    };
+    if has_file("Cargo.toml") {
+        return Some(format!("cargo test {filter} --quiet"));
+    }
+    if let Some(dir) = nearest_pkg_dirs(project, changed_files, "package.json")
+        .into_iter()
+        .next()
+    {
+        return Some(if dir == "." {
+            format!("npm test --silent -- {filter}")
+        } else {
+            format!("npm --prefix {dir} test --silent -- {filter}")
+        });
+    }
+    if ["pyproject.toml", "pytest.ini", "setup.cfg"]
+        .iter()
+        .any(|name| has_file(name))
+    {
+        return Some(format!("python -m pytest -q -k {filter}"));
+    }
+    None
+}
+
 impl VerificationRunner {
     pub fn new(default_timeout_ms: u64) -> Self {
         Self { default_timeout_ms }
@@ -581,33 +723,18 @@ impl VerificationRunner {
             }
         };
 
-        // Map changed paths → cargo package / npm package for targeted runs.
-        let mut crates_changed: Vec<String> = Vec::new();
-        let mut web_changed = false;
-        for path in changed_files {
-            if let Some(rest) = path.strip_prefix("crates/") {
-                if let Some(pkg) = rest.split('/').next() {
-                    let name = crate::tools::resolve_in_project(
-                        project,
-                        &format!("crates/{pkg}/Cargo.toml"),
-                    )
-                    .ok()
-                    .and_then(|path| fs::read_to_string(path).ok())
-                    .and_then(|text| {
-                        text.lines()
-                            .find_map(|l| l.trim().strip_prefix("name = "))
-                            .map(|n| n.trim_matches('"').to_owned())
-                    })
-                    .unwrap_or_else(|| pkg.to_owned());
-                    if !crates_changed.contains(&name) {
-                        crates_changed.push(name);
-                    }
+        // Map changed paths onto the packages that own them. No repository
+        // layout is hardcoded — the nearest ancestor carrying a manifest wins,
+        // so `apps/desktop`, `packages/web` and a flat root all behave alike.
+        let crates_changed: Vec<String> = nearest_pkg_dirs(project, changed_files, "Cargo.toml")
+            .iter()
+            .map(|dir| cargo_pkg_name(project, dir))
+            .fold(Vec::new(), |mut acc, name| {
+                if !acc.contains(&name) {
+                    acc.push(name);
                 }
-            }
-            if path.starts_with("apps/desktop/") {
-                web_changed = true;
-            }
-        }
+                acc
+            });
 
         if crate::tools::resolve_in_project(project, "Cargo.toml").is_ok_and(|p| p.is_file()) {
             if !crates_changed.is_empty() {
@@ -629,22 +756,25 @@ impl VerificationRunner {
             }
         }
 
-        let web_manifest = if web_changed {
-            ["apps/desktop/package.json", "package.json"]
-                .iter()
-                .filter_map(|p| crate::tools::resolve_in_project(project, p).ok())
-                .find(|p| p.is_file())
-        } else {
-            crate::tools::resolve_in_project(project, "package.json")
-                .ok()
-                .filter(|p| p.is_file())
-        };
-        if let Some(manifest) = web_manifest {
-            let text = fs::read_to_string(&manifest).unwrap_or_default();
-            let npm_prefix = if manifest.ends_with("apps/desktop/package.json") {
-                "npm --prefix apps/desktop run "
+        for dir in nearest_pkg_dirs(project, changed_files, "package.json") {
+            let manifest_rel = if dir == "." {
+                "package.json".to_owned()
             } else {
-                "npm run "
+                format!("{dir}/package.json")
+            };
+            let Ok(manifest) = crate::tools::resolve_in_project(project, &manifest_rel) else {
+                continue;
+            };
+            let text = fs::read_to_string(&manifest).unwrap_or_default();
+            let run_prefix = if dir == "." {
+                "npm run ".to_owned()
+            } else {
+                format!("npm --prefix {dir} run ")
+            };
+            let test_prefix = if dir == "." {
+                "npm test --silent".to_owned()
+            } else {
+                format!("npm --prefix {dir} test --silent")
             };
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(scripts) = value.get("scripts").and_then(|s| s.as_object()) {
@@ -659,14 +789,14 @@ impl VerificationRunner {
                     ];
                     for (name, kind) in mapping {
                         if scripts.contains_key(name) {
-                            push(&mut cmds, kind, format!("{npm_prefix}{name}"));
+                            push(&mut cmds, kind, format!("{run_prefix}{name}"));
                         }
                     }
                 }
             }
-            // Fallbacks when scripts missing
+            // Fallback when the manifest declares no test script.
             if !cmds.iter().any(|c| c.kind == VerifyKind::Test) {
-                push(&mut cmds, VerifyKind::Test, "npm test --silent".into());
+                push(&mut cmds, VerifyKind::Test, test_prefix);
             }
         }
 
@@ -696,11 +826,17 @@ impl VerificationRunner {
     ///
     /// `criteria` is `(id, description)` for acceptance criteria that need
     /// verification evidence.
+    ///
+    /// `repro_commands` are the commands the agent actually used to reproduce
+    /// the defect (from the evidence bag). They are the strongest available
+    /// regression signal — the same invocation failed before the fix — so they
+    /// lead the plan instead of a guessed runner.
     pub fn build_plan(
         project: &Path,
         criteria: &[(String, String)],
         changed_files: &[String],
         task_type: &str,
+        repro_commands: &[String],
     ) -> VerificationPlan {
         let mut all_ids: Vec<String> = criteria.iter().map(|(id, _)| id.clone()).collect();
         all_ids.sort();
@@ -717,32 +853,15 @@ impl VerificationRunner {
             }
         }
 
-        let mut package = None;
+        let cargo_dirs = nearest_pkg_dirs(project, changed_files, "Cargo.toml");
         let mut crates_changed: Vec<String> = Vec::new();
-        for path in changed_files {
-            if let Some(rest) = path.strip_prefix("crates/") {
-                if let Some(pkg) = rest.split('/').next() {
-                    let name = crate::tools::resolve_in_project(
-                        project,
-                        &format!("crates/{pkg}/Cargo.toml"),
-                    )
-                    .ok()
-                    .and_then(|path| fs::read_to_string(path).ok())
-                    .and_then(|text| {
-                        text.lines()
-                            .find_map(|l| l.trim().strip_prefix("name = "))
-                            .map(|n| n.trim_matches('"').to_owned())
-                    })
-                    .unwrap_or_else(|| pkg.to_owned());
-                    if !crates_changed.contains(&name) {
-                        crates_changed.push(name.clone());
-                    }
-                    if package.is_none() {
-                        package = Some(name);
-                    }
-                }
+        for dir in &cargo_dirs {
+            let name = cargo_pkg_name(project, dir);
+            if !crates_changed.contains(&name) {
+                crates_changed.push(name.clone());
             }
         }
+        let package = crates_changed.first().cloned();
 
         let mut commands: Vec<PlannedVerifyCommand> = Vec::new();
         struct PushCtx<'a> {
@@ -791,14 +910,32 @@ impl VerificationRunner {
                 timeout_ms: 120_000,
             };
 
-            // 1) Exact regression tests (one per criterion that named a test).
+            // 1a) The commands that reproduced the defect. Re-running the exact
+            // invocation that failed before the fix is the strongest regression
+            // signal available, and it is language-agnostic.
+            if !all_ids.is_empty() {
+                for command in repro_commands.iter().take(3) {
+                    ctx.push(
+                        VerifyKind::Test,
+                        command.clone(),
+                        VerifyTier::ExactRegression,
+                        all_ids.clone(),
+                    );
+                }
+            }
+
+            // 1b) A test named by the criterion, run with the project's own
+            // runner. Skipped when the repository has no recognizable runner —
+            // `cargo test <name>` must never be injected into a JS project.
             for (cid, filter) in &exact_targets {
-                ctx.push(
-                    VerifyKind::Test,
-                    format!("cargo test {filter} --quiet"),
-                    VerifyTier::ExactRegression,
-                    vec![cid.clone()],
-                );
+                if let Some(command) = test_command_for_filter(project, changed_files, filter) {
+                    ctx.push(
+                        VerifyKind::Test,
+                        command,
+                        VerifyTier::ExactRegression,
+                        vec![cid.clone()],
+                    );
+                }
             }
 
             // 2) Related package tests — generic verification criteria only.
@@ -1609,6 +1746,7 @@ error[E0308]: mismatched types
             &criteria,
             &["crates/agent/src/lib.rs".into()],
             "bug-fix",
+            &[],
         );
         assert!(!plan.commands.is_empty(), "plan={:?}", plan.commands);
         // Exact tier first when a named test exists.
@@ -1650,7 +1788,7 @@ error[E0308]: mismatched types
             "c_target".to_string(),
             "Must pass `test_login_panic`".to_string(),
         )];
-        let plan = VerificationRunner::build_plan(&dir, &criteria, &[], "bug-fix");
+        let plan = VerificationRunner::build_plan(&dir, &criteria, &[], "bug-fix", &[]);
         // Simulate: broad/package command that does NOT target c_target.
         let mut evidence = VerificationEvidence {
             command: "cargo test --workspace --quiet".into(),
@@ -1933,6 +2071,7 @@ error[E0308]: mismatched types
             &[("c1".into(), "Verification commands pass".into())],
             &["app.js".into()],
             "feature",
+            &[],
         );
         for command in ["npm run test", "npm run typecheck", "python -m pytest -q"] {
             assert!(
@@ -1990,6 +2129,71 @@ error[E0308]: mismatched types
         let allowed = runner.run_plan_with_approval(&root, &plan, &|| true, false, &|_| true);
         assert!(allowed[0].ok);
         assert!(root.join("marker.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A manifest-less repo (the common fixture shape) still gets a plan, as
+    /// long as the agent reproduced the defect with a command of its own.
+    #[test]
+    fn plan_leads_with_repro_commands_when_no_manifest_exists() {
+        let root = std::env::temp_dir().join(format!("kodo-verify-repro-{}", std::process::id()));
+        let project = root.join("repo");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("app.js"), "module.exports = 1;\n").unwrap();
+        fs::write(project.join("test.js"), "console.log('ok');\n").unwrap();
+
+        let plan = VerificationRunner::build_plan(
+            &project,
+            &[("c1".into(), "Verification commands pass".into())],
+            &["app.js".into()],
+            "bug-fix",
+            &["node test.js".into()],
+        );
+        assert!(
+            plan.commands
+                .iter()
+                .any(|c| c.command.command == "node test.js"
+                    && c.tier == VerifyTier::ExactRegression
+                    && c.criterion_ids == ["c1"]),
+            "repro command missing from plan: {plan:?}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The exact-regression tier must not invent a Rust command for a project
+    /// that has no Cargo.toml — that produced 34 failed tool calls in one run.
+    #[test]
+    fn exact_regression_filter_never_invents_cargo_for_js_project() {
+        let root = std::env::temp_dir().join(format!("kodo-verify-runner-{}", std::process::id()));
+        let project = root.join("repo");
+        fs::create_dir_all(project.join("web")).unwrap();
+        fs::write(
+            project.join("web/package.json"),
+            r#"{"scripts":{"test":"node --test"}}"#,
+        )
+        .unwrap();
+        fs::write(project.join("web/index.js"), "1\n").unwrap();
+
+        let command =
+            test_command_for_filter(&project, &["web/index.js".into()], "test_login_panic");
+        assert_eq!(
+            command.as_deref(),
+            Some("npm --prefix web test --silent -- test_login_panic"),
+            "expected the project's own runner"
+        );
+        // Manifest-less project: no runner can be inferred at all.
+        let bare = root.join("bare");
+        fs::create_dir_all(&bare).unwrap();
+        assert_eq!(
+            test_command_for_filter(&bare, &["a.js".into()], "some_test"),
+            None
+        );
+        // Shell metacharacters must not be interpolated into a command.
+        assert_eq!(
+            test_command_for_filter(&bare, &[], "a; rm -rf /"),
+            None,
+            "filter must be validated"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

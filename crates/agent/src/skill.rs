@@ -196,6 +196,13 @@ impl SkillSpec {
         registry.filtered(|name| self.allows_label(name))
     }
 
+    /// `true` only when the skill deliberately verifies nothing (docs, review).
+    /// Distinct from "this project has no manifests to infer from" — callers
+    /// must not treat the two the same way.
+    pub fn verifies_nothing(&self) -> bool {
+        matches!(self.verification_policy, VerificationPolicy::None)
+    }
+
     /// Verification commands this skill permits for the project.
     /// `None` policy → empty (the Verifier must not run a full compile for docs).
     pub fn verification_commands(
