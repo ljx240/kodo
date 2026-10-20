@@ -90,11 +90,22 @@ static LAST_CONFIG: Mutex<Option<(String, DecisionProvider, bool)>> = Mutex::new
 /// `HOME` all degrade to "off" plus a configuration problem.
 pub fn load_decision_config() -> DecisionConfig {
     let settings_path = settings::settings_path();
+    let creds = settings::credentials_path();
+    load_decision_config_from(settings_path.as_deref(), creds.as_deref())
+}
+
+/// Read the decision configuration from an explicit pair of files.
+///
+/// The stores are passed in so the save→read round trip can be tested
+/// against a real file: a record that is written but cannot be read back
+/// is worse than no record at all.
+pub fn load_decision_config_from(
+    settings_path: Option<&std::path::Path>,
+    creds: Option<&std::path::Path>,
+) -> DecisionConfig {
     let raw = settings_path
-        .as_ref()
         .and_then(|path| settings::read(path, SETTINGS_KEY))
         .filter(|value| !value.trim().is_empty());
-    let creds = settings::credentials_path();
 
     let (parsed, config_error) = match raw.as_deref() {
         None => (DecisionSettings::default(), None),
@@ -108,7 +119,6 @@ pub fn load_decision_config() -> DecisionConfig {
     // never stands in for another's: a request must never be signed with a
     // key the user gave for a different service.
     let credential = creds
-        .as_ref()
         .and_then(|path| {
             settings::read_secret(path, CREDENTIAL_NAMESPACE, parsed.provider.credential_id())
         })
@@ -244,10 +254,22 @@ pub fn mask_secret(secret: &str) -> String {
 /// Persist the decision settings. The record is validated first: an
 /// invalid record is refused, never stored.
 pub fn save_decision_settings(raw: &str) -> Result<u64, String> {
+    let path = settings::settings_path().ok_or("settings directory is unavailable")?;
+    save_decision_settings_to(&path, raw)
+}
+
+/// Store the decision settings in an explicit file.
+///
+/// The record is normalized before it is written: the log is line-based,
+/// so the stored value has to be a single line. A pretty-printed value
+/// would be cut at the first newline and read back as a truncated object.
+pub fn save_decision_settings_to(path: &std::path::Path, raw: &str) -> Result<u64, String> {
     let parsed = DecisionSettings::from_json(raw)?;
     let normalized = parsed.to_json();
-    let path = settings::settings_path().ok_or("settings directory is unavailable")?;
-    settings::append(&path, SETTINGS_KEY, &normalized).map_err(|error| error.to_string())?;
+    if normalized.contains('\n') || normalized.contains('\r') {
+        return Err("jev-decision: the stored record must be a single line".to_owned());
+    }
+    settings::append(path, SETTINGS_KEY, &normalized).map_err(|error| error.to_string())?;
     Ok(bump_config_generation())
 }
 
@@ -1488,6 +1510,96 @@ mod tests {
         let service = service(config(DecisionMode::Observe, Some("secret")), consent);
         let outcome = service.evaluate(&task_route_input(), &|| false);
         assert!(matches!(outcome.result, DecisionResult::Cancelled));
+    }
+
+    #[test]
+    fn a_saved_record_can_be_read_back() {
+        // The settings log is line-based: a record written as more than
+        // one line is cut at the first newline and comes back as a
+        // truncated object. The round trip is the contract.
+        let dir = std::env::temp_dir().join(format!("kodo-jev-roundtrip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("settings.log");
+        let raw = r#"{"schemaVersion":1,"provider":"openRouter","mode":"observe",
+            "model":"typesafe/jev-1.14","scenarios":{"taskRoute":true,"failureTriage":false},
+            "requestTimeoutMs":1500,"maxCallsPerTurn":3,"maxRequestBytes":32768,
+            "maxStateBytes":16384,"maxResponseBytes":65536,
+            "maxDecisionTimeMsPerTurn":4500,"policyVersion":"kodo-jev-v1"}"#;
+        save_decision_settings_to(&path, raw).expect("save");
+
+        // The stored value is one line.
+        let text = std::fs::read_to_string(&path).expect("read the log");
+        let stored = text
+            .lines()
+            .find(|line| line.starts_with("jev-decision="))
+            .expect("the record must be one line");
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("jev-decision="))
+                .count(),
+            1,
+            "the record must occupy exactly one line"
+        );
+        assert!(!stored["jev-decision=".len()..].contains('\n'));
+
+        // And it parses back into the same configuration.
+        let config = load_decision_config_from(Some(&path), None);
+        assert!(config.config_error.is_none(), "{:?}", config.config_error);
+        assert_eq!(config.settings.mode, DecisionMode::Observe);
+        assert_eq!(config.settings.provider, DecisionProvider::OpenRouter);
+        assert_eq!(config.settings.model, "typesafe/jev-1.14");
+        assert!(config.settings.task_route_enabled);
+        assert!(!config.settings.failure_triage_enabled);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_pretty_printed_record_is_normalized_before_it_is_written() {
+        let dir = std::env::temp_dir().join(format!("kodo-jev-pretty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("settings.log");
+        let pretty = "{\n  \"schemaVersion\": 1,\n  \"mode\": \"observe\"\n}";
+        save_decision_settings_to(&path, pretty).expect("save");
+        let config = load_decision_config_from(Some(&path), None);
+        assert!(config.config_error.is_none(), "{:?}", config.config_error);
+        assert_eq!(config.settings.mode, DecisionMode::Observe);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_damaged_record_says_how_to_repair_it() {
+        // The settings log is line-based: a record written as more than
+        // one line comes back as a truncated object. The message has to
+        // say what to do, not just repeat the parser's complaint.
+        let dir = std::env::temp_dir().join(format!("kodo-jev-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("settings.log");
+        // What the old pretty-printed writer left behind.
+        std::fs::write(
+            &path,
+            "jev-decision={\n  \"schemaVersion\": 1,\n  \"mode\": \"observe\"\n}\n",
+        )
+        .expect("write the damaged record");
+        let config = load_decision_config_from(Some(&path), None);
+        let error = config
+            .config_error
+            .expect("the damaged record must be reported");
+        assert!(error.contains("save the configuration again"), "{error}");
+        // The feature stays off rather than falling back to "on".
+        assert_eq!(config.settings.mode, DecisionMode::Off);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_openrouter_default_model_is_the_typesafe_one() {
+        assert_eq!(
+            DecisionProvider::OpenRouter.default_model(),
+            "typesafe/jev-1.14"
+        );
+        assert_eq!(DecisionProvider::TypeSafe.default_model(), "jev-1.13.0");
     }
 
     #[test]

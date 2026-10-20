@@ -25,6 +25,8 @@
 
 服务来源是配置的一部分：`provider` 字段（`typeSafe` / `openRouter`）决定目的地、凭据与请求格式。
 
+**存储格式**：记录以**单行** JSON 写入 `settings.log`。该日志是行式 `key=value`，多行值会在第一行被截断；存盘前统一用 `DecisionSettings::to_json()` 归一化，既保证单行，也保证存进去的形状和界面看到的形状一致。
+
 沿用 `settings.log` 的 append-only `key=value` 语义，新增独立键 `jev-decision`，值为 JSON：
 
 ```json
@@ -293,6 +295,8 @@ Jev 接入点在 **`conversational` 判定之后、`skill` 选择之前**（即 
 | 10 | 语料放在 `evals/fixtures/` 下的独立目录 | 放在 `evals/fixtures-decision/` | `evals/fixtures/` 的每个目录都被 fixture 层当作"带 oracle 的任务仓库"扫描；把语料放进去会破坏 `splits_cover_all_fixtures` 门。 |
 | 11 | 首期固定一个官方接收方 | 支持两个来源（官方 Jev / OpenRouter），一次只启用一个 | 用户明确要求接入 OpenRouter。仍然固定目的地、固定凭据、失败不换源；新增的是"用户选哪一个"，不是"系统替用户选"。 |
 | 12 | 概率由服务直接给出 | OpenRouter 的概率由首 token 候选归一化得到；没有概率时只记录不采纳 | 单字母作答让逐选项概率可取；没有分布就意味着"不知道"，而不是"很确定"。门槛假设的是真实概率，不能拿模型自评冒充。 |
+| 13 | 设置记录按可读 JSON 存盘 | 存盘前统一归一化成**单行** JSON | `settings.log` 是行式 `key=value` 日志：多行记录会在第一行被截断，读回来是 `{`，于是报 `EOF while parsing an object`。归一化同时兜住了用户直接提交多行 JSON 的情况。 |
+| 14 | 官方端点固定 `jev-1.13.0` | OpenRouter 端点默认 `typesafe/jev-1.14` | 用户指定。两者是不同传输上的不同版本；官方路径的版本仍受冻结评测约束，OpenRouter 路径的版本在质量门里单独统计。 |
 
 **无新增依赖**：`kodo-agent` 已有 `ureq 2.12` / `serde` / `serde_json`；`kodo-shell` 已有 `serde` / `serde_json`；凭据与设置复用 `kodo-core::settings`；脱敏复用 `kodo-core::redact`；轨迹复用 `kodo-shell::turn` 的 Reasoning 映射。
 

@@ -44,7 +44,7 @@ test("切换服务来源会换掉模型并各自记住密钥", async ({ page }) 
   );
   // The model id means something different per provider, so the default
   // follows the provider.
-  await expect(page.getByTestId("decision-model")).toHaveValue("openai/gpt-4o-mini");
+  await expect(page.getByTestId("decision-model")).toHaveValue("typesafe/jev-1.14");
 
   await page.getByTestId("decision-provider-typeSafe").click();
   await expect(page.getByTestId("decision-model")).toHaveValue("jev-1.13.0");

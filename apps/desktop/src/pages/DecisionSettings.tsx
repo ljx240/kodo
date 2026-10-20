@@ -76,7 +76,7 @@ function toJson(form: Form): string {
 /** The model each provider starts from. */
 const PROVIDER_DEFAULT_MODEL: Record<Provider, string> = {
   typeSafe: "jev-1.13.0",
-  openRouter: "openai/gpt-4o-mini",
+  openRouter: "typesafe/jev-1.14",
 };
 
 export function DecisionSettingsBody() {

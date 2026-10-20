@@ -38,7 +38,11 @@ pub const OPENROUTER_PATH: &str = "/api/v1/chat/completions";
 pub const DEFAULT_MODEL: &str = "jev-1.13.0";
 /// The default OpenRouter model. A caller may name any model the router
 /// offers; the default is the one the settings form starts from.
-pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-4o-mini";
+///
+/// The default is TypeSafe's Jev 1.14 served *through* the router: the
+/// router is the transport, the model is still the one the evaluation was
+/// written against.
+pub const DEFAULT_OPENROUTER_MODEL: &str = "typesafe/jev-1.14";
 /// The policy version recorded with every request and every decision record.
 pub const DEFAULT_POLICY_VERSION: &str = "kodo-jev-v1";
 /// The settings key this component reads from `settings.log`.
@@ -239,8 +243,15 @@ impl DecisionSettings {
     /// fields are ignored; an illegal mode, a mismatched schema or policy
     /// version, or an out-of-range quota disables the component.
     pub fn from_json(raw: &str) -> Result<Self, String> {
-        let parsed: DecisionSettingsJson =
-            serde_json::from_str(raw).map_err(|error| format!("jev-decision: {error}"))?;
+        let parsed: DecisionSettingsJson = serde_json::from_str(raw).map_err(|error| {
+            // A record that cannot be parsed is usually a damaged one —
+            // the settings log is line-based, so a record written as more
+            // than one line comes back truncated. The message says so
+            // instead of showing a bare parser error.
+            format!(
+                "jev-decision: the stored record is not readable JSON ({error}); save the configuration again to rewrite it"
+            )
+        })?;
         let mode = DecisionMode::parse(&parsed.mode)
             .ok_or_else(|| format!("jev-decision: unknown mode `{}`", parsed.mode))?;
         let provider = DecisionProvider::parse(&parsed.provider)
@@ -323,8 +334,12 @@ impl DecisionSettings {
     /// The canonical JSON form of this configuration. The same shape is
     /// stored in `settings.log` and handed to the settings form, so the
     /// two can never drift.
+    ///
+    /// The output is **one line**: `settings.log` is a line-based
+    /// `key=value` log, and a pretty-printed value would be cut at the
+    /// first newline and read back as a truncated object.
     pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(&serde_json::json!({
+        serde_json::to_string(&serde_json::json!({
             "schemaVersion": self.schema_version,
             "provider": self.provider.label(),
             "mode": self.mode.label(),
