@@ -1225,14 +1225,17 @@ impl TaskPlan {
                         && evidence.had_tool_success)
                     // Criterion-scoped verify only: bound bag items, or the
                     // legacy unscoped shortcut when no plan targets exist.
+                    // A project with no verification commands at all satisfies
+                    // the requirement vacuously ("not applicable", never
+                    // "passed").
                     || (matches!(
                         criterion.requirement,
                         EvidenceRequirement::VerificationPassed
                             | EvidenceRequirement::SemanticProof {
                                 target: SemanticTarget::RegressionPrevented
                             }
-                    ) && evidence.verify_ok == Some(true)
-                        && unscoped_verify)
+                    ) && (evidence.verify_not_applicable
+                        || (evidence.verify_ok == Some(true) && unscoped_verify)))
                     || (matches!(
                         criterion.requirement,
                         EvidenceRequirement::ContextRead { .. }
@@ -1545,6 +1548,11 @@ pub struct AcceptanceEvidence {
     pub verify_evidence: Vec<crate::verify::VerificationEvidence>,
     /// Set when verification failed for infrastructure reasons (not product).
     pub verify_infra_failure: bool,
+    /// Set when the project/skill policy exposes no verification commands at
+    /// all (e.g. docs-only repos). That is "verification not applicable",
+    /// never an environment block.
+    #[serde(default)]
+    pub verify_not_applicable: bool,
     /// True when at least one targeted verification command passed this turn.
     pub partial_verified: bool,
     pub deliverable_errors: Option<Vec<String>>,
@@ -1626,6 +1634,16 @@ impl AcceptanceEvidence {
         self.verify_ok = Some(ok);
         let _ = cmds;
     }
+
+    /// No verification commands exist for this project/skill policy: close
+    /// the verify gate as "not applicable" instead of blocking the task.
+    pub fn mark_verify_not_applicable(&mut self) {
+        self.verify_not_applicable = true;
+        self.verify_infra_failure = false;
+        self.verify_ok = Some(true);
+        self.partial_verified = false;
+        self.verify_evidence.clear();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1703,6 +1721,63 @@ mod tests {
         assert!(plan.requires_verify);
         assert!(plan.subtasks.iter().any(|s| s.kind == SubtaskKind::Edit));
         assert!(plan.subtasks.iter().any(|s| s.kind == SubtaskKind::Verify));
+    }
+
+    #[test]
+    fn empty_verification_plan_is_not_applicable_not_blocked() {
+        use crate::skill::SkillRegistry;
+
+        let skill = SkillRegistry::builtin()
+            .select(crate::classify::TaskType::Feature)
+            .expect("feature skill must be present")
+            .clone();
+        let plan = TaskPlan::from_skill(&skill, "完成目录重组并更新文档路径");
+
+        // Mirror the real session: reads and the edit carry tool evidence.
+        let mut plan = plan;
+        for (id, ev) in [
+            (
+                "s1",
+                Evidence::ToolResultId {
+                    id: "r1".into(),
+                    tool: "read_file".into(),
+                },
+            ),
+            (
+                "s2",
+                Evidence::ToolResultId {
+                    id: "r2".into(),
+                    tool: "read_file".into(),
+                },
+            ),
+            (
+                "s3",
+                Evidence::ChangedFile {
+                    path: "docs/PROJECT-INTRODUCTION.md".into(),
+                },
+            ),
+        ] {
+            if let Some(sub) = plan.subtasks.iter_mut().find(|s| s.id == id) {
+                sub.mark_done(ev);
+            }
+        }
+
+        // Fail-closed default: no verification signal at all must not Finish.
+        let mut evidence = AcceptanceEvidence {
+            had_tool_success: true,
+            files_written: vec!["docs/PROJECT-INTRODUCTION.md".to_owned()],
+            model_claimed_done: true,
+            ..Default::default()
+        };
+        assert!(!plan.evaluate_acceptance(&evidence).ok);
+
+        // A project with zero verification commands (docs-only repo) closes
+        // the gate as "not applicable" instead of blocking the whole task.
+        evidence.mark_verify_not_applicable();
+        let report = plan.evaluate_acceptance(&evidence);
+        assert!(report.ok, "not-applicable verify must accept: {report:?}");
+        assert!(evidence.verify_not_applicable);
+        assert!(!evidence.verify_infra_failure);
     }
 
     #[test]

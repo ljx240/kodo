@@ -1173,6 +1173,35 @@ mod tests {
     }
 
     #[test]
+    fn verify_not_applicable_finishes_without_blocking() {
+        let mut m = AgentMachine::new("fix tests", Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("p"),
+                ToolName::WriteFile.label(),
+                "docs/PROJECT-INTRODUCTION.md",
+                "patched",
+            )],
+        });
+        assert_eq!(m.state(), &AgentState::Verify);
+        {
+            let ev = m.evidence_mut().unwrap();
+            ev.mark_verify_not_applicable();
+        }
+        m.handle(AgentEvent::VerifyFinished { ok: true });
+        assert_eq!(
+            m.state(),
+            &AgentState::Finish,
+            "empty verification plan must reach Finish, not Failed: {:?}",
+            m.state()
+        );
+    }
+
+    #[test]
     fn repair_wall_clock_budget_exhausts() {
         let budget = Budget {
             max_repairs: 10,
