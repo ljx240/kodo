@@ -14,10 +14,14 @@
 //! least one call; cleared explicitly at the start of each turn.
 //!
 //! A third surface rides along because it needs the same per-turn lifetime:
-//! the set of file contents the model has actually seen, which is what makes
-//! a whole-file overwrite a *repair* instead of a blind guess.
+//! the structured read evidence for this turn — which files reached the model,
+//! in which representation, over which ranges, at which source version. That
+//! ledger is what makes a whole-file overwrite a *repair* instead of a blind
+//! guess, and what refuses an overwrite after the file changed underneath.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
+
+use crate::read_receipt::{ReadLedger, ReadReceipt, Representation};
 
 /// How many recent `list_files` calls to remember for the same-prefix check.
 const LIST_DEDUP_WINDOW: usize = 16;
@@ -35,9 +39,10 @@ pub struct TurnDedup {
     /// `(prefix, ts_ms)` for recent `list_files` calls in this turn. The
     /// ts is wall-clock millis (informational — only ordering matters).
     recent_list_calls: VecDeque<(String, u64)>,
-    /// Project-relative paths whose current bytes reached the model this
-    /// turn: a successful read, or a file the model wrote itself.
-    seen_paths: BTreeSet<String>,
+    /// Structured read evidence for this turn. Replaces the old
+    /// `BTreeSet<path>` "saw this path" boolean, which could not distinguish
+    /// "read 120 of 201 lines" from "read the file".
+    reads: ReadLedger,
 }
 
 impl TurnDedup {
@@ -45,21 +50,31 @@ impl TurnDedup {
         Self::default()
     }
 
-    /// Model-provided relative paths drift (`./src/a.ts` vs `src/a.ts`); the
-    /// reader and the writer must land on the same key.
-    fn sight_key(path: &str) -> String {
-        path.trim().trim_start_matches("./").to_owned()
+    /// Record what one read actually delivered to the model.
+    pub fn note_read_receipt(&mut self, receipt: ReadReceipt) {
+        self.reads.record(receipt);
     }
 
-    /// Record that this turn now holds `path`'s content in context.
-    pub fn note_seen(&mut self, path: &str) {
-        self.seen_paths.insert(Self::sight_key(path));
+    /// The model authored these bytes this turn; a rewrite is a repair.
+    pub fn note_authored(
+        &mut self,
+        path: &str,
+        representation: Representation,
+        version: impl Into<String>,
+        units: Option<usize>,
+    ) {
+        self.reads
+            .note_authored(path, representation, version, units);
     }
 
-    /// True when a whole-file write to `path` replaces bytes this turn has
-    /// already shown the model.
-    pub fn has_seen(&self, path: &str) -> bool {
-        self.seen_paths.contains(&Self::sight_key(path))
+    /// Why a whole-file overwrite is not allowed right now, or `None` when the
+    /// turn holds a complete read of the current version.
+    pub fn overwrite_block(&self, path: &str, current_version: Option<&str>) -> Option<String> {
+        self.reads.overwrite_block(path, current_version)
+    }
+
+    pub fn receipt(&self, path: &str) -> Option<&ReadReceipt> {
+        self.reads.get(path)
     }
 
     /// Record a `list_files(prefix)` call. Returns:
@@ -156,13 +171,17 @@ mod tests {
     }
 
     #[test]
-    fn sight_records_one_path_under_both_spellings() {
+    fn receipt_lands_under_one_key_for_both_spellings() {
         let mut d = TurnDedup::new();
-        assert!(!d.has_seen("src/a.ts"));
-        d.note_seen("./src/a.ts");
-        assert!(d.has_seen("src/a.ts"));
-        assert!(d.has_seen("./src/a.ts"));
-        assert!(!d.has_seen("src/b.ts"));
+        assert!(d.receipt("src/a.ts").is_none());
+        let mut receipt =
+            ReadReceipt::new("./src/a.ts", Representation::RawText, "v1").with_total(Some(3));
+        receipt.add_range(1, 3);
+        d.note_read_receipt(receipt);
+        assert!(d.receipt("src/a.ts").is_some());
+        assert!(d.receipt("./src/a.ts").is_some());
+        assert!(d.receipt("src/b.ts").is_none());
+        assert_eq!(d.overwrite_block("src/a.ts", Some("v1")), None);
     }
 
     #[test]
