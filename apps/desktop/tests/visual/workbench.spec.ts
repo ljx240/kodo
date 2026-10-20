@@ -4,6 +4,7 @@ import type { CalendarEventDto, TodoDto, TodoStatusDefDto } from "../../src/api"
 import {
   DEMO_CALENDAR_EVENTS,
   DEMO_TODO_STATUSES,
+  DEMO_TODAY,
   DEMO_TODOS,
 } from "../../src/data/workbench";
 import { stubShell, type Core } from "./shell";
@@ -274,7 +275,14 @@ test("the board renders one column per status, not a fixed three", async ({ page
   // A card carries its title, due date, priority and status.
   const card = page.getByTestId("todo-card-todo-1");
   await expect(card.locator(".todo-priority").first()).toHaveText("高");
-  await expect(card.locator(".todo-due").first()).toContainText("09/30");
+  // `todo-1` is frozen at DEMO_TODAY while the app reads the real clock, so
+  // the chip reads as an overdue relative date whose count moves with TODAY.
+  const demoDaysLate = Math.round(
+    (Date.parse(`${TODAY}T00:00:00Z`) - Date.parse(`${DEMO_TODAY}T00:00:00Z`)) / 86_400_000,
+  );
+  await expect(card.locator(".todo-due").first()).toHaveText(
+    `已逾期 ${demoDaysLate} 天 12:00`,
+  );
   await expect(page.getByTestId("todo-status-todo-1")).toHaveValue("doing");
   // Sub-items are counted on the parent and never float into a column.
   await expect(card.locator(".todo-subcount")).toHaveText("2/5 子项");
@@ -323,11 +331,17 @@ test("a card wears the catalog's own chips, and its due chip reddens only when d
   await expect(card.locator(".todo-due")).toHaveText("今天 12:00");
   await expect(card.locator(".todo-due")).toHaveClass(/todo-due--late/);
 
-  // So is a date already behind us…
+  // So is a date already behind us, and the chip says by how much…
+  await expect(page.getByTestId("todo-card-t-late").locator(".todo-due")).toHaveText(
+    "已逾期 3 天",
+  );
   await expect(page.getByTestId("todo-card-t-late").locator(".todo-due")).toHaveClass(
     /todo-due--late/,
   );
-  // …but a date still ahead is plain, and none at all says so.
+  // …a date still ahead is plain and counts the other way…
+  await expect(page.getByTestId("todo-card-t-soon").locator(".todo-due")).toHaveText(
+    "3 天后",
+  );
   await expect(page.getByTestId("todo-card-t-soon").locator(".todo-due")).not.toHaveClass(
     /todo-due--late/,
   );

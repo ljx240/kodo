@@ -78,7 +78,7 @@ export function TodoToolbar({
         ))}
       </div>
 
-      <span className="spacer" />
+      <span className="todo-toolbar-divider" aria-hidden="true" />
 
       <Menu
         align="right"

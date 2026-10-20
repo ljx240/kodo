@@ -1125,6 +1125,9 @@ export const T = {
       noDue: "无截止日期",
       overdue: "已逾期",
       dueToday: (time: string) => (time ? `今天 ${time}` : "今天"),
+      dueTomorrow: "明天",
+      dueYesterday: "昨天",
+      dueDaysSuffix: "天后",
       // A column with nothing left in it is good news, and a 已完成 column
       // says so instead of offering a drop target.
       emptyStatusTitle: "太棒了！",

@@ -184,7 +184,7 @@ export function TodoEditorModal({
               </label>
             </div>
 
-            <div className="todo-editor-row todo-editor-row--three">
+            <div className="todo-editor-row">
               <label className="field">
                 <span className="field-label">{W.due}</span>
                 <input
@@ -207,6 +207,57 @@ export function TodoEditorModal({
                   onChange={(event) => onPatch({ dueTime: event.target.value || null })}
                 />
               </label>
+            </div>
+
+            <div className="todo-editor-row">
+              <label className="field">
+                <span className="field-label">{W.module}</span>
+                <input
+                  className="input"
+                  value={draft.module}
+                  aria-label={W.module}
+                  placeholder={W.module}
+                  data-testid="todo-edit-module"
+                  onChange={(event) => onPatch({ module: event.target.value })}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">{W.estimate}</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  className="input"
+                  value={draft.estimateHours ?? ""}
+                  aria-label={W.estimate}
+                  data-testid="todo-edit-estimate"
+                  onChange={(event) =>
+                    onPatch({
+                      estimateHours: event.target.value === "" ? null : Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
+            </div>
+
+            <div className="todo-editor-row">
+              <label className="field">
+                <span className="field-label">{W.actual}</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  className="input"
+                  value={draft.actualHours ?? ""}
+                  aria-label={W.actual}
+                  data-testid="todo-edit-actual"
+                  onChange={(event) =>
+                    onPatch({
+                      actualHours: event.target.value === "" ? null : Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
               <label className="field">
                 <span className="field-label">{W.itemType}</span>
                 <select
@@ -223,56 +274,6 @@ export function TodoEditorModal({
                   ))}
                 </select>
               </label>
-            </div>
-
-            <div className="todo-editor-row">
-              <label className="field">
-                <span className="field-label">{W.module}</span>
-                <input
-                  className="input"
-                  value={draft.module}
-                  aria-label={W.module}
-                  placeholder={W.module}
-                  data-testid="todo-edit-module"
-                  onChange={(event) => onPatch({ module: event.target.value })}
-                />
-              </label>
-              <div className="todo-editor-row">
-                <label className="field">
-                  <span className="field-label">{W.estimate}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.5}
-                    className="input"
-                    value={draft.estimateHours ?? ""}
-                    aria-label={W.estimate}
-                    data-testid="todo-edit-estimate"
-                    onChange={(event) =>
-                      onPatch({
-                        estimateHours: event.target.value === "" ? null : Number(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-                <label className="field">
-                  <span className="field-label">{W.actual}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.5}
-                    className="input"
-                    value={draft.actualHours ?? ""}
-                    aria-label={W.actual}
-                    data-testid="todo-edit-actual"
-                    onChange={(event) =>
-                      onPatch({
-                        actualHours: event.target.value === "" ? null : Number(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-              </div>
             </div>
 
             <section className="todo-editor-section">
