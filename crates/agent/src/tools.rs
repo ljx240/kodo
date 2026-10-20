@@ -224,7 +224,57 @@ fn basename(tok: &str) -> String {
     t.rsplit('/').next().unwrap_or(t).to_ascii_lowercase()
 }
 
-pub fn search_files(project: &Path, query: &str) -> String {
+/// One search answer stays inside a bounded block: the point is to answer
+/// "where is it and what does the line say", not to dump the repository.
+/// Content spans pulled from the retrieval index. We ask for more than we
+/// print, so the "另有 N 处未显示" hint is truthful — and well past the context
+/// packer's own 12-file ceiling, which is far too shallow for a code search.
+const MAX_SEARCH_HITS: usize = 48;
+const MAX_SEARCH_SNIPPETS: usize = 24;
+const MAX_SEARCH_LINE_CHARS: usize = 200;
+const MAX_SEARCH_CHARS: usize = 6_000;
+
+/// Case-insensitive glob match. A pattern without `/` is tested against the
+/// basename, so `*.rs` also finds `crates/agent/src/tools.rs`. `*` spans path
+/// separators and `?` matches one character.
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    let pat: Vec<char> = pattern.to_lowercase().chars().collect();
+    let target = if pattern.contains('/') {
+        path.to_owned()
+    } else {
+        basename(path)
+    };
+    let text: Vec<char> = target.chars().collect();
+    let (mut p, mut t) = (0usize, 0usize);
+    let (mut star_p, mut star_t) = (None, 0usize);
+    while t < text.len() {
+        if p < pat.len() && (pat[p] == '?' || pat[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pat.len() && pat[p] == '*' {
+            star_p = Some(p);
+            star_t = t;
+            p += 1;
+        } else if let Some(anchor) = star_p {
+            // Let the last `*` absorb one more text character and retry the
+            // tail. `star_t` must advance here or the loop never moves.
+            p = anchor + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == '*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+/// Search project files for `query`, optionally filtered by a filename glob.
+/// Each content hit prints as `path:line` plus the matched line, because a
+/// bare path list made the model spend a `read_file` round trip per hit.
+pub fn search_files(project: &Path, query: &str, glob: Option<&str>) -> String {
     if query.trim().is_empty() {
         return "空查询".to_owned();
     }
@@ -233,23 +283,95 @@ pub fn search_files(project: &Path, query: &str) -> String {
     if context.scan(&|| true).is_err() {
         return "搜索已取消".into();
     }
-    let hits = context.collect(query, &|| true).unwrap_or_default();
-    let mut paths: Vec<String> = hits.into_iter().map(|span| span.path).collect();
-    for entry in context.file_map() {
-        if entry.path.to_lowercase().contains(&query.to_lowercase()) {
-            paths.push(entry.path.clone());
+    let keep = |path: &str| glob.is_none_or(|pattern| glob_matches(pattern, path));
+    let needle = query.to_lowercase();
+    let tokens: Vec<&str> = needle.split_whitespace().collect();
+    let is_hit = |line: &str| {
+        let lowered = line.to_lowercase();
+        lowered.contains(&needle) || tokens.iter().any(|token| lowered.contains(token))
+    };
+
+    // One span per file, centred on its densest run of matches. The span
+    // window starts at `start_line`, so the matched line is that plus the
+    // offset of the first hit inside the window.
+    let mut found: Vec<(String, usize, usize, String)> = Vec::new();
+    for span in context
+        .grep(query, MAX_SEARCH_HITS, &|| true)
+        .unwrap_or_default()
+    {
+        if !keep(&span.path) {
+            continue;
+        }
+        let lines: Vec<&str> = span.snippet.lines().collect();
+        let Some(offset) = lines.iter().copied().position(is_hit) else {
+            continue;
+        };
+        let line = lines[offset]
+            .trim()
+            .chars()
+            .take(MAX_SEARCH_LINE_CHARS)
+            .collect::<String>();
+        let others = lines
+            .iter()
+            .filter(|line| is_hit(line))
+            .count()
+            .saturating_sub(1);
+        found.push((span.path, span.start_line + offset, others, line));
+    }
+    let hit_paths: std::collections::BTreeSet<&str> =
+        found.iter().map(|(path, ..)| path.as_str()).collect();
+    let mut names: Vec<String> = context
+        .file_map()
+        .iter()
+        .map(|entry| entry.path.clone())
+        .filter(|rel| keep(rel) && rel.to_lowercase().contains(&needle))
+        .filter(|rel| !hit_paths.contains(rel.as_str()))
+        .collect();
+    names.sort();
+    names.dedup();
+    if found.is_empty() && names.is_empty() {
+        return match glob {
+            Some(pattern) => format!("0 处匹配（glob `{pattern}` 过滤后）"),
+            None => "0 处匹配".into(),
+        };
+    }
+    found.sort();
+    let mut out = format!("{} 个文件匹配：\n", found.len().saturating_add(names.len()));
+    let mut shown = 0usize;
+    let mut skipped = 0usize;
+    for (path, line, others, text) in found {
+        if shown >= MAX_SEARCH_SNIPPETS || out.len() >= MAX_SEARCH_CHARS {
+            skipped += 1;
+            continue;
+        }
+        shown += 1;
+        let head = if others > 0 {
+            format!("{path}:{line}（同文件另有 {others} 处）")
+        } else {
+            format!("{path}:{line}")
+        };
+        if text.is_empty() {
+            out.push_str(&format!("{head}\n"));
+        } else {
+            out.push_str(&format!("{head}\n    {text}\n"));
         }
     }
-    paths.sort();
-    paths.dedup();
-    if paths.is_empty() {
-        return "0 处匹配".into();
+    // Filename matches print last: without a line number they still cost the
+    // model a read_file round trip, so a content hit is worth more of the cap.
+    for path in names {
+        if shown >= MAX_SEARCH_SNIPPETS || out.len() >= MAX_SEARCH_CHARS {
+            skipped += 1;
+            continue;
+        }
+        shown += 1;
+        out.push_str(&format!("{path} (文件名匹配)\n"));
     }
-    format!(
-        "{} 个文件匹配：\n{}",
-        paths.len(),
-        paths.into_iter().take(12).collect::<Vec<_>>().join("\n")
-    )
+    if skipped > 0 {
+        out.push_str(&format!(
+            "…（另有 {skipped} 处未显示，可用 glob 参数或更具体的查询缩小范围）"
+        ));
+    }
+    out.trim_end().to_owned()
 }
 
 pub fn read_text(path: &Path, max_lines: usize) -> String {
@@ -1927,6 +2049,140 @@ mod tests {
         assert!(context
             .read_range("outside-link.txt", 1, 5, "test")
             .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn search_fixture(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "kodo-search-{}-{}-{tag}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        for (path, body) in files {
+            let full = root.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(&full, body).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn search_reports_the_matched_line_and_counts_hits_in_the_same_file() {
+        let root = search_fixture(
+            "lines",
+            &[
+                (
+                    "src/tax.rs",
+                    "// one\n// two\npub fn kodo_tax_v2(amount: u32) -> u32 {\n    amount * 7 / 100\n}\n",
+                ),
+                (
+                    "src/loop.rs",
+                    "// head\nkodo_tax_v2 first\n// mid\nkodo_tax_v2 second\n",
+                ),
+                ("notes.md", "# notes\n\nkodo_tax_v2 is documented here\n"),
+            ],
+        );
+        let out = search_files(&root, "kodo_tax_v2", None);
+        assert!(out.contains("src/tax.rs:3"), "{out}");
+        assert!(
+            out.contains("pub fn kodo_tax_v2(amount: u32) -> u32"),
+            "matched text must ship with the hit: {out}"
+        );
+        assert!(out.contains("notes.md:3"), "{out}");
+        assert!(out.contains("src/loop.rs:2"), "{out}");
+        assert!(out.contains("同文件另有 1 处"), "{out}");
+        assert!(out.starts_with("3 个文件匹配："), "{out}");
+        // Every hit was a real content match, so no filename-only fallback.
+        assert!(!out.contains("(文件名匹配)"), "{out}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn glob_matches_absorbs_variable_prefixes() {
+        // A `*` that has to swallow several characters is also the case that
+        // must terminate: the backtrack has to advance the star anchor.
+        assert!(glob_matches("*.rs", "crates/agent/src/tools.rs"));
+        assert!(glob_matches("*.rs", "tools.rs"));
+        assert!(glob_matches("src/**/*.ts", "src/a/b/c.ts"));
+        assert!(glob_matches("?.rs", "a.rs"));
+        assert!(glob_matches("*", ""));
+        assert!(!glob_matches("*.rs", "notes.md"));
+        assert!(!glob_matches("src/**/*.ts", "tests/a/b/c.ts"));
+        assert!(!glob_matches("a.rs", "ab.rs"));
+    }
+
+    #[test]
+    fn search_glob_narrows_by_basename_or_full_path() {
+        let root = search_fixture(
+            "glob",
+            &[
+                ("src/a/deep.rs", "kodo_glob_marker inside rust\n"),
+                ("docs/notes.md", "kodo_glob_marker inside markdown\n"),
+            ],
+        );
+        // A pattern without `/` matches the basename, so `*.rs` reaches nested files.
+        let only_rust = search_files(&root, "kodo_glob_marker", Some("*.rs"));
+        assert!(only_rust.contains("src/a/deep.rs"), "{only_rust}");
+        assert!(!only_rust.contains("notes.md"), "{only_rust}");
+        let only_md = search_files(&root, "kodo_glob_marker", Some("*.md"));
+        assert!(only_md.contains("docs/notes.md"), "{only_md}");
+        assert!(!only_md.contains("deep.rs"), "{only_md}");
+        let path_glob = search_files(&root, "kodo_glob_marker", Some("src/**/*.rs"));
+        assert!(path_glob.contains("src/a/deep.rs"), "{path_glob}");
+        assert!(!path_glob.contains("notes.md"), "{path_glob}");
+        let filtered_out = search_files(&root, "kodo_glob_marker", Some("*.py"));
+        assert_eq!(filtered_out, "0 处匹配（glob `*.py` 过滤后）");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_falls_back_to_filenames_and_flags_overflow() {
+        let mut files: Vec<(String, String)> = (0..MAX_SEARCH_SNIPPETS + 6)
+            .map(|i| {
+                (
+                    format!("src/mod{i:02}.rs"),
+                    format!("kodo_flood_marker number {i}\n"),
+                )
+            })
+            .collect();
+        files.push((
+            "kodo_flood_helper.rs".to_owned(),
+            "// this file only matches by name\n".to_owned(),
+        ));
+        let owned: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(path, body)| (path.as_str(), body.as_str()))
+            .collect();
+        let root = search_fixture("flood", &owned);
+        let out = search_files(&root, "kodo_flood", None);
+        assert!(out.starts_with("31 个文件匹配："), "{out}");
+        assert!(out.contains("src/mod00.rs:1"), "{out}");
+        assert!(
+            !out.contains("src/mod29.rs"),
+            "capped hits must not print: {out}"
+        );
+        assert!(!out.contains("(文件名匹配)"), "{out}");
+        // 30 content hits minus the 24 shown, plus the filename-only file.
+        assert!(out.contains("另有 7 处未显示"), "{out}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn filename_only_hits_are_listed_when_they_fit() {
+        let root = search_fixture("names", &[("kodo_marker_helper.rs", "// unrelated\n")]);
+        let out = search_files(&root, "kodo_marker", None);
+        assert!(out.starts_with("1 个文件匹配："), "{out}");
+        assert!(out.contains("kodo_marker_helper.rs (文件名匹配)"), "{out}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_refuses_blank_queries_and_reports_zero_hits() {
+        let root = search_fixture("blank", &[("src/a.rs", "kodo_marker\n")]);
+        assert_eq!(search_files(&root, "   ", None), "空查询");
+        assert_eq!(search_files(&root, "kodo_absent_marker", None), "0 处匹配");
         fs::remove_dir_all(root).unwrap();
     }
 }

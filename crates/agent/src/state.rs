@@ -232,14 +232,30 @@ impl Budget {
         }
     }
 
+    /// Code work needs read → edit → verify → repair cycles. The generic
+    /// default (6 rounds / 32 tools / 120 s repair wall) is smaller than one
+    /// `cargo test` compile in a workspace this size, so a Rust repair cycle
+    /// could burn its entire wall-clock allowance on the first attempt and end
+    /// the turn with the failure still standing. Evidence gates and the repair
+    /// *count* stay exactly as the default: only the room to run them grows.
+    pub fn for_code() -> Self {
+        Self {
+            max_rounds: 10,
+            max_tool_calls: 64,
+            max_repair_wall_ms: 300_000,
+            max_context_chars: 120_000,
+            ..Self::default()
+        }
+    }
+
     /// Read-only summary family budget: many tool calls, no repairs.
     ///
     /// Read-only tasks (「为我输出该项目架构」,「总结仓库结构」, etc.) need
-    /// 20-30+ tool calls just to map a project — well past the code-mode
-    /// default of 32. They never mutate the project or trigger repair cycles,
-    /// so code repair capacity stays zero; denied reads can replan within
-    /// the normal tool and round caps. Context window doubles because list-heavy tasks
-    /// accumulate a lot of repo_map output.
+    /// 20-30+ tool calls just to map a project — well past the generic
+    /// `Budget::default()` cap of 32. They never mutate the project or trigger
+    /// repair cycles, so code repair capacity stays zero; denied reads can
+    /// replan within the normal tool and round caps. Context window doubles
+    /// because list-heavy tasks accumulate a lot of repo_map output.
     ///
     /// `is_summary_family()` is the predicate callers use to pick the right
     /// diagnostic style at Finish time.

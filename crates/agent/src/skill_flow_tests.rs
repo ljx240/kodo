@@ -89,7 +89,7 @@ fn fake_execute(call: &ToolCall) -> ToolResult {
                 ToolResult::success(call.id.clone(), call.name.label(), command.clone(), "ok")
             }
         }
-        (ToolName::Search, ToolArgs::Search { query }) => ToolResult::success(
+        (ToolName::Search, ToolArgs::Search { query, .. }) => ToolResult::success(
             call.id.clone(),
             call.name.label(),
             query.clone(),
