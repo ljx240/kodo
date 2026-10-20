@@ -13,6 +13,7 @@ pub mod checkpoint;
 mod classify;
 pub mod compaction;
 mod context;
+pub mod decision;
 mod dedup;
 pub mod evidence;
 pub mod knowledge;
@@ -37,7 +38,7 @@ pub mod websearch;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use classify::{classify, is_document_output};
+use classify::{classify, classify_with_evidence, is_document_output};
 use context::ContextBudget;
 use mcp::{McpClients, McpError};
 use patch::{
@@ -64,15 +65,27 @@ use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason, Transition
 use tools::{
     classify_command_risk, command_run, search_files, write_project_file, CommandOutcomeKind,
 };
-use verify::{FailureClass, FinalStatus, RepairDecision, VerificationPlan, VerificationRunner};
+use verify::{
+    failure_triage_eligible, FailureClass, FinalStatus, RepairDecision, VerificationPlan,
+    VerificationRunner,
+};
 
 pub use checkpoint::{
     unified_diff, TurnChangeSet, UndoConflict, UndoConflictReason, UndoFileState, UndoReport,
 };
-pub use classify::{classify as classify_task, TaskType};
+pub use classify::{
+    classify as classify_task, classify_with_evidence as classify_task_with_evidence,
+    ClassificationEvidence, ClassificationSource, TaskType,
+};
 pub use context::{
     ContextBudget as TurnContextBudget, ContextManager, ContextSpan,
     Observation as TurnObservation, DEFAULT_CONTEXT_CHARS, MAX_HISTORY_MESSAGES,
+};
+pub use decision::{
+    consult_failure_triage, consult_task_route, DecisionAccess, DecisionHandle, DecisionInput,
+    DecisionMode, DecisionOutcome, DecisionReceipt, DecisionRecord, DecisionResult,
+    DecisionScenario, DecisionSettings, FailureTriageInput, FailureTriageOutcome, TaskRouteInput,
+    TaskRouteOutcome,
 };
 pub use evidence::{
     AcceptanceCriterion, CommandExpectation, EvidenceItem as AgentEvidenceItem,
@@ -100,10 +113,11 @@ pub use skill::{
 pub use state::{AgentState as TurnState, Budget as TurnBudget, FailReason as TurnFailReason};
 pub use tools::{dangerous_reason, CommandOutcome, CommandRisk};
 pub use verify::{
-    classify_verify_failure, CommandFailureKind as TurnFailureKind,
-    FailureClass as TurnFailureClass, FinalStatus as TurnFinalStatus, PlannedVerifyCommand,
-    RepairDecision as TurnRepairDecision, VerificationEvidence as TurnVerificationEvidence,
-    VerificationPlan as TurnVerificationPlan, VerificationRunner as TurnVerifier, VerifyTier,
+    classify_verify_failure, failure_evidence_origin, CommandFailureKind as TurnFailureKind,
+    FailureClass as TurnFailureClass, FailureOrigin as TurnFailureOrigin,
+    FinalStatus as TurnFinalStatus, PlannedVerifyCommand, RepairDecision as TurnRepairDecision,
+    VerificationEvidence as TurnVerificationEvidence, VerificationPlan as TurnVerificationPlan,
+    VerificationRunner as TurnVerifier, VerifyTier,
 };
 
 /// Permission mode for tool execution. Default is Ask — Secure by Default.
@@ -575,6 +589,41 @@ pub struct RunRequest {
     /// classes that always need a human: network egress, installs, process
     /// control, secrets, destructive git, catastrophic.
     pub allow_verify_commands: bool,
+    /// Optional decision-assistance handle (Jev).
+    ///
+    /// `None` — the default everywhere, including every test and the
+    /// background scheduler — means this run makes no decision request at
+    /// all and behaves exactly as it did before the feature existed. A
+    /// handle is only supplied by an entry point that can actually ask a
+    /// human for permission to send data; the agent itself never reads a
+    /// setting, a credential or a socket.
+    pub decision: Option<DecisionHandle>,
+}
+
+/// A coarse, locally derived category for a failed command.
+///
+/// The raw shell command never leaves the machine: only this label is
+/// eligible for the decision component's state, because a command line can
+/// carry paths, arguments and credentials.
+fn command_category(command: &str) -> &'static str {
+    let lower = command.to_ascii_lowercase();
+    if lower.contains("cargo test") || lower.contains("nextest") {
+        "rust_test"
+    } else if lower.contains("cargo check") || lower.contains("cargo clippy") {
+        "rust_check"
+    } else if lower.contains("cargo build") {
+        "rust_build"
+    } else if lower.contains("typecheck") || lower.contains("tsc") {
+        "frontend_typecheck"
+    } else if lower.contains("vitest") || lower.contains("jest") || lower.contains("npm test") {
+        "frontend_test"
+    } else if lower.contains("vite build") || lower.contains("npm run build") {
+        "frontend_build"
+    } else if lower.contains("pytest") {
+        "python_test"
+    } else {
+        "generic"
+    }
 }
 
 /// Commands the `allow_verify_commands` opt-in may run unattended.
@@ -3053,7 +3102,11 @@ pub fn run(
         request.project.as_deref(),
     );
     let chip_skill = resolve_skill(&skill_registry, &chip_ids, request.mode).cloned();
-    let task_type = match request.mode {
+    // The local rule's answer. It stays the baseline for the whole run:
+    // the budget family is derived from it, and the decision component may
+    // only refine the category inside the task channel that already
+    // exists.
+    let baseline_task_type = match request.mode {
         // Work mode always pins Work — the two spaces never mix (DESIGN §11),
         // and the space filter already rejected out-of-space chips.
         AgentMode::Work => TaskType::Work,
@@ -3064,6 +3117,7 @@ pub fn run(
             None => classify(classify_text),
         },
     };
+    let mut task_type = baseline_task_type;
     // Conversational channel (DESIGN.md §11, 2026-09-29): no project is
     // always constrained Q&A, and a knowledge/explanation question without a
     // pinned skill chip is a question — not a task. Both answer directly:
@@ -3084,6 +3138,56 @@ pub fn run(
             && (is_direct_conversation(classify_text)
                 || is_conversational_question(classify_text)));
     let conversational = conversational && !file_contract.requires_file_output;
+    // Optional decision assistance (Jev). Every hard constraint above has
+    // already been decided at this point: Work/Code mode, the explicit
+    // skill chip, the project, the file-output contract and the
+    // conversation channel. The decision component may only refine the
+    // task category *inside* that channel — it never opens a new one, and
+    // it never touches the budget family, the permission or the contract.
+    if let Some(handle) = request.decision.as_ref() {
+        if !conversational
+            && request.mode == AgentMode::Code
+            && chip_skill.is_none()
+            && has_project
+            && !file_contract.requires_file_output
+        {
+            let evidence = classify_with_evidence(classify_text);
+            if evidence.ambiguous {
+                let outcome = decision::consult_task_route(
+                    handle,
+                    &decision::TaskRouteInput {
+                        message: classify_text.to_owned(),
+                        mode: request.mode.label().to_owned(),
+                        baseline: baseline_task_type,
+                    },
+                    baseline_task_type,
+                    alive,
+                    emit,
+                );
+                match outcome {
+                    decision::TaskRouteOutcome::Applied(kind) => {
+                        // Re-check the hard constraints right before the
+                        // suggestion is used: nothing that was decided
+                        // above may be overridden here.
+                        if request.mode == AgentMode::Code
+                            && chip_skill.is_none()
+                            && has_project
+                            && !file_contract.requires_file_output
+                        {
+                            task_type = kind;
+                        }
+                    }
+                    decision::TaskRouteOutcome::Cancelled => {
+                        // The user stopped the round. Stop here: a cancelled
+                        // decision is not a reason to "fall back" and keep
+                        // running tools.
+                        return Ok(());
+                    }
+                    decision::TaskRouteOutcome::Unchanged => {}
+                }
+            }
+        }
+    }
     let skill = if conversational {
         None
     } else {
@@ -3130,7 +3234,14 @@ pub fn run(
         }
     }
     clamp_plan_verification(&mut plan, request.mode, has_project);
-    let budget = budget_for_task(task_type, project_summary, request.budget_family.as_deref());
+    // The budget family is derived from the *baseline* category. A decision
+    // suggestion may refine which skill runs; it never widens or narrows
+    // the run's budget.
+    let budget = budget_for_task(
+        baseline_task_type,
+        project_summary,
+        request.budget_family.as_deref(),
+    );
     let mut machine = AgentMachine::with_plan(&request.message, plan, budget);
     // Start with the configured window; refresh it after each model attempt
     // so failover uses the window of the provider that actually answered.
@@ -4027,7 +4138,53 @@ pub fn run(
                     )));
                 } else {
                     changeset.verified = Some(false);
-                    let infra = decision.failure_class == FailureClass::Infrastructure
+                    // Optional decision assistance for an *ambiguous*
+                    // failure. A denial, a cancellation, a timeout, an
+                    // explicit environment marker or an exhausted budget
+                    // never reaches this point: only a plain non-zero exit
+                    // with the default guess is eligible.
+                    let mut jev_infrastructure = false;
+                    let mut jev_transient = false;
+                    if let Some(handle) = request.decision.as_ref() {
+                        if failure_triage_eligible(&evidence_list, decision.budget_exhausted) {
+                            let failed = evidence_list
+                                .iter()
+                                .find(|e| !e.ok)
+                                .expect("eligible implies a failed item");
+                            let triage = decision::consult_failure_triage(
+                                handle,
+                                &decision::FailureTriageInput {
+                                    command_category: command_category(&failed.command).to_owned(),
+                                    exit_code: failed.exit_code,
+                                    known_flags: vec!["nonzero_exit".to_owned()],
+                                    error_excerpt: failed.output_summary.clone(),
+                                },
+                                alive,
+                                emit,
+                            );
+                            match triage {
+                                decision::FailureTriageOutcome::Infrastructure => {
+                                    jev_infrastructure = true;
+                                }
+                                decision::FailureTriageOutcome::Transient => {
+                                    jev_transient = true;
+                                }
+                                decision::FailureTriageOutcome::Cancelled => {
+                                    machine.handle(AgentEvent::Cancel);
+                                    break;
+                                }
+                                decision::FailureTriageOutcome::Unchanged => {}
+                            }
+                        }
+                    }
+                    if jev_transient {
+                        notes.push(
+                            "决策辅助提示本次失败可能是短暂外部故障；未自动重试，沿用既有处理路径。"
+                                .to_owned(),
+                        );
+                    }
+                    let infra = jev_infrastructure
+                        || decision.failure_class == FailureClass::Infrastructure
                         || evidence_list
                             .iter()
                             .filter(|e| !e.ok)
@@ -6739,6 +6896,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         }
     }
 
@@ -9573,6 +9731,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let approvals = std::cell::Cell::new(0);
         let mut command_outputs: Vec<(String, String)> = Vec::new();
@@ -9892,6 +10051,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut steps: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -9934,6 +10094,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut steps: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -9977,6 +10138,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut messages: Vec<(String, String, String, bool)> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -10053,6 +10215,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut messages: Vec<(String, bool)> = Vec::new();
@@ -10113,6 +10276,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -10164,6 +10328,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -10218,6 +10383,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -10275,6 +10441,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -10348,6 +10515,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let images = vec![ContentBlock::Image {
             media_type: "image/png".to_owned(),
@@ -10397,6 +10565,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -10499,6 +10668,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -10632,6 +10802,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut kinds: Vec<String> = Vec::new();
         let mut answers: Vec<(String, String, String, bool)> = Vec::new();
@@ -10705,6 +10876,7 @@ mod tests {
             memory: None,
             knowledge_context: None,
             allow_verify_commands: false,
+            decision: None,
         };
         let mut kinds: Vec<String> = Vec::new();
         let mut answers: Vec<(String, String, String, bool)> = Vec::new();

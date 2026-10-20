@@ -5,6 +5,7 @@
 //! oracles. The default run validates baselines and leaves live quality
 //! `NOT RUN`; real provider evaluation requires an explicit `--live`.
 
+mod decision;
 mod work;
 
 use std::path::{Path, PathBuf};
@@ -51,6 +52,7 @@ fn main() {
     let mut report = EvalReport::default();
     run_deterministic(&mut report);
     work::run(&mut report);
+    decision::run();
 
     println!("\nkodo-evals fixture layer (Layer B)");
     run_fixture_baselines(&mut report);
@@ -1995,6 +1997,7 @@ fn run_one_live_task(
         memory: None,
         knowledge_context: None,
         allow_verify_commands: false,
+        decision: None,
     };
     let alive = || true;
     let approve = |_kind: kodo_agent::StepKind, _cmd: &str| true;

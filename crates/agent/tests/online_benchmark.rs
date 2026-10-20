@@ -51,6 +51,7 @@ fn online_read_only_smoke() {
         memory: None,
         knowledge_context: None,
         allow_verify_commands: false,
+        decision: None,
     };
 
     let mut answer = String::new();

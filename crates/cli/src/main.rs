@@ -5,6 +5,7 @@
 
 mod approve;
 mod args;
+mod decision;
 mod interrupt;
 mod memory_cmd;
 mod render;

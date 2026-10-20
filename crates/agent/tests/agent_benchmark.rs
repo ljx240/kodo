@@ -241,6 +241,7 @@ fn run_scenario(
         memory: None,
         knowledge_context: None,
         allow_verify_commands: false,
+        decision: None,
     };
 
     let cancel_after = Arc::new(AtomicUsize::new(

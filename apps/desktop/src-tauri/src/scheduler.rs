@@ -24,7 +24,7 @@ use std::thread;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use kodo_agent::Permission;
 use kodo_core::scheduler::{
@@ -459,8 +459,20 @@ fn execute_agent_run(
         // run.
         personas: Vec::new(),
         budget_family,
+        // Background runs do not consult the decision service.
+        decision: None,
     };
-    let result = run::start(&app, &runs, &approvals, start_args, token.clone());
+    // A scheduled run never gets a decision handle: it cannot ask a human
+    // for permission, and it must not inherit a desktop approval.
+    let decisions: tauri::State<'_, crate::decision::DecisionRegistry> = app.state();
+    let result = run::start(
+        &app,
+        &runs,
+        &approvals,
+        decisions.inner(),
+        start_args,
+        token.clone(),
+    );
     let outcome = match &result {
         Ok(()) => Outcome::Succeeded,
         Err(_) => Outcome::Failed,

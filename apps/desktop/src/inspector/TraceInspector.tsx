@@ -8,6 +8,7 @@ import { T } from "../i18n";
 import { MetaRow, Section } from "./Section";
 import { LlmCallList, modelCallsFromItems } from "./LlmCallCard";
 import { ChangedFilesSection } from "./ResponseInspector";
+import { DecisionRecordsSection } from "./DecisionRecords";
 
 export function LlmCallsDetailed({ demo, demoState, live }: {
   demo: boolean;
@@ -57,6 +58,7 @@ export function TraceOverview({ demo, demoState, live }: {
   return (
     <>
       <ChangedFilesSection demo={demo} demoState={demoState} live={live} />
+      <DecisionRecordsSection items={live?.turn?.items} />
       <LlmCallsDetailed demo={demo} demoState={demoState} live={live} />
       <MetadataSection demo={demo} demoState={demoState} live={live} />
     </>

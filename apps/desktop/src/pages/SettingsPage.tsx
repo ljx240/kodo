@@ -10,6 +10,7 @@ import {
   Plug,
   Plus,
   RotateCw,
+  Scale,
   Search,
   Settings,
   SlidersHorizontal,
@@ -45,6 +46,7 @@ import {
   providerModelLabel,
 } from "../data/providers";
 import { useSetting, useSettingBool } from "../data/useSetting";
+import { DecisionSettingsBody } from "./DecisionSettings";
 
 /** The shared switch markup: `Toggle` binds it to a settings key; `Field` and
  *  `Switch` live in `shell/controls` because the MCP page's editor uses the
@@ -125,6 +127,12 @@ const SECTIONS: { id: string; title: string; subtitle: string; icon: ReactNode }
     title: T.page.settings.categories.appearance,
     subtitle: T.page.settings.categoryHints.appearance,
     icon: <Palette size={17} strokeWidth={1.7} />,
+  },
+  {
+    id: "decision",
+    title: T.decision.section,
+    subtitle: T.decision.sectionHint,
+    icon: <Scale size={17} strokeWidth={1.7} />,
   },
 ];
 
@@ -1080,6 +1088,8 @@ function body(
       return <MemoryBody />;
     case "appearance":
       return <AppearanceBody />;
+    case "decision":
+      return <DecisionSettingsBody />;
     default:
       return <GeneralBody model={model} onSelectModel={onSelectModel} />;
   }

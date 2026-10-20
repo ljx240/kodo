@@ -19,11 +19,17 @@ use kodo_agent::mcp::{
 
 use run::{ApprovalChoice, Approvals, Runs, StartArgs};
 
+mod decision;
+use decision::{
+    decision_clear_credential, decision_confirm_preview, decision_get_settings,
+    decision_save_settings, decision_set_credential,
+};
 mod knowledge;
 mod platform;
 mod run;
 mod terminal;
 mod view;
+use decision::DecisionRegistry;
 use knowledge::{
     knowledge_confirm_import, knowledge_create_base, knowledge_delete_document,
     knowledge_get_bindings, knowledge_import_text, knowledge_inspect_document,
@@ -1088,6 +1094,7 @@ fn send_message(
     approvals: State<'_, Approvals>,
     knowledge: State<'_, KnowledgeService>,
     apps: State<'_, AppService>,
+    decisions: State<'_, DecisionRegistry>,
     id: String,
     text: String,
     context: Option<Vec<String>>,
@@ -1241,6 +1248,39 @@ fn send_message(
             }
         }
 
+        // Optional decision assistance. The service is created per run and
+        // owns the credential, the quotas and the transport; the agent only
+        // ever sees the handle. An unusable configuration, a missing
+        // credential or a missing feature all mean "no handle" — the run
+        // then behaves exactly as it did before.
+        let decision_config = kodo_shell::load_decision_config();
+        let decision = if decision_config.usable() {
+            let consent = decision::DesktopDecisionConsent::new(
+                decisions.inner().clone(),
+                Box::new({
+                    let app = app.clone();
+                    let token = token.clone();
+                    move |event| run::emit_for(&app, &token, event)
+                }),
+                id.clone(),
+                token.generation(),
+                token.alive_flag(),
+            );
+            let service =
+                std::sync::Arc::new(kodo_shell::DecisionService::with_official_destination(
+                    decision_config,
+                    std::sync::Arc::new(consent),
+                    id.clone(),
+                    token.generation(),
+                ));
+            decisions
+                .inner()
+                .register_run(&id, token.generation(), service.clone());
+            Some(service.handle())
+        } else {
+            None
+        };
+
         Ok(StartArgs {
             dir,
             id: id.clone(),
@@ -1263,6 +1303,7 @@ fn send_message(
             agent_instructions: None,
             personas,
             budget_family,
+            decision,
         })
     })();
     let args = match prepared {
@@ -1272,7 +1313,14 @@ fn send_message(
             return Err(error);
         }
     };
-    run::start(&app, runs.inner(), approvals.inner(), args, token)?;
+    run::start(
+        &app,
+        runs.inner(),
+        approvals.inner(),
+        decisions.inner(),
+        args,
+        token,
+    )?;
 
     Ok(id)
 }
@@ -1650,9 +1698,17 @@ fn probe_context_file(project: String, path: String) -> Result<ContextProbe, Str
 }
 
 #[tauri::command]
-fn stop_run(runs: State<'_, Runs>, approvals: State<'_, Approvals>, id: String) {
+fn stop_run(
+    runs: State<'_, Runs>,
+    approvals: State<'_, Approvals>,
+    decisions: State<'_, DecisionRegistry>,
+    id: String,
+) {
     runs.cancel(&id);
     approvals.clear_session(&id);
+    // A pending send preview must die with the run: a window that was
+    // still open must not be able to release a request afterwards.
+    decisions.clear_session(&id);
 }
 
 #[tauri::command]
@@ -1803,6 +1859,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .manage(Runs::default())
         .manage(Approvals::default())
+        .manage(DecisionRegistry::default())
         .manage(BrowseWebview::default())
         .manage(AppService::boot())
         .manage(KnowledgeService::boot())
@@ -1918,6 +1975,11 @@ fn main() {
             knowledge_set_bindings,
             knowledge_prepare_turn,
             knowledge_turn_citations,
+            decision_get_settings,
+            decision_save_settings,
+            decision_set_credential,
+            decision_clear_credential,
+            decision_confirm_preview,
             stop_run,
             respond_approval,
             list_project_files,

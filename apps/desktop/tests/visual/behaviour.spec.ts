@@ -1494,9 +1494,10 @@ test("each Settings category swaps the detail pane", async ({ page }) => {
     "归档与存储",
     "Memory",
     "外观",
+    "决策辅助",
   ]);
 
-  for (const name of ["模型", "AI Provider", "工具与权限", "项目", "归档与存储", "Memory", "外观", "通用"]) {
+  for (const name of ["模型", "AI Provider", "工具与权限", "项目", "归档与存储", "Memory", "外观", "决策辅助", "通用"]) {
     await page.locator(".settings-nav-item", { hasText: name }).click();
     await expect(page.locator(".settings-detail h2")).toHaveText(name);
     await expect(page.locator(".settings-detail").locator(".setting-row, .provider-row, .provider-editor, button").first()).toBeVisible();
