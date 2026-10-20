@@ -1157,6 +1157,35 @@ pub fn is_read_timeout(err: &std::io::Error) -> bool {
     )
 }
 
+/// The 200 ms `timeout_read` above is only a cancellation poll. Once ureq's
+/// request deadline latches — or the peer has gone away (half-closed socket) —
+/// every read returns `TimedOut` immediately and no further byte can ever
+/// arrive. An unbounded `continue` on that arm degrades into a 100% CPU spin
+/// that never returns control to the agent loop, so no budget or wall-clock
+/// check can fire.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Deliberately above ureq's own 180 s request timeout: below that a slow but
+/// live stream must keep streaming.
+const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(240);
+
+/// True when the SSE poll loop must stop waiting for another byte.
+fn stream_is_stalled(idle: Duration, elapsed: Duration) -> bool {
+    idle >= STREAM_IDLE_TIMEOUT || elapsed >= STREAM_TOTAL_TIMEOUT
+}
+
+/// A permanent read-timeout becomes a real (failover-eligible) error instead
+/// of one more spin around the poll loop.
+fn stalled_stream_err(idle: Duration, elapsed: Duration) -> Option<ProviderError> {
+    stream_is_stalled(idle, elapsed).then(|| ProviderError {
+        class: ProviderFailureClass::Timeout,
+        message: format!(
+            "model stream stalled: no byte for {}s ({}s elapsed)",
+            idle.as_secs(),
+            elapsed.as_secs()
+        ),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Robust SSE: UTF-8-safe incremental decoder + blank-line event assembler
 // ---------------------------------------------------------------------------
@@ -1762,6 +1791,9 @@ fn openai_sse(
     let mut buf = [0u8; 4096];
     use std::io::Read;
 
+    let stream_started = Instant::now();
+    let mut last_byte_at = Instant::now();
+
     loop {
         if !alive() {
             return Err(cancelled_err("cancelled while reading model stream"));
@@ -1769,6 +1801,7 @@ fn openai_sse(
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                last_byte_at = Instant::now();
                 for line in decoder.push(&buf[..n]) {
                     if !alive() {
                         return Err(cancelled_err("cancelled while reading model stream"));
@@ -1785,6 +1818,11 @@ fn openai_sse(
                 // Short read timeout: poll cancellation without waiting on 180s.
                 if !alive() {
                     return Err(cancelled_err("cancelled while reading model stream"));
+                }
+                if let Some(stalled) =
+                    stalled_stream_err(last_byte_at.elapsed(), stream_started.elapsed())
+                {
+                    return Err(stalled);
                 }
                 continue;
             }
@@ -2365,6 +2403,9 @@ fn anthropic_sse(
     let mut buf = [0u8; 4096];
     use std::io::Read;
 
+    let stream_started = Instant::now();
+    let mut last_byte_at = Instant::now();
+
     loop {
         if !alive() {
             return Err(cancelled_err("cancelled while reading model stream"));
@@ -2372,6 +2413,7 @@ fn anthropic_sse(
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                last_byte_at = Instant::now();
                 for line in decoder.push(&buf[..n]) {
                     if !alive() {
                         return Err(cancelled_err("cancelled while reading model stream"));
@@ -2387,6 +2429,11 @@ fn anthropic_sse(
             Err(err) if is_read_timeout(&err) => {
                 if !alive() {
                     return Err(cancelled_err("cancelled while reading model stream"));
+                }
+                if let Some(stalled) =
+                    stalled_stream_err(last_byte_at.elapsed(), stream_started.elapsed())
+                {
+                    return Err(stalled);
                 }
                 continue;
             }
@@ -3818,6 +3865,34 @@ mod tests {
             classify_failure("request timed out", None),
             ProviderFailureClass::Timeout
         );
+    }
+
+    #[test]
+    fn stalled_stream_ends_the_read_timeout_spin() {
+        // A live-but-slow stream keeps polling — bytes arrived recently.
+        assert!(!stream_is_stalled(
+            Duration::from_secs(30),
+            Duration::from_secs(60)
+        ));
+        // Peer gone (half-closed socket): every read returns TimedOut at once,
+        // so the poll loop must stop spinning and surface a real error.
+        let stalled = stalled_stream_err(Duration::from_secs(60), Duration::from_secs(90))
+            .expect("idle past the stream idle timeout must error");
+        assert_eq!(stalled.class, ProviderFailureClass::Timeout);
+        assert!(
+            stalled.class.allows_failover(),
+            "a stalled stream must be failover-eligible"
+        );
+        // Past ureq's own request deadline the timeout latch is permanent, even
+        // if a byte trickled in just before.
+        assert!(stream_is_stalled(
+            Duration::from_millis(10),
+            Duration::from_secs(240)
+        ));
+        assert!(!stream_is_stalled(
+            Duration::from_millis(10),
+            Duration::from_secs(239)
+        ));
     }
 
     #[test]
