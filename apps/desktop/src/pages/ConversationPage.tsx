@@ -148,7 +148,7 @@ type ActionErrorState = {
   action?: { label: string; run: () => void };
 };
 
-type PendingSend = { text: string; context: string[] };
+type PendingSend = { text: string; context: string[]; forceInline?: string[] };
 
 type FailoverNotice = {
   fromProvider: string;
@@ -951,16 +951,19 @@ export function ConversationPage({
     drainingRef.current = true;
     const [next, ...rest] = pending;
     applyQueue(rest);
-    void dispatchSend(next.text, next.context, { skipTitle: true }).finally(() => {
+    void dispatchSend(next.text, next.context, {
+      skipTitle: true,
+      forceInline: next.forceInline ?? [],
+    }).finally(() => {
       drainingRef.current = false;
     });
   };
 
-  const send = (text: string, context: string[]) => {
+  const send = (text: string, context: string[], forceInline: string[] = []) => {
     if (knowledgeSendLockRef.current || knowledgeSavingRef.current) return;
     // Running: queue the follow-up instead of dropping the draft (codex/DSH).
     if (running) {
-      applyQueue([...queueRef.current, { text, context }]);
+      applyQueue([...queueRef.current, { text, context, forceInline }]);
       return;
     }
     // Vision-incapable model + image attached: surface a one-time notice
@@ -972,10 +975,10 @@ export function ConversationPage({
       activeModelVision === false &&
       context.some((path) => kindFromPath(path) === "image")
     ) {
-      setPendingVisionSend({ text, context });
+      setPendingVisionSend({ text, context, forceInline });
       return;
     }
-    void dispatchSend(text, context);
+    void dispatchSend(text, context, forceInline.length > 0 ? { forceInline } : undefined);
   };
 
   /** Acknowledge the vision-skip notice: persist the flag, dismiss the
@@ -988,7 +991,13 @@ export function ConversationPage({
     setVisionSkipAcked(true);
     const held = pendingVisionSend;
     setPendingVisionSend(null);
-    if (held) void dispatchSend(held.text, held.context);
+    if (held) {
+      void dispatchSend(
+        held.text,
+        held.context,
+        held.forceInline?.length ? { forceInline: held.forceInline } : undefined,
+      );
+    }
   };
 
   /** Cancel the pending send without acking; the user keeps the draft and
@@ -1595,10 +1604,10 @@ export function ConversationPage({
         }
         onSend={(text, context) => send(text, context)}
         onSendWithForceInline={(text, context, forceInline, clearForceInline) => {
-          // Forward pasted/dropped paths through to the run so the agent's
-          // image-inlining branch honors the user's attach intent even when
-          // the saved vision flag is `false`.
-          dispatchSend(text, context, { forceInline }).finally(clearForceInline);
+          // Forward pasted/dropped paths through the normal send path so the
+          // vision gate and the running queue still apply.
+          send(text, context, forceInline);
+          clearForceInline();
         }}
         onStop={stop}
         providerWarning={providerWarning}
