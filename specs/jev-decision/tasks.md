@@ -18,6 +18,7 @@
 | T010 | `evals/src/decision.rs` + `evals/fixtures-decision/`：虚构语料、标签、离线对照与契约检查 | T002/T008 | FR-013 | `cargo run -p kodo-evals` | 已验证（离线部分） |
 | T011 | 冻结策略后按场景实现 Assist 与硬约束复核 | T009/T010 且质量门通过 | FR-003/004/005 | 质量门评测 | **未开始 — 质量门未通过** |
 | T012 | 兼容、回退、完整验收与交付记录 | T011 | 全部 | AC-001～020 | 已实现，验收记录见 `acceptance.md` |
+| T013 | OpenRouter 来源：目的地、凭据隔离、单字母作答与 logprobs 概率、模型一致性、无概率不采纳 | T012 | FR-015 | `cargo test -p kodo-agent --lib decision::`、`cargo test -p kodo-shell --test decision_transport`、`cargo test -p kodo-agent --test decision_scenarios` | 已验证 |
 
 ## 关于 T011
 

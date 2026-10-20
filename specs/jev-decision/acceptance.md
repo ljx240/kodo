@@ -162,6 +162,21 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 
 ---
 
+## 3.1 OpenRouter 来源（FR-015）
+
+2026-10-20 追加：决策请求可以走 OpenRouter，一次只启用一个来源。
+
+| 验收点 | 证据 | 结论 |
+| --- | --- | --- |
+| 来源可配置，目的地/凭据/格式随之切换 | `the_openrouter_path_sends_its_own_shape_to_its_own_path`（请求打到 `/api/v1/chat/completions`，带 OpenRouter 自己的密钥，body 是 chat completions） | **通过** |
+| 单字母作答，首 token 概率归一化 | `the_openrouter_request_asks_for_a_single_letter`、`an_openrouter_answer_becomes_a_probability_distribution` | **通过** |
+| 没有概率分布就不采纳 | `an_openrouter_answer_without_logprobs_is_never_adoptable`（传输层）、`an_uncalibrated_answer_is_recorded_but_never_applied`（接入层，`applied=false`） | **通过** |
+| 模型一致性 | `an_openrouter_answer_for_another_model_is_refused`、`the_openrouter_model_check_allows_a_resolved_id`（允许日期后缀与 provider 前缀，拒绝另一个模型） | **通过** |
+| 凭据按来源隔离 | `decision.set_credential` / `clear_credential` 带来源参数；`clearing_the_decision_credential_leaves_the_others_alone` 扩展为"清一个来源、留另一个" | **通过** |
+| 失败不自动换源 | 服务按 `settings.provider` 选一个客户端；没有任何跨来源回退分支 | **通过（代码级）** |
+
+**未验证**：OpenRouter 的真实连通性、真实模型的字母服从率与 logprobs 可用性、各路由器的限流与价格 —— 都需要单独授权的联网评测。
+
 ## 4. 尚未通过 / 未验证的项
 
 | 项 | 状态 | 说明 |

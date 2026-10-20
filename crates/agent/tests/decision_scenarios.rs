@@ -43,6 +43,7 @@ fn receipt(mode: DecisionMode) -> DecisionReceipt {
     DecisionReceipt {
         request_id: "jev-test".to_owned(),
         mode,
+        provider: kodo_agent::decision::DecisionProvider::TypeSafe,
         model: "jev-1.13.0".to_owned(),
         policy_version: "kodo-jev-v1".to_owned(),
         duration_ms: 12,
@@ -83,6 +84,16 @@ fn skipped(mode: DecisionMode) -> DecisionOutcome {
     DecisionOutcome {
         receipt: receipt(mode),
         result: DecisionResult::Skipped(kodo_agent::decision::DecisionSkip::new("disabled", "off")),
+    }
+}
+
+/// An answer the service gave without a probability distribution.
+fn uncalibrated() -> DecisionOutcome {
+    DecisionOutcome {
+        receipt: receipt(DecisionMode::Assist),
+        result: DecisionResult::Uncalibrated {
+            choice: "refactor".to_owned(),
+        },
     }
 }
 
@@ -462,6 +473,43 @@ fn a_skipped_decision_keeps_the_local_path() {
             .iter()
             .any(|text| text.contains("task_type=refactor")),
         "a skipped decision must not change the category"
+    );
+    let _ = std::fs::remove_dir_all(project.parent().unwrap());
+}
+
+#[test]
+fn an_uncalibrated_answer_is_recorded_but_never_applied() {
+    // The thresholds assume real probabilities. An answer without them is
+    // shown to the user and refused as a decision.
+    let (project, script) = fixture();
+    let handle = RecordingDecision::new(uncalibrated());
+    let request = request(
+        project.clone(),
+        script,
+        AgentMode::Code,
+        "把重复的校验逻辑合并一下",
+        Some(handle.clone() as kodo_agent::DecisionHandle),
+    );
+    let (_result, steps) = run_and_collect(request);
+    assert_eq!(handle.calls(), 1);
+    let records = diagnostics(&steps);
+    let decision_record = records
+        .iter()
+        .find(|text| text.contains("decision.v1"))
+        .expect("a decision record must be in the trace");
+    assert!(
+        decision_record.contains("\"status\":\"uncalibrated\""),
+        "{decision_record}"
+    );
+    assert!(
+        decision_record.contains("\"applied\":false"),
+        "{decision_record}"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|text| text.contains("task_type=refactor")),
+        "an uncalibrated answer must not change the category"
     );
     let _ = std::fs::remove_dir_all(project.parent().unwrap());
 }

@@ -12,8 +12,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use kodo_agent::decision::{
-    DecisionAccess, DecisionClient, DecisionInput, DecisionMode, DecisionResult, DecisionScenario,
-    DecisionSettings, TaskRouteInput,
+    DecisionAccess, DecisionClient, DecisionInput, DecisionMode, DecisionProvider, DecisionResult,
+    DecisionScenario, DecisionSettings, TaskRouteInput,
 };
 use kodo_shell::decision::{
     DecisionConfig, DecisionConsent, DecisionConsentAnswer, DecisionPreview, DecisionService,
@@ -24,6 +24,10 @@ use kodo_shell::decision::{
 enum Reply {
     /// A well formed answer for the task-route question.
     Ok,
+    /// A well formed OpenRouter answer, with token logprobs.
+    OpenRouterOk,
+    /// A well formed OpenRouter answer without token logprobs.
+    OpenRouterNoLogprobs,
     /// A raw status code and body.
     Raw(u16, String),
     /// A well formed answer, but delayed.
@@ -171,6 +175,8 @@ fn serve(
             let body = ok_body("refactor", 0.93, 0.02);
             (200, body, Duration::ZERO)
         }
+        Reply::OpenRouterOk => (200, openrouter_body(true), Duration::ZERO),
+        Reply::OpenRouterNoLogprobs => (200, openrouter_body(false), Duration::ZERO),
         Reply::Raw(status, body) => (status, body, Duration::ZERO),
         Reply::Delayed(delay) => {
             let body = ok_body("refactor", 0.93, 0.02);
@@ -209,6 +215,43 @@ fn ok_body(choice: &str, top: f64, _rest: f64) -> String {
     )
 }
 
+/// A well formed OpenRouter chat completion. The answer is a single option
+/// letter; the alternatives are reported as the token logprobs.
+fn openrouter_body(with_logprobs: bool) -> String {
+    let options = [
+        "bug-fix",
+        "feature",
+        "test",
+        "refactor",
+        "code-review",
+        "docs",
+        "unknown",
+    ];
+    let rest = (1.0f64 - 0.93) / (options.len() as f64 - 1.0);
+    let mut alternatives = Vec::new();
+    for (index, option) in options.iter().enumerate() {
+        let letter = (b'A' + index as u8) as char;
+        let logprob = if *option == "refactor" {
+            0.93f64.ln()
+        } else {
+            rest.ln()
+        };
+        alternatives.push(format!("{{\"token\":\"{letter}\",\"logprob\":{logprob}}}"));
+    }
+    let logprobs = if with_logprobs {
+        format!(
+            "{{\"content\":[{{\"token\":\"D\",\"logprob\":{},\"top_logprobs\":[{}]}}]}}",
+            0.93f64.ln(),
+            alternatives.join(",")
+        )
+    } else {
+        "null".to_owned()
+    };
+    format!(
+        "{{\"model\":\"openai/gpt-4o-mini\",\"choices\":[{{\"message\":{{\"role\":\"assistant\",\"content\":\"D\"}},\"logprobs\":{logprobs}}}],\"usage\":{{\"prompt_tokens\":180,\"completion_tokens\":1}}}}",
+    )
+}
+
 /// A consent host that always allows.
 struct AllowAll;
 
@@ -243,6 +286,24 @@ fn config(mode: DecisionMode, timeout_ms: u64) -> DecisionConfig {
     }
 }
 
+/// The configuration for the OpenRouter path.
+fn openrouter_config(mode: DecisionMode, timeout_ms: u64) -> DecisionConfig {
+    DecisionConfig {
+        settings: DecisionSettings {
+            provider: DecisionProvider::OpenRouter,
+            mode,
+            model: "openai/gpt-4o-mini".to_owned(),
+            task_route_enabled: true,
+            failure_triage_enabled: true,
+            request_timeout_ms: timeout_ms,
+            ..DecisionSettings::default()
+        },
+        credential: Some("synthetic-openrouter-key".to_owned()),
+        config_generation: kodo_shell::decision::current_config_generation(),
+        config_error: None,
+    }
+}
+
 fn service(
     origin: &str,
     mode: DecisionMode,
@@ -251,7 +312,23 @@ fn service(
 ) -> Arc<DecisionService> {
     Arc::new(DecisionService::new(
         config(mode, timeout_ms),
-        DecisionClient::for_local_endpoint(origin),
+        DecisionClient::for_local_endpoint(DecisionProvider::TypeSafe, origin),
+        consent,
+        "session-1",
+        1,
+    ))
+}
+
+/// The service on the OpenRouter path, pointed at the loopback mock.
+fn openrouter_service(
+    origin: &str,
+    mode: DecisionMode,
+    timeout_ms: u64,
+    consent: Arc<dyn DecisionConsent>,
+) -> Arc<DecisionService> {
+    Arc::new(DecisionService::new(
+        openrouter_config(mode, timeout_ms),
+        DecisionClient::for_local_endpoint(DecisionProvider::OpenRouter, origin),
         consent,
         "session-1",
         1,
@@ -329,6 +406,61 @@ fn an_allowed_request_reaches_the_destination_with_the_frozen_bytes() {
     let mut keys: Vec<&String> = state.keys().collect();
     keys.sort();
     assert_eq!(keys, vec!["message", "mode"], "{body}");
+}
+
+#[test]
+fn the_openrouter_path_sends_its_own_shape_to_its_own_path() {
+    let mock = MockService::start(Reply::OpenRouterOk);
+    let service = openrouter_service(
+        &mock.origin(),
+        DecisionMode::Observe,
+        1500,
+        Arc::new(AllowAll),
+    );
+    let outcome = service.evaluate(&task_route_input(), &|| true);
+    let decision = match outcome.result {
+        DecisionResult::Suggested(decision) => decision,
+        other => panic!("expected a suggestion, got {other:?}"),
+    };
+    assert_eq!(decision.choice, "refactor");
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.path, "/api/v1/chat/completions");
+    assert_eq!(
+        request.header("authorization"),
+        Some("Bearer synthetic-openrouter-key"),
+        "the OpenRouter key must be used for the OpenRouter request"
+    );
+    let body = String::from_utf8(request.body.clone()).expect("utf-8 body");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(value["model"], "openai/gpt-4o-mini");
+    assert_eq!(value["logprobs"], true);
+    assert_eq!(value["temperature"], 0.0);
+    let system = value["messages"][0]["content"]
+        .as_str()
+        .expect("system message");
+    assert!(system.contains("A. bug-fix"), "{system}");
+    let user = value["messages"][1]["content"]
+        .as_str()
+        .expect("user message");
+    assert!(user.contains("把重复的校验逻辑合并一下"), "{user}");
+}
+
+#[test]
+fn an_openrouter_answer_without_logprobs_is_never_adoptable() {
+    let mock = MockService::start(Reply::OpenRouterNoLogprobs);
+    let service = openrouter_service(
+        &mock.origin(),
+        DecisionMode::Assist,
+        1500,
+        Arc::new(AllowAll),
+    );
+    let outcome = service.evaluate(&task_route_input(), &|| true);
+    match outcome.result {
+        DecisionResult::Uncalibrated { choice } => assert_eq!(choice, "refactor"),
+        other => panic!("expected an uncalibrated answer, got {other:?}"),
+    }
 }
 
 #[test]

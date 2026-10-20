@@ -28,6 +28,24 @@
 | FR-012 | 桌面、CLI、后台任务的行为边界明确；无交互授权能力的入口不隐式发送 |
 | FR-013 | 通过虚构语料、离线契约检查与经单独授权的实测决定是否启用，中文结果单独报告 |
 | FR-014 | 旧配置和会话继续可读；新增配置出错时仅禁用 Jev，不导致程序启动失败 |
+| FR-015 | 支持两种服务来源（官方 Jev / OpenRouter），一次只启用一个；凭据按来源隔离；失败不自动换源；没有概率分布的答案不采纳 |
+
+### 服务来源（provider）
+
+决策请求可以走两个服务之一，**一次只启用一个**：
+
+| provider | 接收方 | 凭据 | 请求/响应 |
+| --- | --- | --- | --- |
+| `typeSafe` | `https://api.typesafe.ai/v1/systemone` | `decision.jev` | System One 原生格式：请求 `{model, state, questions}`，响应 `answers` 带概率分布 |
+| `openRouter` | `https://openrouter.ai/api/v1/chat/completions` | `decision.openrouter` | OpenAI 兼容 chat completions：请求单字母选择 + `logprobs`，概率由首 token 的候选归一化得到 |
+
+约束：
+
+- **失败不自动换源**。TypeSafe 失败不会改投 OpenRouter，反之亦然：换源等于把同一份内容发给用户没有批准过的第二个接收方。
+- 凭据按 provider 隔离，各自的密钥只发给各自的服务。
+- `openRouter` 的模型 id 由用户指定（默认 `openai/gpt-4o-mini`），与 TypeSafe 的固定版本是两件事。
+- 响应里的模型必须与请求的模型一致（允许路由解析出的日期后缀与 provider 前缀），否则拒绝。
+- **没有概率分布的答案不采纳**。路由器不返回 token 概率时，答案只作为观察记录，`applied` 恒为 false —— 门槛假设的是真实概率，不是模型的自评。
 
 ### 本期不做
 

@@ -20,10 +20,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kodo_agent::decision::{
-    build_request, looks_sensitive, plan_failure_triage, plan_task_route, serialize_request,
-    validate_response, DecisionAccess, DecisionClient, DecisionFailure, DecisionInput,
-    DecisionMode, DecisionOutcome, DecisionReceipt, DecisionResult, DecisionScenario,
-    DecisionSettings, TaskRouteInput, CREDENTIAL_ID, CREDENTIAL_NAMESPACE, SETTINGS_KEY,
+    build_provider_request, looks_sensitive, parse_openrouter_response, plan_failure_triage,
+    plan_task_route, validate_response, DecisionAccess, DecisionClient, DecisionFailure,
+    DecisionInput, DecisionMode, DecisionOutcome, DecisionProvider, DecisionReceipt,
+    DecisionResult, DecisionScenario, DecisionSettings, OpenRouterAnswer, TaskRouteInput,
+    CREDENTIAL_NAMESPACE, SETTINGS_KEY,
 };
 use kodo_core::settings;
 
@@ -81,7 +82,7 @@ impl DecisionConfig {
 
 /// The last configuration this process saw, so a content change can be
 /// turned into a generation bump.
-static LAST_CONFIG: Mutex<Option<(String, bool)>> = Mutex::new(None);
+static LAST_CONFIG: Mutex<Option<(String, DecisionProvider, bool)>> = Mutex::new(None);
 
 /// Read the decision configuration from the local stores.
 ///
@@ -94,10 +95,6 @@ pub fn load_decision_config() -> DecisionConfig {
         .and_then(|path| settings::read(path, SETTINGS_KEY))
         .filter(|value| !value.trim().is_empty());
     let creds = settings::credentials_path();
-    let credential = creds
-        .as_ref()
-        .and_then(|path| settings::read_secret(path, CREDENTIAL_NAMESPACE, CREDENTIAL_ID))
-        .filter(|value| !value.trim().is_empty());
 
     let (parsed, config_error) = match raw.as_deref() {
         None => (DecisionSettings::default(), None),
@@ -107,8 +104,22 @@ pub fn load_decision_config() -> DecisionConfig {
         },
     };
 
+    // The credential belongs to the configured provider. One provider's key
+    // never stands in for another's: a request must never be signed with a
+    // key the user gave for a different service.
+    let credential = creds
+        .as_ref()
+        .and_then(|path| {
+            settings::read_secret(path, CREDENTIAL_NAMESPACE, parsed.provider.credential_id())
+        })
+        .filter(|value| !value.trim().is_empty());
+
     // A content change invalidates every outstanding grant.
-    let fingerprint = (raw.clone().unwrap_or_default(), credential.is_some());
+    let fingerprint = (
+        raw.clone().unwrap_or_default(),
+        parsed.provider,
+        credential.is_some(),
+    );
     let changed = {
         let mut last = LAST_CONFIG
             .lock()
@@ -136,14 +147,20 @@ pub fn load_decision_config() -> DecisionConfig {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DecisionSettingsView {
+    /// The configured provider: `typeSafe` or `openRouter`.
+    pub provider: String,
     pub mode: String,
     pub model: String,
     pub task_route_enabled: bool,
     pub failure_triage_enabled: bool,
-    /// Whether a credential is stored. The plaintext never leaves Rust.
+    /// Whether a credential is stored for the configured provider. The
+    /// plaintext never leaves Rust.
     pub has_credential: bool,
     /// The last few characters of the stored credential, or an empty string.
     pub credential_mask: String,
+    /// The credential state of every provider, so the form can show which
+    /// key belongs where.
+    pub credentials: Vec<DecisionCredentialView>,
     /// Set when the stored configuration cannot be used.
     pub config_error: Option<String>,
     pub config_generation: u64,
@@ -153,10 +170,33 @@ pub struct DecisionSettingsView {
     pub defaults_json: String,
 }
 
+/// The credential state of one provider.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionCredentialView {
+    pub provider: String,
+    pub id: String,
+    pub has_credential: bool,
+    pub credential_mask: String,
+}
+
 /// The settings screen's view of the decision configuration.
 pub fn decision_settings_view() -> DecisionSettingsView {
     let config = load_decision_config();
+    let credentials = DecisionProvider::ALL
+        .iter()
+        .map(|provider| {
+            let stored = stored_credential(*provider);
+            DecisionCredentialView {
+                provider: provider.label().to_owned(),
+                id: provider.credential_id().to_owned(),
+                has_credential: stored.is_some(),
+                credential_mask: stored.as_deref().map(mask_secret).unwrap_or_default(),
+            }
+        })
+        .collect();
     DecisionSettingsView {
+        provider: config.settings.provider.label().to_owned(),
         mode: config.settings.mode.label().to_owned(),
         model: config.settings.model.clone(),
         task_route_enabled: config.settings.task_route_enabled,
@@ -167,10 +207,21 @@ pub fn decision_settings_view() -> DecisionSettingsView {
             .as_deref()
             .map(mask_secret)
             .unwrap_or_default(),
+        credentials,
         config_error: config.config_error.clone(),
         config_generation: config.config_generation,
         defaults_json: DecisionSettings::default().to_json(),
     }
+}
+
+/// The stored credential of one provider, if there is one.
+fn stored_credential(provider: DecisionProvider) -> Option<String> {
+    settings::credentials_path()
+        .as_ref()
+        .and_then(|path| {
+            settings::read_secret(path, CREDENTIAL_NAMESPACE, provider.credential_id())
+        })
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// The last four characters of a secret, everything else masked.
@@ -202,22 +253,39 @@ pub fn save_decision_settings(raw: &str) -> Result<u64, String> {
 
 /// Store the decision credential. An empty secret is refused: clearing is
 /// an explicit, separate action.
-pub fn save_decision_credential(secret: &str) -> Result<u64, String> {
+pub fn save_decision_credential(provider: DecisionProvider, secret: &str) -> Result<u64, String> {
     let secret = secret.trim();
     if secret.is_empty() {
         return Err("the credential must not be empty".to_owned());
     }
     let path = settings::credentials_path().ok_or("credentials directory is unavailable")?;
-    settings::write_secret(&path, CREDENTIAL_NAMESPACE, CREDENTIAL_ID, secret)
-        .map_err(|error| error.to_string())?;
+    settings::write_secret(
+        &path,
+        CREDENTIAL_NAMESPACE,
+        provider.credential_id(),
+        secret,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(bump_config_generation())
 }
 
-/// Remove the decision credential. Other credential families are
-/// untouched.
-pub fn clear_decision_credential() -> Result<u64, String> {
+/// Remove one provider's decision credential. The other provider's key and
+/// every other credential family are untouched.
+pub fn clear_decision_credential(provider: DecisionProvider) -> Result<u64, String> {
     let path = settings::credentials_path().ok_or("credentials directory is unavailable")?;
-    settings::clear_secrets(&path, CREDENTIAL_NAMESPACE, &[]).map_err(|error| error.to_string())?;
+    // `clear_secrets` rebuilds a whole namespace, so the other ids are read
+    // back in and kept.
+    let mut keep: Vec<(String, String)> = Vec::new();
+    for other in DecisionProvider::ALL {
+        if other == provider {
+            continue;
+        }
+        if let Some(value) = stored_credential(other) {
+            keep.push((other.credential_id().to_owned(), value));
+        }
+    }
+    settings::clear_secrets(&path, CREDENTIAL_NAMESPACE, &keep)
+        .map_err(|error| error.to_string())?;
     Ok(bump_config_generation())
 }
 
@@ -360,20 +428,20 @@ impl DecisionService {
         }
     }
 
-    /// The service pointed at the pinned official destination.
+    /// The service pointed at the configured provider's pinned destination.
+    ///
+    /// The destination follows the configuration, and the configuration
+    /// names exactly one provider. A failure never falls back to the other
+    /// one: sending the same content to a second receiver the user did
+    /// not approve for it is not a fallback.
     pub fn with_official_destination(
         config: DecisionConfig,
         consent: Arc<dyn DecisionConsent>,
         session_id: impl Into<String>,
         run_generation: u64,
     ) -> Self {
-        Self::new(
-            config,
-            DecisionClient::official(),
-            consent,
-            session_id,
-            run_generation,
-        )
+        let client = DecisionClient::for_provider(config.settings.provider);
+        Self::new(config, client, consent, session_id, run_generation)
     }
 
     /// The handle the agent takes.
@@ -528,6 +596,7 @@ impl DecisionAccess for DecisionService {
         let mut receipt = DecisionReceipt {
             request_id: String::new(),
             mode: self.config.settings.mode,
+            provider: self.config.settings.provider,
             model: self.config.settings.model.clone(),
             policy_version: self.config.settings.policy_version.clone(),
             duration_ms: 0,
@@ -672,9 +741,14 @@ impl DecisionAccess for DecisionService {
                 )),
             };
         }
-        let request = build_request(&self.config.settings.model, &plan);
-        let payload = match serialize_request(&request) {
-            Ok(payload) => payload,
+        // The provider decides the wire format; the state it carries is the
+        // same minimal state in both cases.
+        let body = match build_provider_request(
+            self.config.settings.provider,
+            &self.config.settings.model,
+            &plan,
+        ) {
+            Ok(body) => body,
             Err(error) => {
                 return DecisionOutcome {
                     receipt,
@@ -685,6 +759,7 @@ impl DecisionAccess for DecisionService {
                 }
             }
         };
+        let payload = body.bytes.clone();
         if payload.len() > self.config.settings.max_request_bytes {
             return DecisionOutcome {
                 receipt,
@@ -753,9 +828,8 @@ impl DecisionAccess for DecisionService {
             model: self.config.settings.model.clone(),
             policy_version: self.config.settings.policy_version.clone(),
             purpose: purpose_for(scenario),
-            request_body: String::from_utf8_lossy(&payload).into_owned(),
-            questions: serde_json::to_string_pretty(&request.questions)
-                .unwrap_or_else(|_| String::new()),
+            request_body: body.text.clone(),
+            questions: questions_preview(&plan),
             request_bytes: payload.len(),
             state_bytes: source_snapshot.len(),
             expires_in_seconds: CONSENT_TTL.as_secs(),
@@ -874,7 +948,44 @@ impl DecisionAccess for DecisionService {
             }
         };
 
-        // 12. Validate the answer.
+        // 12. Decode the answer. The provider decides the wire format; the
+        //     internal shape is the same, so the validation order below is
+        //     identical for every provider.
+        let decoded = match self.config.settings.provider {
+            DecisionProvider::TypeSafe => {
+                let parsed: Result<kodo_agent::decision::DecisionResponse, DecisionFailure> =
+                    serde_json::from_value(response).map_err(|error| {
+                        DecisionFailure::new("invalid_response", format!("{error}"))
+                    });
+                parsed.map(|parsed| (parsed, None))
+            }
+            DecisionProvider::OpenRouter => {
+                parse_openrouter_response(&response, &self.config.settings.model, &plan)
+                    .map(|(parsed, answer)| (parsed, Some(answer)))
+            }
+        };
+        let (response, answer) = match decoded {
+            Ok(decoded) => decoded,
+            Err(failure) => {
+                receipt.duration_ms = started.elapsed().as_millis() as u64;
+                return DecisionOutcome {
+                    receipt,
+                    result: DecisionResult::Fallback(failure),
+                };
+            }
+        };
+
+        // An answer without a probability distribution is recorded and
+        // never adopted: the thresholds assume real probabilities.
+        if let Some(OpenRouterAnswer::Uncalibrated { choice }) = answer {
+            receipt.duration_ms = started.elapsed().as_millis() as u64;
+            return DecisionOutcome {
+                receipt,
+                result: DecisionResult::Uncalibrated { choice },
+            };
+        }
+
+        let request = kodo_agent::decision::build_request(&self.config.settings.model, &plan);
         let validated = match validate_response(&request, &response, scenario) {
             Ok(validated) => validated,
             Err(failure) => {
@@ -919,6 +1030,33 @@ impl DecisionService {
             breaker.probe_in_flight = false;
         }
     }
+}
+
+/// The questions and their answer space, as the consent preview shows them.
+///
+/// The option order is the same one the OpenRouter path maps its letters
+/// through, so the preview tells the user exactly what the model will be
+/// asked to choose between.
+fn questions_preview(plan: &kodo_agent::decision::DecisionPlan) -> String {
+    let options: Vec<serde_json::Value> = plan
+        .question
+        .options
+        .iter()
+        .map(|option| {
+            serde_json::json!({
+                "key": option,
+                "meaning": plan.question.criteria.get(option).cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        plan.question_id.clone(): {
+            "type": plan.question.kind,
+            "instructions": plan.question.instructions,
+            "options": options,
+        }
+    }))
+    .unwrap_or_default()
 }
 
 /// A short, local description of what a request is for.
@@ -997,7 +1135,7 @@ mod tests {
     fn service(config: DecisionConfig, consent: Arc<dyn DecisionConsent>) -> Arc<DecisionService> {
         Arc::new(DecisionService::new(
             config,
-            DecisionClient::for_local_endpoint("http://127.0.0.1:1"),
+            DecisionClient::for_local_endpoint(DecisionProvider::TypeSafe, "http://127.0.0.1:1"),
             consent,
             "session-1",
             7,
@@ -1350,6 +1488,63 @@ mod tests {
         let service = service(config(DecisionMode::Observe, Some("secret")), consent);
         let outcome = service.evaluate(&task_route_input(), &|| false);
         assert!(matches!(outcome.result, DecisionResult::Cancelled));
+    }
+
+    #[test]
+    fn clearing_one_providers_credential_keeps_the_other_one() {
+        // The two providers have separate keys; clearing one must not take
+        // the other with it.
+        let dir = std::env::temp_dir().join(format!("kodo-jev-providers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("credentials.log");
+        kodo_core::settings::write_secret(
+            &path,
+            kodo_agent::decision::CREDENTIAL_NAMESPACE,
+            DecisionProvider::TypeSafe.credential_id(),
+            "type-safe-key",
+        )
+        .expect("type safe credential");
+        kodo_core::settings::write_secret(
+            &path,
+            kodo_agent::decision::CREDENTIAL_NAMESPACE,
+            DecisionProvider::OpenRouter.credential_id(),
+            "openrouter-key",
+        )
+        .expect("openrouter credential");
+
+        // `clear_decision_credential` reads the real store, so exercise the
+        // namespace rebuild directly with the same keep-set shape.
+        let keep = vec![(
+            DecisionProvider::OpenRouter.credential_id().to_owned(),
+            "openrouter-key".to_owned(),
+        )];
+        kodo_core::settings::clear_secrets(
+            &path,
+            kodo_agent::decision::CREDENTIAL_NAMESPACE,
+            &keep,
+        )
+        .expect("clear one provider");
+
+        assert_eq!(
+            kodo_core::settings::read_secret(
+                &path,
+                kodo_agent::decision::CREDENTIAL_NAMESPACE,
+                DecisionProvider::TypeSafe.credential_id(),
+            ),
+            None,
+            "the cleared provider's key must be gone"
+        );
+        assert_eq!(
+            kodo_core::settings::read_secret(
+                &path,
+                kodo_agent::decision::CREDENTIAL_NAMESPACE,
+                DecisionProvider::OpenRouter.credential_id(),
+            )
+            .as_deref(),
+            Some("openrouter-key"),
+            "the other provider's key must survive"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
