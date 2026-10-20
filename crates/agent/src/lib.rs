@@ -964,7 +964,7 @@ fn write_step(
             .unwrap_or(false)
     {
         let seen = trace_file_text(project, path);
-        if seen.as_deref().map_or(true, |text| !text.trim().is_empty()) {
+        if seen.as_deref().is_none_or(|text| !text.trim().is_empty()) {
             let advice = match &seen {
                 Some(text) => format!(
                     "`{path}` 已存在 {} 行，本轮还没有读取过它。先 read_file 看清现有内容再整体重写；\
