@@ -36,6 +36,7 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(15);
+    let repeat = parse_repeat(&args[1..]);
 
     println!("kodo-evals deterministic layer");
     let mut report = EvalReport::default();
@@ -45,7 +46,7 @@ fn main() {
     println!("\nkodo-evals fixture layer (Layer B)");
     run_fixture_baselines(&mut report);
     if live {
-        run_fixture_live(tasks_n, &mut report);
+        run_fixture_live(tasks_n, repeat, &mut report);
     } else {
         report.live_status = "NOT RUN — --live not requested".into();
         report
@@ -68,6 +69,16 @@ struct SplitMetrics {
     failed_tool_calls: usize,
     repair_attempts: usize,
     unnecessary_files: usize,
+    /// Runs whose own final answer claimed completion (delivery ready or
+    /// verification passed). Compared with `success` on the same denominator
+    /// this is the per-split self-report gap.
+    claims: usize,
+    /// Runs whose agent-side verification verdict was `passed`.
+    verify_passed: usize,
+    /// Runs that solved the task without touching every declared expected file.
+    expected_files_missing: usize,
+    /// Runs that touched files outside the declared expected scope.
+    scope_extra_files: usize,
 }
 
 impl SplitMetrics {
@@ -89,12 +100,14 @@ impl SplitMetrics {
 
     fn print(&self, label: &str) {
         println!(
-            "  {label}: {}/{} success ({:.0}%) · fc={} ({:.0}%) · tools_avg={:.1} · failed_tools={} · repairs={} · unnec_files={}",
+            "  {label}: {}/{} success ({:.0}%) · fc={} ({:.0}%) · claims={} verify={} · tools_avg={:.1} · failed_tools={} · repairs={} · unnec_files={} · scope_missing={} scope_extra={}",
             self.success,
             self.tasks,
             self.success_rate() * 100.0,
             self.false_completions,
             self.fc_rate() * 100.0,
+            self.claims,
+            self.verify_passed,
             if self.tasks == 0 {
                 0.0
             } else {
@@ -103,6 +116,8 @@ impl SplitMetrics {
             self.failed_tool_calls,
             self.repair_attempts,
             self.unnecessary_files,
+            self.expected_files_missing,
+            self.scope_extra_files,
         );
     }
 }
@@ -128,6 +143,9 @@ struct EvalReport {
     live_failed_tool_calls: usize,
     /// Final-answer `delivery == "ready"` — the agent's own acceptance verdict.
     live_acceptance_success: usize,
+    /// Runs whose final answer claimed completion at all (ready delivery or a
+    /// `verification == "passed"` verdict). `live_success` is the oracle's say.
+    live_claims: usize,
     /// Final-answer `verification == "passed"` — independent of the oracle.
     live_verification_success: usize,
     live_not_verified: usize,
@@ -137,7 +155,15 @@ struct EvalReport {
     live_failure_budget: usize,
     live_failure_acceptance: usize,
     live_failure_provider: usize,
+    live_failure_truncated: usize,
+    live_failure_permission: usize,
+    live_failure_no_answer: usize,
     live_failure_other: usize,
+    /// Runs that never landed an answer (provider outage, crash, empty final,
+    /// state-machine error). Such a run is **not** credited with an oracle
+    /// pass: an untouched blocked fixture goes green precisely because nothing
+    /// happened, which is how a dead endpoint once scored 2/2.
+    live_aborted: usize,
     live_input_tokens: u32,
     live_output_tokens: u32,
     live_model_calls: usize,
@@ -151,6 +177,22 @@ struct EvalReport {
     live_unnecessary_files: usize,
     live_repair_attempts: usize,
     live_max_output_tokens: u32,
+    /// Runs requested per fixture (`--repeat`); 1 is the historical single sample.
+    live_repeat: usize,
+    /// Distinct fixtures attempted. `live_tasks` counts **runs**, so every rate
+    /// stays per-attempt and comparable with the single-sample baseline.
+    live_fixtures: usize,
+    /// Fixtures with at least one oracle-passing run (pass@N).
+    live_pass_at_n: usize,
+    /// Fixtures whose every repeat passed.
+    live_pass_always: usize,
+    /// Fixtures that both passed and failed across repeats — the variance a
+    /// single sample hides.
+    live_unstable_fixtures: usize,
+    /// Runs that solved the task while leaving a declared expected file untouched.
+    live_expected_files_missing: usize,
+    /// Runs that changed files outside the declared expected scope.
+    live_scope_extra_files: usize,
     /// Per-split live metrics (development vs holdout) — always both reported.
     dev: SplitMetrics,
     holdout: SplitMetrics,
@@ -179,10 +221,22 @@ impl EvalReport {
             self.gate_selftest_rejections
         );
         println!("live: {}", self.live_status);
-        println!("live_tasks: {}", self.live_tasks);
+        println!("live_tasks: {} (runs)", self.live_tasks);
+        if self.live_fixtures > 0 {
+            println!(
+                "live_fixtures: {} ({} run(s) each)",
+                self.live_fixtures, self.live_repeat
+            );
+        }
         println!("live_success: {}", self.live_success);
         println!("acceptance_success: {}", self.live_acceptance_success);
         println!("verification_success: {}", self.live_verification_success);
+        println!(
+            "self_report: claims={} oracle_confirmed={} gap={}",
+            self.live_claims,
+            self.live_success,
+            self.live_claims.saturating_sub(self.live_success)
+        );
         println!(
             "false_completion_rate: {}",
             if self.live_tasks > 0 {
@@ -202,6 +256,14 @@ impl EvalReport {
         println!("failed_tool_calls: {}", self.live_failed_tool_calls);
         println!("repair_attempts: {}", self.live_repair_attempts);
         println!("unnecessary_files_changed: {}", self.live_unnecessary_files);
+        println!(
+            "expected_files_missing: {} (oracle passed but a declared expected file was untouched)",
+            self.live_expected_files_missing
+        );
+        println!(
+            "scope_extra_files: {} (runs that changed files outside the declared scope)",
+            self.live_scope_extra_files
+        );
         println!("input_tokens: {}", self.live_input_tokens);
         println!("output_tokens: {}", self.live_output_tokens);
         println!("latency_ms: {}", self.live_latency_ms);
@@ -219,13 +281,33 @@ impl EvalReport {
             self.live_not_verified, self.live_verify_failed, self.live_blocked
         );
         println!(
-            "failure_taxonomy: budget={} acceptance={} provider={} other={}",
+            "failure_taxonomy: budget={} acceptance={} provider={} truncated={} permission={} no_answer={} other={}",
             self.live_failure_budget,
             self.live_failure_acceptance,
             self.live_failure_provider,
+            self.live_failure_truncated,
+            self.live_failure_permission,
+            self.live_failure_no_answer,
             self.live_failure_other
         );
+        println!(
+            "aborted_runs: {} (no answer landed; never credited as success)",
+            self.live_aborted
+        );
         if self.live_tasks > 0 {
+            if self.live_repeat > 1 {
+                println!(
+                    "variance: pass_at_n={} pass_always={} unstable={}/{} (unstable = same fixture, both passing and failing runs)",
+                    self.live_pass_at_n,
+                    self.live_pass_always,
+                    self.live_unstable_fixtures,
+                    self.live_fixtures
+                );
+            } else {
+                println!(
+                    "variance: NOT MEASURED — one run per fixture (pass --repeat N to measure it)"
+                );
+            }
             println!("splits (must both be reported):");
             self.dev.print("development");
             self.holdout.print("holdout");
@@ -329,6 +411,18 @@ impl EvalReport {
             println!("  FAIL  {name}: {detail}");
         }
     }
+
+    /// The split bucket a run belongs to; holdout wins over development, and a
+    /// fixture in neither split is still counted in the global totals.
+    fn split_mut(&mut self, in_dev: bool, in_hold: bool) -> Option<&mut SplitMetrics> {
+        if in_hold {
+            Some(&mut self.holdout)
+        } else if in_dev {
+            Some(&mut self.dev)
+        } else {
+            None
+        }
+    }
 }
 
 fn load_splits() -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -359,6 +453,134 @@ fn load_splits() -> (Vec<String>, Vec<String>, Vec<String>) {
         })
         .unwrap_or_default();
     (arr("development"), arr("holdout"), regressions)
+}
+
+/// One repo-relative path per line; blank lines and `#` comments ignored.
+/// Shared by `expected_files.txt` and `forbidden.txt`.
+fn parse_path_list(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Kodo's own state, git metadata and the harness's temp oracle script are not
+/// user dirt and must not count as scope deviations.
+fn is_noise_path(rel: &str) -> bool {
+    rel == ".kodo"
+        || rel.starts_with(".kodo/")
+        || rel == ".git"
+        || rel.starts_with(".git/")
+        || rel == ".oracle-run.sh"
+}
+
+fn walk_files(root: &Path, dir: &Path, out: &mut std::collections::BTreeSet<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if rel.is_empty() || is_noise_path(&rel) {
+            continue;
+        }
+        if path.is_dir() {
+            walk_files(root, &path, out);
+        } else {
+            out.insert(rel);
+        }
+    }
+}
+
+/// Repo-relative files the run created, deleted, or changed content in.
+fn changed_paths(baseline: &Path, work: &Path) -> Vec<String> {
+    let mut files = std::collections::BTreeSet::new();
+    walk_files(baseline, baseline, &mut files);
+    walk_files(work, work, &mut files);
+    files
+        .into_iter()
+        .filter(|rel| {
+            let before = std::fs::read(baseline.join(rel)).ok();
+            let after = std::fs::read(work.join(rel)).ok();
+            before.as_deref() != after.as_deref()
+        })
+        .collect()
+}
+
+/// Declared expected files the run never touched, and touched files outside the
+/// declared scope. Reported as diagnostics: a different-but-correct fix location
+/// must not silently become a failure the oracle does not know about.
+fn scope_deviation(expected: &[String], changed: &[String]) -> (Vec<String>, Vec<String>) {
+    let missing = expected
+        .iter()
+        .filter(|path| !changed.contains(path))
+        .cloned()
+        .collect();
+    let extra = changed
+        .iter()
+        .filter(|path| !expected.contains(path))
+        .cloned()
+        .collect();
+    (missing, extra)
+}
+
+/// Forbidden paths the run broke. A path that exists in the baseline must stay
+/// byte-identical; a path that is absent there must not be created. Both halves
+/// are load-bearing — the fixtures use the second form for "do not fabricate
+/// secret.env / README.md / vendor/…".
+fn forbidden_violations(baseline: &Path, work: &Path, entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|rel| {
+            let before = std::fs::read(baseline.join(rel)).ok();
+            let after = std::fs::read(work.join(rel)).ok();
+            match (before, after) {
+                (Some(before), Some(after)) => before != after,
+                (None, Some(_)) => true,
+                (Some(_), None) => true,
+                (None, None) => false,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Aggregate per-fixture oracle results across `--repeat` runs.
+/// Returns `(pass_at_n, pass_always, unstable)`; `unstable` is a fixture that
+/// both passed and failed, i.e. the number a single run cannot reveal.
+fn repeat_summary(results: &[(String, usize, usize)]) -> (usize, usize, usize) {
+    let (mut pass_at_n, mut always, mut unstable) = (0usize, 0usize, 0usize);
+    for (_id, passes, runs) in results {
+        if *runs == 0 {
+            continue;
+        }
+        if *passes > 0 {
+            pass_at_n += 1;
+        }
+        if *passes == *runs {
+            always += 1;
+        }
+        if *passes > 0 && *passes < *runs {
+            unstable += 1;
+        }
+    }
+    (pass_at_n, always, unstable)
+}
+
+/// `--repeat <n>`: at least one run, capped so a typo cannot schedule hours of
+/// paid model calls.
+fn parse_repeat(args: &[String]) -> usize {
+    let requested = args
+        .iter()
+        .position(|a| a == "--repeat")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1);
+    requested.clamp(1, 10)
 }
 
 fn cmd_ok(command: &str) -> ToolResult {
@@ -1002,6 +1224,209 @@ fn run_deterministic(report: &mut EvalReport) {
             "fallbacks empty",
         );
     }
+
+    // 22) the two scope manifests are parsed the same way
+    {
+        let list = parse_path_list("# comment\n\n  sum.js  \nsrc/a.js\n");
+        report.check(
+            "scope_manifest_parses_comments_and_blanks",
+            list == ["sum.js", "src/a.js"],
+            &format!("{list:?}"),
+        );
+    }
+
+    // 23) scope, forbidden and change measurement run off the real file diff,
+    //     not the agent's claims, and ignore Kodo/harness state.
+    {
+        let dir = std::env::temp_dir().join(format!("kodo_eval_scope_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let base = dir.join("base");
+        let work = dir.join("work");
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::create_dir_all(work.join("src")).unwrap();
+        std::fs::write(base.join("src/lib.js"), "one\n").unwrap();
+        std::fs::write(work.join("src/lib.js"), "two\n").unwrap();
+        std::fs::write(base.join("keep.js"), "same\n").unwrap();
+        std::fs::write(work.join("keep.js"), "same\n").unwrap();
+        std::fs::write(base.join("gone.js"), "delete me\n").unwrap();
+        std::fs::write(work.join("new.js"), "created\n").unwrap();
+        std::fs::create_dir_all(work.join(".kodo/checkpoints")).unwrap();
+        std::fs::write(work.join(".kodo/checkpoints/state.json"), "{}\n").unwrap();
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        std::fs::write(work.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(work.join(".oracle-run.sh"), "sh\n").unwrap();
+        let changed = changed_paths(&base, &work);
+        let declared = ["src/lib.js".to_string(), "keep.js".to_string()];
+        let (missing, extra) = scope_deviation(&declared, &changed);
+        report.check(
+            "changed_paths_sees_edit_add_delete_and_ignores_state",
+            changed == ["gone.js", "new.js", "src/lib.js"],
+            &format!("changed={changed:?}"),
+        );
+        report.check(
+            "scope_deviation_splits_missing_from_extra",
+            missing == ["keep.js"] && extra == ["gone.js", "new.js"],
+            &format!("missing={missing:?} extra={extra:?}"),
+        );
+        let broken = forbidden_violations(
+            &base,
+            &work,
+            &[
+                "keep.js".to_string(),
+                "gone.js".to_string(),
+                "new.js".to_string(),
+            ],
+        );
+        report.check(
+            "forbidden_guard_covers_modify_delete_and_create",
+            broken == ["gone.js", "new.js"],
+            &format!(
+                "broken={broken:?} (a path absent from the baseline is a must-not-create guard)"
+            ),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 24) --repeat aggregation separates "solved sometimes" from "solved every
+    //     time" — the distinction a single sample cannot make.
+    {
+        let results = vec![
+            ("a".to_string(), 2usize, 2usize),
+            ("b".to_string(), 1, 2),
+            ("c".to_string(), 0, 2),
+            ("d".to_string(), 0, 0),
+        ];
+        let (pass_at_n, always, unstable) = repeat_summary(&results);
+        report.check(
+            "repeat_summary_separates_pass_at_n_from_stability",
+            pass_at_n == 2 && always == 1 && unstable == 1,
+            &format!("pass_at_n={pass_at_n} always={always} unstable={unstable}"),
+        );
+        let some: Vec<String> = vec!["--repeat".into(), "7".into()];
+        let zero: Vec<String> = vec!["--repeat".into(), "0".into()];
+        let too_many: Vec<String> = vec!["--repeat".into(), "99".into()];
+        report.check(
+            "repeat_flag_defaults_and_clamps",
+            parse_repeat(&some) == 7
+                && parse_repeat(&zero) == 1
+                && parse_repeat(&too_many) == 10
+                && parse_repeat(&[]) == 1,
+            &format!(
+                "7/0/99/none → {} {} {} {}",
+                parse_repeat(&some),
+                parse_repeat(&zero),
+                parse_repeat(&too_many),
+                parse_repeat(&[])
+            ),
+        );
+    }
+
+    // 25) run aggregation: a claimed-but-red run is a false completion and must
+    //     never land on the success side; a blocked run is counted once.
+    {
+        let mut r = EvalReport::default();
+        let claimed_but_red = TaskRun {
+            claims_done: true,
+            delivery: "ready".into(),
+            verification: "passed".into(),
+            ..Default::default()
+        };
+        apply_run(&mut r, "dev-fixture", true, false, false, &claimed_but_red);
+        let blocked = TaskRun {
+            delivery: "blocked".into(),
+            verification: "blocked".into(),
+            failure_reason: "acceptance_unmet".into(),
+            ..Default::default()
+        };
+        apply_run(&mut r, "holdout-fixture", false, true, false, &blocked);
+        report.check(
+            "run_aggregation_keeps_false_completion_off_the_success_side",
+            r.live_tasks == 2
+                && r.live_success == 0
+                && r.live_false_completions == 1
+                && r.live_claims == 1
+                && r.dev.tasks == 1
+                && r.dev.false_completions == 1
+                && r.holdout.tasks == 1,
+            &format!(
+                "tasks={} success={} fc={} claims={} dev={}/{} holdout={}",
+                r.live_tasks,
+                r.live_success,
+                r.live_false_completions,
+                r.live_claims,
+                r.dev.tasks,
+                r.dev.false_completions,
+                r.holdout.tasks
+            ),
+        );
+        report.check(
+            "blocked_run_is_counted_once_not_twice",
+            r.live_blocked == 1 && r.live_failure_acceptance == 1 && r.live_acceptance_success == 1,
+            &format!(
+                "blocked={} acceptance={} ready={}",
+                r.live_blocked, r.live_failure_acceptance, r.live_acceptance_success
+            ),
+        );
+    }
+
+    // 26) a dead provider must not be able to score a pass: the oracle goes
+    //     green on an untouched blocked fixture precisely because nothing ran.
+    {
+        let mut r = EvalReport::default();
+        let dead_endpoint = TaskRun {
+            oracle_ok: true,
+            delivery: "failed".into(),
+            verification: "not_run".into(),
+            failure_reason: "unknown".into(),
+            model_calls: 1,
+            answered_calls: 0,
+            ..Default::default()
+        };
+        apply_run(
+            &mut r,
+            "blocked-1-impossible",
+            true,
+            false,
+            false,
+            &dead_endpoint,
+        );
+        report.check(
+            "aborted_run_never_credited_as_success",
+            r.live_success == 0 && r.live_aborted == 1 && r.live_tasks == 1,
+            &format!(
+                "success={} aborted={} tasks={}",
+                r.live_success, r.live_aborted, r.live_tasks
+            ),
+        );
+        // The same fixture answered by a live model and refused honestly is a
+        // pass: the rule must not swallow legitimate refusals.
+        let mut healthy = EvalReport::default();
+        let honest_refusal = TaskRun {
+            oracle_ok: true,
+            delivery: "blocked".into(),
+            verification: "blocked".into(),
+            model_calls: 3,
+            answered_calls: 3,
+            output_tokens: 512,
+            ..Default::default()
+        };
+        apply_run(
+            &mut healthy,
+            "blocked-1-impossible",
+            true,
+            false,
+            false,
+            &honest_refusal,
+        );
+        report.check(
+            "honest_refusal_from_a_live_model_is_still_scored",
+            healthy.live_success == 1 && healthy.live_aborted == 0 && healthy.live_blocked == 1,
+            &format!(
+                "success={} aborted={} blocked={}",
+                healthy.live_success, healthy.live_aborted, healthy.live_blocked
+            ),
+        );
+    }
 }
 
 fn fixture_git_repo(name: &str) -> PathBuf {
@@ -1120,12 +1545,488 @@ fn run_fixture_baselines(report: &mut EvalReport) {
                 "oracle unexpectedly passed on unfixed fixture",
             );
         }
+
+        // The scope manifests only matter if the live runner reads them and the
+        // paths they name exist. `bug-*/expected_files.txt` pointed at `src/*`
+        // files the fixtures never had while the metadata was dead weight.
+        let expected = parse_path_list(
+            &std::fs::read_to_string(dir.join("expected_files.txt")).unwrap_or_default(),
+        );
+        report.baseline(
+            &format!("fixture_{id}_has_scope_manifests"),
+            dir.join("expected_files.txt").is_file() && dir.join("forbidden.txt").is_file(),
+            "missing expected_files.txt or forbidden.txt",
+        );
+        for rel in &expected {
+            report.baseline(
+                &format!("fixture_{id}_expected_file_exists_{rel}"),
+                dir.join("repo").join(rel).is_file(),
+                "declared expected file is not in the fixture repo (stale metadata)",
+            );
+        }
+        // Blocked/impossible fixtures must not invite edits at all; every other
+        // fixture must declare at least one file the fix is expected to change.
+        if pass_baseline.contains(&id.as_str()) {
+            report.baseline(
+                &format!("fixture_{id}_expects_no_file_changes"),
+                expected.is_empty(),
+                "blocked fixture declares expected files",
+            );
+        } else {
+            report.baseline(
+                &format!("fixture_{id}_declares_expected_files"),
+                !expected.is_empty(),
+                "editable fixture declares no expected files — scope metric cannot be measured",
+            );
+        }
+    }
+}
+
+/// One live attempt against a fresh copy of a fixture repo, fully scored.
+#[derive(Default)]
+struct TaskRun {
+    tool_calls: usize,
+    failed_tools: usize,
+    repairs: usize,
+    model_calls: usize,
+    input_tokens: u32,
+    output_tokens: u32,
+    truncated_calls: usize,
+    fallback_calls: usize,
+    /// Model calls that landed a finish reason, i.e. the provider actually
+    /// answered. Zero of them with zero output tokens is an outage, not a
+    /// result, and can never be scored as a solved task.
+    answered_calls: usize,
+    delivery: String,
+    verification: String,
+    failure_reason: String,
+    claims_done: bool,
+    error: Option<String>,
+    oracle_ok: bool,
+    /// Forbidden paths the run broke (modified, deleted, or fabricated).
+    forbidden: Vec<String>,
+    expected_missing: Vec<String>,
+    scope_extra: Vec<String>,
+    final_text: String,
+    trace: Vec<String>,
+}
+
+impl TaskRun {
+    /// A run whose model never answered is an infrastructure outcome, not a
+    /// result. `finish_reason` comes back empty only on a synthesized failure
+    /// (the streaming path falls back to "stop"), so zero answered calls plus
+    /// zero output tokens is the outage signature — while a legitimate refusal
+    /// from a live model still scores normally.
+    fn is_aborted(&self) -> bool {
+        self.error.is_some()
+            || (self.answered_calls == 0 && self.output_tokens == 0)
+            || (self.delivery.is_empty() && self.verification.is_empty())
+            || matches!(
+                self.failure_reason.as_str(),
+                "provider_error" | "unrecoverable" | "no_answer" | "state_machine_error"
+            )
+    }
+}
+
+/// Re-run the fixture oracle against the edited copy. Oracle scripts resolve
+/// their repo as `$(dirname "$0")/repo`, so the harness rewrites that to the
+/// throwaway work dir before invoking it.
+fn run_oracle(fixture: &Path, work: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(fixture.join("oracle.sh")) else {
+        return false;
+    };
+    let wrapped = text.replace("$(dirname \"$0\")/repo", &work.display().to_string());
+    let tmp = work.join(".oracle-run.sh");
+    if std::fs::write(&tmp, wrapped).is_err() {
+        return false;
+    }
+    let ok = Command::new("sh")
+        .arg(&tmp)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&tmp);
+    ok
+}
+
+/// Copy the edited repo plus its trace to `evals/out/<run-id>/…` so a red
+/// oracle can be diagnosed after the fact. Passing runs are still deleted.
+fn keep_forensics(
+    out_root: &Path,
+    id: &str,
+    run_no: usize,
+    repeat: usize,
+    baseline: &Path,
+    work: &Path,
+    prompt: &str,
+    run: &TaskRun,
+) -> Option<PathBuf> {
+    let name = if repeat > 1 {
+        format!("{id}-run{run_no}")
+    } else {
+        id.to_string()
+    };
+    let keep = out_root.join(&name);
+    let _ = std::fs::remove_dir_all(&keep);
+    if !copy_dir(work, &keep.join("repo")) {
+        return None;
+    }
+    let _ = std::fs::write(
+        keep.join("trace.txt"),
+        format!(
+            "prompt:\n{prompt}\n--- trace ---\n{}\n",
+            run.trace.join("\n")
+        ),
+    );
+    let _ = std::fs::write(&keep.join("final-answer.txt"), &run.final_text);
+    if let Ok(out) = Command::new("diff")
+        .arg("-ruN")
+        .arg(baseline)
+        .arg(keep.join("repo"))
+        .output()
+    {
+        let _ = std::fs::write(keep.join("changes.diff"), &out.stdout);
+    }
+    Some(keep)
+}
+
+/// Fold one attempt into the aggregate counters. Every rate keeps a per-run
+/// denominator so repeat runs stay comparable with the single-sample history,
+/// and the split counters use the same denominator so a holdout false
+/// completion cannot hide inside the development average.
+fn apply_run(
+    report: &mut EvalReport,
+    tag: &str,
+    in_dev: bool,
+    in_hold: bool,
+    is_regression: bool,
+    run: &TaskRun,
+) {
+    report.live_tasks += 1;
+    if in_dev {
+        report.dev.tasks += 1;
+    }
+    if in_hold {
+        report.holdout.tasks += 1;
+    }
+    report.live_tool_calls += run.tool_calls;
+    report.live_failed_tool_calls += run.failed_tools;
+    report.live_repair_attempts += run.repairs;
+    report.live_model_calls += run.model_calls;
+    report.live_input_tokens += run.input_tokens;
+    report.live_output_tokens += run.output_tokens;
+    report.live_truncated_calls += run.truncated_calls;
+    report.live_fallback_protocol_calls += run.fallback_calls;
+    if run.claims_done {
+        report.live_claims += 1;
+    }
+    match run.verification.as_str() {
+        "passed" => report.live_verification_success += 1,
+        "failed" => report.live_verify_failed += 1,
+        "blocked" => report.live_blocked += 1,
+        _ => report.live_not_verified += 1,
+    }
+    if run.delivery == "ready" {
+        report.live_acceptance_success += 1;
+    } else if run.delivery == "blocked" && run.verification != "blocked" {
+        // A blocked run is counted once: delivery and verification usually say
+        // it together, and double counting inflated the old blocked metric.
+        report.live_blocked += 1;
+    }
+    match run.failure_reason.as_str() {
+        "budget_exhausted" => report.live_failure_budget += 1,
+        "acceptance_unmet" => report.live_failure_acceptance += 1,
+        "provider_error" => report.live_failure_provider += 1,
+        "output_truncated" => report.live_failure_truncated += 1,
+        "permission_blocked" => report.live_failure_permission += 1,
+        "no_answer" => report.live_failure_no_answer += 1,
+        "" => {}
+        _ => report.live_failure_other += 1,
+    }
+    let aborted = run.is_aborted();
+    if aborted {
+        report.live_aborted += 1;
+    }
+    if run.oracle_ok && !run.expected_missing.is_empty() {
+        report.live_expected_files_missing += 1;
+    }
+    if !run.scope_extra.is_empty() {
+        report.live_scope_extra_files += 1;
+    }
+    if !run.forbidden.is_empty() {
+        report.live_unnecessary_files += 1;
+        report.notes.push(format!(
+            "{tag}: broke forbidden path(s): {}",
+            run.forbidden.join(", ")
+        ));
+    }
+    if let Some(s) = report.split_mut(in_dev, in_hold) {
+        s.tool_calls += run.tool_calls;
+        s.failed_tool_calls += run.failed_tools;
+        s.repair_attempts += run.repairs;
+        if run.claims_done {
+            s.claims += 1;
+        }
+        if run.verification == "passed" {
+            s.verify_passed += 1;
+        }
+        if run.oracle_ok && !run.expected_missing.is_empty() {
+            s.expected_files_missing += 1;
+        }
+        if !run.scope_extra.is_empty() {
+            s.scope_extra_files += 1;
+        }
+        if !run.forbidden.is_empty() {
+            s.unnecessary_files += 1;
+        }
+    }
+    // Success stays oracle-grounded; the agent's own acceptance and
+    // verification verdicts are counted separately and never aliased to it.
+    if run.oracle_ok && !aborted {
+        report.live_success += 1;
+        if let Some(s) = report.split_mut(in_dev, in_hold) {
+            s.success += 1;
+        }
+        if !run.expected_missing.is_empty() {
+            report.notes.push(format!(
+                "{tag}: oracle passed but declared expected file(s) untouched: {}",
+                run.expected_missing.join(", ")
+            ));
+        }
+    } else if run.oracle_ok {
+        report.notes.push(format!(
+            "{tag}: oracle green on an aborted run — not credited (delivery={:?} verification={:?} failure_reason={:?} model_calls={} answered={})",
+            run.delivery,
+            run.verification,
+            run.failure_reason,
+            run.model_calls,
+            run.answered_calls
+        ));
+    } else if run.claims_done {
+        report.live_false_completions += 1;
+        report.notes.push(format!(
+            "{tag}: FALSE COMPLETION — delivery={:?} verification={:?} but oracle failed",
+            run.delivery, run.verification
+        ));
+        if let Some(s) = report.split_mut(in_dev, in_hold) {
+            s.false_completions += 1;
+        }
+        if is_regression {
+            report.regression_false_completions += 1;
+        }
+    } else {
+        report.notes.push(format!(
+            "{tag}: oracle failed (delivery={:?} verification={:?} failure_reason={:?} run_ok={})",
+            run.delivery,
+            run.verification,
+            run.failure_reason,
+            run.error.is_none()
+        ));
+        if !run.scope_extra.is_empty() {
+            report.notes.push(format!(
+                "{tag}: changed outside declared scope: {}",
+                run.scope_extra.join(", ")
+            ));
+        }
+    }
+    if let Some(error) = &run.error {
+        report.notes.push(format!("{tag}: agent error {error}"));
+    }
+}
+
+/// Run the agent once against `work` (a fresh copy of `fixture/repo`) and score
+/// the result: oracle, forbidden paths, declared-file scope, provider counters.
+fn run_one_live_task(
+    id: &str,
+    fixture: &Path,
+    work: &Path,
+    prompt: &str,
+    provider: &Provider,
+    max_output_tokens: u32,
+    expected: &[String],
+    forbidden: &[String],
+) -> TaskRun {
+    let mut tool_calls = 0usize;
+    let mut failed_tools = 0usize;
+    let mut repairs = 0usize;
+    // Provider-side accounting — tokens, call count, truncation, protocol.
+    let mut model_calls = 0usize;
+    let mut input_tokens = 0u32;
+    let mut output_tokens = 0u32;
+    let mut truncated_calls = 0usize;
+    let mut fallback_calls = 0usize;
+    let mut answered_calls = 0usize;
+    // Structured final-answer verdicts read off Step::AgentMessage instead of
+    // substring-matching the rendered text.
+    let mut delivery = String::new();
+    let mut verification = String::new();
+    let mut failure_reason = String::new();
+    let mut final_text = String::new();
+    let mut claimed_verified = false;
+    let mut trace: Vec<String> = Vec::new();
+    let request = RunRequest {
+        project: Some(work.to_path_buf()),
+        message: prompt.to_string(),
+        conversation_history: Vec::new(),
+        pinned_context: Vec::new(),
+        pinned_force_inline: Vec::new(),
+        provider: Some(provider.clone()),
+        permission: Permission::Full,
+        mode: AgentMode::Code,
+        fallback_to_local: false,
+        max_output_tokens,
+        extended_thinking: false,
+        local_trace: false,
+        session_id: Some(format!("eval_{id}")),
+        user_skills_dir: None,
+        mcp_servers: Vec::new(),
+        agent_instructions: None,
+        personas: Vec::new(),
+        budget_family: None,
+        memory: None,
+        knowledge_context: None,
+        allow_verify_commands: false,
+    };
+    let alive = || true;
+    let approve = |_kind: kodo_agent::StepKind, _cmd: &str| true;
+    let mut sink = |event: kodo_agent::SinkEvent| match &event {
+        kodo_agent::SinkEvent::Finished { step, .. } => {
+            match step {
+                kodo_agent::Step::Command { .. }
+                | kodo_agent::Step::FileChange { .. }
+                | kodo_agent::Step::FileRead { .. }
+                | kodo_agent::Step::Search { .. } => {
+                    tool_calls += 1;
+                }
+                kodo_agent::Step::ModelCall {
+                    input_tokens: it,
+                    output_tokens: ot,
+                    protocol,
+                    finish_reason,
+                    ..
+                } => {
+                    model_calls += 1;
+                    input_tokens += *it;
+                    output_tokens += *ot;
+                    if *finish_reason == "length" {
+                        truncated_calls += 1;
+                    }
+                    if !finish_reason.is_empty() {
+                        answered_calls += 1;
+                    }
+                    if !protocol.is_empty() && *protocol != "native" {
+                        fallback_calls += 1;
+                    }
+                    trace.push(format!(
+                        "model_call protocol={protocol} finish={finish_reason} in={it} out={ot}"
+                    ));
+                }
+                kodo_agent::Step::AgentMessage {
+                    text,
+                    delivery: d,
+                    verification: v,
+                    failure_reason: fr,
+                    ..
+                } => {
+                    delivery = d.clone();
+                    verification = v.clone();
+                    failure_reason = fr.clone();
+                    final_text = text.clone();
+                    // Belt and braces: the structured verdict is authoritative,
+                    // the rendered-text marker is kept for older traces.
+                    if *v == "passed"
+                        || text.contains("Verification status:** Verified")
+                        || text.contains("status: Verified")
+                    {
+                        claimed_verified = true;
+                    }
+                }
+                _ => {}
+            }
+            // Non-zero command exits count as failed tool calls (honest).
+            if let kodo_agent::Step::Command { exit_code, .. } = step {
+                if matches!(exit_code, Some(c) if *c != 0) {
+                    failed_tools += 1;
+                }
+            }
+            if trace.len() < 400 {
+                let brief = match step {
+                    kodo_agent::Step::Reasoning { summary, .. } => {
+                        format!("reasoning: {summary}")
+                    }
+                    kodo_agent::Step::Search { query, .. } => format!("search: {query}"),
+                    kodo_agent::Step::FileRead { path, .. } => format!("read: {path}"),
+                    kodo_agent::Step::Command {
+                        command, exit_code, ..
+                    } => {
+                        format!("command: {command} -> exit {exit_code:?}")
+                    }
+                    kodo_agent::Step::FileChange { changes, .. } => format!(
+                        "change: {}",
+                        changes
+                            .iter()
+                            .map(|c| c.path.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    kodo_agent::Step::AgentMessage {
+                        delivery,
+                        verification,
+                        ..
+                    } => format!("answer: delivery={delivery} verification={verification}"),
+                    _ => String::new(),
+                };
+                if !brief.is_empty() {
+                    trace.push(brief);
+                }
+            }
+            true
+        }
+        kodo_agent::SinkEvent::Progress { phase, .. } => {
+            if phase == "Repairing" {
+                repairs += 1;
+            }
+            trace.push(format!("progress: {phase}"));
+            true
+        }
+        _ => true,
+    };
+    let run_result = kodo_agent::run(&request, &alive, &approve, &mut sink);
+    let oracle_ok = run_oracle(fixture, work);
+    let baseline = fixture.join("repo");
+    let changed = changed_paths(&baseline, work);
+    let (expected_missing, scope_extra) = scope_deviation(expected, &changed);
+    TaskRun {
+        tool_calls,
+        failed_tools,
+        repairs,
+        model_calls,
+        input_tokens,
+        output_tokens,
+        truncated_calls,
+        fallback_calls,
+        answered_calls,
+        claims_done: claimed_verified || delivery == "ready",
+        error: run_result.err().map(|e| e.to_string()),
+        oracle_ok,
+        forbidden: forbidden_violations(&baseline, work, forbidden),
+        expected_missing,
+        scope_extra,
+        final_text,
+        trace,
+        delivery,
+        verification,
+        failure_reason,
     }
 }
 
 /// Real coding eval: copy fixture → run agent → re-run oracle.
 /// Requires KODO_EVAL_PROVIDER / MODEL_ID / API_KEY.
-fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
+///
+/// `repeat` runs every fixture N times. One sample cannot tell a flaky agent
+/// from a weak model, so the pass@N / always / unstable triple is reported
+/// alongside the per-run rates.
+fn run_fixture_live(tasks_n: usize, repeat: usize, report: &mut EvalReport) {
     let provider_type = std::env::var("KODO_EVAL_PROVIDER").unwrap_or_default();
     let model_id = std::env::var("KODO_EVAL_MODEL_ID").unwrap_or_default();
     let api_key = std::env::var("KODO_EVAL_API_KEY").unwrap_or_default();
@@ -1155,22 +2056,21 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         })
         .unwrap_or_default();
     ids.sort();
+    ids.truncate(tasks_n);
 
     let started = Instant::now();
     let provider = Provider::new(&provider_type, &api_key, &endpoint, &model_id);
 
-    // A1: the live harness must not code against a smaller output ceiling than
-    // the product ships with. 2048 truncated real fixes and made the dev split
-    // look like a model-quality problem when it was a harness problem.
+    // The live harness must not code against a smaller output ceiling than the
+    // product ships with; a truncated fix looks like a model-quality problem.
     let max_output_tokens = std::env::var("KODO_EVAL_MAX_OUTPUT_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(8192);
     report.live_max_output_tokens = max_output_tokens;
+    report.live_repeat = repeat.max(1);
 
-    // A4: failed runs are kept under evals/out/<run-id>/<task>/ so a red oracle
-    // can be diagnosed after the fact. Passing runs are still deleted.
     let run_id = format!(
         "live-{}-{}",
         std::time::SystemTime::now()
@@ -1183,313 +2083,100 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         .join("out")
         .join(&run_id);
 
-    for id in ids.into_iter().take(tasks_n) {
-        let fixture = root.join(&id);
-        let prompt = match std::fs::read_to_string(fixture.join("prompt.md")) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let work =
-            std::env::temp_dir().join(format!("kodo_liv_eval_{}_{}", id, std::process::id()));
-        let _ = std::fs::remove_dir_all(&work);
-        if !copy_dir(&fixture.join("repo"), &work) {
-            report.notes.push(format!("copy failed for {id}"));
+    // (fixture id, oracle passes, runs actually executed) for the variance view.
+    let mut per_fixture: Vec<(String, usize, usize)> = Vec::new();
+
+    for id in &ids {
+        let fixture = root.join(id);
+        let Ok(prompt) = std::fs::read_to_string(fixture.join("prompt.md")) else {
+            report.notes.push(format!("{id}: skipped — no prompt.md"));
             continue;
-        }
-
-        let in_dev = development.contains(&id);
-        let in_hold = holdout.contains(&id);
-        let is_regression = regressions.contains(&id);
-
-        report.live_tasks += 1;
-        if in_dev {
-            report.dev.tasks += 1;
-        }
-        if in_hold {
-            report.holdout.tasks += 1;
-        }
-        let mut tool_calls = 0usize;
-        let mut failed_tools = 0usize;
-        let mut repairs = 0usize;
-        // A3: provider-side accounting — tokens, call count, truncation, protocol.
-        let mut model_calls = 0usize;
-        let mut input_tokens = 0u32;
-        let mut output_tokens = 0u32;
-        let mut truncated_calls = 0usize;
-        let mut fallback_calls = 0usize;
-        // Structured final-answer verdicts read off Step::AgentMessage instead of
-        // substring-matching the rendered text.
-        let mut delivery = String::new();
-        let mut verification = String::new();
-        let mut failure_reason = String::new();
-        let mut final_text = String::new();
-        let mut claimed_verified = false;
-        let mut trace: Vec<String> = Vec::new();
-        let request = RunRequest {
-            project: Some(work.clone()),
-            message: prompt.clone(),
-            conversation_history: Vec::new(),
-            pinned_context: Vec::new(),
-            pinned_force_inline: Vec::new(),
-            provider: Some(provider.clone()),
-            permission: Permission::Full,
-            mode: AgentMode::Code,
-            fallback_to_local: false,
-            max_output_tokens,
-            extended_thinking: false,
-            local_trace: false,
-            session_id: Some(format!("eval_{id}")),
-            user_skills_dir: None,
-            mcp_servers: Vec::new(),
-            agent_instructions: None,
-            personas: Vec::new(),
-            budget_family: None,
-            memory: None,
-            knowledge_context: None,
-            allow_verify_commands: false,
         };
-        let alive = || true;
-        let approve = |_kind: kodo_agent::StepKind, _cmd: &str| true;
-        let mut sink = |event: kodo_agent::SinkEvent| match &event {
-            kodo_agent::SinkEvent::Finished { step, .. } => {
-                match step {
-                    kodo_agent::Step::Command { .. }
-                    | kodo_agent::Step::FileChange { .. }
-                    | kodo_agent::Step::FileRead { .. }
-                    | kodo_agent::Step::Search { .. } => {
-                        tool_calls += 1;
-                    }
-                    kodo_agent::Step::ModelCall {
-                        input_tokens: it,
-                        output_tokens: ot,
-                        protocol,
-                        finish_reason,
-                        ..
-                    } => {
-                        model_calls += 1;
-                        input_tokens += *it;
-                        output_tokens += *ot;
-                        if *finish_reason == "length" {
-                            truncated_calls += 1;
-                        }
-                        if !protocol.is_empty() && *protocol != "native" {
-                            fallback_calls += 1;
-                        }
-                        trace.push(format!(
-                            "model_call protocol={protocol} finish={finish_reason} in={it} out={ot}"
-                        ));
-                    }
-                    kodo_agent::Step::AgentMessage {
-                        text,
-                        delivery: d,
-                        verification: v,
-                        failure_reason: fr,
-                        ..
-                    } => {
-                        delivery = d.clone();
-                        verification = v.clone();
-                        failure_reason = fr.clone();
-                        final_text = text.clone();
-                        // Belt and braces: the structured verdict is authoritative,
-                        // the rendered-text marker is kept for older traces.
-                        if *v == "passed"
-                            || text.contains("Verification status:** Verified")
-                            || text.contains("status: Verified")
-                        {
-                            claimed_verified = true;
-                        }
-                    }
-                    _ => {}
-                }
-                // Non-zero command exits count as failed tool calls (honest).
-                if let kodo_agent::Step::Command { exit_code, .. } = step {
-                    if matches!(exit_code, Some(c) if *c != 0) {
-                        failed_tools += 1;
-                    }
-                }
-                if trace.len() < 400 {
-                    let brief = match step {
-                        kodo_agent::Step::Reasoning { summary, .. } => {
-                            format!("reasoning: {summary}")
-                        }
-                        kodo_agent::Step::Search { query, .. } => format!("search: {query}"),
-                        kodo_agent::Step::FileRead { path, .. } => format!("read: {path}"),
-                        kodo_agent::Step::Command {
-                            command, exit_code, ..
-                        } => {
-                            format!("command: {command} -> exit {exit_code:?}")
-                        }
-                        kodo_agent::Step::FileChange { changes, .. } => format!(
-                            "change: {}",
-                            changes
-                                .iter()
-                                .map(|c| c.path.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        kodo_agent::Step::AgentMessage {
-                            delivery,
-                            verification,
-                            ..
-                        } => format!("answer: delivery={delivery} verification={verification}"),
-                        _ => String::new(),
-                    };
-                    if !brief.is_empty() {
-                        trace.push(brief);
-                    }
-                }
-                true
-            }
-            kodo_agent::SinkEvent::Progress { phase, .. } => {
-                if phase == "Repairing" {
-                    repairs += 1;
-                }
-                trace.push(format!("progress: {phase}"));
-                true
-            }
-            _ => true,
-        };
-        let run_result = kodo_agent::run(&request, &alive, &approve, &mut sink);
-        report.live_tool_calls += tool_calls;
-        report.live_failed_tool_calls += failed_tools;
-        report.live_repair_attempts += repairs;
-        report.live_model_calls += model_calls;
-        report.live_input_tokens += input_tokens;
-        report.live_output_tokens += output_tokens;
-        report.live_truncated_calls += truncated_calls;
-        report.live_fallback_protocol_calls += fallback_calls;
-        match verification.as_str() {
-            "passed" => report.live_verification_success += 1,
-            "failed" => report.live_verify_failed += 1,
-            "blocked" => report.live_blocked += 1,
-            _ => report.live_not_verified += 1,
-        }
-        match delivery.as_str() {
-            "ready" => report.live_acceptance_success += 1,
-            "blocked" => report.live_blocked += 1,
-            _ => {}
-        }
-        match failure_reason.as_str() {
-            "budget_exhausted" => report.live_failure_budget += 1,
-            "acceptance_unmet" => report.live_failure_acceptance += 1,
-            "provider_error" => report.live_failure_provider += 1,
-            "" => {}
-            _ => report.live_failure_other += 1,
-        }
-        let run_ok = run_result.is_ok();
-        if let Err(error) = &run_result {
-            report.notes.push(format!("{id}: agent error {error}"));
-        }
+        let expected = parse_path_list(
+            &std::fs::read_to_string(fixture.join("expected_files.txt")).unwrap_or_default(),
+        );
+        let forbidden_list = parse_path_list(
+            &std::fs::read_to_string(fixture.join("forbidden.txt")).unwrap_or_default(),
+        );
+        let in_dev = development.contains(id);
+        let in_hold = holdout.contains(id);
+        let is_regression = regressions.contains(id);
+        let mut passes = 0usize;
+        let mut runs = 0usize;
 
-        // Forbidden / user-owned files: must still exist with baseline content.
-        let mut forbidden_ok = true;
-        if let Ok(list) = std::fs::read_to_string(fixture.join("forbidden.txt")) {
-            for line in list.lines().filter(|l| !l.trim().is_empty()) {
-                let base_path = fixture.join("repo").join(line);
-                if !base_path.exists() {
-                    continue;
-                }
-                let base = std::fs::read(&base_path).unwrap_or_default();
-                match std::fs::read(work.join(line)) {
-                    Err(_) => forbidden_ok = false,
-                    Ok(cur) if cur != base => forbidden_ok = false,
-                    Ok(_) => {}
-                }
-            }
-        }
-
-        let oracle_ok = std::fs::metadata(fixture.join("oracle.sh"))
-            .map(|_| {
-                let oracle = std::fs::read_to_string(fixture.join("oracle.sh")).unwrap_or_default();
-                let wrapped = oracle.replace("$(dirname \"$0\")/repo", &work.display().to_string());
-                let tmp = work.join(".oracle-run.sh");
-                let _ = std::fs::write(&tmp, wrapped);
-                let ok = Command::new("sh")
-                    .arg(&tmp)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                let _ = std::fs::remove_file(&tmp);
-                ok
-            })
-            .unwrap_or(false);
-
-        let mut split = if in_hold {
-            Some(&mut report.holdout)
-        } else if in_dev {
-            Some(&mut report.dev)
-        } else {
-            None
-        };
-
-        // A7: success stays oracle-grounded; the agent's own acceptance and
-        // verification verdicts are counted separately above and must not be
-        // aliased to the oracle result.
-        let claims_done = claimed_verified || delivery == "ready";
-        if oracle_ok {
-            report.live_success += 1;
-            if let Some(s) = split.as_mut() {
-                s.success += 1;
-            }
-        } else if claims_done {
-            report.live_false_completions += 1;
-            report.notes.push(format!(
-                "{id}: FALSE COMPLETION — delivery={delivery:?} verification={verification:?} but oracle failed"
+        for run_no in 1..=repeat {
+            let work = std::env::temp_dir().join(format!(
+                "kodo_liv_eval_{}_{run_no}_{}",
+                id,
+                std::process::id()
             ));
-            if let Some(s) = split.as_mut() {
-                s.false_completions += 1;
+            let _ = std::fs::remove_dir_all(&work);
+            if !copy_dir(&fixture.join("repo"), &work) {
+                report.notes.push(format!("copy failed for {id}"));
+                continue;
             }
-            if is_regression {
-                report.regression_false_completions += 1;
+            let tag = if repeat > 1 {
+                format!("{id}#r{run_no}")
+            } else {
+                id.clone()
+            };
+            let run = run_one_live_task(
+                id,
+                &fixture,
+                &work,
+                &prompt,
+                &provider,
+                max_output_tokens,
+                &expected,
+                &forbidden_list,
+            );
+            runs += 1;
+            if run.oracle_ok && !run.is_aborted() {
+                passes += 1;
             }
-        } else {
-            report.notes.push(format!(
-                "{id}: oracle failed (delivery={delivery:?} verification={verification:?} failure_reason={failure_reason:?} run_ok={run_ok})"
-            ));
-        }
-        if !forbidden_ok {
-            report.live_unnecessary_files += 1;
-            if let Some(s) = split.as_mut() {
-                s.unnecessary_files += 1;
-            }
-            report.notes.push(format!("{id}: touched forbidden path"));
-        }
-        if let Some(s) = split.as_mut() {
-            s.tool_calls += tool_calls;
-            s.failed_tool_calls += failed_tools;
-            s.repair_attempts += repairs;
-        }
-        let failed = !oracle_ok || !forbidden_ok;
-        if failed {
-            // A4: keep the scene of the crime instead of deleting it.
-            let keep = out_root.join(&id);
-            let _ = std::fs::remove_dir_all(&keep);
-            if copy_dir(&work, &keep.join("repo")) {
-                let _ = std::fs::write(
-                    keep.join("trace.txt"),
-                    format!("prompt:\n{prompt}\n--- trace ---\n{}\n", trace.join("\n")),
-                );
-                let _ = std::fs::write(&keep.join("final-answer.txt"), &final_text);
-                if let Ok(out) = Command::new("diff")
-                    .arg("-ruN")
-                    .arg(fixture.join("repo"))
-                    .arg(keep.join("repo"))
-                    .output()
-                {
-                    let _ = std::fs::write(keep.join("changes.diff"), &out.stdout);
+            apply_run(report, &tag, in_dev, in_hold, is_regression, &run);
+            if !run.oracle_ok || run.is_aborted() || !run.forbidden.is_empty() {
+                if let Some(keep) = keep_forensics(
+                    &out_root,
+                    id,
+                    run_no,
+                    repeat,
+                    &fixture.join("repo"),
+                    &work,
+                    &prompt,
+                    &run,
+                ) {
+                    report
+                        .notes
+                        .push(format!("{tag}: forensics kept at {}", keep.display()));
                 }
-                report
-                    .notes
-                    .push(format!("{id}: forensics kept at {}", keep.display()));
+            }
+            let _ = std::fs::remove_dir_all(&work);
+        }
+        per_fixture.push((id.clone(), passes, runs));
+    }
+
+    let (pass_at_n, always, unstable) = repeat_summary(&per_fixture);
+    report.live_pass_at_n = pass_at_n;
+    report.live_pass_always = always;
+    report.live_unstable_fixtures = unstable;
+    report.live_fixtures = per_fixture.iter().filter(|(_, _, r)| *r > 0).count();
+    if report.live_repeat > 1 {
+        for (id, passes, runs) in &per_fixture {
+            if *passes > 0 && *passes < *runs {
+                report.notes.push(format!(
+                    "{id}: UNSTABLE — oracle passed {passes}/{runs} runs"
+                ));
             }
         }
-        let _ = std::fs::remove_dir_all(&work);
     }
     report.live_latency_ms = started.elapsed().as_millis();
     report.live_status = format!(
-        "RAN — {}/{} tasks succeeded (forensics: {})",
+        "RAN — {}/{} runs passed (aborted={}), {pass_at_n}/{} fixtures solved at least once (forensics: {})",
         report.live_success,
         report.live_tasks,
+        report.live_aborted,
+        report.live_fixtures,
         out_root.display()
     );
 }
