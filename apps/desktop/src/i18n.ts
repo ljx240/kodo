@@ -1128,6 +1128,7 @@ export const T = {
       dueTomorrow: "明天",
       dueYesterday: "昨天",
       dueDaysSuffix: "天后",
+      dueDaysUnit: "天",
       // A column with nothing left in it is good news, and a 已完成 column
       // says so instead of offering a drop target.
       emptyStatusTitle: "太棒了！",

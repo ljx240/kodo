@@ -21,7 +21,9 @@ function djb2(input: string): number {
 
 /** Stable short hex suffix for the identifier. Same todo id → same suffix. */
 export function todoShortId(id: string): string {
-  return djb2(id).toString(16).padStart(8, "0").slice(0, 4).toUpperCase();
+  // Low 16 bits: ids that differ only in their last character (todo-1, todo-2)
+  // leave the high nibbles untouched, which would collide every card.
+  return djb2(id).toString(16).padStart(8, "0").slice(-4).toUpperCase();
 }
 
 /** Full display identifier, e.g. `TODO-F47A`. */

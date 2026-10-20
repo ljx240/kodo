@@ -84,6 +84,7 @@ export function DueChip({ todo, today }: { todo: TodoDto; today: string }) {
       "workbench.todo.dueYesterday": W.dueYesterday,
       "workbench.todo.overdue": W.overdue,
       "workbench.todo.dueDaysSuffix": W.dueDaysSuffix,
+      "workbench.todo.dueDaysUnit": W.dueDaysUnit,
     };
     const smart = smartDate(todo.dueDate, today) ?? {
       kind: "absolute" as const,

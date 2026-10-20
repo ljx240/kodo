@@ -70,7 +70,7 @@ export function smartDateLabel(s: SmartDate, lookup: SmartDateLabels, time = "")
       case "yesterday":
         return pick("workbench.todo.dueYesterday");
       case "overdue":
-        return `${pick("workbench.todo.overdue")} ${s.days} ${pick("workbench.todo.dueDaysSuffix")}`;
+        return `${pick("workbench.todo.overdue")} ${s.days} ${pick("workbench.todo.dueDaysUnit")}`;
       case "in-days":
         return `${s.days} ${pick("workbench.todo.dueDaysSuffix")}`;
       case "absolute":

@@ -32,6 +32,12 @@ function isoDate(offset = 0): string {
 
 const TODAY = isoDate();
 
+/** Whole days from `b` to `a`; negative when `b` is later. */
+const daysBetween = (a: string, b: string): number =>
+  Math.round(
+    (Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000,
+  );
+
 /** A 待办 row shaped like the store's, seeded for a specific case. */
 const todo = (over: Partial<TodoDto> & { id: string }): TodoDto => ({
   ...DEMO_TODOS[1],
@@ -277,13 +283,15 @@ test("the board renders one column per status, not a fixed three", async ({ page
   await expect(card.locator(".todo-priority").first()).toHaveText("高");
   // `todo-1` is frozen at DEMO_TODAY while the app reads the real clock, so
   // the chip reads as an overdue relative date whose count moves with TODAY.
-  const demoDaysLate = Math.round(
-    (Date.parse(`${TODAY}T00:00:00Z`) - Date.parse(`${DEMO_TODAY}T00:00:00Z`)) / 86_400_000,
-  );
+  const demoDaysLate = daysBetween(TODAY, DEMO_TODAY);
   await expect(card.locator(".todo-due").first()).toHaveText(
     `已逾期 ${demoDaysLate} 天 12:00`,
   );
   await expect(page.getByTestId("todo-status-todo-1")).toHaveValue("doing");
+  // The short display id is derived per todo, not shared across the board.
+  const displayIds = await page.locator(".todo-card-id").allTextContents();
+  expect(displayIds).toHaveLength(6);
+  expect(new Set(displayIds).size).toBe(displayIds.length);
   // Sub-items are counted on the parent and never float into a column.
   await expect(card.locator(".todo-subcount")).toHaveText("2/5 子项");
   // The design keeps a card to its progress line; the sub-items themselves
@@ -618,7 +626,8 @@ test("editing a card updates the record and its sub-items", async ({ page }) => 
   await page.getByTestId("todo-edit-todo-5").click();
   await page.getByTestId("todo-edit-title").fill("更新发布说明里的 v1.2 与 v1.3 段落");
   await page.getByTestId("todo-edit-priority").selectOption("high");
-  await page.getByTestId("todo-edit-due").fill("2026-10-05");
+  const editedDue = "2026-10-05";
+  await page.getByTestId("todo-edit-due").fill(editedDue);
   // A sub-item can be added from the editor and inherits the parent's status.
   await page.getByTestId("todo-add-subtask").fill("校对版本号");
   await page.getByTestId("todo-add-subtask").press("Enter");
@@ -627,7 +636,10 @@ test("editing a card updates the record and its sub-items", async ({ page }) => 
   const card = page.getByTestId("todo-card-todo-5");
   await expect(card.locator(".todo-card-title")).toHaveText("更新发布说明里的 v1.2 与 v1.3 段落");
   await expect(card.locator(".todo-priority")).toHaveText("高");
-  await expect(card.locator(".todo-due")).toContainText("10/05");
+  // Against the real clock that date is behind us, so the chip reads relative.
+  await expect(card.locator(".todo-due")).toHaveText(
+    `已逾期 ${daysBetween(TODAY, editedDue)} 天 18:00`,
+  );
   await expect(card.locator(".todo-subcount")).toHaveText("0/1 子项");
   expect(await commands(page)).toContain("update_todo");
   // The sub-item was created, not saved as part of the parent's row.
