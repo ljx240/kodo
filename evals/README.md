@@ -56,8 +56,15 @@ export KODO_EVAL_PROVIDER=custom        # or anthropic / openai / deepseek
 export KODO_EVAL_MODEL_ID=...
 export KODO_EVAL_API_KEY=...            # never printed
 export KODO_EVAL_ENDPOINT=https://...   # optional
+export KODO_EVAL_MAX_OUTPUT_TOKENS=8192 # optional, default 8192
 cargo run -p kodo-evals -- --live --tasks 30
 ```
+
+`KODO_EVAL_MAX_OUTPUT_TOKENS` exists because the harness previously hardcoded a
+2048 ceiling while the product ships 102400 (desktop) / 4096 (CLI). A capped
+completion is a harness artifact, not a model-quality signal, so the ceiling is
+configurable and echoed back in the report as `truncated_calls ... at
+max_output_tokens=N`.
 
 Without credentials:
 
@@ -67,13 +74,33 @@ LIVE EVAL: NOT RUN — credential unavailable
 
 Never fill live fields from a fake provider.
 
+### Failure forensics
+
+A fixture whose oracle fails (or that touches a `forbidden.txt` path) is **not**
+deleted. Its workdir, full step trace, final answer and a `changes.diff` against
+the baseline repo are copied to:
+
+```
+evals/out/live-<ts>-<pid>/<fixture-id>/
+```
+
+That directory is gitignored — it can contain provider output. Passing fixtures
+are removed as before. `live_status` prints the run directory.
+
 ## Metrics
 
-- task_success / criterion_success (oracle) / verification_success
-- false_completion / false_completion_rate
+- task_success (oracle) — counted only from `oracle.sh`
+- acceptance_success — agent's final `delivery == "ready"`
+- verification_success — agent's final `verification == "passed"`
+- agent_verdicts — `not_verified` / `verify_failed` / `blocked`
+- failure_taxonomy — `budget_exhausted` / `acceptance_unmet` / `provider_error` / other
+- false_completion / false_completion_rate — oracle failed **and** the agent
+  claimed a verified or ready answer. Deterministic acceptance-gate rejections
+  are reported separately as `gate_selftest_rejections` and never enter this rate
 - files_changed / unnecessary_files_changed
 - tool_calls / failed_tool_calls / repair_attempts
-- input_tokens / output_tokens / latency
+- model_calls / input_tokens / output_tokens / truncated_calls /
+  fallback_protocol_calls / latency
 - **per-split** development and holdout rates
 
 ## Beta-0 gates (thresholds fixed; do not weaken oracles)

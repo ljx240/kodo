@@ -112,22 +112,45 @@ struct EvalReport {
     deterministic_total: usize,
     deterministic_passed: usize,
     deterministic_failures: usize,
-    false_completions: usize,
+    /// The deterministic layer deliberately walks a simulated "claimed done
+    /// without evidence" through the acceptance gate and counts each correct
+    /// rejection. Those rejections are **not** agent false completions and must
+    /// never feed the live false-completion rate (Beta-0 gate).
+    gate_selftest_rejections: usize,
     baseline_total: usize,
     baseline_passed: usize,
     baseline_failures: usize,
     live_status: String,
     live_tasks: usize,
     live_success: usize,
+    live_false_completions: usize,
     live_tool_calls: usize,
     live_failed_tool_calls: usize,
+    /// Final-answer `delivery == "ready"` — the agent's own acceptance verdict.
     live_acceptance_success: usize,
+    /// Final-answer `verification == "passed"` — independent of the oracle.
     live_verification_success: usize,
+    live_not_verified: usize,
+    live_verify_failed: usize,
+    live_blocked: usize,
+    /// Structured failure taxonomy counts reported by the agent itself.
+    live_failure_budget: usize,
+    live_failure_acceptance: usize,
+    live_failure_provider: usize,
+    live_failure_other: usize,
     live_input_tokens: u32,
     live_output_tokens: u32,
+    live_model_calls: usize,
+    /// Model calls that hit the output ceiling (`finish_reason == "length"`),
+    /// i.e. the run was capped rather than wrong.
+    live_truncated_calls: usize,
+    /// Calls that could not use native tool-calling and fell back to a
+    /// JSON/tag/text protocol.
+    live_fallback_protocol_calls: usize,
     live_latency_ms: u128,
     live_unnecessary_files: usize,
     live_repair_attempts: usize,
+    live_max_output_tokens: u32,
     /// Per-split live metrics (development vs holdout) — always both reported.
     dev: SplitMetrics,
     holdout: SplitMetrics,
@@ -147,7 +170,14 @@ impl EvalReport {
             "fixture_baselines: {}/{} passed ({} fail)",
             self.baseline_passed, self.baseline_total, self.baseline_failures
         );
-        println!("false_completions_recorded: {}", self.false_completions);
+        println!(
+            "false_completions_recorded: {} (live agent answers that claimed success without evidence)",
+            self.live_false_completions
+        );
+        println!(
+            "gate_selftest_rejections: {} (deterministic acceptance-gate rejections, NOT agent false completions)",
+            self.gate_selftest_rejections
+        );
         println!("live: {}", self.live_status);
         println!("live_tasks: {}", self.live_tasks);
         println!("live_success: {}", self.live_success);
@@ -156,7 +186,7 @@ impl EvalReport {
         println!(
             "false_completion_rate: {}",
             if self.live_tasks > 0 {
-                self.false_completions as f64 / self.live_tasks as f64
+                self.live_false_completions as f64 / self.live_tasks as f64
             } else {
                 0.0
             }
@@ -175,6 +205,26 @@ impl EvalReport {
         println!("input_tokens: {}", self.live_input_tokens);
         println!("output_tokens: {}", self.live_output_tokens);
         println!("latency_ms: {}", self.live_latency_ms);
+        println!("model_calls: {}", self.live_model_calls);
+        println!(
+            "truncated_calls: {} (finish_reason=length at max_output_tokens={})",
+            self.live_truncated_calls, self.live_max_output_tokens
+        );
+        println!(
+            "fallback_protocol_calls: {} (no native tool-calling used)",
+            self.live_fallback_protocol_calls
+        );
+        println!(
+            "agent_verdicts: not_verified={} verify_failed={} blocked={}",
+            self.live_not_verified, self.live_verify_failed, self.live_blocked
+        );
+        println!(
+            "failure_taxonomy: budget={} acceptance={} provider={} other={}",
+            self.live_failure_budget,
+            self.live_failure_acceptance,
+            self.live_failure_provider,
+            self.live_failure_other
+        );
         if self.live_tasks > 0 {
             println!("splits (must both be reported):");
             self.dev.print("development");
@@ -238,19 +288,11 @@ impl EvalReport {
                 if hold { "PASS" } else { "FAIL" },
                 self.holdout.success_rate() * 100.0
             );
-            let fc = if self.live_tasks > 0 {
-                self.false_completions as f64 / self.live_tasks as f64 <= 0.05
-            } else {
-                false
-            };
+            let fc = self.live_false_completions as f64 / self.live_tasks as f64 <= 0.05;
             println!(
                 "G_live_false_completion_le_5: {} ({:.1}%)",
                 if fc { "PASS" } else { "FAIL" },
-                if self.live_tasks > 0 {
-                    self.false_completions as f64 / self.live_tasks as f64 * 100.0
-                } else {
-                    0.0
-                }
+                self.live_false_completions as f64 / self.live_tasks as f64 * 100.0
             );
             // Destructive FC: blocked/impossible + regression trap must not FC.
             let destructive_ok = !self.notes.iter().any(|n| {
@@ -464,8 +506,10 @@ fn run_deterministic(report: &mut EvalReport) {
             !acceptance.ok,
             &format!("failures={:?}", acceptance.failures),
         );
+        // A rejection here means the gate *worked*. Counted separately from live
+        // agent false completions so it can never inflate the Beta-0 FC rate.
         if !acceptance.ok {
-            report.false_completions += 1;
+            report.gate_selftest_rejections += 1;
         }
     }
 
@@ -795,13 +839,22 @@ fn run_deterministic(report: &mut EvalReport) {
         let r = EvalReport {
             live_tasks: 1,
             live_success: 0,
-            false_completions: 1,
+            live_false_completions: 1,
+            gate_selftest_rejections: 3,
             ..Default::default()
         };
-        let rate = r.false_completions as f64 / r.live_tasks as f64;
+        // Gate rejections alone must produce a zero live false-completion rate.
+        let only_selftest = EvalReport {
+            live_tasks: 1,
+            gate_selftest_rejections: 3,
+            ..Default::default()
+        };
+        let rate = r.live_false_completions as f64 / r.live_tasks as f64;
+        let selftest_rate =
+            only_selftest.live_false_completions as f64 / only_selftest.live_tasks as f64;
         report.check(
             "oracle_fail_not_success_and_counts_false_completion",
-            r.live_success == 0 && rate == 1.0,
+            r.live_success == 0 && rate == 1.0 && selftest_rate == 0.0,
             &format!("success={} rate={rate}", r.live_success),
         );
     }
@@ -1106,6 +1159,30 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
     let started = Instant::now();
     let provider = Provider::new(&provider_type, &api_key, &endpoint, &model_id);
 
+    // A1: the live harness must not code against a smaller output ceiling than
+    // the product ships with. 2048 truncated real fixes and made the dev split
+    // look like a model-quality problem when it was a harness problem.
+    let max_output_tokens = std::env::var("KODO_EVAL_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(8192);
+    report.live_max_output_tokens = max_output_tokens;
+
+    // A4: failed runs are kept under evals/out/<run-id>/<task>/ so a red oracle
+    // can be diagnosed after the fact. Passing runs are still deleted.
+    let run_id = format!(
+        "live-{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        std::process::id()
+    );
+    let out_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("out")
+        .join(&run_id);
+
     for id in ids.into_iter().take(tasks_n) {
         let fixture = root.join(&id);
         let prompt = match std::fs::read_to_string(fixture.join("prompt.md")) {
@@ -1134,7 +1211,20 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         let mut tool_calls = 0usize;
         let mut failed_tools = 0usize;
         let mut repairs = 0usize;
+        // A3: provider-side accounting — tokens, call count, truncation, protocol.
+        let mut model_calls = 0usize;
+        let mut input_tokens = 0u32;
+        let mut output_tokens = 0u32;
+        let mut truncated_calls = 0usize;
+        let mut fallback_calls = 0usize;
+        // Structured final-answer verdicts read off Step::AgentMessage instead of
+        // substring-matching the rendered text.
+        let mut delivery = String::new();
+        let mut verification = String::new();
+        let mut failure_reason = String::new();
+        let mut final_text = String::new();
         let mut claimed_verified = false;
+        let mut trace: Vec<String> = Vec::new();
         let request = RunRequest {
             project: Some(work.clone()),
             message: prompt.clone(),
@@ -1145,7 +1235,7 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             permission: Permission::Full,
             mode: AgentMode::Code,
             fallback_to_local: false,
-            max_output_tokens: 2048,
+            max_output_tokens,
             extended_thinking: false,
             local_trace: false,
             session_id: Some(format!("eval_{id}")),
@@ -1168,11 +1258,45 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
                     | kodo_agent::Step::Search { .. } => {
                         tool_calls += 1;
                     }
-                    kodo_agent::Step::AgentMessage { text, .. }
-                        if text.contains("Verification status:** Verified")
-                            || text.contains("status: Verified") =>
-                    {
-                        claimed_verified = true;
+                    kodo_agent::Step::ModelCall {
+                        input_tokens: it,
+                        output_tokens: ot,
+                        protocol,
+                        finish_reason,
+                        ..
+                    } => {
+                        model_calls += 1;
+                        input_tokens += *it;
+                        output_tokens += *ot;
+                        if *finish_reason == "length" {
+                            truncated_calls += 1;
+                        }
+                        if !protocol.is_empty() && *protocol != "native" {
+                            fallback_calls += 1;
+                        }
+                        trace.push(format!(
+                            "model_call protocol={protocol} finish={finish_reason} in={it} out={ot}"
+                        ));
+                    }
+                    kodo_agent::Step::AgentMessage {
+                        text,
+                        delivery: d,
+                        verification: v,
+                        failure_reason: fr,
+                        ..
+                    } => {
+                        delivery = d.clone();
+                        verification = v.clone();
+                        failure_reason = fr.clone();
+                        final_text = text.clone();
+                        // Belt and braces: the structured verdict is authoritative,
+                        // the rendered-text marker is kept for older traces.
+                        if *v == "passed"
+                            || text.contains("Verification status:** Verified")
+                            || text.contains("status: Verified")
+                        {
+                            claimed_verified = true;
+                        }
                     }
                     _ => {}
                 }
@@ -1182,12 +1306,44 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
                         failed_tools += 1;
                     }
                 }
+                if trace.len() < 400 {
+                    let brief = match step {
+                        kodo_agent::Step::Reasoning { summary, .. } => {
+                            format!("reasoning: {summary}")
+                        }
+                        kodo_agent::Step::Search { query, .. } => format!("search: {query}"),
+                        kodo_agent::Step::FileRead { path, .. } => format!("read: {path}"),
+                        kodo_agent::Step::Command {
+                            command, exit_code, ..
+                        } => {
+                            format!("command: {command} -> exit {exit_code:?}")
+                        }
+                        kodo_agent::Step::FileChange { changes, .. } => format!(
+                            "change: {}",
+                            changes
+                                .iter()
+                                .map(|c| c.path.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        kodo_agent::Step::AgentMessage {
+                            delivery,
+                            verification,
+                            ..
+                        } => format!("answer: delivery={delivery} verification={verification}"),
+                        _ => String::new(),
+                    };
+                    if !brief.is_empty() {
+                        trace.push(brief);
+                    }
+                }
                 true
             }
             kodo_agent::SinkEvent::Progress { phase, .. } => {
                 if phase == "Repairing" {
                     repairs += 1;
                 }
+                trace.push(format!("progress: {phase}"));
                 true
             }
             _ => true,
@@ -1196,6 +1352,29 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
         report.live_tool_calls += tool_calls;
         report.live_failed_tool_calls += failed_tools;
         report.live_repair_attempts += repairs;
+        report.live_model_calls += model_calls;
+        report.live_input_tokens += input_tokens;
+        report.live_output_tokens += output_tokens;
+        report.live_truncated_calls += truncated_calls;
+        report.live_fallback_protocol_calls += fallback_calls;
+        match verification.as_str() {
+            "passed" => report.live_verification_success += 1,
+            "failed" => report.live_verify_failed += 1,
+            "blocked" => report.live_blocked += 1,
+            _ => report.live_not_verified += 1,
+        }
+        match delivery.as_str() {
+            "ready" => report.live_acceptance_success += 1,
+            "blocked" => report.live_blocked += 1,
+            _ => {}
+        }
+        match failure_reason.as_str() {
+            "budget_exhausted" => report.live_failure_budget += 1,
+            "acceptance_unmet" => report.live_failure_acceptance += 1,
+            "provider_error" => report.live_failure_provider += 1,
+            "" => {}
+            _ => report.live_failure_other += 1,
+        }
         let run_ok = run_result.is_ok();
         if let Err(error) = &run_result {
             report.notes.push(format!("{id}: agent error {error}"));
@@ -1242,17 +1421,19 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             None
         };
 
+        // A7: success stays oracle-grounded; the agent's own acceptance and
+        // verification verdicts are counted separately above and must not be
+        // aliased to the oracle result.
+        let claims_done = claimed_verified || delivery == "ready";
         if oracle_ok {
             report.live_success += 1;
-            report.live_acceptance_success += 1;
-            report.live_verification_success += 1;
             if let Some(s) = split.as_mut() {
                 s.success += 1;
             }
-        } else if claimed_verified {
-            report.false_completions += 1;
+        } else if claims_done {
+            report.live_false_completions += 1;
             report.notes.push(format!(
-                "{id}: FALSE COMPLETION — claimed Verified but oracle failed"
+                "{id}: FALSE COMPLETION — delivery={delivery:?} verification={verification:?} but oracle failed"
             ));
             if let Some(s) = split.as_mut() {
                 s.false_completions += 1;
@@ -1262,7 +1443,7 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             }
         } else {
             report.notes.push(format!(
-                "{id}: oracle failed (claimed_verified={claimed_verified}, run_ok={run_ok})"
+                "{id}: oracle failed (delivery={delivery:?} verification={verification:?} failure_reason={failure_reason:?} run_ok={run_ok})"
             ));
         }
         if !forbidden_ok {
@@ -1277,12 +1458,38 @@ fn run_fixture_live(tasks_n: usize, report: &mut EvalReport) {
             s.failed_tool_calls += failed_tools;
             s.repair_attempts += repairs;
         }
+        let failed = !oracle_ok || !forbidden_ok;
+        if failed {
+            // A4: keep the scene of the crime instead of deleting it.
+            let keep = out_root.join(&id);
+            let _ = std::fs::remove_dir_all(&keep);
+            if copy_dir(&work, &keep.join("repo")) {
+                let _ = std::fs::write(
+                    keep.join("trace.txt"),
+                    format!("prompt:\n{prompt}\n--- trace ---\n{}\n", trace.join("\n")),
+                );
+                let _ = std::fs::write(&keep.join("final-answer.txt"), &final_text);
+                if let Ok(out) = Command::new("diff")
+                    .arg("-ruN")
+                    .arg(fixture.join("repo"))
+                    .arg(keep.join("repo"))
+                    .output()
+                {
+                    let _ = std::fs::write(keep.join("changes.diff"), &out.stdout);
+                }
+                report
+                    .notes
+                    .push(format!("{id}: forensics kept at {}", keep.display()));
+            }
+        }
         let _ = std::fs::remove_dir_all(&work);
     }
     report.live_latency_ms = started.elapsed().as_millis();
     report.live_status = format!(
-        "RAN — {}/{} tasks succeeded",
-        report.live_success, report.live_tasks
+        "RAN — {}/{} tasks succeeded (forensics: {})",
+        report.live_success,
+        report.live_tasks,
+        out_root.display()
     );
 }
 

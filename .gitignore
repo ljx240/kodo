@@ -29,6 +29,9 @@ settings.log
 projects.log
 sessions/
 .kodo/
+# Live-eval failure forensics: post-run copies of failed fixture workdirs plus
+# traces. Local-only, may contain provider output.
+evals/out/
 # Composer paste/drop staging (the desktop writes it at the project root so
 # the agent's read_file can reach the bytes).
 .pasted/
