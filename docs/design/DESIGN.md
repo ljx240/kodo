@@ -430,9 +430,11 @@ so clicking a chip is deterministic:
    from the run's project root and is usually absent in temp fixtures) and stay
    hermetic. The desktop shell reads, previews and edits them through
    `list_skills` / `read_skill` / `save_skill` / `delete_skill` with a `scope`
-   of `user` or `project` (`COMPONENTS.md` §13b/§13c); builtin names and
-   display-layer ids (`kodo-ui`, `doc`, `summary`, `qa`) are refused as
-   filenames.
+   of `user` or `project` (`COMPONENTS.md` §13b/§13c). The editor refuses
+   builtin names (all nine, `kodo-ui` included) and the work-space display ids
+   (`doc`, `summary`, `qa`) as filenames; the registry additionally **anchors**
+   builtin names, so a same-named user or project file is dropped instead of
+   shadowing dispatch.
 5. **Work guarantees are structural, not advisory.** The `workflow` skill
    stamps `deliverable_bar` (work-family plans) and declares
    `verification_policy: none`; regardless of what any skill file claims,
@@ -456,13 +458,16 @@ so clicking a chip is deterministic:
    skill guarantees intact (they constrain builtin tools) while leaving
    external risk to the Permission mode.
 
-Builtins are eight embedded files (`skills/<id>/SKILL.md`, `include_str!` via
-`BUILTIN_SOURCES`): six code skills (bug-fix, feature, test, refactor,
-code-review, docs) and two work skills (work, workflow). The frontend's
-display lists carry a few extra presentation ids that have no backend file —
-`kodo-ui` in code space; `doc` / `summary` / `qa` in work space (all render the
-`work` skill's behavior via mode defaults). Reserved filename sets in the
-backend and the skill editor cover both groups.
+Builtins are nine embedded files (`skills/<id>/SKILL.md`, `include_str!` via
+`SOURCES` in `skill.rs`): seven code skills (bug-fix, feature, test, refactor,
+code-review, docs, kodo-ui) and two work skills (work, workflow). `kodo-ui` is
+last in `SOURCES` and is chip-only: it declares code task types so the
+`【技能：kodo-ui】` chip and its preview resolve, but `select()` always answers
+an auto-classified task with the earlier skill that owns the type. The
+frontend's work display list carries three presentation ids with no backend
+file — `doc` / `summary` / `qa`; those chips are unknown to the registry, so
+the run falls back to `select(task_type)` and mode defaults. The skill editor's
+reserved set and the registry's builtin anchor cover both groups.
 
 ---
 

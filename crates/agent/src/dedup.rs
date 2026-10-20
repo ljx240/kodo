@@ -12,8 +12,12 @@
 //!
 //! Both surfaces are off by default until `note_list_prefix` records at
 //! least one call; cleared explicitly at the start of each turn.
+//!
+//! A third surface rides along because it needs the same per-turn lifetime:
+//! the set of file contents the model has actually seen, which is what makes
+//! a whole-file overwrite a *repair* instead of a blind guess.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 /// How many recent `list_files` calls to remember for the same-prefix check.
 const LIST_DEDUP_WINDOW: usize = 16;
@@ -31,11 +35,31 @@ pub struct TurnDedup {
     /// `(prefix, ts_ms)` for recent `list_files` calls in this turn. The
     /// ts is wall-clock millis (informational — only ordering matters).
     recent_list_calls: VecDeque<(String, u64)>,
+    /// Project-relative paths whose current bytes reached the model this
+    /// turn: a successful read, or a file the model wrote itself.
+    seen_paths: BTreeSet<String>,
 }
 
 impl TurnDedup {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Model-provided relative paths drift (`./src/a.ts` vs `src/a.ts`); the
+    /// reader and the writer must land on the same key.
+    fn sight_key(path: &str) -> String {
+        path.trim().trim_start_matches("./").to_owned()
+    }
+
+    /// Record that this turn now holds `path`'s content in context.
+    pub fn note_seen(&mut self, path: &str) {
+        self.seen_paths.insert(Self::sight_key(path));
+    }
+
+    /// True when a whole-file write to `path` replaces bytes this turn has
+    /// already shown the model.
+    pub fn has_seen(&self, path: &str) -> bool {
+        self.seen_paths.contains(&Self::sight_key(path))
     }
 
     /// Record a `list_files(prefix)` call. Returns:
@@ -129,6 +153,16 @@ mod tests {
         let mut d = TurnDedup::new();
         assert!(d.note_list_prefix(Some("crates/"), 1).is_none());
         assert!(!d.should_warn_list_repeat());
+    }
+
+    #[test]
+    fn sight_records_one_path_under_both_spellings() {
+        let mut d = TurnDedup::new();
+        assert!(!d.has_seen("src/a.ts"));
+        d.note_seen("./src/a.ts");
+        assert!(d.has_seen("src/a.ts"));
+        assert!(d.has_seen("./src/a.ts"));
+        assert!(!d.has_seen("src/b.ts"));
     }
 
     #[test]

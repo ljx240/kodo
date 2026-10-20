@@ -824,7 +824,7 @@ append to the system prompt when selected in the Composer (§13).
 The 12 read-only builtins ship as static markdown at `agents/<name>.md` in
 the workspace root, embedded by `crates/agent/src/agents.rs::BUILTIN_AGENTS`
 with `include_str!("../../../agents/<name>.md")` — mirroring the skills
-`BUILTIN_SOURCES` pattern (`crates/agent/src/skill.rs:372-390`):
+`SOURCES` pattern (`crates/agent/src/skill.rs`):
 
 | id | description |
 |---|---|

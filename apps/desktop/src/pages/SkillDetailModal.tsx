@@ -41,9 +41,11 @@ type Props = {
 const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
- * Display-only ids from `data/skills.ts` that never reach the backend store
- * but would collide as chip ids if a user skill reused them. The 8 builtin
- * names are rejected by the backend; these four are the frontend's own.
+ * Names the editor refuses for a user skill. The 9 builtin ids are anchored by
+ * the backend (`SkillRegistry::with_user` drops a same-named overlay), so this
+ * check only saves the user a wasted save; `doc` / `summary` / `qa` are the
+ * display-only ids in `data/skills.ts` that have no backend file but would
+ * still collide as chip ids. Keep in sync with `skill.rs` `SOURCES`.
  */
 const RESERVED = new Set([
   "bug-fix",

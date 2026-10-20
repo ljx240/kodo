@@ -1,8 +1,12 @@
 /**
  * Builtin skill lists per agent space, mirrored from `skills/<id>/SKILL.md`
- * (runtime SkillRegistry). Plain display lists for the picker and the Skills
- * page — selection itself happens in the backend (`run()` resolves the
- * `【技能：id】` chip); these only label the rows the user clicks.
+ * (runtime SkillRegistry, embedded in `skill.rs` `SOURCES`). Plain display
+ * lists for the picker and the Skills page — selection itself happens in the
+ * backend (`run()` resolves the `【技能：id】` chip); these only label the rows
+ * the user clicks. Every code-space id is a real builtin. In work space only
+ * `workflow` is: `doc` / `summary` / `qa` are display ids whose chip is
+ * unknown to the registry, so the run falls back to `select(task_type)` and
+ * mode defaults.
  */
 
 import type { SkillView } from "../api";
