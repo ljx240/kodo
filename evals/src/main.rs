@@ -1787,7 +1787,7 @@ fn keep_forensics(
             run.trace.join("\n")
         ),
     );
-    let _ = std::fs::write(&keep.join("final-answer.txt"), &run.final_text);
+    let _ = std::fs::write(keep.join("final-answer.txt"), &run.final_text);
     if let Ok(out) = Command::new("diff")
         .arg("-ruN")
         .arg(baseline)
