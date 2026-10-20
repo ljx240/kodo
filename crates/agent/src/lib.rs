@@ -566,6 +566,28 @@ pub struct RunRequest {
     /// Approved knowledge snapshot for this turn. Its body is appended to
     /// the first user observation; the guard is rechecked during the run.
     pub knowledge_context: Option<knowledge::KnowledgeContext>,
+    /// Run the planner's own verification commands without prompting.
+    ///
+    /// Headless runs (`kodo -p ...` with no TTY, the scheduler) cannot answer a
+    /// prompt, so every gated verify command was denied and verification never
+    /// ran at all. This opt-in covers **only** commands that came from the
+    /// verification plan — never model-chosen tool calls — and still refuses
+    /// classes that always need a human: network egress, installs, process
+    /// control, secrets, destructive git, catastrophic.
+    pub allow_verify_commands: bool,
+}
+
+/// Commands the `allow_verify_commands` opt-in may run unattended.
+///
+/// Test runners are usually opaque scripts (`node test.js`, `sh run.sh`), so
+/// `Unknown` has to be included or the opt-in buys nothing. Anything that can
+/// leave the machine, install packages, touch secrets, control processes or
+/// lose history still goes through the normal gate.
+fn verify_allowable_command(command: &str) -> bool {
+    matches!(
+        classify_command_risk(command),
+        CommandRisk::ReadOnly | CommandRisk::FilesystemWrite | CommandRisk::Unknown
+    )
 }
 
 /// Where per-turn change sets are persisted for the diff/undo UI.
@@ -3840,6 +3862,11 @@ pub fn run(
                 let verify_before = changeset.capture_command_files(project)?;
                 let evidence_list =
                     verifier.run_plan_with_approval(project, &plan, alive, true, &|cmd| {
+                        // Headless opt-in: the plan's own commands, capped by
+                        // risk class. Everything else keeps the normal gate.
+                        if request.allow_verify_commands && verify_allowable_command(&cmd.command) {
+                            return true;
+                        }
                         !request
                             .permission
                             .needs_approval(StepKind::Command, Some(&cmd.command))
@@ -6631,6 +6658,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         }
     }
 
@@ -7582,6 +7610,34 @@ mod tests {
         assert!(Permission::Full.needs_approval(StepKind::Command, Some("rm -rf /")));
         assert!(Permission::Full.needs_approval(StepKind::Command, Some("git push --force")));
         assert!(Permission::Full.needs_approval(StepKind::Command, Some("sudo ls")));
+    }
+
+    /// `--allow-verify` must cover the opaque scripts test runners really are,
+    /// while never reaching network, installs, secrets or destructive git.
+    #[test]
+    fn allow_verify_covers_test_runners_but_not_risky_classes() {
+        for allowed in [
+            "cargo check --quiet",
+            "npm test --silent",
+            "node test.js",
+            "python -m pytest -q",
+        ] {
+            assert!(verify_allowable_command(allowed), "{allowed}");
+        }
+        for refused in [
+            "curl https://example.com",
+            "npm install lodash",
+            "rm -rf /",
+            "git push --force",
+            "sudo ls",
+            "kill -9 1",
+            "printenv",
+        ] {
+            assert!(
+                !verify_allowable_command(refused),
+                "{refused} must keep the approval gate"
+            );
+        }
     }
 
     #[test]
@@ -9279,6 +9335,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let approvals = std::cell::Cell::new(0);
         let mut command_outputs: Vec<(String, String)> = Vec::new();
@@ -9588,6 +9645,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut steps: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -9629,6 +9687,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut steps: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -9671,6 +9730,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut messages: Vec<(String, String, String, bool)> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -9746,6 +9806,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut messages: Vec<(String, bool)> = Vec::new();
@@ -9805,6 +9866,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -9855,6 +9917,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -9908,6 +9971,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -9964,6 +10028,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut texts: Vec<String> = Vec::new();
         let mut emit = |event: SinkEvent| {
@@ -10036,6 +10101,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let images = vec![ContentBlock::Image {
             media_type: "image/png".to_owned(),
@@ -10084,6 +10150,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -10185,6 +10252,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut progress: Vec<String> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
@@ -10317,6 +10385,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut kinds: Vec<String> = Vec::new();
         let mut answers: Vec<(String, String, String, bool)> = Vec::new();
@@ -10389,6 +10458,7 @@ mod tests {
             budget_family: None,
             memory: None,
             knowledge_context: None,
+            allow_verify_commands: false,
         };
         let mut kinds: Vec<String> = Vec::new();
         let mut answers: Vec<(String, String, String, bool)> = Vec::new();

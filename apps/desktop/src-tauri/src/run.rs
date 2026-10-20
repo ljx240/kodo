@@ -712,6 +712,7 @@ pub fn start(
             message: args.message.clone(),
             conversation_history: args.conversation_history.clone(),
             knowledge_context: args.knowledge_context.clone(),
+            allow_verify_commands: false,
             pinned_context: args.context.clone(),
             pinned_force_inline: args.force_inline.clone(),
             provider: args.provider.clone(),

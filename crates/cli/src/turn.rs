@@ -61,6 +61,9 @@ pub struct TurnContext {
     /// `[a]` at a prompt and `/permission` change it for subsequent turns.
     pub permission: Permission,
     pub config: ShellConfig,
+    /// `--allow-verify`: let the planner's own verification commands run without
+    /// a prompt. Off by default; headless turns need it or verification is skipped.
+    pub allow_verify: bool,
     pub renderer: Renderer<Stdout, Stderr>,
     pub approver: Approver,
 }
@@ -75,6 +78,7 @@ impl TurnContext {
             session_id: None,
             permission,
             config,
+            allow_verify: false,
             renderer: Renderer::stdio(),
             approver,
         }
@@ -168,6 +172,7 @@ impl TurnContext {
             budget_family: None,
             memory: open_memory_handle(),
             knowledge_context: None,
+            allow_verify_commands: self.allow_verify,
         };
 
         let mut logger = TurnLogger::new(self.session_dir.clone(), session_id)
