@@ -298,6 +298,7 @@ mod tests {
             credential: Some("synthetic".to_owned()),
             config_generation: kodo_shell::decision::current_config_generation(),
             config_error: None,
+            recovered: false,
         }
     }
 

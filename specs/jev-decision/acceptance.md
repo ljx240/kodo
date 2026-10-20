@@ -183,8 +183,9 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 | --- | --- | --- | --- |
 | OpenRouter 默认模型 | 按用户要求 | `typesafe/jev-1.14`（官方端点仍固定 `jev-1.13.0`） | `the_openrouter_default_model_is_the_typesafe_one`、前端「切换服务来源」用例 |
 | 保存配置报错 `jev-decision: EOF while parsing an object at line 1 column 1` | `settings.log` 是行式 `key=value`，而记录用 `to_string_pretty` 写成多行；读回时只剩第一行 `{` | 存盘前用 `DecisionSettings::to_json()` 归一化成**单行** JSON，并拒绝含换行的值 | `a_saved_record_can_be_read_back`、`a_pretty_printed_record_is_normalized_before_it_is_written`、`a_damaged_record_says_how_to_repair_it` |
+| 修复后仍报错 | 旧的截断记录仍在日志里，读出来还是 `{` | 增加**恢复读取**：值解析失败时，把日志里紧跟其后的行重新拼回去直到 JSON 复原；复原后按紧凑格式回写一份 | `a_truncated_record_is_recovered_and_written_back`；用本机 `settings.log` 副本实测：`config_error=None`、`mode=assist`、`provider=openRouter`、`model=typesafe/jev-1.14` |
 
-**用户现场的修复方式**：本机 `settings.log` 里已有三条被截断的 `jev-decision={` 记录（此前每次保存各留一条）。修复后的版本**重新保存一次配置**即可 —— 追加日志取最后一次值，新记录会覆盖读取结果，旧的截断记录留在日志里不影响读取（`parse_line` 不含 `=` 的行直接忽略）。代码不再改写用户数据。
+**用户现场的修复方式**：本机 `settings.log` 第 391–407 行仍完整留着那条被截断的记录（`mode=assist`、`provider=openRouter`、`model=typesafe/jev-1.14`），只是被切成了多行。恢复读取会把这些行重新拼回去 —— **设置值不丢**，并回写一份单行记录。以本机 `settings.log` 的副本实测：首次加载 `config_error=None`、三项设置原样恢复，记录被改写为单行，第二次加载无任何问题。旧的多行残留在日志里不再影响读取（`parse_line` 不含 `=` 的行直接忽略）。代码不重写用户既有数据，只追加一条正确的记录。
 
 **接入 OpenRouter 带来的新风险（尚未评估）**：官方 Jev 给出的是服务自己标注的概率；OpenRouter 给出的是 chat 模型首 token 的 token 概率经选项字母归一化后的分布。两者都**不是**"准确率"，但后者对模型的服从度、分词器与提示词更敏感。因此 OpenRouter 路径在质量门评测里应当**单独统计**，不能与官方路径合并成一个指标。
 
@@ -234,6 +235,8 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 ## 6. Git 现场
 
 **已合入本地 `main`**（用户明确授权"合并至main"）。**未推送**：本次授权只到本地合并，`git push` 与创建 PR 均未执行。
+
+> **并发记录（2026-10-20 22:40）**：本任务进行期间，另一个会话把 `fix/work-reliability` 分支合并进了 `main`（合并提交 `46b9f53 merge(work): …`），其合并基点正是本任务的 `a9304ea`。本任务的提交全部保留在 `main` 历史中，未被覆盖；本轮修复在合并后的树上重新验证通过。
 
 ```text
 当前分支：main

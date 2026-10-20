@@ -183,6 +183,18 @@ impl DecisionScenario {
     }
 }
 
+/// Why a stored configuration could not be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsProblem {
+    /// The record is not valid JSON. A line-based log cuts a multi-line
+    /// record at the first newline, so this is usually a damaged record
+    /// that can be recovered.
+    Unreadable,
+    /// The record is valid JSON but one of its values is not allowed. The
+    /// user has to decide what to change.
+    Invalid,
+}
+
 /// The stored configuration. Anything invalid disables the component and
 /// surfaces a configuration problem — it never silently downgrades to "on".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,34 +255,63 @@ impl DecisionSettings {
     /// fields are ignored; an illegal mode, a mismatched schema or policy
     /// version, or an out-of-range quota disables the component.
     pub fn from_json(raw: &str) -> Result<Self, String> {
+        Self::from_json_checked(raw).map_err(|(_, message)| message)
+    }
+
+    /// The parsed configuration, with the *kind* of problem.
+    ///
+    /// The kind matters to the caller: an unreadable record can be
+    /// repaired, while a record with illegal values has to be changed by
+    /// the user.
+    pub fn from_json_checked(raw: &str) -> Result<Self, (SettingsProblem, String)> {
         let parsed: DecisionSettingsJson = serde_json::from_str(raw).map_err(|error| {
             // A record that cannot be parsed is usually a damaged one —
             // the settings log is line-based, so a record written as more
             // than one line comes back truncated. The message says so
             // instead of showing a bare parser error.
-            format!(
-                "jev-decision: the stored record is not readable JSON ({error}); save the configuration again to rewrite it"
+            (
+                SettingsProblem::Unreadable,
+                format!(
+                    "jev-decision: the stored record is not readable JSON ({error}); save the configuration again to rewrite it"
+                ),
             )
         })?;
-        let mode = DecisionMode::parse(&parsed.mode)
-            .ok_or_else(|| format!("jev-decision: unknown mode `{}`", parsed.mode))?;
-        let provider = DecisionProvider::parse(&parsed.provider)
-            .ok_or_else(|| format!("jev-decision: unknown provider `{}`", parsed.provider))?;
+        let mode = DecisionMode::parse(&parsed.mode).ok_or_else(|| {
+            (
+                SettingsProblem::Invalid,
+                format!("jev-decision: unknown mode `{}`", parsed.mode),
+            )
+        })?;
+        let provider = DecisionProvider::parse(&parsed.provider).ok_or_else(|| {
+            (
+                SettingsProblem::Invalid,
+                format!("jev-decision: unknown provider `{}`", parsed.provider),
+            )
+        })?;
         if parsed.schema_version != 1 {
-            return Err(format!(
-                "jev-decision: unsupported schema version {}",
-                parsed.schema_version
+            return Err((
+                SettingsProblem::Invalid,
+                format!(
+                    "jev-decision: unsupported schema version {}",
+                    parsed.schema_version
+                ),
             ));
         }
         if parsed.policy_version != DEFAULT_POLICY_VERSION {
-            return Err(format!(
-                "jev-decision: unsupported policy version `{}`",
-                parsed.policy_version
+            return Err((
+                SettingsProblem::Invalid,
+                format!(
+                    "jev-decision: unsupported policy version `{}`",
+                    parsed.policy_version
+                ),
             ));
         }
         let model = parsed.model.trim().to_owned();
         if model.is_empty() {
-            return Err("jev-decision: model must not be empty".to_owned());
+            return Err((
+                SettingsProblem::Invalid,
+                "jev-decision: model must not be empty".to_owned(),
+            ));
         }
         let settings = Self {
             schema_version: parsed.schema_version,
@@ -287,7 +328,9 @@ impl DecisionSettings {
             max_decision_time_ms_per_turn: parsed.max_decision_time_ms_per_turn,
             policy_version: parsed.policy_version,
         };
-        settings.validate()?;
+        settings
+            .validate()
+            .map_err(|error| (SettingsProblem::Invalid, error))?;
         Ok(settings)
     }
 

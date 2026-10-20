@@ -283,6 +283,7 @@ fn config(mode: DecisionMode, timeout_ms: u64) -> DecisionConfig {
         credential: Some("synthetic-credential".to_owned()),
         config_generation: kodo_shell::decision::current_config_generation(),
         config_error: None,
+        recovered: false,
     }
 }
 
@@ -301,6 +302,7 @@ fn openrouter_config(mode: DecisionMode, timeout_ms: u64) -> DecisionConfig {
         credential: Some("synthetic-openrouter-key".to_owned()),
         config_generation: kodo_shell::decision::current_config_generation(),
         config_error: None,
+        recovered: false,
     }
 }
 

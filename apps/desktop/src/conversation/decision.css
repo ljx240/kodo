@@ -24,6 +24,17 @@
   font-size: var(--kodo-font-sm);
 }
 
+.decision-settings-recovered {
+  margin: 0 0 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface-muted, #f7f8fa);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.6;
+}
+
 .decision-settings-ok {
   margin: 0 0 10px;
   color: var(--kodo-success, #16a34a);
