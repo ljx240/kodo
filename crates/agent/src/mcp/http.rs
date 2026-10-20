@@ -83,7 +83,7 @@ impl HttpTransport {
         }
         static WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         WORKERS
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n < 16).then_some(n + 1)
             })
             .map_err(|_| McpError::Transport("too many outstanding HTTP requests".into()))?;
