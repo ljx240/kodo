@@ -5,16 +5,33 @@ Two layers:
 1. **Layer A — deterministic** — no LLM, no network. Evidence gates, cancel,
    timeout, process-tree kill, dirty worktree, undo, context staleness,
    serialization, settings wiring (`cargo run -p kodo-evals`).
-2. **Layer B — fixture coding tasks** — **30** machine-checkable fixture repos
-   under `evals/fixtures/`. Each has `prompt.md`, `oracle.sh`,
-   `expected_files.txt`, `forbidden.txt`.
+2. **Layer B — fixture coding tasks** — machine-checkable fixture repos. Each
+   fixture has `prompt.md`, `oracle.sh`, `expected_files.txt`,
+   `forbidden.txt`, and there are **two corpora (suites)**:
+   - `fixtures/` — the historical **30**-task set. Its repos are small on
+     purpose (69 files / 291 lines total; the largest single repo is 20 lines),
+     so a model can hold one in view without searching. It measures protocol
+     correctness, not retrieval depth.
+   - `fixtures-real/` — **4** real-scale projects (11–12 files, 171–216 lines
+     each, a `package.json` and a `test/run.js` suite plus green companion
+     suites). The noise is the point: the fix needs a multi-file read, and the
+     Verify gate resolves a genuine `npm test`.
+
+Baselines run over **every** corpus found on disk, so `fixtures-real/` cannot
+rot quietly next to a green report: `cargo run -p kodo-evals` gates on the two
+corpora together (currently 73 deterministic + 200 baseline checks, of which 32
+belong to the real suite). Live runs pick one corpus with `--suite` (default:
+`default`).
 
 ## Splits (always report both)
 
-See `splits.json`:
+Each corpus has its own split file so a fixture id cannot sit in two coverage
+checks at once: `splits.json` for `fixtures/`, `splits-<suite>.json` for
+another suite (`splits-real.json`).
 
 - **development** (17): original PR #3 set — for iteration.
 - **holdout** (13): new harder tasks — **not** for development-only tuning.
+- real suite: development `real-1`/`real-2`, holdout `real-3`/`real-4`.
 
 Never publish development success rate alone.
 
@@ -49,6 +66,15 @@ Unfixed bug/feature/refactor/config oracles must **fail**.
 `blocked-1-impossible` and `impossible-1-no-creds` must **pass** on baseline
 (no fabricated deploy/verified artifacts).
 
+"Oracle fails before the fix" alone does not prove the task is solvable, so a
+fixture may ship an optional `solution.sh` — the reviewer's canonical fix, using
+the same `cd "$(dirname "$0")/repo"` anchor the oracle does. When the file is
+present the baselines copy `repo/` to a throwaway directory, apply
+`solution.sh`, re-run the oracle and gate on `fixture_<id>_canonical_solution_passes`.
+The live runner copies only `repo/`, never `solution.sh`, so a canonical fix
+cannot reach the model. All four `fixtures-real/` tasks carry one; the toy
+corpus predates the mechanism and is verified by hand.
+
 The two scope manifests are load-bearing, so the baselines check them too:
 every declared expected path must name a real file in `repo/`, every editable
 fixture must declare at least one, and the two no-edit fixtures must declare
@@ -78,7 +104,15 @@ export KODO_EVAL_API_KEY=...            # never printed
 export KODO_EVAL_ENDPOINT=https://...   # optional
 export KODO_EVAL_MAX_OUTPUT_TOKENS=8192 # optional, default 8192
 cargo run -p kodo-evals -- --live --tasks 30 --repeat 2
+cargo run -p kodo-evals -- --live --suite real   # the 4 real-scale projects
 ```
+
+`--suite` selects the corpus for the live pass (`default` → `fixtures/`,
+`real` → `fixtures-real/`) and its split file. `--tasks N` truncates the sorted
+fixture list, so `--tasks 30` is the whole default corpus and the real suite
+only needs 4. An unknown suite name reports
+`live: NOT RUN — unknown suite "<x>"` with the available list instead of
+quietly scoring zero tasks.
 
 `--repeat N` (clamped to 1..=10) runs every selected fixture N times. One
 sample cannot tell a flaky agent from a weak model, so the run also reports
@@ -109,10 +143,14 @@ final answer and a `changes.diff` against the baseline repo are copied to:
 ```
 evals/out/live-<ts>-<pid>/<fixture-id>/            # --repeat 1
 evals/out/live-<ts>-<pid>/<fixture-id>-run<k>/     # --repeat >1
+evals/out/live-<ts>-<pid>-<suite>/...              # any --suite other than default
 ```
 
 That directory is gitignored — it can contain provider output. Passing fixtures
-are removed as before. `live_status` prints the run directory.
+are removed as before. `live_status` prints the run directory and `live_suite`
+prints which corpus produced the numbers (it reads
+`n/a (live not run)` when no live pass ran, so a baseline-only report cannot be
+mistaken for a measured one).
 
 ## Metrics
 
@@ -152,7 +190,7 @@ are removed as before. `live_status` prints the run directory.
 | live false completion | ≤ 5% |
 | no destructive false completion | blocked/impossible/regression never FC |
 
-## Fixture map (30)
+## Fixture map (default suite, 30)
 
 | id | split | oracle |
 |----|-------|--------|
@@ -186,3 +224,22 @@ are removed as before. `live_status` prints the run directory.
 | stale-1-after-edit | holdout | version + test agree |
 | undo-1-preserves-user | holdout | keep user_config |
 | regression-1-fc-trap | holdout | FC gate |
+
+## Fixture map (`--suite real`, 4)
+
+Every one of these is a 11–12 file project whose oracle is the repo's own
+`npm test` (`test/run.js`), with green companion suites that must stay green
+and the test files listed in `forbidden.txt` so a pass cannot be bought by
+editing the contract.
+
+| id | split | scale | what it measures |
+|----|-------|-------|------------------|
+| real-1-pricing-discount | dev | 11 files / 216 lines | boundary bug (`>` vs `>=`) buried in a pricing module with a green neighbour suite |
+| real-2-reservation-stock | dev | 11 files / 183 lines | **two independent bugs** in two files; either fix alone still fails |
+| real-3-legacy-dedupe | holdout | 11 files / 171 lines | carried-out ADR: share `formatDate`/`padAmount` through `src/text.js`, delete the private copies (oracle greps that they are gone) |
+| real-4-customer-report | holdout | 12 files / 213 lines | implement a spec'd API in `src/report.js` **and** register kind `by-customer` through `src/service.js` (oracle greps the wiring) |
+
+The 291-line whole-corpus default set measures protocol compliance at toy
+scale; these four measure whether retrieval depth and edit precision survive a
+project that has to be read. Both numbers are reported — the real suite does
+not replace the default gate.

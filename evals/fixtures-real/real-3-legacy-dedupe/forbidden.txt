@@ -1,0 +1,5 @@
+docs/adr-004.md
+src/legacy/ledger.js
+test/text.test.js
+test/documents.test.js
+test/ledger.test.js

@@ -1,0 +1,12 @@
+{
+  "description": "Layer-B real-scale corpus split (evals/fixtures-real/). Multi-file repos with a package.json and a test runner. Same rule as splits.json: always report both sets; never tune on development alone.",
+  "development": [
+    "real-1-pricing-discount",
+    "real-2-reservation-stock"
+  ],
+  "holdout": [
+    "real-3-legacy-dedupe",
+    "real-4-customer-report"
+  ],
+  "regressions": []
+}
