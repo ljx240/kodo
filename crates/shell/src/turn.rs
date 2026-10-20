@@ -72,6 +72,11 @@ pub struct TurnLogger {
     capture_turn: Option<u32>,
     capture_seq: u32,
     pending_trace: Option<(&'static str, serde_json::Value)>,
+    /// Explicit trace-root override. When `None`, capture writes fall back to
+    /// `kodo_core::traces::traces_root()` so the shell and the GUI agree on
+    /// where the bodies land. Tests that need hermetic paths use
+    /// `with_capture_root`.
+    trace_root_override: Option<std::path::PathBuf>,
 }
 
 impl TurnLogger {
@@ -84,7 +89,15 @@ impl TurnLogger {
             capture_turn: None,
             capture_seq: 0,
             pending_trace: None,
+            trace_root_override: None,
         }
+    }
+
+    /// Pin the trace root for one turn logger. Capture writes then land under
+    /// that directory instead of `kodo_core::traces::traces_root()`.
+    pub fn with_capture_root(mut self, root: std::path::PathBuf) -> Self {
+        self.trace_root_override = Some(root);
+        self
     }
 
     pub fn with_capture(mut self, enabled: bool) -> Self {
@@ -107,7 +120,19 @@ impl TurnLogger {
         self.capture_seq += 1;
         value["seq"] = self.capture_seq.into();
         redact_capture(&mut value);
-        let Some(root) = self.dir.parent().map(|p| p.join("traces")) else {
+        // Pin the trace root to `kodo_core::traces::traces_root()` — that
+        // is the directory the GUI's `list_artifacts` walks, so the JSON
+        // bodies the shell writes here stay reachable from the response
+        // trace page. Tests pin an explicit temp root via
+        // `with_capture_root`. (Writing into `<self.dir.parent()>/traces`
+        // moves the captures one directory deeper than the GUI reads, so
+        // the response trace page would forever show "no LLM I/O".)
+        let trace_root = self
+            .trace_root_override
+            .clone()
+            .or_else(kodo_core::traces::traces_root);
+        let Some(root) = trace_root else {
+            eprintln!("Kodo: local detailed trace unavailable; no state dir");
             return;
         };
         let reference = match (label, kind) {
@@ -787,10 +812,14 @@ mod tests {
             kind: "llm_io",
             capture: body.clone(),
         };
-        let mut off = TurnLogger::new(dir.clone(), id.clone());
+        let trace_root = root.join("traces");
+        let mut off =
+            TurnLogger::new(dir.clone(), id.clone()).with_capture_root(trace_root.clone());
         off.record(&event);
-        assert!(!root.join("traces").exists());
-        let mut on = TurnLogger::new(dir.clone(), id.clone()).with_capture(true);
+        assert!(!trace_root.exists());
+        let mut on = TurnLogger::new(dir.clone(), id.clone())
+            .with_capture_root(trace_root.clone())
+            .with_capture(true);
         on.record(&event);
         let step = Step::ModelCall {
             model: "fixture".into(),
@@ -819,8 +848,7 @@ mod tests {
         else {
             panic!("reference");
         };
-        let capture =
-            kodo_core::traces::read_llm_io_in(&root.join("traces"), &id, 0, &reference).unwrap();
+        let capture = kodo_core::traces::read_llm_io_in(&trace_root, &id, 0, &reference).unwrap();
         assert_eq!(capture.request.messages[0]["password"], "[REDACTED]");
         assert_eq!(capture.response.text, "done");
         let mut value = serde_json::json!({"authorization":"token-value","input_tokens":5,"nested":{"secret":"another"}});

@@ -1409,8 +1409,9 @@ export function ConversationPage({
 
   const liveSnapshot = useMemo(() => {
     if (demoMode || !sessionId) return null;
-    const last = turns[turns.length - 1] ?? null;
-    return snapshotFromTurn(sessionId, title || "新对话", projectName, projectPath, last, running, {
+    const turnSeq = turns.length > 0 ? turns.length - 1 : null;
+    const last = turns[turnSeq ?? -1] ?? null;
+    return snapshotFromTurn(sessionId, title || "新对话", projectName, projectPath, { turn: last, turnSeq }, running, {
       onUndo: undoChanges,
       undoing: undoingChanges,
       onRetry: regenerate,

@@ -854,6 +854,7 @@ export const T = {
     terminalOutput: "命令输出",
     llmCalls: "模型调用",
     noModelCalls: "尚未调用模型",
+    noModelDetail: "本轮没有捕获到完整请求/响应；上一轮的摘要详见 LLM I/O 选项卡",
     metadata: "元数据",
     currentProject: "当前项目",
     debugDetails: "运行详情",
