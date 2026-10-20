@@ -80,3 +80,18 @@ npm run typecheck / test:imports / build                 → 未执行（工作�
 6. **T028–T030 未做**：兼容样本、迁移限制说明、回滚演练、原生客户端手动验收均未执行。
 7. **既有抖动**：`context::tests::pinned_span_survives_collect` 在全量并行负载下曾失败一次，单跑与重跑均通过；与本轮改动无因果关系，未修改。
 8. **分支落后 main**：本地 main 已前进 5 个提交（Jev decision assistant），本分支基于 `c0f67a3`；按约束未变基、未合并。
+
+## 七、合并状态（2026-10-20 追加）
+
+- 第 8 条已处理：分支先 rebase 到当时的 main（`a9304ea`），冲突 3 个文件按语义逐个解决——
+  `run.rs` 的 `StartArgs` 同时保留 `decision` 与 `terminal` 两个字段，并补回 `impl TurnTerminal` 的闭合；
+  `scheduler.rs` 保留 decision 注入（`app.state()` + 六参数 `run::start`）同时改用 `terminal_tx` 与
+  `wait_for_terminal`；`evals/src/work.rs` 采用新 oracle 并补 `decision: None`。
+- 提交拆为 6 个逻辑单元：读取回执/可读性、交付契约与格式边界、调度模式字段、桌面生命周期、评测 oracle、实施记录。
+- 合并方式：`git merge --no-ff fix/work-reliability`，main 合并提交 `90f5228`；合并树与已验证分支树
+  `git diff --stat` 为空，即 main 上的内容与验证过的内容逐字节一致。
+- 合并后状态：`main` 领先 `origin/main`（未推送）；`git branch --no-merged main` 为空。
+- **合并前既有红项**：在干净 main（`a9304ea`）上复现同样两条失败——
+  `fixture_count_at_least_4_decision: only 0 fixtures`、`splits_defined_decision: dev=0 holdout=0`，
+  属 decision 特性的夹具缺口，与本轮改动无关，本轮未修。
+- 未推送、未建 PR；任务分支保留在会话工作树中（该工作树即本会话目录，未删除）。
