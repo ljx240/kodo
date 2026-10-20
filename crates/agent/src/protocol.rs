@@ -765,7 +765,7 @@ impl ToolRegistry {
                 },
                 ToolDefinition {
                     name: "write_file",
-                    description: "Write a UTF-8 file, or generate a DOCX from text/Markdown headings and pipe tables. Creates parent directories; DOCX is validated by readback.",
+                    description: "Write a UTF-8 file, or generate a DOCX from text/Markdown headings and pipe tables. Creates parent directories; DOCX is validated by readback. Content replaces the whole file, so an existing file must be read in this turn first; use apply_patch or replace_range for a local change.",
                     input_schema: serde_json::json!({
                         "type": "object",
                         "properties": {

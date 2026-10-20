@@ -1,111 +1,53 @@
-# Kodo UI Skill
+# Skill: kodo-ui
 
-Use this skill whenever implementing or modifying Kodo GUI.
+## description
+Implement or modify Kodo GUI with fidelity to the approved design — reproduce it, do not redesign it.
 
-## Objective
+## applicable_task_types
+- feature
+- bug-fix
+- refactor
 
-Faithfully reproduce the approved Kodo UI.
+## context_strategy
+acceptance-first
 
-The goal is implementation fidelity, not redesign.
+## allowed_tools
+- search
+- read_file
+- list_files
+- find_symbol
+- find_references
+- read_range
+- run_command
+- write_file
+- apply_patch
+- replace_range
+- create_file
 
-## Before coding
+## allowed_external_tools
+- mcp__*
 
-Read:
+## verification_policy
+full
 
-- `CLAUDE.md`
-- `docs/design/DESIGN.md`
-- `docs/design/LAYOUT.md`
-- `docs/design/COMPONENTS.md`
-- `docs/design/UI_ACCEPTANCE.md`
-- `docs/design/DEMO_DATA.md`
+## workflow
+- s1 | read | Read CLAUDE.md and docs/design DESIGN, LAYOUT, COMPONENTS, UI_ACCEPTANCE, DEMO_DATA
+- s2 | read | Analyse the screen: outer layout, panel dimensions, hierarchy, row density, typography, states, scroll boundaries
+- s3 | read | Search existing components and confirm which ones can be reused
+- s4 | edit | Implement in order: shell/columns, sidebar and project tree, conversation flow, trace rows, Inspector, composer, typography, colors and borders
+- s5 | verify | Run the deterministic demo state at 1586 x 992, capture a screenshot and check it against UI_ACCEPTANCE.md
 
-## Analyze the screen
+## completion_criteria
+- The demo-state screenshot passes every `UI_ACCEPTANCE.md` check
+- Existing layout primitives and components were reused; no abstraction was introduced for a single use case
+- Every page sharing a changed component was re-screenshotted
+- Completion was not reported on a successful build or typecheck alone
 
-Before changing code, identify:
+## guidance
+Faithful reproduction, not redesign. Do not start by styling individual controls — settle the outer layout first.
 
-- outer layout;
-- panel dimensions;
-- content hierarchy;
-- row density;
-- typography;
-- repeated components;
-- visible interaction states;
-- Inspector state;
-- scroll boundaries.
+Reuse before creating: layout primitives, buttons, inputs, icons, trace rows, Inspector sections. Never introduce an abstraction for one use case.
 
-Do not start by styling individual controls.
+CSS: prefer Grid for the app shell, Flexbox for rows and toolbars, CSS variables and semantic class names, minimal DOM nesting. Avoid absolute positioning for normal layout, one-off pixel values where a token exists, excessive wrappers, and duplicated responsive logic.
 
-## Reuse first
-
-Search existing UI components before creating new ones.
-
-Reuse:
-- layout primitives;
-- buttons;
-- inputs;
-- icons;
-- trace rows;
-- Inspector sections.
-
-Do not introduce an abstraction for one use case.
-
-## Implementation order
-
-Implement visual fidelity in this order:
-
-1. shell / major columns;
-2. sidebar and project tree;
-3. conversation flow;
-4. trace rows;
-5. Inspector;
-6. composer;
-7. typography;
-8. colors/borders/icons.
-
-## CSS rules
-
-Prefer:
-- CSS Grid for app shell;
-- Flexbox for rows/toolbars;
-- CSS variables;
-- semantic class names;
-- minimal DOM nesting.
-
-Avoid:
-- absolute positioning for normal layout;
-- arbitrary one-off pixel values when a token exists;
-- excessive wrappers;
-- duplicated responsive logic.
-
-## Verification
-
-Run the deterministic demo state.
-
-Use viewport:
-
-```text
-1586 × 992
-```
-
-Capture screenshot.
-
-Check it against the design rules and `UI_ACCEPTANCE.md`.
-
-Repeat until `UI_ACCEPTANCE.md` passes.
-
-Never report UI completion based only on successful build/typecheck.
-
-## Regression safety
-
-After changing a shared component:
-- re-run visual screenshots for all pages that use it;
-- do not fix one screen by breaking another.
-
-## Minimalism
-
-If two solutions match the design equally well, choose:
-- fewer components;
-- fewer state layers;
-- fewer dependencies;
-- fewer CSS rules;
-- easier-to-understand code.
+If two solutions match the design equally well, choose fewer components, fewer state layers, fewer dependencies, fewer CSS rules and code that is easier to understand.

@@ -926,6 +926,7 @@ fn write_step(
     project: &Path,
     request: &RunRequest,
     approve: &Approve,
+    dedup: &mut dedup::TurnDedup,
     emit: &mut Emit,
     notes: &mut Vec<String>,
 ) -> StepOutcome {
@@ -954,6 +955,47 @@ fn write_step(
         return Ok((keep, Some(result)));
     }
 
+    // A whole-file write replaces everything it does not contain. If this turn
+    // never saw the existing bytes, the model is deleting content it has not
+    // read — the shape that turns a "fix" into a truncated file.
+    if !dedup.has_seen(path)
+        && tools::resolve_in_project(project, path)
+            .map(|target| target.is_file())
+            .unwrap_or(false)
+    {
+        let seen = trace_file_text(project, path);
+        if seen.as_deref().map_or(true, |text| !text.trim().is_empty()) {
+            let advice = match &seen {
+                Some(text) => format!(
+                    "`{path}` 已存在 {} 行，本轮还没有读取过它。先 read_file 看清现有内容再整体重写；\
+                     只改局部请改用 apply_patch 或 replace_range。",
+                    text.lines().count()
+                ),
+                None => format!(
+                    "`{path}` 已存在但本轮读不到它的内容。先 read_file 确认现有内容再整体重写；\
+                     只改局部请改用 apply_patch 或 replace_range。"
+                ),
+            };
+            notes.push(format!("拒绝覆盖未读取的 `{path}`"));
+            let denied = Step::FileChange {
+                changes: vec![FileDelta {
+                    path: path.to_owned(),
+                    added: 0,
+                    removed: 0,
+                }],
+                file_span_ref: None,
+            };
+            let keep = finish_step(denied, 0, true, emit);
+            let result = ToolResult::failure(
+                call_id,
+                ToolName::WriteFile.label(),
+                path,
+                ToolError::patch_conflict(advice),
+            );
+            return Ok((keep, Some(result)));
+        }
+    }
+
     let provisional = Step::FileChange {
         changes: vec![FileDelta {
             path: path.to_owned(),
@@ -971,6 +1013,9 @@ fn write_step(
         Ok((rel, added, removed)) => {
             let duration_ms = began.elapsed().as_millis() as u64;
             notes.push(format!("写入 `{rel}` (+{added} -{removed})"));
+            // The model just authored these bytes, so rewriting the file again
+            // in this turn is a repair, not a blind overwrite.
+            dedup.note_seen(&rel);
             if let Some(before) = before {
                 emit_file_trace(project, path, before, &call_id.to_string(), emit);
             }
@@ -1038,6 +1083,7 @@ fn execute_tool_call(
             project,
             request,
             approve,
+            dedup,
             emit,
             notes,
         ),
@@ -1280,15 +1326,20 @@ fn execute_tool_call(
                     )
                 }
                 Ok(full) => match tools::read_text_result(full, 120) {
-                    Ok(text) => (
-                        text.clone(),
-                        ToolResult::success(
-                            call.id.clone(),
-                            ToolName::ReadFile.label(),
-                            path.clone(),
-                            text,
-                        ),
-                    ),
+                    Ok(text) => {
+                        // Whole-file writes are only allowed for content this
+                        // turn has actually seen.
+                        dedup.note_seen(path);
+                        (
+                            text.clone(),
+                            ToolResult::success(
+                                call.id.clone(),
+                                ToolName::ReadFile.label(),
+                                path.clone(),
+                                text,
+                            ),
+                        )
+                    }
                     Err(error) => (
                         error.clone(),
                         ToolResult::failure(
@@ -1662,15 +1713,18 @@ fn execute_tool_call(
                     ),
                 ),
                 Ok(full) => match tools::read_text_range(&full, *start_line, *end_line, 6000) {
-                    Ok(text) => (
-                        text.clone(),
-                        ToolResult::success(
-                            call.id.clone(),
-                            ToolName::ReadRange.label(),
-                            path.clone(),
-                            text,
-                        ),
-                    ),
+                    Ok(text) => {
+                        dedup.note_seen(path);
+                        (
+                            text.clone(),
+                            ToolResult::success(
+                                call.id.clone(),
+                                ToolName::ReadRange.label(),
+                                path.clone(),
+                                text,
+                            ),
+                        )
+                    }
                     Err(error) => (
                         format!("读取失败：{error}"),
                         ToolResult::failure(
@@ -5150,7 +5204,10 @@ fn system_prompt(
              Prefer facts from local notes and tool observations.\n\
              {protocol}\n\
              Paths must stay inside the project (no .. or absolute paths).\n\
-             After writing files you may rely on Kodo to run project tests once.\n\
+             Prove every edit yourself before finishing: read the changed region back and run \
+             the narrowest project command that covers it (`cargo check -p <crate>`, one test \
+             filter, `npm run typecheck`). Kodo runs the plan's verification once as a backstop, \
+             never as a substitute for that evidence.\n\
              {mcp_block}\
              {checks}",
             project = project.display(),
@@ -6598,6 +6655,14 @@ mod tests {
         // Unknown ids fall back too.
         assert!(resolve_skill(&reg, &["nope".to_owned()], AgentMode::Work).is_none());
         assert!(resolve_skill(&reg, &[], AgentMode::Code).is_none());
+        // `kodo-ui` is an embedded builtin, not a display id: its chip resolves
+        // in code space and stays out of work space.
+        let ui_chip = vec!["kodo-ui".to_owned()];
+        assert_eq!(
+            resolve_skill(&reg, &ui_chip, AgentMode::Code).map(|s| s.name.as_str()),
+            Some("kodo-ui")
+        );
+        assert!(resolve_skill(&reg, &ui_chip, AgentMode::Work).is_none());
     }
 
     #[test]
@@ -7907,6 +7972,155 @@ mod tests {
         assert!(!result.ok);
         assert_eq!(result.id.as_str(), "r1");
         assert!(result.error.as_ref().unwrap().code == ToolErrorCode::PathEscape);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C1 write guard: `write_file` replaces the whole file, so an existing
+    /// file the turn never read cannot be overwritten blind. Reading it first
+    /// turns the same call into a normal repair.
+    #[test]
+    fn blind_overwrite_is_refused_until_the_file_has_been_read() {
+        let dir = std::env::temp_dir().join(format!("kodo-write-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = "pub const KEEP: &str = \"do not lose me\";\n";
+        std::fs::write(dir.join("keep.rs"), original).unwrap();
+        let request = temp_request(&dir, Permission::Ask);
+        let mut notes = Vec::new();
+        let mut dedup = dedup::TurnDedup::new();
+        let write = ToolCall {
+            id: ToolCallId::new("w1"),
+            name: ToolName::WriteFile,
+            args: ToolArgs::WriteFile {
+                path: "keep.rs".to_owned(),
+                content: "pub const KEEP: &str = \"rewritten\";\n".to_owned(),
+            },
+        };
+        let (keep, result) = execute_tool_call(
+            &write,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |event| {
+                let _ = event;
+                true
+            },
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("execute");
+        assert!(keep, "a refused write is advice, not a dead turn");
+        let result = result.expect("observation");
+        assert!(!result.ok);
+        assert_eq!(
+            result.error.as_ref().unwrap().code,
+            ToolErrorCode::PatchConflict
+        );
+        assert!(
+            result.error.as_ref().unwrap().message.contains("read_file"),
+            "the refusal must name the way out: {:?}",
+            result.error
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("keep.rs")).unwrap(),
+            original,
+            "a refused write must not touch the file"
+        );
+
+        let read = ToolCall {
+            id: ToolCallId::new("r1"),
+            name: ToolName::ReadFile,
+            args: ToolArgs::ReadFile {
+                path: "./keep.rs".to_owned(),
+            },
+        };
+        let (_, obs) = execute_tool_call(
+            &read,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |event| {
+                let _ = event;
+                true
+            },
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("execute");
+        assert!(obs.expect("read observation").ok);
+        let after_read = execute_tool_call(
+            &write,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |event| {
+                let _ = event;
+                true
+            },
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("execute")
+        .1
+        .expect("observation");
+        assert!(
+            after_read.ok,
+            "having read the file, the write is a repair: {:?}",
+            after_read.error
+        );
+        assert!(
+            std::fs::read_to_string(dir.join("keep.rs"))
+                .unwrap()
+                .contains("rewritten"),
+            "the write must land once the content was seen"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A brand-new file is never a blind overwrite, and an empty existing file
+    /// has nothing to lose.
+    #[test]
+    fn write_guard_leaves_new_and_empty_targets_alone() {
+        let dir = std::env::temp_dir().join(format!("kodo-write-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("empty.rs"), "").unwrap();
+        let request = temp_request(&dir, Permission::Ask);
+        let mut notes = Vec::new();
+        let mut dedup = dedup::TurnDedup::new();
+        for (id, path) in [("new", "src/fresh.rs"), ("empty", "empty.rs")] {
+            let call = ToolCall {
+                id: ToolCallId::new(id),
+                name: ToolName::WriteFile,
+                args: ToolArgs::WriteFile {
+                    path: path.to_owned(),
+                    content: "// written\n".to_owned(),
+                },
+            };
+            let (_, result) = execute_tool_call(
+                &call,
+                &dir,
+                &request,
+                &|| true,
+                &|_, _| true,
+                &mut |event| {
+                    let _ = event;
+                    true
+                },
+                &mut notes,
+                &mut dedup,
+            )
+            .expect("execute");
+            assert!(
+                result.expect("observation").ok,
+                "{path} must be writable without a prior read"
+            );
+        }
+        // The file the model just wrote counts as seen, so a rewrite is allowed.
+        assert!(dedup.has_seen("src/fresh.rs"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9575,6 +9789,15 @@ mod tests {
         let code = system_prompt(Some(dir), AgentMode::Code, &reg, "");
         assert!(code.contains("coding agent working in /tmp/project-x"));
         assert!(code.contains("Paths must stay inside the project"));
+        // D1: the code arm hands verification to the model. Kodo's Verify gate
+        // is a backstop — wording that told the model it could delegate is what
+        // let it finish with unverified edits.
+        assert!(code.contains("Prove every edit yourself"));
+        assert!(code.contains("never as a substitute for that evidence"));
+        assert!(
+            !code.contains("you may rely on Kodo"),
+            "the code arm must not promise delegation"
+        );
 
         let work = system_prompt(Some(dir), AgentMode::Work, &reg, "");
         assert!(work.contains("work assistant working in /tmp/project-x"));

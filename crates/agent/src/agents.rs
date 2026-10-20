@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::skill::{section_body, single_line};
 
 /// Embedded built-in persona sources, keyed by name, in registry order.
-/// Mirrors `BUILTIN_SOURCES` in skill.rs: a static array of
+/// Mirrors `SOURCES` in skill.rs: a static array of
 /// `include_str!("../../agents/<name>.md")` so the run never depends on the
 /// filesystem. `resolve_instructions` checks builtins before the user dir —
 /// user files shadow nothing. File name matches `# Agent:` title (the parser

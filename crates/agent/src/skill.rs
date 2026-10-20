@@ -2,7 +2,7 @@
 //! Planner, Verifier, and tool gate — not a Markdown blob in the prompt.
 //!
 //! Skill files live at `skills/<name>/SKILL.md` and use section headers the
-//! parser understands (`## applicable_task_types`, `## workflow`, …). The six
+//! parser understands (`## applicable_task_types`, `## workflow`, …). The nine
 //! built-in skills are embedded via `include_str!` so the registry is
 //! available with zero filesystem I/O.
 
@@ -395,7 +395,11 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
 // Registry
 // ---------------------------------------------------------------------------
 
-const SOURCES: [&str; 8] = [
+/// Embedded in dispatch order: `select(task_type)` returns the **first** skill
+/// that declares the type, so the seven auto-selected skills come first and
+/// `kodo-ui` is last — it declares code task types only so its chip resolves,
+/// never so classification picks it on its own.
+const SOURCES: [&str; 9] = [
     include_str!("../../../skills/bug-fix/SKILL.md"),
     include_str!("../../../skills/feature/SKILL.md"),
     include_str!("../../../skills/test/SKILL.md"),
@@ -404,6 +408,7 @@ const SOURCES: [&str; 8] = [
     include_str!("../../../skills/docs/SKILL.md"),
     include_str!("../../../skills/work/SKILL.md"),
     include_str!("../../../skills/workflow/SKILL.md"),
+    include_str!("../../../skills/kodo-ui/SKILL.md"),
 ];
 
 /// Selects the active skill for a classified task type.
@@ -417,7 +422,7 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    /// The eight built-in skills, embedded at compile time.
+    /// The nine built-in skills, embedded at compile time.
     pub fn builtin() -> Self {
         let skills: Vec<SkillSpec> = SOURCES
             .iter()
@@ -587,7 +592,62 @@ mod tests {
                 .unwrap_or_else(|| panic!("no skill for {kind}"));
             assert!(skill.applicable_task_types.contains(&kind));
         }
-        assert_eq!(reg.skills().len(), 8);
+        assert_eq!(reg.skills().len(), 9);
+    }
+
+    /// `kodo-ui` is a real builtin (chip + preview + reserved name) but must
+    /// never win an auto-classified dispatch, and the embedded set must match
+    /// the frontend's display lists. Pin both here: adding a builtin means
+    /// updating `apps/desktop/src/data/skills.ts` in the same commit.
+    #[test]
+    fn kodo_ui_is_chip_only_and_the_builtin_set_is_pinned() {
+        let reg = registry();
+        let names: Vec<&str> = reg.skills().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "bug-fix",
+                "feature",
+                "test",
+                "refactor",
+                "code-review",
+                "docs",
+                "work",
+                "workflow",
+                "kodo-ui",
+            ]
+        );
+        for kind in [TaskType::Feature, TaskType::BugFix, TaskType::Refactor] {
+            assert_eq!(
+                reg.select(kind).map(|s| s.name.as_str()),
+                Some(match kind {
+                    TaskType::Feature => "feature",
+                    TaskType::BugFix => "bug-fix",
+                    _ => "refactor",
+                }),
+                "{kind} must not auto-dispatch to kodo-ui"
+            );
+        }
+        // …but the chip and the preview both reach it.
+        assert!(reg.get("kodo-ui").is_some());
+        assert!(builtin_markdown("kodo-ui").is_some());
+        // A work-type chip would be filtered out of code space by
+        // `resolve_skill`; kodo-ui declares code types only.
+        assert!(!reg
+            .get("kodo-ui")
+            .unwrap()
+            .applicable_task_types
+            .contains(&TaskType::Work));
+        // Anchored: a user file named kodo-ui can't shadow it.
+        let overlay = parse_skill(
+            "# Skill: kodo-ui\n## applicable_task_types\n- feature\n## context_strategy\nacceptance-first\n## allowed_tools\n- read_file\n## verification_policy\nnone\n## workflow\n- s1 | read | hijack\n## completion_criteria\n- done\n## guidance\nx\n",
+        )
+        .unwrap();
+        let anchored = SkillRegistry::builtin().with_user(vec![overlay]);
+        assert_eq!(
+            anchored.get("kodo-ui").unwrap().guidance,
+            reg.get("kodo-ui").unwrap().guidance
+        );
     }
 
     #[test]
