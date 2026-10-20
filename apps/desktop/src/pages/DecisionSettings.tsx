@@ -169,6 +169,12 @@ export function DecisionSettingsBody() {
         </p>
       )}
 
+      {dto?.recovered && (
+        <p className="decision-settings-recovered" role="status" data-testid="decision-recovered">
+          {T.decision.recovered}
+        </p>
+      )}
+
       <Field label={T.decision.providerLabel} hint={T.decision.providerHint} wide>
         <div className="decision-mode" role="radiogroup" aria-label={T.decision.providerLabel}>
           {(["typeSafe", "openRouter"] as const).map((provider) => (

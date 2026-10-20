@@ -68,6 +68,10 @@ pub struct DecisionConfig {
     /// Set when the stored configuration cannot be used. The feature stays
     /// off in that case — an invalid record never downgrades to "on".
     pub config_error: Option<String>,
+    /// True when the stored record had to be recovered from a truncated
+    /// write. The settings were not lost; they were read back out of the
+    /// log and rewritten in the compact form.
+    pub recovered: bool,
 }
 
 impl DecisionConfig {
@@ -94,6 +98,56 @@ pub fn load_decision_config() -> DecisionConfig {
     load_decision_config_from(settings_path.as_deref(), creds.as_deref())
 }
 
+/// Read the decision record, recovering a truncated one.
+///
+/// The settings log is line-based: a record written as more than one line
+/// is cut at the first newline, and the rest of the record is left behind
+/// as ordinary lines. When the value cannot be parsed, those trailing
+/// lines are rejoined and the record is recovered — so a record damaged by
+/// an older writer is not lost, it is read back.
+///
+/// Returns the value to use and, when the value had to be recovered, the
+/// recovered JSON so the caller can write it back in the compact form.
+fn read_decision_record(path: &std::path::Path) -> (Option<String>, Option<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let prefix = format!("{SETTINGS_KEY}=");
+    // The last record wins: the log is append-only.
+    let Some(start) = lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with(&prefix))
+    else {
+        return (None, None);
+    };
+    let Some((_, value)) = lines[start].split_once('=') else {
+        return (None, None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return (None, None);
+    }
+    if serde_json::from_str::<serde_json::Value>(value).is_ok() {
+        return (Some(value.to_owned()), None);
+    }
+    // The record was cut at the first newline. The rest of it is still in
+    // the log: rejoin the following lines until the JSON parses again.
+    let mut candidate = value.to_owned();
+    for line in lines.iter().skip(start + 1) {
+        if line.trim_start().starts_with(&prefix) {
+            // A newer record starts here: the old one is not recoverable.
+            break;
+        }
+        candidate.push('\n');
+        candidate.push_str(line);
+        if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+            return (Some(candidate.clone()), Some(candidate));
+        }
+    }
+    (Some(value.to_owned()), None)
+}
+
 /// Read the decision configuration from an explicit pair of files.
 ///
 /// The stores are passed in so the save→read round trip can be tested
@@ -103,17 +157,25 @@ pub fn load_decision_config_from(
     settings_path: Option<&std::path::Path>,
     creds: Option<&std::path::Path>,
 ) -> DecisionConfig {
-    let raw = settings_path
-        .and_then(|path| settings::read(path, SETTINGS_KEY))
-        .filter(|value| !value.trim().is_empty());
+    let (raw, recovered) = settings_path
+        .map(read_decision_record)
+        .unwrap_or((None, None));
+    let raw = raw.filter(|value| !value.trim().is_empty());
 
     let (parsed, config_error) = match raw.as_deref() {
         None => (DecisionSettings::default(), None),
-        Some(value) => match DecisionSettings::from_json(value) {
+        Some(value) => match DecisionSettings::from_json_checked(value) {
             Ok(parsed) => (parsed, None),
-            Err(error) => (DecisionSettings::default(), Some(error)),
+            Err((_problem, error)) => (DecisionSettings::default(), Some(error)),
         },
     };
+
+    // A record that had to be recovered from a truncated write is written
+    // back in the compact form, so the next read is a plain one and the
+    // log stops growing a broken copy on every start.
+    if let (Some(path), Some(recovered)) = (settings_path, recovered.as_ref()) {
+        let _ = settings::append(path, SETTINGS_KEY, recovered);
+    }
 
     // The credential belongs to the configured provider. One provider's key
     // never stands in for another's: a request must never be signed with a
@@ -149,6 +211,7 @@ pub fn load_decision_config_from(
         credential,
         config_generation,
         config_error,
+        recovered: recovered.is_some(),
     }
 }
 
@@ -173,6 +236,9 @@ pub struct DecisionSettingsView {
     pub credentials: Vec<DecisionCredentialView>,
     /// Set when the stored configuration cannot be used.
     pub config_error: Option<String>,
+    /// True when the stored record had to be recovered from a truncated
+    /// write and rewritten in the compact form.
+    pub recovered: bool,
     pub config_generation: u64,
     /// The default configuration, as JSON. The settings form starts from
     /// this and overrides the fields the user changed, so the numeric
@@ -219,6 +285,7 @@ pub fn decision_settings_view() -> DecisionSettingsView {
             .unwrap_or_default(),
         credentials,
         config_error: config.config_error.clone(),
+        recovered: config.recovered,
         config_generation: config.config_generation,
         defaults_json: DecisionSettings::default().to_json(),
     }
@@ -1143,6 +1210,7 @@ mod tests {
             credential: credential.map(|value| value.to_owned()),
             config_generation: current_config_generation(),
             config_error: None,
+            recovered: false,
         }
     }
 
@@ -1569,20 +1637,58 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_record_is_recovered_and_written_back() {
+        // What an older writer left behind: the record was cut at the
+        // first newline and the rest of it is still in the log.
+        let dir = std::env::temp_dir().join(format!("kodo-jev-recover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("settings.log");
+        let truncated = concat!(
+            "jev-decision={\n",
+            "  \"maxCallsPerTurn\": 3,\n",
+            "  \"mode\": \"assist\",\n",
+            "  \"model\": \"typesafe/jev-1.14\",\n",
+            "  \"provider\": \"openRouter\",\n",
+            "  \"schemaVersion\": 1\n",
+            "}\n",
+        );
+        std::fs::write(&path, truncated).expect("write the truncated record");
+
+        let config = load_decision_config_from(Some(&path), None);
+        assert!(config.config_error.is_none(), "{:?}", config.config_error);
+        // The user's settings survived the truncation.
+        assert_eq!(config.settings.mode, DecisionMode::Assist);
+        assert_eq!(config.settings.provider, DecisionProvider::OpenRouter);
+        assert_eq!(config.settings.model, "typesafe/jev-1.14");
+
+        // And the record was written back in the compact form, so the next
+        // read is a plain one.
+        let text = std::fs::read_to_string(&path).expect("read the log");
+        let last = text
+            .lines()
+            .filter(|line| line.starts_with("jev-decision="))
+            .next_back()
+            .expect("the record");
+        assert!(!last["jev-decision=".len()..].contains('\n'));
+        let again = load_decision_config_from(Some(&path), None);
+        assert!(again.config_error.is_none());
+        assert_eq!(again.settings.model, "typesafe/jev-1.14");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_damaged_record_says_how_to_repair_it() {
         // The settings log is line-based: a record written as more than
-        // one line comes back as a truncated object. The message has to
-        // say what to do, not just repeat the parser's complaint.
+        // one line comes back as a truncated object. When the rest of the
+        // record is gone too, the message has to say what to do, not just
+        // repeat the parser's complaint.
         let dir = std::env::temp_dir().join(format!("kodo-jev-damaged-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("settings.log");
-        // What the old pretty-printed writer left behind.
-        std::fs::write(
-            &path,
-            "jev-decision={\n  \"schemaVersion\": 1,\n  \"mode\": \"observe\"\n}\n",
-        )
-        .expect("write the damaged record");
+        // A record that was cut and whose remainder is gone.
+        std::fs::write(&path, "jev-decision={\n").expect("write the damaged record");
         let config = load_decision_config_from(Some(&path), None);
         let error = config
             .config_error

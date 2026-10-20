@@ -14,6 +14,8 @@ export type DecisionSettingsDto = {
   /** The credential state of every provider. */
   credentials: DecisionCredentialDto[];
   configError: string | null;
+  /** True when the stored record was recovered from a truncated write. */
+  recovered: boolean;
   configGeneration: number;
   /** The default configuration as JSON. The form starts from this so the
    *  numeric limits live in exactly one place. */
@@ -108,6 +110,7 @@ const BROWSER_SETTINGS: DecisionSettingsDto = {
     { provider: "openRouter", id: "openrouter", hasCredential: false, credentialMask: "" },
   ],
   configError: null,
+  recovered: false,
   configGeneration: 1,
   defaultsJson: DEFAULT_SETTINGS_JSON,
 };

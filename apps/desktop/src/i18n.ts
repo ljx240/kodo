@@ -1391,6 +1391,8 @@ export const T = {
       typeSafe: "官方 Jev",
       openRouter: "OpenRouter",
     },
+    recovered:
+      "上次的配置记录被截断，已从日志中恢复并重写为完整记录；设置值保持不变。",
     modeLabel: "启用状态",
     modeHint: "关闭时不会发起任何请求；观察只记录建议；采纳按场景分别生效。",
     modes: {
