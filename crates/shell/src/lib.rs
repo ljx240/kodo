@@ -7,6 +7,7 @@
 pub mod approve;
 pub mod apps;
 pub mod config;
+pub mod decision;
 pub mod memory_outbox;
 pub mod scheduler;
 pub mod scheduler_jobs;
@@ -15,6 +16,12 @@ pub mod turn;
 pub use approve::{approval_fingerprint, step_kind_label, ApprovalChoice};
 pub use apps::AppStore;
 pub use config::{permission_from_settings, Overrides, ShellConfig};
+pub use decision::{
+    bump_config_generation, clear_decision_credential, current_config_generation,
+    decision_settings_view, load_decision_config, mask_secret, save_decision_credential,
+    save_decision_settings, DecisionConfig, DecisionConsent, DecisionConsentAnswer,
+    DecisionPreview, DecisionService, DecisionSettingsView,
+};
 pub use memory_outbox::{event_for_item, open_default_handle, write_event};
 pub use scheduler::{
     recover_inflight, AdmissionLimits, DispatchedRun, DispatcherConfig, Job, JobCancellation,

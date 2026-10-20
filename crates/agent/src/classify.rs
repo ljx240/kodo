@@ -78,20 +78,138 @@ fn score(task: &str, patterns: &[&str]) -> u32 {
         .sum()
 }
 
+/// The margin between the winning rule score and the runner-up that still
+/// counts as a clear decision.
+///
+/// This is a *policy constant*, not a measurement: the rule scores are
+/// keyword weights, so a difference of 4 points says "the keywords leaned
+/// this way", never "the request is 4% more likely to be a refactor". The
+/// value is still to be evaluated against the frozen corpus before the
+/// decision component is ever allowed to act on the result.
+pub const AMBIGUITY_MARGIN: u32 = 4;
+
+/// Where a classification came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassificationSource {
+    /// The message asks for a document as the deliverable.
+    DocumentOutput,
+    /// The keyword rules decided.
+    Keywords,
+    /// There was no message to classify.
+    Empty,
+}
+
+/// The rule evidence behind a classification.
+///
+/// The scores are keyword weights. They are reported so a reader can see
+/// *why* a category won — they are not probabilities and must never be
+/// presented as confidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassificationEvidence {
+    /// The category the local rules produced.
+    pub baseline: TaskType,
+    pub source: ClassificationSource,
+    /// Every category's rule score, highest first.
+    pub scores: Vec<(TaskType, u32)>,
+    /// The winning score.
+    pub top_score: u32,
+    /// The score of the category that came second.
+    pub runner_up_score: u32,
+    /// How many categories matched at least one keyword.
+    pub hit_count: usize,
+    /// True when no keyword matched at all and the default was used.
+    pub default_fallback: bool,
+    /// True when the rules did not decide clearly: no keyword hit, a tie at
+    /// the top, or a margin below [`AMBIGUITY_MARGIN`].
+    pub ambiguous: bool,
+}
+
 /// Classify a natural-language task into one of the six task types.
 ///
 /// Deterministic heuristic: the highest-scoring category wins; ties fall back
 /// to [`TaskType::Feature`] (the common additive default).
 pub fn classify(message: &str) -> TaskType {
+    classify_with_evidence(message).baseline
+}
+
+/// Classify a task and report the rule evidence behind the decision.
+///
+/// [`classify`] stays the compatibility entry point and keeps returning
+/// exactly the same category; this function adds the *reason* so a caller
+/// can tell a clear decision from a coin flip.
+pub fn classify_with_evidence(message: &str) -> ClassificationEvidence {
     let m = message.trim();
     if m.is_empty() {
-        return TaskType::Feature;
+        return ClassificationEvidence {
+            baseline: TaskType::Feature,
+            source: ClassificationSource::Empty,
+            scores: Vec::new(),
+            top_score: 0,
+            runner_up_score: 0,
+            hit_count: 0,
+            default_fallback: true,
+            ambiguous: true,
+        };
     }
     if is_document_output(m) {
-        return TaskType::Docs;
+        return ClassificationEvidence {
+            baseline: TaskType::Docs,
+            source: ClassificationSource::DocumentOutput,
+            scores: Vec::new(),
+            top_score: 0,
+            runner_up_score: 0,
+            hit_count: 0,
+            default_fallback: false,
+            ambiguous: false,
+        };
     }
 
-    let scores: [(TaskType, u32); 6] = [
+    let scores = score_all(m);
+    // Same traversal as the original implementation: strictly greater wins,
+    // so a tie keeps the category that comes first in the rule order.
+    let mut best = TaskType::Feature;
+    let mut best_score = 0u32;
+    for (kind, s) in &scores {
+        if *s > best_score {
+            best_score = *s;
+            best = *kind;
+        }
+    }
+    let mut ranked: Vec<(TaskType, u32)> = scores.to_vec();
+    // Stable sort keeps the rule order for equal scores, so the reported
+    // order matches the order the winner was chosen in.
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    let runner_up_score = ranked
+        .iter()
+        .skip(1)
+        .map(|(_, score)| *score)
+        .find(|score| *score > 0)
+        .unwrap_or(0);
+    let hit_count = scores.iter().filter(|(_, score)| *score > 0).count();
+    let tied_at_top = ranked
+        .iter()
+        .skip(1)
+        .find(|(_, score)| *score > 0)
+        .is_some_and(|(_, score)| *score == best_score);
+    let default_fallback = hit_count == 0;
+    let ambiguous = default_fallback
+        || tied_at_top
+        || best_score.saturating_sub(runner_up_score) < AMBIGUITY_MARGIN;
+    ClassificationEvidence {
+        baseline: best,
+        source: ClassificationSource::Keywords,
+        scores: ranked,
+        top_score: best_score,
+        runner_up_score,
+        hit_count,
+        default_fallback,
+        ambiguous,
+    }
+}
+
+/// The rule scores for every keyword-driven category, in rule order.
+fn score_all(m: &str) -> [(TaskType, u32); 6] {
+    let scores = [
         (
             TaskType::CodeReview,
             score(
@@ -225,15 +343,7 @@ pub fn classify(message: &str) -> TaskType {
         ),
     ];
 
-    let mut best = TaskType::Feature;
-    let mut best_score = 0u32;
-    for (kind, s) in scores {
-        if s > best_score {
-            best_score = s;
-            best = kind;
-        }
-    }
-    best
+    scores
 }
 
 /// Saving an answer is a file task, even when its filename contains "架构".
@@ -351,5 +461,69 @@ mod tests {
     fn empty_task_defaults_to_feature() {
         assert_eq!(classify(""), TaskType::Feature);
         assert_eq!(classify("   "), TaskType::Feature);
+    }
+
+    #[test]
+    fn the_compatibility_entry_point_agrees_with_the_evidence() {
+        for message in [
+            "Fix the panic when opening an empty project",
+            "Add a dark mode toggle to settings",
+            "Add unit tests for the task classifier",
+            "Refactor the verify module into smaller functions",
+            "Please review the patch in crates/agent",
+            "Update the README installation section",
+            "修复登录接口 500 报错",
+            "实现导出 CSV 的功能",
+            "",
+        ] {
+            assert_eq!(
+                classify(message),
+                classify_with_evidence(message).baseline,
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clear_keyword_decision_is_not_ambiguous() {
+        let evidence = classify_with_evidence("Please review the patch in crates/agent");
+        assert_eq!(evidence.baseline, TaskType::CodeReview);
+        assert_eq!(evidence.source, ClassificationSource::Keywords);
+        assert!(!evidence.ambiguous, "{evidence:?}");
+        assert!(!evidence.default_fallback);
+        assert!(evidence.top_score > evidence.runner_up_score);
+    }
+
+    #[test]
+    fn a_message_without_any_keyword_is_ambiguous() {
+        let evidence = classify_with_evidence("把那个东西弄好");
+        assert_eq!(evidence.baseline, TaskType::Feature);
+        assert!(evidence.default_fallback);
+        assert!(evidence.ambiguous, "{evidence:?}");
+        assert_eq!(evidence.hit_count, 0);
+    }
+
+    #[test]
+    fn a_tie_at_the_top_is_ambiguous() {
+        // "review" lands on CodeReview, "test" on Test; neither leads.
+        let evidence = classify_with_evidence("review test");
+        assert!(evidence.ambiguous, "{evidence:?}");
+    }
+
+    #[test]
+    fn a_document_request_is_decided_by_the_document_rule() {
+        let evidence = classify_with_evidence("保存到 docs/架构.md");
+        assert_eq!(evidence.baseline, TaskType::Docs);
+        assert_eq!(evidence.source, ClassificationSource::DocumentOutput);
+        assert!(!evidence.ambiguous, "{evidence:?}");
+    }
+
+    #[test]
+    fn an_empty_message_is_ambiguous_and_falls_back() {
+        let evidence = classify_with_evidence("   ");
+        assert_eq!(evidence.baseline, TaskType::Feature);
+        assert_eq!(evidence.source, ClassificationSource::Empty);
+        assert!(evidence.default_fallback);
+        assert!(evidence.ambiguous, "{evidence:?}");
     }
 }

@@ -350,6 +350,75 @@ pub fn classify_verify_failure(command: &str, output: &str) -> FailureClass {
     FailureClass::Product
 }
 
+/// Where a failure classification came from.
+///
+/// The existing [`FailureClass`] enum stays exactly as it is — including
+/// its persisted form. This is a separate, local reading of the same
+/// evidence: it answers "how sure are we?" rather than "what class is it?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureOrigin {
+    /// Every failed item carries an explicit, non-negotiable signal: the
+    /// user denied it, the user cancelled it, the command does not exist,
+    /// the environment refused, the run timed out.
+    HardEvidence,
+    /// The batch mixes explicit signals with default guesses, so the
+    /// aggregate class is a rule's judgement over mixed evidence.
+    Heuristic,
+    /// No explicit marker matched: the default `Product` guess.
+    Default,
+}
+
+/// Read the origin of a failed verification batch.
+///
+/// `None` when nothing failed — there is no failure to reason about.
+pub fn failure_evidence_origin(evidence: &[VerificationEvidence]) -> Option<FailureOrigin> {
+    let failed: Vec<&VerificationEvidence> = evidence.iter().filter(|e| !e.ok).collect();
+    if failed.is_empty() {
+        return None;
+    }
+    let explicit = failed
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.failure_class,
+                Some(
+                    FailureClass::Denied
+                        | FailureClass::Cancelled
+                        | FailureClass::Timeout
+                        | FailureClass::Infrastructure
+                )
+            )
+        })
+        .count();
+    if explicit == failed.len() {
+        return Some(FailureOrigin::HardEvidence);
+    }
+    if explicit > 0 {
+        return Some(FailureOrigin::Heuristic);
+    }
+    Some(FailureOrigin::Default)
+}
+
+/// Whether a failed verification batch may be handed to the optional
+/// decision component at all.
+///
+/// Only a plain non-zero exit with the default guess qualifies. A denial, a
+/// cancellation, a timeout, an explicit environment marker, a missing exit
+/// code or an exhausted repair budget all keep the failure on the existing
+/// path — the decision component never gets to overturn them.
+pub fn failure_triage_eligible(evidence: &[VerificationEvidence], budget_exhausted: bool) -> bool {
+    if budget_exhausted {
+        return false;
+    }
+    let failed: Vec<&VerificationEvidence> = evidence.iter().filter(|e| !e.ok).collect();
+    if failed.is_empty() {
+        return false;
+    }
+    failed.iter().all(|e| {
+        e.failure_class == Some(FailureClass::Product) && e.exit_code.is_some_and(|code| code != 0)
+    })
+}
+
 /// What to do after a verification run when something failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepairDecision {

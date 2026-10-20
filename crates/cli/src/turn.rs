@@ -13,6 +13,7 @@ use kodo_memory::{MemoryHandle, SqliteMemory};
 use kodo_shell::{Logged, ShellConfig, TurnLogger, TurnOutcome};
 
 use crate::approve::Approver;
+use crate::decision::CliDecisionConsent;
 use crate::interrupt;
 use crate::render::Renderer;
 
@@ -133,6 +134,29 @@ impl TurnContext {
         Ok(id)
     }
 
+    /// The decision handle for this turn, or `None`.
+    ///
+    /// `None` is the answer in every case that matters: the component is
+    /// off, its configuration is unusable, no credential is stored, or
+    /// there is no terminal that could answer the prompt. A piped or
+    /// unattended run never asks and never sends.
+    fn decision_handle(&self, session_id: &str) -> Option<kodo_agent::DecisionHandle> {
+        let config = kodo_shell::load_decision_config();
+        if !config.usable() {
+            return None;
+        }
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return None;
+        }
+        let service = std::sync::Arc::new(kodo_shell::DecisionService::with_official_destination(
+            config,
+            std::sync::Arc::new(CliDecisionConsent),
+            session_id,
+            0,
+        ));
+        Some(service.handle())
+    }
+
     /// Runs one full turn: ask envelope → agent → outcome envelope.
     pub fn run_turn(&mut self, message: &str) -> Result<TurnStatus, String> {
         // Drop a stale interrupt left over from the prompt or a previous turn.
@@ -173,6 +197,7 @@ impl TurnContext {
             memory: open_memory_handle(),
             knowledge_context: None,
             allow_verify_commands: self.allow_verify,
+            decision: self.decision_handle(&session_id),
         };
 
         let mut logger = TurnLogger::new(self.session_dir.clone(), session_id)

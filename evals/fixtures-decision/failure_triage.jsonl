@@ -1,0 +1,60 @@
+{"id":"ft-001","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error[E0308]: mismatched types --&gt; src/lib.rs:42:5","label":"product","split":"tune","note":""}
+{"id":"ft-002","command_category":"rust_test","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"thread 'main' panicked at 'called `Option::unwrap()` on a `None` value'","label":"product","split":"tune","note":""}
+{"id":"ft-003","command_category":"rust_test","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"test result: FAILED. 1 passed; 2 failed","label":"product","split":"tune","note":""}
+{"id":"ft-004","command_category":"frontend_typecheck","exit_code":2,"known_flags":["nonzero_exit"],"error_excerpt":"src/App.tsx(12,7): error TS2322: Type 'string' is not assignable to type 'number'","label":"product","split":"tune","note":""}
+{"id":"ft-005","command_category":"frontend_test","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"FAIL src/verify.test.ts > rejects an empty input","label":"product","split":"tune","note":""}
+{"id":"ft-006","command_category":"generic","exit_code":2,"known_flags":["nonzero_exit"],"error_excerpt":"assertion failed: expected 3 actual 4","label":"product","split":"tune","note":""}
+{"id":"ft-007","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error[E0277]: the trait bound `str: Into<String>` is not satisfied","label":"product","split":"tune","note":""}
+{"id":"ft-008","command_category":"rust_test","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error: test failed, to rerun pass `--test-name`","label":"product","split":"tune","note":""}
+{"id":"ft-009","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error: could not compile `kodo-agent` (lib) due to 2 previous errors","label":"product","split":"tune","note":""}
+{"id":"ft-010","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"expected status 200, got 500","label":"product","split":"tune","note":""}
+{"id":"ft-011","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error: linking with `cc` failed: exit status 1","label":"infrastructure","split":"tune","note":""}
+{"id":"ft-012","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error: failed to run custom build command for `ring v0.17.14`","label":"infrastructure","split":"tune","note":""}
+{"id":"ft-013","command_category":"rust_test","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error: test failed, to rerun pass `--no-fail-fast`","label":"product","split":"tune","note":""}
+{"id":"ft-014","command_category":"frontend_typecheck","exit_code":2,"known_flags":["nonzero_exit"],"error_excerpt":"error TS2688: Cannot find type definition file for 'node'","label":"infrastructure","split":"tune","note":""}
+{"id":"ft-015","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"npm ERR! missing script: build","label":"infrastructure","split":"tune","note":""}
+{"id":"ft-016","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"docker: Cannot connect to the Docker daemon","label":"infrastructure","split":"tune","note":""}
+{"id":"ft-017","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"No space left on device","label":"infrastructure","split":"tune","note":""}
+{"id":"ft-018","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"Killed (OOM)","label":"infrastructure","split":"tune","note":""}
+{"id":"ft-019","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"Connection reset by peer","label":"transient","split":"tune","note":""}
+{"id":"ft-020","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"Temporary failure in name resolution","label":"transient","split":"tune","note":""}
+{"id":"ft-021","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"read ECONNRESET","label":"transient","split":"tune","note":""}
+{"id":"ft-022","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"The operation was canceled","label":"transient","split":"tune","note":""}
+{"id":"ft-023","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"rate limit exceeded, retry after 30s","label":"transient","split":"tune","note":""}
+{"id":"ft-024","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"upstream connect error or disconnect/reset before headers","label":"transient","split":"tune","note":""}
+{"id":"ft-025","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"something went wrong","label":"unknown","split":"tune","note":"证据不足"}
+{"id":"ft-026","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"error","label":"unknown","split":"tune","note":"证据不足"}
+{"id":"ft-027","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"exit status 1","label":"unknown","split":"tune","note":"证据不足"}
+{"id":"ft-028","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"","label":"unknown","split":"tune","note":"证据不足：没有输出"}
+{"id":"ft-029","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error[E0308]: mismatched types --&gt; src/lib.rs:12:5","label":"product","split":"holdout","note":""}
+{"id":"ft-030","command_category":"rust_test","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"assertion `left == right` failed","label":"product","split":"holdout","note":""}
+{"id":"ft-031","command_category":"frontend_typecheck","exit_code":2,"known_flags":["nonzero_exit"],"error_excerpt":"error TS2345: Argument of type 'string' is not assignable","label":"product","split":"holdout","note":""}
+{"id":"ft-032","command_category":"frontend_test","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"Tests: 1 failed, 2 passed","label":"product","split":"holdout","note":""}
+{"id":"ft-033","command_category":"generic","exit_code":2,"known_flags":["nonzero_exit"],"error_excerpt":"SyntaxError: Unexpected token","label":"product","split":"holdout","note":""}
+{"id":"ft-034","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error: failed to select a version for the requirement `serde`","label":"infrastructure","split":"holdout","note":""}
+{"id":"ft-035","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error: linker `ld` not found","label":"infrastructure","split":"holdout","note":""}
+{"id":"ft-036","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"npm ERR! code ENOENT","label":"infrastructure","split":"holdout","note":""}
+{"id":"ft-037","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"Cannot find module 'vite'","label":"infrastructure","split":"holdout","note":""}
+{"id":"ft-038","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"disk quota exceeded","label":"infrastructure","split":"holdout","note":""}
+{"id":"ft-039","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"EAI_AGAIN registry.npmjs.org","label":"transient","split":"holdout","note":""}
+{"id":"ft-040","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"502 Bad Gateway","label":"transient","split":"holdout","note":""}
+{"id":"ft-041","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"socket hang up","label":"transient","split":"holdout","note":""}
+{"id":"ft-042","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"request timed out after 30000ms","label":"transient","split":"holdout","note":""}
+{"id":"ft-043","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"failed with status 429","label":"transient","split":"holdout","note":""}
+{"id":"ft-044","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"","label":"unknown","split":"holdout","note":""}
+{"id":"ft-045","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"FAILED","label":"unknown","split":"holdout","note":""}
+{"id":"ft-046","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"command failed","label":"unknown","split":"holdout","note":""}
+{"id":"ft-047","command_category":"rust_test","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error[E0599]: no method named `parse` found for struct `Config`","label":"product","split":"holdout","note":""}
+{"id":"ft-048","command_category":"rust_test","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error[E0433]: failed to resolve: use of undeclared crate `serde_json`","label":"product","split":"holdout","note":""}
+{"id":"ft-049","command_category":"frontend_typecheck","exit_code":2,"known_flags":["nonzero_exit"],"error_excerpt":"src/x.tsx(3,10): error TS2551: Property 'foo' does not exist","label":"product","split":"holdout","note":""}
+{"id":"ft-050","command_category":"frontend_test","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"FAIL  src/plan.test.ts > keeps the order","label":"product","split":"holdout","note":""}
+{"id":"ft-051","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"error: could not find `Cargo.toml` in `/tmp` or any parent directory","label":"infrastructure","split":"holdout","note":""}
+{"id":"ft-052","command_category":"rust_check","exit_code":101,"known_flags":["nonzero_exit"],"error_excerpt":"rustc: command not found","label":"infrastructure","split":"holdout","note":""}
+{"id":"ft-053","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"EACCES: permission denied, open '/etc/hosts'","label":"infrastructure","split":"holdout","note":""}
+{"id":"ft-054","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"docker: permission denied while trying to connect to the Docker daemon socket","label":"infrastructure","split":"holdout","note":""}
+{"id":"ft-055","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"connect ETIMEDOUT 10.0.0.1:443","label":"transient","split":"holdout","note":""}
+{"id":"ft-056","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"503 Service Unavailable","label":"transient","split":"holdout","note":""}
+{"id":"ft-057","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"unexpected end of stream","label":"transient","split":"holdout","note":""}
+{"id":"ft-058","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"rate limit","label":"transient","split":"holdout","note":""}
+{"id":"ft-059","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"???","label":"unknown","split":"holdout","note":""}
+{"id":"ft-060","command_category":"generic","exit_code":1,"known_flags":["nonzero_exit"],"error_excerpt":"exit code 1","label":"unknown","split":"holdout","note":""}

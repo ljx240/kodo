@@ -37,6 +37,18 @@ impl RunToken {
         self.alive.load(Ordering::SeqCst)
     }
 
+    /// The run's generation. A consent is bound to it, so a grant from an
+    /// earlier run can never be used by a later one.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The liveness flag, so a host that waits on a human can notice a
+    /// stopped run.
+    pub fn alive_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.alive)
+    }
+
     fn set_progress(&self, phase: &str, detail: &str) {
         let mut current = self
             .progress
@@ -169,6 +181,15 @@ struct RunEventEnvelope {
     run_id: u64,
     #[serde(flatten)]
     event: RunEvent,
+}
+
+/// Emit a run event for a run that is already registered.
+///
+/// The decision bridge uses this to show the send preview: the preview
+/// travels on the same channel as every other run event, so the frontend
+/// has exactly one place to listen.
+pub fn emit_for(app: &AppHandle, token: &RunToken, event: RunEvent) {
+    emit_run(app, token, event);
 }
 
 fn emit_run(app: &AppHandle, token: &RunToken, event: RunEvent) {
@@ -356,18 +377,27 @@ pub struct StartArgs {
     /// Currently only the desktop "继续本轮" affordance sets this to
     /// `"summary"` when a prior turn died with `BudgetExhausted`.
     pub budget_family: Option<String>,
+    /// Optional decision-assistance handle (Jev).
+    ///
+    /// `None` — the background scheduler's path, and every default — means
+    /// this run makes no decision request at all. A scheduled run must not
+    /// inherit a desktop approval, and it must not open a prompt that
+    /// nobody is there to answer.
+    pub decision: Option<agent::DecisionHandle>,
 }
 
 pub fn start(
     app: &AppHandle,
     runs: &Runs,
     approvals: &Approvals,
+    decisions: &crate::decision::DecisionRegistry,
     args: StartArgs,
     token: RunToken,
 ) -> Result<(), String> {
     let app = app.clone();
     let runs = runs.clone();
     let approvals = approvals.clone();
+    let decisions = decisions.clone();
 
     thread::spawn(move || {
         let notify = |event: RunEvent| {
@@ -734,10 +764,16 @@ pub fn start(
             } else {
                 open_memory_handle()
             },
+            decision: args.decision.clone(),
         };
 
         let result = agent::run(&request, &alive, &approve, &mut sink);
         approvals.clear_session(&args.id);
+        // The run's decision service dies with the run: its credential
+        // handle, its pending grants and its quota counters are not
+        // inherited by the next turn.
+        decisions.release_run(&args.id);
+        decisions.clear_session(&args.id);
 
         match result {
             Ok(()) => {
