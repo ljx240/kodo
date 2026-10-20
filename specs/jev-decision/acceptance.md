@@ -177,6 +177,8 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 
 **未验证**：OpenRouter 的真实连通性、真实模型的字母服从率与 logprobs 可用性、各路由器的限流与价格 —— 都需要单独授权的联网评测。
 
+**接入 OpenRouter 带来的新风险（尚未评估）**：官方 Jev 给出的是服务自己标注的概率；OpenRouter 给出的是 chat 模型首 token 的 token 概率经选项字母归一化后的分布。两者都**不是**"准确率"，但后者对模型的服从度、分词器与提示词更敏感。因此 OpenRouter 路径在质量门评测里应当**单独统计**，不能与官方路径合并成一个指标。
+
 ## 4. 尚未通过 / 未验证的项
 
 | 项 | 状态 | 说明 |
@@ -226,14 +228,16 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 
 ```text
 当前分支：main
-main HEAD：91eb96b merge(decision): integrate the optional Jev decision assistant
+main HEAD：60ae37f merge(decision): integrate the OpenRouter decision path
 本任务提交：
   aaa9a84 docs(decision): add the Jev decision specification
   bd5bd60 feat(decision): add the optional Jev decision assistant
   c4e52b3 docs(decision): add the Jev decision acceptance record
+  0b1f96e docs(decision): record the local merge into main
+  e8381f6 feat(decision): let the decision service talk to OpenRouter
 合并前基线：c0f67a310cb7dea1761f14e017381407a0e07a81（= 合并前 main = 合并前缓存 origin/main）
 缓存 origin/main：c0f67a310cb7dea1761f14e017381407a0e07a81 —— 本次未 fetch，远程新鲜度未核验
-main 相对 origin/main：ahead 5（3 个任务提交 + 1 个合并提交 + 1 个本记录提交；全部未推送）
+main 相对 origin/main：ahead 8（5 个任务提交 + 2 个合并提交 + 1 个本记录提交；全部未推送）
 git branch --no-merged main：（空）
 任务分支 feat/jev-decision：已合入后按 AGENTS.md §2 删除（三个提交均保留在 main 的历史里）
 git stash list：7 条，全部为会话开始前既有，未 pop / drop / clear
@@ -314,7 +318,7 @@ playwright --project=behaviour --grep "决策辅助设置小节|发送预览展�
 
 ### 恢复路径
 
-- 全部实现已提交并合入本地 `main`（`91eb96b`），三个提交在 main 的历史里可追溯；`git stash` 未使用。
-- 分支 `feat/jev-decision` 已删除；要单独查看任务边界可用 `git log c0f67a3..91eb96b`。
+- 全部实现已提交并合入本地 `main`（`60ae37f`），提交在 main 的历史里可追溯；`git stash` 未使用。
+- 任务分支 `feat/jev-decision` 与 `feat/jev-openrouter` 均已在合入后删除；要单独查看任务边界可用 `git log c0f67a3..60ae37f`。
 - 7 条 stash 与第二个 worktree 的未提交改动保持原样，未被本任务改动。
 - 文档：`specs/jev-decision/` 四件套是下一次续接的入口；续接时先重新读 `crates/agent/src/decision.rs` 与 `crates/shell/src/decision.rs` 的当前内容（本文档记录的行号可能已过时）。
