@@ -854,6 +854,7 @@ export const T = {
     terminalOutput: "命令输出",
     llmCalls: "模型调用",
     noModelCalls: "尚未调用模型",
+    noModelDetail: "本轮没有捕获到完整请求/响应；上一轮的摘要详见 LLM I/O 选项卡",
     metadata: "元数据",
     currentProject: "当前项目",
     debugDetails: "运行详情",
@@ -1124,6 +1125,10 @@ export const T = {
       noDue: "无截止日期",
       overdue: "已逾期",
       dueToday: (time: string) => (time ? `今天 ${time}` : "今天"),
+      dueTomorrow: "明天",
+      dueYesterday: "昨天",
+      dueDaysSuffix: "天后",
+      dueDaysUnit: "天",
       // A column with nothing left in it is good news, and a 已完成 column
       // says so instead of offering a drop target.
       emptyStatusTitle: "太棒了！",

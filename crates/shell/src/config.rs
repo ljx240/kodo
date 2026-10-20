@@ -41,6 +41,24 @@ struct ProviderJson {
     model: String,
     #[serde(default, rename = "modelId")]
     model_id: Option<String>,
+    /// Configured model list (with `vision` per model). Optional — legacy
+    /// settings.log records before 2026-10-19 do not carry it. New records
+    /// written by the desktop shell always include it (full `ProviderView.models`
+    /// round-trip). Read once to seed `Provider::model_vision_override`.
+    #[serde(default)]
+    models: Option<Vec<ModelJson>>,
+}
+
+/// One entry of `ProviderJson.models`. Schema mirrors the desktop's
+/// `ModelOptionView` (`apps/desktop/src-tauri/src/view.rs`); only the fields
+/// the shell config loader needs are decoded.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ModelJson {
+    #[serde(default, rename = "modelId")]
+    model_id: String,
+    /// `None` when the field is absent on legacy records.
+    #[serde(default)]
+    vision: Option<bool>,
 }
 
 impl ShellConfig {
@@ -174,19 +192,48 @@ fn load_provider(
         if api_key.is_empty() {
             return None;
         }
+        let active_model_id = p
+            .model_id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| p.model.clone());
         let mut provider = Provider::new(
             p.template.clone(),
             api_key,
             p.endpoint.clone(),
-            p.model_id
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| p.model.clone()),
+            active_model_id.clone(),
         );
         if let Some(window) = context_window {
             let mut caps = provider.capabilities();
             caps.context_window_tokens = window;
             provider.capabilities_override = Some(caps);
+        }
+        // Seed the per-model vision override from the configured model list.
+        // The desktop persists each model's `vision` flag in `models[]`
+        // (settings.log round-trip); legacy records without `models` leave
+        // the override unset, which keeps the template-derived default.
+        //
+        // Reconciliation (2026-10-19): when the saved entry has NO explicit
+        // vision field (Option::None) AND the template is one of the
+        // modern OpenAI-compatible presets, upgrade to `Some(true)`. Most
+        // such models (MiniMax, GLM, Qwen, Doubao, …) accept image
+        // inputs. Explicit `vision: false` is left alone — the user
+        // upgraded that on purpose.
+        if let Some(models) = p.models.as_ref() {
+            if let Some(found) = models
+                .iter()
+                .find(|m| !m.model_id.is_empty() && m.model_id == active_model_id)
+            {
+                let upgrade_default = matches!(
+                    p.template.as_str(),
+                    "openai" | "openai_compatible" | "custom"
+                );
+                provider.model_vision_override = match (found.vision, upgrade_default) {
+                    (v @ Some(_), _) => v,
+                    (None, true) => Some(true),
+                    (None, false) => None,
+                };
+            }
         }
         Some(provider)
     };
@@ -366,6 +413,169 @@ mod tests {
         let defaults = ShellConfig::from_sources(Overrides::default(), &|_| None, None);
         assert!(!defaults.local_trace);
         assert_eq!(defaults.max_output_tokens, 4096);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn model_vision_override_round_trips_through_settings_log() {
+        // The desktop shell persists each provider's model list (with
+        // per-model `vision`) inside `providers[].models[]`. The shell
+        // config loader must seed `Provider::model_vision_override` from the
+        // active model so `Provider::capabilities()` returns the user's
+        // intent — not the conservative default for unknown templates.
+        // (Vision-override plumbing, 2026-10-19.)
+        let dir = std::env::temp_dir()
+            .join(format!("kodo-shell-vision-override-{}", std::process::id(),));
+        std::fs::create_dir_all(&dir).unwrap();
+        let creds = dir.join("credentials.log");
+        settings::write_credential(&creds, "custom-mimo", "synthetic-key").unwrap();
+        settings::write_credential(&creds, "mystery-vendor", "synthetic-key").unwrap();
+
+        // Custom template (openai_compatible default → vision:true), active
+        // model marked vision=true. Per-model override is the user's
+        // explicit override; template default already matches.
+        let providers_with_vision = r#"[
+          {
+            "id": "custom-mimo",
+            "name": "Mimo",
+            "template": "custom",
+            "endpoint": "",
+            "model": "mimo-v2.6-flash",
+            "modelId": "mimo-v2.6-flash",
+            "models": [
+              {"modelId": "mimo-v2.6-flash", "displayName": "Mimo v2.6 Flash", "vision": true},
+              {"modelId": "mimo-v2.6-pro", "displayName": "Mimo v2.6 Pro", "vision": true}
+            ]
+          }
+        ]"#;
+        let read = |k: &str| (k == "providers").then(|| providers_with_vision.to_owned());
+        let provider = ShellConfig::from_sources(Overrides::default(), &read, Some(&creds))
+            .provider
+            .expect("active provider must load");
+        assert_eq!(provider.template, "custom");
+        assert_eq!(provider.resolved_model_id(), "mimo-v2.6-flash");
+        assert_eq!(provider.model_vision_override, Some(true));
+        assert!(
+            provider.capabilities().vision,
+            "custom template + user vision=true must yield effective vision=true"
+        );
+
+        // Same provider with vision=false on the active model: the override
+        // rides on top of the template default and disables image inlining.
+        let providers_text_only = r#"[
+          {
+            "id": "custom-mimo",
+            "name": "Mimo",
+            "template": "custom",
+            "endpoint": "",
+            "model": "mimo-v2.6-flash",
+            "modelId": "mimo-v2.6-flash",
+            "models": [
+              {"modelId": "mimo-v2.6-flash", "displayName": "Mimo v2.6 Flash", "vision": false}
+            ]
+          }
+        ]"#;
+        let read = |k: &str| (k == "providers").then(|| providers_text_only.to_owned());
+        let provider = ShellConfig::from_sources(Overrides::default(), &read, Some(&creds))
+            .provider
+            .expect("active provider must load");
+        assert_eq!(provider.model_vision_override, Some(false));
+        assert!(
+            !provider.capabilities().vision,
+            "explicit vision=false must override template default"
+        );
+
+        // Legacy record without `models[]`: no per-model override, the
+        // template default (here custom → openai_compatible → vision:true)
+        // applies. 2026-10-19: custom templates are now vision-capable by
+        // default; the legacy record still gets the right answer.
+        let providers_legacy = r#"[
+          {
+            "id": "custom-mimo",
+            "name": "Mimo",
+            "template": "custom",
+            "endpoint": "",
+            "model": "mimo-v2.6-flash",
+            "modelId": "mimo-v2.6-flash"
+          }
+        ]"#;
+        let read = |k: &str| (k == "providers").then(|| providers_legacy.to_owned());
+        let provider = ShellConfig::from_sources(Overrides::default(), &read, Some(&creds))
+            .provider
+            .expect("active provider must load");
+        assert_eq!(provider.model_vision_override, None);
+        assert!(
+            provider.capabilities().vision,
+            "custom template default is now vision=true (2026-10-19): MiniMax/GLM/Qwen style providers ship vision"
+        );
+
+        // `models[]` present but the active model id isn't listed:
+        // override stays None, template default remains (vision:true).
+        let providers_mismatch = r#"[
+          {
+            "id": "custom-mimo",
+            "name": "Mimo",
+            "template": "custom",
+            "endpoint": "",
+            "model": "mimo-v2.6-flash",
+            "modelId": "mimo-v2.6-flash",
+            "models": [
+              {"modelId": "some-other-model", "displayName": "Other", "vision": true}
+            ]
+          }
+        ]"#;
+        let read = |k: &str| (k == "providers").then(|| providers_mismatch.to_owned());
+        let provider = ShellConfig::from_sources(Overrides::default(), &read, Some(&creds))
+            .provider
+            .expect("active provider must load");
+        assert_eq!(provider.model_vision_override, None);
+
+        // Active model listed but `vision` field absent: reconcile to
+        // `Some(true)` for custom/openai_compatible templates (modern
+        // OpenAI-compatible providers ship vision); keep `None` for
+        // unknown templates so the conservative stance remains.
+        let providers_no_vision_field = r#"[
+          {
+            "id": "custom-mimo",
+            "name": "Mimo",
+            "template": "custom",
+            "endpoint": "",
+            "model": "mimo-v2.6-flash",
+            "modelId": "mimo-v2.6-flash",
+            "models": [
+              {"modelId": "mimo-v2.6-flash", "displayName": "Mimo v2.6 Flash"}
+            ]
+          }
+        ]"#;
+        let read = |k: &str| (k == "providers").then(|| providers_no_vision_field.to_owned());
+        let provider = ShellConfig::from_sources(Overrides::default(), &read, Some(&creds))
+            .provider
+            .expect("active provider must load");
+        assert_eq!(
+            provider.model_vision_override,
+            Some(true),
+            "vision field absent on a custom-template model must reconcile to Some(true)"
+        );
+        // Unknown template + vision absent: stays `None` (conservative).
+        let providers_unknown_template = r#"[
+          {
+            "id": "mystery-vendor",
+            "name": "Mystery",
+            "template": "mystery-vendor",
+            "endpoint": "",
+            "model": "v1",
+            "modelId": "v1",
+            "models": [
+              {"modelId": "v1", "displayName": "V1"}
+            ]
+          }
+        ]"#;
+        let read = |k: &str| (k == "providers").then(|| providers_unknown_template.to_owned());
+        let provider = ShellConfig::from_sources(Overrides::default(), &read, Some(&creds))
+            .provider
+            .expect("active provider must load");
+        assert_eq!(provider.model_vision_override, None);
+
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -403,13 +403,20 @@ export function TracePage({
                         projectName: data.crumbProject,
                         projectPath: session!.project,
                         turn: session!.turns[session!.turns.length - 1] ?? null,
+                        turnSeq:
+                          session!.turns.length > 0
+                            ? session!.turns.length - 1
+                            : null,
                         reply: null,
                         running: false,
                       }
                 }
               />
-              <div className="reply-summary">
-                <h4>{T.page.finalSummary}</h4>
+              <details className="reply-summary" data-testid="reply-summary">
+                <summary>
+                  <span className="reply-summary-caret" aria-hidden />
+                  <h4>{T.page.finalSummary}</h4>
+                </summary>
                 <p>{data.final || T.page.noFinalReply}</p>
                 {data.checks.length > 0 && (
                   <ul className="trace-checks">
@@ -418,7 +425,7 @@ export function TracePage({
                     ))}
                   </ul>
                 )}
-              </div>
+              </details>
             </div>
           </section>
 
@@ -628,6 +635,9 @@ function LlmIoTab({
   const [active, setActive] = useState<number>(0);
   const [capture, setCapture] = useState<LlmIoDto | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  /** Bumped on every "reload now" click so we can drive the live-list effect
+   *  by hand from the empty state without waiting for prop changes. */
+  const [reloadTick, setReloadTick] = useState<number>(0);
 
   // Demo mode short-circuits both effects — fixture is already in hand.
   useEffect(() => {
@@ -658,7 +668,7 @@ function LlmIoTab({
     return () => {
       alive = false;
     };
-  }, [demoMode, sessionId, turnSeq]);
+  }, [demoMode, sessionId, turnSeq, reloadTick]);
 
   useEffect(() => {
     if (demoMode) return;
@@ -699,7 +709,19 @@ function LlmIoTab({
     return <p className="empty-note">{T.page.loadingTrace}</p>;
   }
   if (refs.length === 0) {
-    return <p className="empty-note">{T.page.llmIo.empty}</p>;
+    return (
+      <div className="empty-state-block">
+        <p className="empty-note">{T.page.llmIo.empty}</p>
+        <button
+          type="button"
+          className="btn btn--sm"
+          data-testid="llm-io-reload"
+          onClick={() => setReloadTick((tick) => tick + 1)}
+        >
+          {T.viewer.retry}
+        </button>
+      </div>
+    );
   }
   return (
     <LlmIoViewer

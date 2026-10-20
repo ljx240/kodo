@@ -32,7 +32,12 @@ export function LlmIoViewer({
       {capture ? (
         <CaptureBody capture={capture} loading={loading} />
       ) : (
-        <p className="empty-note">{T.page.loadingTrace}</p>
+        <p
+          className="empty-note"
+          data-testid={loading ? "llm-io-loading" : "llm-io-empty"}
+        >
+          {loading ? T.page.loadingTrace : T.page.llmIo.empty}
+        </p>
       )}
     </div>
   );
@@ -121,6 +126,15 @@ function CaptureBody({
     return <p className="empty-note">{T.page.loadingTrace}</p>;
   }
   return (
+    <LlmIoCaptureDetail capture={capture} />
+  );
+}
+
+/** Renders one captured LLM I/O body — request on the left, response on the
+ *  right. Shared between the trace page viewer and the inspector so the two
+ *  surfaces never diverge. */
+export function LlmIoCaptureDetail({ capture }: { capture: LlmIoDto }) {
+  return (
     <div className="llm-io-grid">
       <section className="llm-io-col">
         <h4>{T.page.llmIo.request}</h4>
@@ -143,7 +157,33 @@ function CaptureBody({
   );
 }
 
-function SystemPrompt({ system }: { system: string }) {
+/** Single-column variant of [`LlmIoCaptureDetail`] for narrow inspectors —
+ *  stacks the request and response vertically instead of side-by-side. */
+export function LlmIoCaptureDetailStacked({ capture }: { capture: LlmIoDto }) {
+  return (
+    <div className="llm-io-stack">
+      <section className="llm-io-col">
+        <h4>{T.page.llmIo.request}</h4>
+        <SystemPrompt system={capture.request.system} />
+        <Messages messages={capture.request.messages} />
+        {Array.isArray(capture.request.tools) && capture.request.tools.length > 0 && (
+          <details className="llm-io-block">
+            <summary>工具定义</summary>
+            <pre className="llm-io-pre">{JSON.stringify(capture.request.tools, null, 2)}</pre>
+          </details>
+        )}
+      </section>
+      <section className="llm-io-col">
+        <h4>{T.page.llmIo.response}</h4>
+        <ResponseText text={capture.response.text} />
+        <Reasoning text={capture.response.reasoningContent} />
+        <NativeCalls calls={capture.response.nativeToolCalls} />
+      </section>
+    </div>
+  );
+}
+
+export function SystemPrompt({ system }: { system: string }) {
   const [open, setOpen] = useState<boolean>(false);
   const long = system.length > 400;
   const display = !long || open ? system : `${system.slice(0, 400)}…`;
@@ -170,7 +210,7 @@ function SystemPrompt({ system }: { system: string }) {
   );
 }
 
-function Messages({ messages }: { messages: unknown }) {
+export function Messages({ messages }: { messages: unknown }) {
   return (
     <details className="llm-io-block">
       <summary>
@@ -182,7 +222,7 @@ function Messages({ messages }: { messages: unknown }) {
   );
 }
 
-function ResponseText({ text }: { text: string }) {
+export function ResponseText({ text }: { text: string }) {
   if (!text) return null;
   return (
     <details className="llm-io-block" open>
@@ -195,7 +235,7 @@ function ResponseText({ text }: { text: string }) {
   );
 }
 
-function Reasoning({ text }: { text: string }) {
+export function Reasoning({ text }: { text: string }) {
   if (!text) return null;
   return (
     <details className="llm-io-block">
@@ -208,7 +248,7 @@ function Reasoning({ text }: { text: string }) {
   );
 }
 
-function NativeCalls({ calls }: { calls: unknown }) {
+export function NativeCalls({ calls }: { calls: unknown }) {
   const arr = Array.isArray(calls) ? calls : [];
   if (arr.length === 0) return null;
   return (

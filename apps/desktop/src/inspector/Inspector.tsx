@@ -130,7 +130,7 @@ function contentFor(
     if (tab === "terminal") return <TerminalSection {...data} />;
     if (tab === "files") return <ChangedFilesSection {...data} />;
     if (tab === "tools") return <ToolsSection {...data} />;
-    if (tab === "llm") return <LlmSection {...data} detailed />;
+    if (tab === "llm") return <LlmSection {...data} />;
     if (tab === "memory") {
       return (
         <MemoryOverview

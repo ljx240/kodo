@@ -34,6 +34,7 @@ fn online_read_only_smoke() {
         message: "What is this repository? One sentence.".into(),
         conversation_history: Vec::new(),
         pinned_context: vec![],
+        pinned_force_inline: Vec::new(),
         provider: Some(provider),
         permission: Permission::Auto,
         mode: AgentMode::Code,

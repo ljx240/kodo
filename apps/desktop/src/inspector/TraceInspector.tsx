@@ -6,6 +6,7 @@ import type { LiveSnapshot } from "../data/liveContext";
 import { llmFromTurn } from "../data/liveContext";
 import { T } from "../i18n";
 import { MetaRow, Section } from "./Section";
+import { LlmCallList, modelCallsFromItems } from "./LlmCallCard";
 import { ChangedFilesSection } from "./ResponseInspector";
 
 export function LlmCallsDetailed({ demo, demoState, live }: {
@@ -13,34 +14,13 @@ export function LlmCallsDetailed({ demo, demoState, live }: {
   demoState?: DemoState | null;
   live: LiveSnapshot | null;
 }) {
-  const calls = !demo
-    ? llmFromTurn(live?.turn ?? null)
-    : (demoState?.llmCalls ?? []).map((call) => ({
-        model: call.model,
-        input_tokens: call.inputTokens,
-        output_tokens: call.outputTokens,
-        duration: call.duration,
-      }));
+  const summaries = modelCallsFromItems(
+    demo ? (demoState?.items as Parameters<typeof modelCallsFromItems>[0]) : live?.turn?.items,
+  );
   return (
-    <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title={T.inspector.llmCalls} count={calls.length}>
+    <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title={T.inspector.llmCalls} count={summaries.length}>
       <div className="ins-body">
-        {calls.length === 0 ? (
-          <p className="ins-note">{T.inspector.noModelCalls}</p>
-        ) : (
-          calls.map((call, index) => (
-            <div key={`${call.model}-${index}`} className="llm-call">
-              <div className="llm-head">
-                <span className="llm-index">{index + 1}</span>
-                <Sparkles size={14} strokeWidth={1.7} className="llm-icon" />
-                <span className="llm-model">{call.model}</span>
-                <span className="llm-time">{call.duration}</span>
-              </div>
-              <MetaRow label={T.inspector.inputTokens}>{call.input_tokens}</MetaRow>
-              <MetaRow label={T.inspector.outputTokens}>{call.output_tokens}</MetaRow>
-              <MetaRow label={T.inspector.duration}>{call.duration}</MetaRow>
-            </div>
-          ))
-        )}
+        <LlmCallList summaries={summaries} demo={demo} demoState={demoState} live={live} />
       </div>
     </Section>
   );

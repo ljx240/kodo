@@ -152,6 +152,7 @@ impl TurnContext {
             message: message.to_owned(),
             conversation_history: kodo_shell::turn::conversation_history(&prior_session),
             pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
             provider: self.config.provider.clone(),
             permission: self.permission,
             mode: AgentMode::Code,

@@ -8,7 +8,11 @@ export type LiveSnapshot = {
   title: string;
   projectName: string;
   projectPath: string;
+  /** Last turn for the active conversation, or null while no turn is open. */
   turn: TurnDto | null;
+  /** Index of `turn` inside the session (0-based). Required to address the
+   *  per-turn trace directory the GUI reads (`<traces>/<session>/<turn>/…`). */
+  turnSeq: number | null;
   reply: Reply | null;
   running: boolean;
   /** Undo this turn's Kodo edits (Inspector summary action). */
@@ -23,16 +27,19 @@ export function snapshotFromTurn(
   title: string,
   projectName: string,
   projectPath: string,
-  turn: TurnDto | null,
+  /** `(turn, index)` for the active turn — index is `turns.length - 1`. */
+  turnAndIndex: { turn: TurnDto | null; turnSeq: number | null },
   running: boolean,
   actions?: { onUndo?: (() => void) | null; undoing?: boolean; onRetry?: (() => void) | null },
 ): LiveSnapshot {
+  const { turn, turnSeq } = turnAndIndex;
   return {
     conversationId,
     title,
     projectName,
     projectPath,
     turn,
+    turnSeq,
     reply: turn ? toReply(turn, running) : null,
     running,
     onUndo: actions?.onUndo ?? null,

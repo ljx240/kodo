@@ -550,16 +550,89 @@
 }
 
 .llm-call {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
+  /* `block` — not flex: a UA-`display` of `flex` on <details> suppresses the
+     summary-content toggle in some engines, which made the whole card
+     dead-click. Children lay themselves out via their own rules. */
+  display: block;
+  padding: 8px 9px 10px;
+  border: 1px solid var(--kodo-border, #232732);
+  border-radius: var(--kodo-radius, 6px);
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 8px;
 }
 
-.llm-head {
+.llm-call > summary {
+  list-style: none;
+  cursor: pointer;
+  display: block;
+  font-size: var(--kodo-font-sm);
+  user-select: none;
+}
+
+.llm-call > summary::-webkit-details-marker {
+  display: none;
+}
+
+.llm-call > summary::after {
+  content: "";
+  width: 0;
+  height: 0;
+  margin-left: auto;
+  border-left: 4px solid var(--kodo-text-secondary, #6b7280);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  flex: none;
+  transition: transform 120ms ease;
+}
+
+.llm-call[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.llm-call-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+}
+
+.llm-call-detail {
+  margin-top: 8px;
+}
+
+.llm-call-detail .llm-io-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.llm-call-detail .llm-io-stack > .llm-io-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.llm-call-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.llm-call-spinner {
+  animation: llm-call-spin 0.9s linear infinite;
+}
+
+@keyframes llm-call-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* The head row is the card's `<summary>` itself — flex only while open, so
+   the collapsed summary stays a plain block that the UA toggle honors. */
+.llm-call[open] > summary.llm-head {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: var(--kodo-font-sm);
 }
 
 .llm-icon {

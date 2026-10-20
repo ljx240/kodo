@@ -224,6 +224,7 @@ fn run_scenario(
         message: message.to_owned(),
         conversation_history: Vec::new(),
         pinned_context: Vec::new(),
+        pinned_force_inline: Vec::new(),
         provider: Some(provider),
         permission,
         mode: AgentMode::Code,

@@ -64,6 +64,7 @@ pub(super) fn run(report: &mut super::EvalReport) {
                 message: format!("请根据 source.txt 的资料生成文件，保存到 `{}`", case.path),
                 conversation_history: Vec::new(),
                 pinned_context: Vec::new(),
+                pinned_force_inline: Vec::new(),
                 provider: Some(Provider::new(
                     "fake",
                     "synthetic",

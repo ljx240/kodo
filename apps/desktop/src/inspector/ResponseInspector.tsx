@@ -3,11 +3,12 @@ import { useCallback, useEffect, useState } from "react";
 import { turnChanges, undoTurn, type TurnChangeDto } from "../api";
 import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
-import { changesFromReply, commandsFromTurn, llmFromTurn, toolsFromTurn } from "../data/liveContext";
+import { changesFromReply, commandsFromTurn, toolsFromTurn } from "../data/liveContext";
 import { DiffRows } from "../conversation/diff";
 import { formatDuration, isWaitingForReply, type OutcomeStatus, type Reply, type RunStatus } from "../conversation/trace";
 import { T } from "../i18n";
 import { FileRow, MetaRow, Section, ToolRow } from "./Section";
+import { LlmCallList, modelCallsFromItems } from "./LlmCallCard";
 
 export type InspectorData = {
   /** Demo routes pass the fixture bundle; live routes pass null. */
@@ -452,28 +453,20 @@ export function ToolsSection({ demo, demoState, live }: InspectorData) {
   );
 }
 
-export function LlmSection({ demo, demoState, live, detailed = false }: InspectorData & { detailed?: boolean }) {
-  const calls = !demo ? llmFromTurn(live?.turn ?? null) : demoState?.summary.llm_calls ?? [];
+/**
+ * 模型调用记录 — every model call of the current turn as an expandable card
+ * (shared with the trace inspector via `LlmCallCard`). Summary data comes
+ * from the turn's `modelCall` items (live) or the demo item fixture; the
+ * card body lazily loads the captured LLM request/response.
+ */
+export function LlmSection({ demo, demoState, live }: InspectorData) {
+  const summaries = modelCallsFromItems(
+    demo ? (demoState?.items as Parameters<typeof modelCallsFromItems>[0]) : live?.turn?.items,
+  );
   return (
-    <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title={T.inspector.llmCalls} count={calls.length}>
+    <Section icon={<Sparkles size={14} strokeWidth={1.7} />} title={T.inspector.llmCalls} count={summaries.length}>
       <div className="ins-body">
-        {calls.length === 0 ? (
-          <p className="ins-note">{T.inspector.noModelCalls}</p>
-        ) : (
-          calls.map((call, index) => (
-            <div key={index} className="llm-call">
-              <div className="llm-head">
-                <Sparkles size={14} strokeWidth={1.7} className="llm-icon" />
-                <span className="llm-model">{call.model}</span>
-                {detailed && <span className="llm-time">{call.duration}</span>}
-                {!detailed && <span className="llm-duration">{call.duration}</span>}
-              </div>
-              <MetaRow label={T.inspector.inputTokens}>{call.input_tokens}</MetaRow>
-              <MetaRow label={T.inspector.outputTokens}>{call.output_tokens}</MetaRow>
-              {detailed && <MetaRow label={T.inspector.duration}>{call.duration}</MetaRow>}
-            </div>
-          ))
-        )}
+        <LlmCallList summaries={summaries} demo={demo} demoState={demoState} live={live} />
       </div>
     </Section>
   );

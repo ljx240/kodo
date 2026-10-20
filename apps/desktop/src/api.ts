@@ -337,6 +337,7 @@ export function sendMessage(
   budgetFamily?: string | null,
   knowledgeToken?: string | null,
   knowledgeRemoteApproved?: boolean,
+  forceInline: string[] = [],
 ): Promise<string> {
   return invoke<string>("send_message", {
     id,
@@ -347,6 +348,7 @@ export function sendMessage(
     budgetFamily,
     ...(knowledgeToken !== undefined ? { knowledgeToken } : {}),
     ...(knowledgeRemoteApproved !== undefined ? { knowledgeRemoteApproved } : {}),
+    forceInline,
   });
 }
 
@@ -982,6 +984,29 @@ export type ContextProbe = {
  */
 export function probeContextFile(project: string, path: string): Promise<ContextProbe> {
   return invoke<ContextProbe>("probe_context_file", { project, path });
+}
+
+/**
+ * Persist clipboard / drag-drop image bytes to a temp file. The clipboard
+ * API exposes `File` objects without a filesystem path; this command lands
+ * the bytes on disk so the existing attachment probe + resolve pipeline
+ * can run. Used by the composer paste handler when the user pastes a
+ * screenshot or copies an image file. 16 MiB cap mirrors the desktop
+ * image-preview ceiling.
+ */
+export function savePastedBlob(
+  bytes: Uint8Array,
+  suggestedFilename: string | null,
+  saveDir: string | null,
+): Promise<string> {
+  // Tauri's IPC marshals Uint8Array as an array of numbers across the bridge;
+  // ArrayBuffer / Blob payload types are not portable. Send the byte view.
+  const view = Array.from(bytes);
+  return invoke<string>("save_pasted_blob", {
+    bytes: view,
+    suggestedFilename,
+    saveDir,
+  });
 }
 
 export function onRunEvent(handler: (event: RunEventDto) => void): Promise<() => void> {

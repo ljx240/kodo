@@ -15,6 +15,7 @@ import { ArrowUp, Calendar, Check, GripVertical, ListChecks, Pencil, Undo2 } fro
 import type { TodoDto, TodoPersonDto } from "../../../api";
 import { T } from "../../../i18n";
 import { isDone, isDueToday, isLate, stampOf } from "./todoModel";
+import { smartDate, smartDateLabel } from "./todoDate";
 import {
   doneStatus,
   openStatus,
@@ -70,11 +71,27 @@ export function TagChip({ name, color }: { name: string; color: string }) {
  */
 export function DueChip({ todo, today }: { todo: TodoDto; today: string }) {
   const urgent = isDueToday(todo, today) || isLate(todo, today);
-  const text = !todo.dueDate
-    ? W.noDue
-    : todo.dueDate === today
-      ? W.dueToday(todo.dueTime ?? "")
-      : todo.dueDate.replace(/-/g, "/");
+  // Smart relative date: 今天 / 明天 / 昨天 / 已逾期 N 天 / N 天后 /
+  // absolute date. The chip text stays short so it fits the card's meta row
+  // without pushing other chips off; today's time is folded into 今天.
+  let text: string;
+  if (!todo.dueDate) {
+    text = W.noDue;
+  } else {
+    const lookup = {
+      "workbench.todo.dueToday": W.dueToday,
+      "workbench.todo.dueTomorrow": W.dueTomorrow,
+      "workbench.todo.dueYesterday": W.dueYesterday,
+      "workbench.todo.overdue": W.overdue,
+      "workbench.todo.dueDaysSuffix": W.dueDaysSuffix,
+      "workbench.todo.dueDaysUnit": W.dueDaysUnit,
+    };
+    const smart = smartDate(todo.dueDate, today) ?? {
+      kind: "absolute" as const,
+      yyyyMmDd: todo.dueDate.replace(/-/g, "/"),
+    };
+    text = smartDateLabel(smart, lookup, todo.dueTime ?? "");
+  }
   return (
     <span className={`todo-due${urgent ? " todo-due--late" : ""}${todo.dueDate ? "" : " todo-due--none"}`}>
       <Calendar size={12} strokeWidth={1.9} />

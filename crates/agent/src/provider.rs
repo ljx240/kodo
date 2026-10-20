@@ -124,10 +124,12 @@ impl ProviderCapabilities {
 pub fn provider_template_vision(template: &str) -> bool {
     match template.trim().to_ascii_lowercase().as_str() {
         "anthropic" => ProviderCapabilities::anthropic().vision,
-        "openai" | "openai_compatible" => ProviderCapabilities::openai_compatible().vision,
+        "openai" | "openai_compatible" | "custom" => {
+            ProviderCapabilities::openai_compatible().vision
+        }
         "deepseek" => ProviderCapabilities::deepseek().vision,
         "text_only" => ProviderCapabilities::text_only().vision,
-        "conservative" | "custom" => false,
+        "conservative" => false,
         // Unknown templates default to off (the conservative stance —
         // prove capability before turning it on).
         _ => false,
@@ -382,7 +384,15 @@ pub struct Provider {
     pub model: String,
     pub model_id: Option<String>,
     pub display_name: Option<String>,
+    /// Per-provider full capability override (typically context-window only —
+    /// set by the CLI / shell when a user override is in effect).
     pub capabilities_override: Option<ProviderCapabilities>,
+    /// Per-model vision override. `None` falls back to the template-derived
+    /// vision (`ProviderCapabilities::vision`). The override reaches the
+    /// backend through the `settings.log` `models[].vision` round-trip;
+    /// the catalog-level [`ModelSpec::vision_override`] stays the wired
+    /// entry for the model spec returned by `fetch_models`.
+    pub model_vision_override: Option<bool>,
     /// Fallback chain (other configured providers), used when failover is on.
     pub fallbacks: Vec<Provider>,
 }
@@ -413,6 +423,7 @@ impl Provider {
             }),
             model: String::new(), // filled below
             capabilities_override: None,
+            model_vision_override: None,
             fallbacks: Vec::new(),
         }
         .sync_legacy_model()
@@ -435,6 +446,7 @@ impl Provider {
             model_id: rec.model_id.clone(),
             display_name: rec.display_name,
             capabilities_override: None,
+            model_vision_override: None,
             fallbacks: Vec::new(),
         }
     }
@@ -472,15 +484,32 @@ impl Provider {
 
     pub fn capabilities(&self) -> ProviderCapabilities {
         if let Some(caps) = self.capabilities_override {
-            return caps;
+            return self.apply_model_vision(caps);
         }
-        match self.template.as_str() {
+        let caps = match self.template.as_str() {
             "anthropic" => ProviderCapabilities::anthropic(),
             "deepseek" => ProviderCapabilities::deepseek(),
-            "openai" => ProviderCapabilities::openai_compatible(),
-            // Custom / unknown endpoints: conservative until configured or probed.
+            // Custom / OpenAI-compatible endpoints (MiniMax, GLM, Qwen, etc.)
+            // are vision-capable by default — most modern OpenAI-compatible LLMs
+            // accept image inputs. Per-model overrides still apply via
+            // `model_vision_override`; explicit `vision: false` on a single
+            // model disables image inlining for that model only.
+            "openai" | "openai_compatible" | "custom" => ProviderCapabilities::openai_compatible(),
+            // Text-only / conservative templates / unknown ids: vision stays
+            // off until proven otherwise.
             _ => ProviderCapabilities::conservative(),
+        };
+        self.apply_model_vision(caps)
+    }
+
+    /// Apply the per-model `model_vision_override` on top of a derived
+    /// capability set. `None` returns the input unchanged — backward
+    /// compatible with callers that never set the override.
+    fn apply_model_vision(&self, mut caps: ProviderCapabilities) -> ProviderCapabilities {
+        if let Some(vision) = self.model_vision_override {
+            caps.vision = vision;
         }
+        caps
     }
 
     /// Effective context window for budget UI / compaction thresholds. Falls
@@ -523,6 +552,7 @@ impl Default for Provider {
             model_id: None,
             display_name: None,
             capabilities_override: None,
+            model_vision_override: None,
             fallbacks: Vec::new(),
         }
     }
@@ -3088,23 +3118,88 @@ mod tests {
     }
 
     #[test]
-    fn custom_provider_capabilities_are_conservative_by_default() {
+    fn custom_openai_compatible_provider_inherits_openai_compatible_capabilities() {
+        // 2026-10-19 update: "custom" / "openai_compatible" templates are
+        // treated as OpenAI-compatible — most custom providers (MiniMax,
+        // GLM, Qwen, etc.) ship vision + tool calling + streaming. The
+        // conservative stance now lives on truly-unknown template ids.
         let custom = Provider::new("custom", "sk", "https://proxy.example/v1", "my-model-v2");
         let caps = custom.capabilities();
         assert!(caps.text_chat);
         assert!(
-            !caps.native_tools && !caps.streaming && !caps.token_usage && !caps.reasoning,
-            "custom must not assume native_tools/streaming/token_usage, got {caps:?}"
+            caps.native_tools && caps.streaming && caps.token_usage && caps.vision,
+            "custom / openai-compatible template should expose the openai preset, got {caps:?}"
         );
-        let enabled = Provider {
-            capabilities_override: Some(ProviderCapabilities::openai_compatible()),
-            ..custom
+        let explicit_off = Provider {
+            capabilities_override: Some(ProviderCapabilities::text_only()),
+            ..custom.clone()
         };
-        assert!(enabled.capabilities().native_tools);
-        assert!(enabled.capabilities().streaming);
-        assert!(enabled.capabilities().token_usage);
+        assert!(!explicit_off.capabilities().native_tools);
+        assert!(!explicit_off.capabilities().streaming);
+        // Unknown template id: stay conservative until configured or probed.
         let unknown = Provider::new("mystery-vendor", "sk", "", "m");
-        assert!(!unknown.capabilities().native_tools);
+        let unknown_caps = unknown.capabilities();
+        assert!(
+            !unknown_caps.native_tools && !unknown_caps.streaming && !unknown_caps.vision,
+            "unknown template must not assume vision/native_tools/streaming, got {unknown_caps:?}"
+        );
+    }
+
+    #[test]
+    fn model_vision_override_none_keeps_template_default() {
+        // `model_vision_override: None` is backward-compatible: the template
+        // default flows through unchanged. anthropic stays vision=true;
+        // custom / openai_compatible also stay vision=true (most modern
+        // OpenAI-compatible providers support vision — MiniMax, GLM, Qwen,
+        // …). Truly-unknown template ids stay vision=false (conservative
+        // stance — prove capability before turning it on).
+        let anthropic = Provider::new("anthropic", "sk", "", "claude");
+        assert!(anthropic.capabilities().vision);
+        let custom = Provider::new("custom", "sk", "", "my-model");
+        assert!(custom.capabilities().vision);
+        let unknown = Provider::new("mystery-vendor", "sk", "", "m");
+        assert!(!unknown.capabilities().vision);
+    }
+
+    #[test]
+    fn model_vision_override_overrides_template_default_when_some() {
+        // Anthropic with user setting vision=false → effective vision=false.
+        // This is the per-model opt-out: the catalog default is overridden
+        // by an explicit user flag.
+        let manual_off = Provider {
+            model_vision_override: Some(false),
+            ..Provider::new("anthropic", "sk", "", "claude")
+        };
+        assert!(!manual_off.capabilities().vision);
+        // Custom / openai_compatible with user setting vision=false → also off.
+        let custom_off = Provider {
+            model_vision_override: Some(false),
+            ..Provider::new("custom", "sk", "", "my-model")
+        };
+        assert!(!custom_off.capabilities().vision);
+        // Same custom template with user setting vision=true → on.
+        let custom_on = Provider {
+            model_vision_override: Some(true),
+            ..Provider::new("custom", "sk", "", "my-model")
+        };
+        assert!(custom_on.capabilities().vision);
+    }
+
+    #[test]
+    fn model_vision_override_applies_through_capabilities_override() {
+        // `capabilities_override` (CLI / shell context-window knob) must not
+        // skip the per-model vision layer. We mutate vision on the derived
+        // caps before storing; the override still rides on top.
+        let mut caps = ProviderCapabilities::conservative();
+        caps.context_window_tokens = 64_000;
+        let provider = Provider {
+            capabilities_override: Some(caps),
+            model_vision_override: Some(true),
+            ..Provider::new("custom", "sk", "", "my-model")
+        };
+        let derived = provider.capabilities();
+        assert!(derived.vision);
+        assert_eq!(derived.context_window_tokens, 64_000);
     }
 
     #[test]
@@ -4600,13 +4695,16 @@ mod tests {
     fn provider_template_vision_anthropic_and_openai_on_deepseek_off() {
         // The shape the desktop shell relies on for the first-time notice:
         // vision-capable templates report true; deepseek/conservative
-        // templates report false. A flip here is a wire-visible change.
+        // templates report false. 2026-10-19: "custom" joined the
+        // openai_compatible preset (most modern OpenAI-compatible LLMs ship
+        // vision — MiniMax, GLM, Qwen, …). Truly-unknown ids stay false.
+        // A flip here is a wire-visible change.
         assert!(provider_template_vision("anthropic"));
         assert!(provider_template_vision("openai"));
         assert!(provider_template_vision("openai_compatible"));
+        assert!(provider_template_vision("custom"));
         assert!(!provider_template_vision("deepseek"));
         assert!(!provider_template_vision("text_only"));
-        assert!(!provider_template_vision("custom"));
         // Unknown templates default off (conservative stance).
         assert!(!provider_template_vision("mystery-template"));
     }
