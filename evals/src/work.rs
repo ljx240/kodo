@@ -85,6 +85,7 @@ pub(super) fn run(report: &mut super::EvalReport) {
                 budget_family: None,
                 memory: None,
                 knowledge_context: None,
+                allow_verify_commands: false,
             };
             let mut ready = false;
             let mut sink = |event| {

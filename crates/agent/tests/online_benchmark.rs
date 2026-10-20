@@ -50,6 +50,7 @@ fn online_read_only_smoke() {
         budget_family: None,
         memory: None,
         knowledge_context: None,
+        allow_verify_commands: false,
     };
 
     let mut answer = String::new();

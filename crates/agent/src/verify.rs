@@ -1067,7 +1067,13 @@ impl VerificationRunner {
                 break;
             }
             if !approve(&planned.command) {
-                let outcome = blocked_outcome(&planned.command, &cwd, "用户拒绝了验证命令");
+                let outcome = blocked_outcome(
+                    &planned.command,
+                    &cwd,
+                    // Denials in a run with no TTY are the default, not a user
+                    // decision — say what would have let this through.
+                    "验证命令未获批准，已跳过后续验证（交互模式请批准，无人值守请加 --allow-verify）",
+                );
                 let mut ev = VerificationEvidence::from_outcome(
                     &outcome,
                     &cwd,

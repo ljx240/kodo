@@ -16,6 +16,10 @@ pub struct Args {
     pub session: Option<String>,
     /// `-c/--continue`: resume the most recent session for this project.
     pub resume_last: bool,
+    /// `--allow-verify`: run the planner's own verification commands without
+    /// prompting. Needed for headless turns, where a prompt can never be
+    /// answered and verification would otherwise be skipped entirely.
+    pub allow_verify: bool,
     /// `--model <id>`: override the stored default model for this process.
     pub model: Option<String>,
     /// Joined positional arguments; `None` → interactive REPL.
@@ -138,6 +142,7 @@ pub const USAGE: &str = "\
   --mode <模式>           work | code（默认读取与桌面端共享的设置）
   --session <id>          继续指定会话
   -c, --continue          继续本项目最近一次会话
+  --allow-verify          放行验证计划自身的命令（无人值守时用；危险类别仍会询问）
   --model <模型>          覆盖默认模型（仅本次进程）
   -h, --help              显示本帮助
   -V, --version           显示版本
@@ -171,6 +176,7 @@ pub fn parse(argv: &[String]) -> Parsed {
     let mut mode: Option<AgentMode> = None;
     let mut session: Option<String> = None;
     let mut resume_last = false;
+    let mut allow_verify = false;
     let mut model: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
 
@@ -187,6 +193,7 @@ pub fn parse(argv: &[String]) -> Parsed {
             "-h" | "--help" => return Parsed::Help,
             "-V" | "--version" => return Parsed::Version,
             "-c" | "--continue" => resume_last = true,
+            "--allow-verify" => allow_verify = true,
             "--project" => match take_value("--project") {
                 Ok(value) => project = Some(PathBuf::from(value)),
                 Err(err) => return Parsed::Error(err),
@@ -237,6 +244,7 @@ pub fn parse(argv: &[String]) -> Parsed {
         mode,
         session,
         resume_last,
+        allow_verify,
         model,
         message: if positional.is_empty() {
             None
@@ -499,6 +507,12 @@ mod tests {
     fn positional_arguments_join_into_one_message() {
         let args = run(&["解释", "这个", "仓库"]);
         assert_eq!(args.message.as_deref(), Some("解释 这个 仓库"));
+    }
+
+    #[test]
+    fn allow_verify_is_off_unless_asked() {
+        assert!(!run(&["hi"]).allow_verify);
+        assert!(run(&["--allow-verify", "hi"]).allow_verify);
     }
 
     #[test]

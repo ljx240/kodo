@@ -77,6 +77,7 @@ fn run(parsed: args::Args) -> i32 {
         model: parsed.model,
     });
     let mut ctx = TurnContext::new(project, session_dir, config);
+    ctx.allow_verify = parsed.allow_verify;
 
     if let Some(id) = parsed.session.as_deref() {
         if let Err(error) = ctx.resolve_session(id) {
