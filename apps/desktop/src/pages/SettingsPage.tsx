@@ -507,9 +507,32 @@ function ProviderEditor({
   const addModel = (option: ModelOption) => {
     const id = option.model_id.trim();
     if (!id) return;
+    // Pick a sensible default `vision` based on the current template so a
+    // freshly added model doesn't regress to "unknown". Modern OpenAI-
+    // compatible endpoints (custom / openai_compatible / openai) accept
+    // image inputs by default; deepseek / text_only stay text-only;
+    // unknown templates opt in (undefined) — the provider editor still
+    // lets the user toggle this after the fact.
+    const template = (initial?.template ?? PROVIDER_TEMPLATES[0].id).toLowerCase();
+    const defaultVision: boolean | undefined = (() => {
+      switch (template) {
+        case "openai":
+        case "openai_compatible":
+        case "custom":
+          return true;
+        case "deepseek":
+        case "text_only":
+        case "conservative":
+          return false;
+        default:
+          return undefined;
+      }
+    })();
+    const incomingVision = option.vision;
     const entry: ModelOption = {
       display_name: option.display_name.trim() || id,
       model_id: id,
+      vision: incomingVision ?? defaultVision,
     };
     setModels((prev) => dedupeModels([...prev, entry]));
     selectModel(entry);

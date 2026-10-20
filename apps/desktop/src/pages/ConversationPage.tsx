@@ -358,15 +358,28 @@ export function ConversationPage({
   }, [demoMode, providers, provider]);
 
   /** Does the currently-selected model accept image attachments? `undefined`
-   *  means the catalog doesn't know (legacy / user-added id) — treat as
-   *  opt-in and don't gate. `false` means definitely text-only and triggers
-   *  the first-time skip notice. */
+   *  means the catalog doesn't know (legacy / user-added id) — fall back to
+   *  a template-derived default: `openai` / `openai_compatible` / `custom`
+   *  templates are vision-capable (most modern OpenAI-compatible LLMs —
+   *  MiniMax, GLM, Qwen, … ship vision; per-model `vision: false` still
+   *  wins). Truly-unknown ids stay opt-in (undefined) so the user sees
+   *  no gate for an unverified model. `false` from the catalog stays
+   *  text-only and triggers the first-time skip notice. */
   const activeModelVision = useMemo<boolean | undefined>(() => {
     if (!provider) return undefined;
     const target = provider.modelId || provider.model;
     if (!target) return undefined;
     const match = provider.models?.find((m) => m.model_id === target);
-    return match?.vision;
+    if (match && typeof match.vision === "boolean") return match.vision;
+    const template = provider.template;
+    if (
+      template === "openai" ||
+      template === "openai_compatible" ||
+      template === "custom"
+    ) {
+      return true;
+    }
+    return undefined;
   }, [provider]);
 
   useEffect(() => {
@@ -758,7 +771,11 @@ export function ConversationPage({
     knowledgeLoadedScopeRef.current = scopeKey;
   };
 
-  const dispatchSend = async (text: string, context: string[], opts?: { skipTitle?: boolean; budgetFamily?: string | null }) => {
+  const dispatchSend = async (
+    text: string,
+    context: string[],
+    opts?: { skipTitle?: boolean; budgetFamily?: string | null; forceInline?: string[] },
+  ) => {
     if (knowledgeSendLockRef.current) return;
     knowledgeSendLockRef.current = true;
     const payload = { text, context };
@@ -875,6 +892,7 @@ export function ConversationPage({
         opts?.budgetFamily ?? null,
         prepared?.token,
         prepared ? remoteApproved : undefined,
+        opts?.forceInline ?? [],
       );
       // Stamp the chain's first entry as just-used; recents are an MRU,
       // so the next send will move it back to the top automatically.
@@ -1575,6 +1593,12 @@ export function ConversationPage({
           })
         }
         onSend={(text, context) => send(text, context)}
+        onSendWithForceInline={(text, context, forceInline, clearForceInline) => {
+          // Forward pasted/dropped paths through to the run so the agent's
+          // image-inlining branch honors the user's attach intent even when
+          // the saved vision flag is `false`.
+          dispatchSend(text, context, { forceInline }).finally(clearForceInline);
+        }}
         onStop={stop}
         providerWarning={providerWarning}
         onOpenProviderSettings={openSettings}

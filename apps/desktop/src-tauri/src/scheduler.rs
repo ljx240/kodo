@@ -443,6 +443,7 @@ fn execute_agent_run(
         conversation_history: Vec::new(),
         knowledge_context: None,
         context: Vec::new(),
+        force_inline: Vec::new(),
         provider: config.provider,
         permission: AGENT_RUN_PERMISSION,
         mode: AGENT_RUN_MODE,

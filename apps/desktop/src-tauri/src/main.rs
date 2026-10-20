@@ -1076,8 +1076,11 @@ fn list_provider_models(
         .collect())
 }
 
+/// Paths the user attached explicitly (paste / drop with no shell-known
+/// path) ride the multimodal inlining branch even when the saved provider
+/// config still marks vision as off; the user's attach intent wins over
+/// the model-capability gate. Empty by default.
 #[tauri::command]
-// Tauri injects service state alongside the existing IPC arguments.
 #[allow(clippy::too_many_arguments)]
 fn send_message(
     app: AppHandle,
@@ -1097,6 +1100,7 @@ fn send_message(
     budget_family: Option<String>,
     knowledge_token: Option<String>,
     knowledge_remote_approved: Option<bool>,
+    force_inline: Option<Vec<String>>,
 ) -> Result<String, String> {
     let dir = sessions()?;
 
@@ -1245,6 +1249,7 @@ fn send_message(
             conversation_history,
             knowledge_context,
             context: context_paths,
+            force_inline: force_inline.unwrap_or_default(),
             provider,
             permission: config.permission,
             mode: agent_mode(found.mode),
@@ -1334,6 +1339,139 @@ fn read_context_file(project: String, path: String) -> Result<String, String> {
     manager
         .read_pinned_range(&path, 1, 40, "context preview")
         .map(|span| span.snippet)
+}
+
+/// A project root the user registered on the workspace list. Attachment
+/// writes are confined to these so a script in the webview cannot turn
+/// `save_pasted_blob` into an arbitrary-write primitive.
+fn is_registered_project(root: &Path) -> bool {
+    let Ok(canonical) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    let Some(log) = workspace::log_path() else {
+        return false;
+    };
+    let Ok(projects) = workspace::load(&log) else {
+        return false;
+    };
+    projects
+        .iter()
+        .any(|project| std::fs::canonicalize(&project.path).is_ok_and(|path| path == canonical))
+}
+
+/// Resolve where a pasted blob lands: `<registered-project>/.pasted` when the
+/// renderer passed exactly that, otherwise the OS temp directory. The renderer
+/// supplies the candidate path, so it is validated rather than trusted.
+fn pasted_target_dir(app: &tauri::AppHandle, save_dir: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(dir) = save_dir.map(Path::new) {
+        let named_pasted = dir.file_name().and_then(|name| name.to_str()) == Some(".pasted");
+        if named_pasted && dir.parent().is_some_and(is_registered_project) {
+            if std::fs::create_dir_all(dir).is_ok() {
+                // Canonicalize after creating so a `.pasted` symlink planted
+                // in the project cannot redirect the write outside it.
+                if let Ok(canonical) = std::fs::canonicalize(dir) {
+                    let stays_in_project = canonical.file_name().and_then(|name| name.to_str())
+                        == Some(".pasted")
+                        && canonical.parent().is_some_and(is_registered_project);
+                    if stays_in_project {
+                        return Ok(canonical);
+                    }
+                }
+            }
+        }
+    }
+    let dir = app
+        .path()
+        .temp_dir()
+        .map_err(|error| error.to_string())?
+        .join("kodo-pasted");
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+/// Persist clipboard / drag-drop image bytes to disk so the composer can then
+/// attach them. The clipboard API exposes `File` objects without a filesystem
+/// path, so the renderer cannot use `pickFiles` for a paste — bytes have to
+/// land on disk before the existing attachment probe + resolve pipeline can
+/// run. 16 MiB mirrors the desktop image-preview cap; larger blobs are
+/// rejected with a clear error so the renderer can surface a paste-size
+/// warning.
+#[tauri::command]
+fn save_pasted_blob(
+    app: tauri::AppHandle,
+    bytes: Vec<u8>,
+    suggested_filename: Option<String>,
+    save_dir: Option<String>,
+) -> Result<String, String> {
+    // Project-rooted target directory the renderer pre-resolves (typically
+    // `<project>/.pasted`). When `None`, unregistered or unwritable, fall
+    // back to the OS temp dir so the paste always lands somewhere. Project
+    // writes keep pasted images in agent `read_file` reach — the agent
+    // otherwise can't cross the project boundary, leaving pasted images
+    // unreachable.
+    //
+    // Must NOT be under `.kodo/` — `is_sensitive_relative_path` refuses to
+    // open any path with a `.kodo` segment, so a `.kodo/.pasted/` would
+    // be invisible to the agent's `read_file`. The renderer's
+    // `pastedSaveDir` resolves this outside `.kodo/` at the project root.
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    if bytes.is_empty() {
+        return Err("pasted blob is empty".to_owned());
+    }
+    if bytes.len() > MAX_BYTES {
+        return Err(format!(
+            "pasted blob too large: {} bytes (cap {MAX_BYTES})",
+            bytes.len()
+        ));
+    }
+    // Sanitize the suggested filename: strip path separators, keep the
+    // extension when present (image probes key off extension).
+    let raw_name = suggested_filename.unwrap_or_else(|| "pasted".to_owned());
+    let safe_name: String = raw_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_name = if safe_name.is_empty() {
+        "pasted".to_owned()
+    } else {
+        safe_name
+    };
+    let dir = pasted_target_dir(&app, save_dir.as_deref())?;
+    // Append a monotonic counter to dodge same-millisecond collisions across
+    // rapid pastes (e.g. two screenshots in a row); `create_new` keeps a
+    // colliding write from overwriting an existing file.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    for attempt in 0..100 {
+        let name = if attempt == 0 {
+            format!("pasted-{stamp}-{safe_name}")
+        } else {
+            format!("pasted-{stamp}-{attempt}-{safe_name}")
+        };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(&bytes).map_err(|error| error.to_string())?;
+                return Ok(path.to_string_lossy().into_owned());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("could not allocate a unique pasted filename".to_owned())
 }
 
 /// Attachment probe for the composer cards: kind by extension/content, plus a
@@ -1786,6 +1924,7 @@ fn main() {
             read_context_file,
             read_project_file,
             probe_context_file,
+            save_pasted_blob,
             turn_changes,
             undo_turn,
             list_artifacts,

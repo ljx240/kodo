@@ -27,6 +27,7 @@ import {
   listSkills,
   pickFiles,
   probeContextFile,
+  savePastedBlob,
   type SkillView,
 } from "../api";
 import {
@@ -80,6 +81,22 @@ type Props = {
   /** Recoverable failure from adding context (illegal path, read failure). */
   onContextError: (message: string) => void;
   onSend: (text: string, context: string[]) => void;
+  /**
+   * Called right before `onSend`. Receives the union of:
+   *   - `forceInline`: paths the user attached explicitly (paste / drop with no
+   *     shell-known path). The conversation page forwards these to the
+   *     `RunRequest.pinned_force_inline` so the agent's image inlining
+   *     branch honors the user's attach intent even when the saved
+   *     provider capability flag is `vision: false`.
+   *   - `clearForceInline`: invoked after the page forwards the paths so
+   *     the composer's tracking state stays in sync.
+   */
+  onSendWithForceInline?: (
+    text: string,
+    context: string[],
+    forceInline: string[],
+    clearForceInline: () => void,
+  ) => void;
   onStop: () => void;
   /** Provider is missing / unavailable — shown with a Settings recovery action. */
   providerWarning: string | null;
@@ -152,6 +169,7 @@ export function Composer({
   recentAgents,
   contextBudget,
   agentsVersion = 0,
+  onSendWithForceInline,
 }: Props) {
   const [draft, setDraft] = useState("");
   const input = useRef<HTMLTextAreaElement>(null);
@@ -355,6 +373,13 @@ export function Composer({
   // Stable handle for async drop/paste/file-dialog handlers that must see the latest pickFile.
   const pickFileRef = useRef(pickFile);
   pickFileRef.current = pickFile;
+  /**
+   * Paths the user attached through an explicit paste / drop-without-path
+   * action. Routed to `RunRequest.pinned_force_inline` so the agent's
+   * image-inlining branch honors the user's attach intent even when the
+   * provider's saved vision flag is `false`. Cleared after each send.
+   */
+  const pastedPathsRef = useRef<Set<string>>(new Set());
 
   /** Absolute path → project-relative when inside the project; else null. */
   const toProjectRelative = (absolute: string): string | null => {
@@ -382,6 +407,46 @@ export function Composer({
     },
     [projectPath, onContextError],
   );
+
+  /**
+   * Track a freshly saved paste in the shape `addExternalPaths` will store
+   * in `contexts` — the agent matches `pinned_force_inline` against the same
+   * strings verbatim, so an absolute path here would silently miss a
+   * project-relative `pinned_context` entry (and vice versa).
+   */
+  const trackPastedPath = (raw: string) => {
+    const absoluteOutside = raw.startsWith("/") || /^[A-Za-z]:[\\/]/.test(raw);
+    const relative = toProjectRelative(raw);
+    const normalized = relative ?? (absoluteOutside ? raw.replace(/\\/g, "/") : raw);
+    if (normalized) pastedPathsRef.current.add(normalized);
+  };
+
+  /**
+   * Save a clipboard / drop-without-path blob to a project-rooted directory
+   * (when a project is set) or the OS temp fallback. The project path keeps
+   * the agent's `read_file` tool in reach — pasted images otherwise live
+   * outside the project boundary and the model can only see them via the
+   * multimodal inline branch.
+   *
+   * NOTE: must NOT sit under `.kodo/`. `is_sensitive_relative_path`
+   * (`crates/agent/src/tools.rs`) refuses to read any path segment literally
+   * named `.kodo` — the agent's tools are gated from opening the project's
+   * own kodo config dir. Putting pasted images under `.kodo/` would make
+   * them invisible to the very `read_file` calls that let the model
+   * recover a vision-incapable provider's bytes. `.pasted/` (sibling of
+   * `.kodo/`) avoids the gate; it stays gitignored via the project's
+   * existing `.gitignore` convention.
+   */
+  const pastedSaveDir = projectPath
+    ? `${projectPath.replace(/\/+$/, "")}/.pasted`
+    : null;
+
+  const savePastedBlobToProject = async (
+    bytes: Uint8Array,
+    suggestedFilename: string | null,
+  ): Promise<string> => {
+    return savePastedBlob(bytes, suggestedFilename, pastedSaveDir);
+  };
 
   /** "添加照片和文件" — OS dialog on desktop; hidden file input elsewhere. */
   const openAttachFiles = async () => {
@@ -450,9 +515,13 @@ export function Composer({
   };
 
   const onComposerPaste = async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(event.clipboardData?.files ?? []);
-    if (files.length === 0) return;
-    // Prefer filesystem paths when the shell exposed them on the File object.
+    const transfer = event.clipboardData;
+    if (!transfer) return;
+
+    // Files exposed by the OS (Tauri sets `.path` on `File` for Finder drops
+    // and the OS file dialog). Skip straight to the existing path-based
+    // attachment flow — no temp write needed.
+    const files = Array.from(transfer.files ?? []);
     const withPath = files
       .map((file) => (file as File & { path?: string }).path)
       .filter((path): path is string => Boolean(path));
@@ -461,7 +530,73 @@ export function Composer({
       await addExternalPaths(withPath);
       return;
     }
-    const text = event.clipboardData.getData("text/plain").trim();
+
+    // Files without `.path`: image clipboard items (a screenshot paste
+    // surfaces as a `File` with type `image/png` but no path) or files
+    // copied in the browser shell. Save each blob to a project-rooted or
+    // OS-temp file via the shell, then hand the path to the existing
+    // attachment pipeline. Paths saved through this branch are tracked
+    // in `pastedPathsRef` so the agent's image inlining honors the
+    // user's attach intent even when the saved vision flag is off.
+    if (files.length > 0) {
+      event.preventDefault();
+      const savedPaths: string[] = [];
+      for (const file of files) {
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const path = await savePastedBlobToProject(bytes, file.name || null);
+          savedPaths.push(path);
+        } catch (error) {
+          // Surface a single failure via the existing toast path — the
+          // user pasted something the shell couldn't land; the rest of
+          // the paste continues so one bad item doesn't drop the whole
+          // batch.
+          onContextError(`粘贴附件失败：${String(error)}`);
+        }
+      }
+      if (savedPaths.length > 0) {
+        for (const path of savedPaths) trackPastedPath(path);
+        await addExternalPaths(savedPaths);
+      }
+      return;
+    }
+
+    // No `File`s — try clipboard items (older Chromium / WebKit only
+    // populate `items` for image pastes, not `files`). Same path: save
+    // to project-aware temp, attach.
+    const items = Array.from(transfer.items ?? []);
+    const imageItem = items.find(
+      (item) => item.kind === "file" && item.type.startsWith("image/"),
+    );
+    if (imageItem) {
+      event.preventDefault();
+      const file = imageItem.getAsFile();
+      if (file) {
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          // Pick an extension from the MIME type so the attachment probe
+          // can recognize it (image/jpeg → .jpg).
+          const ext = imageItem.type === "image/png"
+            ? ".png"
+            : imageItem.type === "image/jpeg"
+              ? ".jpg"
+              : imageItem.type === "image/gif"
+                ? ".gif"
+                : imageItem.type === "image/webp"
+                  ? ".webp"
+                  : "";
+          const path = await savePastedBlobToProject(bytes, `pasted-image${ext}`);
+          trackPastedPath(path);
+          await addExternalPaths([path]);
+        } catch (error) {
+          onContextError(`粘贴附件失败：${String(error)}`);
+        }
+      }
+      return;
+    }
+
+    // Plain text that already looks like an absolute path: attach directly.
+    const text = transfer.getData("text/plain").trim();
     if (text.startsWith("/") || text.startsWith("file://")) {
       event.preventDefault();
       await addExternalPaths([text.replace(/^file:\/\//, "")]);
@@ -481,6 +616,37 @@ export function Composer({
     if (withPath.length > 0) {
       await addExternalPaths(withPath);
       return;
+    }
+    // No path: drop carries a blob without a shell-known file location.
+    // Save image items through the project-aware temp path so the agent
+    // can reach them via `read_file`; track them in `pastedPathsRef` so
+    // the agent's image-inlining honors the user's attach intent.
+    const imageItem = Array.from(event.dataTransfer.items ?? []).find(
+      (item) => item.kind === "file" && item.type.startsWith("image/"),
+    );
+    if (imageItem) {
+      const file = imageItem.getAsFile();
+      if (file) {
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const ext = imageItem.type === "image/png"
+            ? ".png"
+            : imageItem.type === "image/jpeg"
+              ? ".jpg"
+              : imageItem.type === "image/gif"
+                ? ".gif"
+                : imageItem.type === "image/webp"
+                  ? ".webp"
+                  : "";
+          const path = await savePastedBlobToProject(bytes, `dropped-image${ext}`);
+          trackPastedPath(path);
+          await addExternalPaths([path]);
+          return;
+        } catch (error) {
+          onContextError(`拖入图片失败：${String(error)}`);
+          return;
+        }
+      }
     }
     await addDataTransferPaths(event.dataTransfer);
   };
@@ -516,7 +682,18 @@ export function Composer({
     setSelectedSkills([]);
     // Sent drafts are gone — don't resurrect them on the next visit.
     localStorage.removeItem(draftKey);
-    onSend(text, [...contexts]);
+    // Snapshot pasted paths before clearing so the page can forward them
+    // to the run's `pinned_force_inline`. Falls back to plain `onSend` for
+    // callers that haven't wired the new contract (tests / unit harness).
+    const pasted = Array.from(pastedPathsRef.current);
+    pastedPathsRef.current = new Set();
+    if (onSendWithForceInline) {
+      onSendWithForceInline(text, [...contexts], pasted, () => {
+        pastedPathsRef.current = new Set();
+      });
+    } else {
+      onSend(text, [...contexts]);
+    }
   };
 
   const permConfig = PERM_CONFIG[permission];

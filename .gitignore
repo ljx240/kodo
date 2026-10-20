@@ -29,6 +29,9 @@ settings.log
 projects.log
 sessions/
 .kodo/
+# Composer paste/drop staging (the desktop writes it at the project root so
+# the agent's read_file can reach the bytes).
+.pasted/
 
 # Env / keys
 .env

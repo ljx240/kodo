@@ -329,6 +329,12 @@ pub struct StartArgs {
     pub knowledge_context: Option<agent::knowledge::KnowledgeContext>,
     /// Project-relative context paths pinned for this turn.
     pub context: Vec<String>,
+    /// Paths the user attached explicitly (paste / drop with no shell-known
+    /// filesystem path). The agent's image inlining branch honors these
+    /// even when the provider capability flag has vision=false (the user's
+    /// intent is the strong signal; vision_ok only gates auto-attached
+    /// or history-inherited contexts).
+    pub force_inline: Vec<String>,
     pub provider: Option<agent::Provider>,
     pub permission: Permission,
     pub mode: agent::AgentMode,
@@ -707,6 +713,7 @@ pub fn start(
             conversation_history: args.conversation_history.clone(),
             knowledge_context: args.knowledge_context.clone(),
             pinned_context: args.context.clone(),
+            pinned_force_inline: args.force_inline.clone(),
             provider: args.provider.clone(),
             permission: args.permission,
             mode: args.mode,
