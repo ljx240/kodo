@@ -28,9 +28,9 @@ test("决策辅助设置小节展示模式、场景开关与显式外发说明",
   await expect(page.getByTestId("decision-provider-tencent")).toBeVisible();
   await expect(page.getByTestId("decision-mode-off")).toHaveAttribute("aria-checked", "true");
   await expect(page.getByTestId("decision-mode-observe")).toBeVisible();
-  await expect(page.getByTestId("decision-mode-assist")).toBeVisible();
-  await expect(page.getByTestId("decision-mode-assist")).toBeDisabled();
-  await expect(page.getByTestId("decision-quality-status")).toContainText("尚未评估");
+  await expect(page.getByTestId("decision-mode-assist")).toBeEnabled();
+  await page.getByTestId("decision-mode-assist").click();
+  await expect(page.getByTestId("decision-mode-assist")).toHaveAttribute("aria-checked", "true");
   await expect(page.getByTestId("decision-model")).toHaveValue("jev-1.13.0");
   // The scenarios start off; a saved credential never turns them on.
   await expect(page.getByTestId("decision-credential-save")).toBeDisabled();

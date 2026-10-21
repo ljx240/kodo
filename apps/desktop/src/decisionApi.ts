@@ -101,7 +101,7 @@ const DEFAULT_SETTINGS_JSON = JSON.stringify({
 const BROWSER_SETTINGS: DecisionSettingsDto = {
   provider: "typeSafe",
   mode: "off",
-  assistAvailable: false,
+  assistAvailable: true,
   model: "jev-1.13.0",
   taskRouteEnabled: false,
   failureTriageEnabled: false,

@@ -787,7 +787,7 @@ fn cancellation_during_http_discards_the_answer() {
 }
 
 #[test]
-fn saved_assist_is_observe_even_with_a_high_probability_response() {
+fn saved_assist_applies_a_high_probability_response() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Ok);
     let svc = service(
@@ -821,12 +821,14 @@ fn saved_assist_is_observe_even_with_a_high_probability_response() {
             true
         },
     );
-    assert_eq!(outcome, kodo_agent::decision::TaskRouteOutcome::Unchanged);
+    assert!(matches!(
+        outcome,
+        kodo_agent::decision::TaskRouteOutcome::Applied(kodo_agent::TaskType::Refactor)
+    ));
     assert_eq!(mock.requests().len(), 1);
-    assert!(diagnostics
-        .iter()
-        .any(|record| record.contains("\"mode\":\"observe\"")
-            && record.contains("\"applied\":false")));
+    assert!(diagnostics.iter().any(
+        |record| record.contains("\"mode\":\"assist\"") && record.contains("\"applied\":true")
+    ));
 }
 
 #[test]

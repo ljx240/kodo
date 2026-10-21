@@ -369,12 +369,14 @@ playwright --project=behaviour --grep "决策辅助设置小节|发送预览展�
 | 修复项 | 行为 | 新增或增强的验证 |
 | --- | --- | --- |
 | RF-001 | 授权绑定服务配置代次，预览前和响应后失效检查；Agent 采纳前复核 | `stale_configuration_never_reaches_the_server`、`configuration_changed_during_http_discards_the_answer`、`cancellation_during_http_discards_the_answer`、`the_agent_rechecks_host_validity_before_adopting_a_result` |
-| RF-002 | 真实质量门未评估，生产 Assist 有效模式强制 Observe；设置返回 `assistAvailable=false`，界面禁用并解释原因 | `unevaluated_assist_is_effectively_observe`、`saved_assist_is_observe_even_with_a_high_probability_response`、浏览器断言采纳按钮禁用和未评估提示 |
+| RF-002（历史，已被 RF-006/R007 覆盖） | 当时真实质量门未评估，生产 Assist 有效模式强制 Observe；设置返回 `assistAvailable=false`，界面禁用并解释原因 | 历史用例 `unevaluated_assist_is_effectively_observe`、`saved_assist_is_observe_even_with_a_high_probability_response`；2026-10-21 用户要求开放 Assist 后，改为 `assist_is_selectable_and_the_default_stays_off`、`saved_assist_applies_a_high_probability_response` |
 | RF-003 | 正文和生成 Token 精确单字母匹配；不补齐缺失选项、不重分配缺失概率质量 | `openrouter_refusals_and_explanations_are_not_option_letters`、`openrouter_generated_token_must_match_the_answer`、`openrouter_does_not_invent_missing_option_probabilities` |
 | RF-004 | 恢复仅回写校验成功后的单行 JSON，写入失败显示配置错误；配置指纹使用规范化内容 | 增强 `a_truncated_record_is_recovered_and_written_back`，断言第二次 recovered=false、字节内容和配置代次不变 |
 | RF-005 | 生产服务使用进程共享并发槽和来源/凭据代次熔断，运行级授权/预算不共享；作用域释放名额及探测位 | `three_runs_share_the_same_two_network_slots`、`multiple_runs_share_two_slots_and_release_them_on_drop`、`authentication_block_is_shared_until_the_credential_changes`、`cooldown_and_single_probe_are_shared_across_runs`、`production_services_default_to_the_same_runtime` |
 
-之前 AC-007/012/018 的“通过”只覆盖部分时序，本轮补充了真实 loopback 在途换代与取消用例。AC-013 本轮已验证三运行并发：只有两个请求到达本机模拟服务器。旧 `Assist` 配置保持可读取，但本轮及当前生产构建均不会实际采纳建议。原场景测试中的假句柄仍可验证有界采纳策略，不代表真实质量门达标。
+之前 AC-007/012/018 的“通过”只覆盖部分时序，本轮补充了真实 loopback 在途换代与取消用例。AC-013 本轮已验证三运行并发：只有两个请求到达本机模拟服务器。原场景测试中的假句柄仍可验证有界采纳策略，不代表真实质量门达标。
+
+**2026-10-21 追加（RF-006 / R007）**：按用户明确要求，`ASSIST_AVAILABLE` 改为 `true`，设置页“采纳”可选，保存后的 Assist 会实际应用高概率建议；未评估提示不再展示。质量门仍未通过，真实模型效果仍未验证。证据：`assist_is_selectable_and_the_default_stays_off`、`saved_assist_applies_a_high_probability_response`，以及 Playwright 用例“决策辅助设置小节…”中的采纳可选用例。
 
 ### 8.2 本轮命令和结果
 

@@ -53,8 +53,10 @@ pub const DEFAULT_OPENROUTER_MODEL: &str = "typesafe/jev-1.14";
 pub const DEFAULT_TENCENT_MODEL: &str = "@makers/jev";
 /// The policy version recorded with every request and every decision record.
 pub const DEFAULT_POLICY_VERSION: &str = "kodo-jev-v1";
-/// No provider/model/scenario has passed the real quality evaluation yet.
-pub const ASSIST_AVAILABLE: bool = false;
+/// Assist is selectable. The real quality evaluation has not run, so this is
+/// an explicit product decision (2026-10-21) that accepts the per-answer
+/// threshold and hard-constraint checks as the only adoption safeguards.
+pub const ASSIST_AVAILABLE: bool = true;
 /// The settings key this component reads from `settings.log`.
 pub const SETTINGS_KEY: &str = "jev-decision";
 /// The credential namespace inside `credentials.log`. Every decision
@@ -2791,13 +2793,13 @@ mod tests {
     }
 
     #[test]
-    fn unevaluated_assist_is_effectively_observe() {
+    fn assist_is_selectable_and_the_default_stays_off() {
         let settings = DecisionSettings {
             mode: DecisionMode::Assist,
             ..DecisionSettings::default()
         };
-        assert!(!ASSIST_AVAILABLE);
-        assert_eq!(settings.effective_mode(), DecisionMode::Observe);
+        assert!(ASSIST_AVAILABLE);
+        assert_eq!(settings.effective_mode(), DecisionMode::Assist);
         assert_eq!(
             DecisionSettings::default().effective_mode(),
             DecisionMode::Off
