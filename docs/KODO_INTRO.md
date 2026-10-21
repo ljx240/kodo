@@ -34,9 +34,9 @@
 |---|---|
 | `ask`（默认） | 每个 shell 命令与写文件都需审批 |
 | `auto` | 普通命令自动执行；危险命令与写文件仍需审批 |
-| `full` | 项目内全自动（不推荐） |
+| `full` | 项目文件编辑、已识别的只读命令与项目构建/测试命令自动执行；其余仍需审批 |
 
-危险命令按风险分类（Catastrophic / DestructiveGit / SensitiveData / ProcessControl / PackageInstall / Network / FilesystemWrite），
+危险命令按风险分类（Catastrophic / DestructiveGit / SensitiveData / ProcessControl / PackageInstall / Network / FilesystemWrite / ProjectBuild），
 通过审批票据（wait point）机制请求人工批准；运行已取消时绝不等待审批。
 
 ## 开发与验证

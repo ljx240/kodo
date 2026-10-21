@@ -29,6 +29,10 @@ pub fn dangerous_reason(command: &str) -> Option<&'static str> {
 pub enum CommandRisk {
     /// Fixed builtins or Git metadata queries executed without hooks/pagers.
     ReadOnly,
+    /// Recognized project build/test command (cargo test, npm run build, …).
+    /// Build scripts and proc-macros run arbitrary code, so this is not
+    /// read-only; only Full mode auto-runs it.
+    ProjectBuild,
     /// Shell filesystem mutation; cwd alone does not confine the target.
     FilesystemWrite,
     /// Network egress (curl, wget, git push/fetch/pull, http clients).
@@ -52,6 +56,7 @@ impl CommandRisk {
     pub fn label(self) -> &'static str {
         match self {
             Self::ReadOnly => "ReadOnly",
+            Self::ProjectBuild => "ProjectBuild",
             Self::FilesystemWrite => "FilesystemWrite",
             Self::Network => "Network",
             Self::PackageInstall => "PackageInstall",
@@ -66,6 +71,7 @@ impl CommandRisk {
     pub fn reason(self) -> &'static str {
         match self {
             Self::ReadOnly => "普通命令",
+            Self::ProjectBuild => "项目构建/测试命令；构建脚本可执行任意代码",
             Self::FilesystemWrite => "shell 文件写入，无法保证目标仅在项目内",
             Self::Network => "网络敏感命令",
             Self::PackageInstall => "安装依赖包",
@@ -81,7 +87,9 @@ impl CommandRisk {
         matches!(self, Self::Catastrophic)
     }
 
-    /// Full mode still requires consent for opaque, sensitive, and external effects.
+    /// Full mode still requires consent for opaque, sensitive, and external
+    /// effects. Recognized project build/test commands are the one extra
+    /// class Full accepts, because they are the normal verification loop.
     pub fn needs_approval_in_full(self) -> bool {
         matches!(
             self,
@@ -832,9 +840,13 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
         || command.contains(['\n', '\r', '`', '$'])
         || command.contains("$(")
         || command.contains("${")
-        // Backgrounding `&` (alone, not part of `&&`) can fork and the
-        // classifier can't see what the right side does.
-        || tokens.iter().any(|t| t == "&")
+        // Backgrounding `&` (alone, not part of `&&` or a `2>&1`
+        // redirect) can fork and the classifier can't see what the
+        // right side does.
+        || tokens
+            .iter()
+            .enumerate()
+            .any(|(index, token)| token == "&" && !is_redirect_ampersand(&tokens, index))
         // Subshell `(...)` is a fresh scope — refuse to reason about it.
         || tokens.iter().any(|t| matches!(t.as_str(), "(" | ")"))
         // Bare `;` (without `&&` / `||`) is a footgun for read-only
@@ -845,14 +857,15 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
         return risk.max(CommandRisk::Unknown);
     }
 
-    // Compound-but-transparently-readable: a chain of `&&` or `||` is
-    // allowed if **every** segment individually classifies as ReadOnly.
-    // This is the fix for the "复合命令被只读权限策略拒绝" symptom in
-    // review tasks — `git status && git diff --numstat` no longer
-    // forces Full permission. Note we do NOT take this path for `;`
-    // (kept conservative) or commands containing `>` / `<` (the
-    // single-command path handles those via the absolute-path
-    // heuristic and bumps to Catastrophic / FilesystemWrite correctly).
+    // Compound-but-transparently-readable: a chain of `&&` / `||` / `|` is
+    // allowed when every segment is read-only, or when it scopes a
+    // recognized project build (`cd apps/desktop && cargo test | tail -20`).
+    // The chain fix keeps read-only review commands out of the approval path;
+    // the build segments are what Full mode accepts as its verification loop.
+    // Note we do NOT take this path for `;` (kept conservative) or commands
+    // containing `>` / `<` (the single-command path handles those via the
+    // absolute-path heuristic and bumps to Catastrophic / FilesystemWrite
+    // correctly).
     if command.contains("&&") || command.contains("||") || command.contains('|') {
         return classify_chain_risk(command);
     }
@@ -860,28 +873,77 @@ pub fn classify_command_risk(command: &str) -> CommandRisk {
     risk
 }
 
+/// `2>&1` / `>&2` tokenize as `2` `>` `&` `1`; that `&` is a dup redirect,
+/// not a background job.
+fn is_redirect_ampersand(tokens: &[String], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .and_then(|previous| tokens.get(previous))
+        .is_some_and(|previous| previous == ">" || previous == ">>")
+}
+
+/// Split on `&&` / `||` / `|` tokens, keeping redirect `&` inside its
+/// segment. Returns `None` for empty segments (`cmd1 && && cmd2`), which
+/// stay on the conservative path.
+fn split_chain_segments(tokens: &[String]) -> Option<Vec<Vec<String>>> {
+    let mut segments = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        match token.as_str() {
+            "&&" | "||" | "|" => {
+                if current.is_empty() {
+                    return None;
+                }
+                segments.push(std::mem::take(&mut current));
+            }
+            "&" if is_redirect_ampersand(tokens, index) => current.push(token.clone()),
+            "&" => return None,
+            _ => current.push(token.clone()),
+        }
+    }
+    if current.is_empty() {
+        return None;
+    }
+    segments.push(current);
+    Some(segments)
+}
+
 /// Split on `&&` / `||` / `|` and classify every segment. Returns the
 /// worst risk across segments. Empty segments force Unknown (the model
 /// ran `cmd1 &&` and forgot the right side).
 fn classify_chain_risk(command: &str) -> CommandRisk {
-    let mut worst = CommandRisk::ReadOnly;
-    for segment in command.split(['&', '|', ';']) {
-        // `&&` / `||` split on a single char produces empty strings
-        // between the operator and the next char. Drop them.
-        let trimmed = segment.trim();
-        if trimmed.is_empty() {
+    let Some(segments) = split_chain_segments(&tokenize_shell(command)) else {
+        return CommandRisk::Unknown;
+    };
+    let mut saw_project_build = false;
+    let mut saw_cd = false;
+    for segment in &segments {
+        // The top-level assignment check only sees the first token; a chain
+        // can hide `cd x && PATH=… npm test`. Assignments can swap the
+        // executable or its environment, so no segment may start with one.
+        if segment.first().is_some_and(|token| token.contains('=')) {
+            return CommandRisk::Unknown;
+        }
+        // A project-relative `cd` only scopes the build that follows it; it
+        // is never treated as a command with side effects of its own.
+        if is_project_relative_cd(segment) {
+            saw_cd = true;
             continue;
         }
-        // Re-stitch the operator we lost: a segment that came from
-        // `cmd1 && cmd2` arrives as `cmd1 ` and ` cmd2`. Recombine by
-        // re-classifying the segment as-is.
-        let seg_risk = classify_single_command_risk(trimmed);
-        worst = worst.max(seg_risk);
+        match classify_single_command_risk(&segment.join(" ")) {
+            CommandRisk::ReadOnly => {}
+            CommandRisk::ProjectBuild => saw_project_build = true,
+            other => return other.max(CommandRisk::Unknown),
+        }
     }
-    if worst == CommandRisk::ReadOnly {
-        CommandRisk::ReadOnly
+    if saw_project_build {
+        CommandRisk::ProjectBuild
+    } else if saw_cd {
+        // `cd x && <read-only>` still asks: directory changes are only
+        // transparent when they scope a recognized build.
+        CommandRisk::Unknown
     } else {
-        worst.max(CommandRisk::Unknown)
+        CommandRisk::ReadOnly
     }
 }
 
@@ -979,6 +1041,124 @@ fn read_only_git_args(command: &str) -> Option<Vec<&str>> {
     safe.then(|| args.to_vec())
 }
 
+/// Lexically inside the project: no absolute, home, drive-qualified, or
+/// parent-relative targets. Symlink escapes are not detectable here; build
+/// commands are trusted code execution either way.
+fn inside_project_path(value: &str) -> bool {
+    let path = value.trim_matches(|c| c == '\'' || c == '"');
+    if path.is_empty()
+        || path == "-"
+        || path.starts_with('/')
+        || path.starts_with('~')
+        || path.starts_with('$')
+        || path.contains(['\\', '`'])
+        || path.as_bytes().get(1) == Some(&b':')
+    {
+        return false;
+    }
+    !path.split('/').any(|part| part == "..")
+}
+
+/// `cd <project-relative dir>` used to scope a build command.
+fn is_project_relative_cd(tokens: &[String]) -> bool {
+    let head = command_head_tokens(tokens);
+    head.len() == 2
+        && basename(&head[0]) == "cd"
+        && !head[0].contains(['/', '\\'])
+        && inside_project_path(&head[1])
+}
+
+/// Arguments that would aim a build at something outside the project or
+/// hand it another program to execute.
+fn escaping_build_arg(arg: &str) -> bool {
+    let bare = arg.trim_matches(|c| c == '\'' || c == '"');
+    if matches!(
+        bare,
+        "-exec" | "--exec" | "-execdir" | "--execdir" | "--open"
+    ) {
+        return true;
+    }
+    let value = bare.split_once('=').map(|(_, value)| value).unwrap_or(bare);
+    if !inside_project_path(value) {
+        return true;
+    }
+    // `-o/tmp/out` attaches the output path to the flag.
+    bare.strip_prefix("-o").is_some_and(|rest| {
+        !rest.is_empty() && !rest.starts_with('-') && !inside_project_path(rest)
+    })
+}
+
+/// Common project build/test entry points. They write build outputs and run
+/// project code, so they are neither read-only nor arbitrary: Full mode may
+/// run them without a prompt while Ask and Auto still ask.
+fn is_project_build_command(head: &[String]) -> bool {
+    let Some(first) = head.first() else {
+        return false;
+    };
+    if first.contains('/') || first.contains('\\') {
+        return false;
+    }
+    let args = &head[1..];
+    if args.iter().any(|arg| escaping_build_arg(arg)) {
+        return false;
+    }
+    let script_is_buildish = |name: &str| {
+        matches!(
+            name.split(':').next().unwrap_or(name),
+            "build" | "test" | "lint" | "typecheck" | "check" | "fmt" | "format"
+        )
+    };
+    match basename(first).as_str() {
+        "cargo" => matches!(
+            args.first().map(String::as_str),
+            Some("check" | "test" | "clippy" | "fmt" | "build" | "bench" | "doc")
+        ),
+        "npm" => match args.first().map(String::as_str) {
+            Some("test") => true,
+            Some("run") => args.get(1).is_some_and(|script| script_is_buildish(script)),
+            _ => false,
+        },
+        "pnpm" | "yarn" => match args.first().map(String::as_str) {
+            Some("run") => args.get(1).is_some_and(|script| script_is_buildish(script)),
+            Some(script) => script_is_buildish(script),
+            None => false,
+        },
+        "pytest" => true,
+        "go" => matches!(
+            args.first().map(String::as_str),
+            Some("test" | "build" | "vet")
+        ),
+        "python" | "python3" => args.len() >= 2 && args[0] == "-m" && args[1] == "pytest",
+        _ => false,
+    }
+}
+
+/// `head -20` / `tail -n 20` as a pipe sink; file arguments and follow
+/// mode stay on the conservative path.
+fn is_head_tail_count_only(args: &[String]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].trim_matches(|c| c == '\'' || c == '"');
+        if matches!(arg, "-n" | "-c") {
+            let Some(next) = args.get(index + 1) else {
+                return false;
+            };
+            if next.is_empty() || !next.chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+            index += 2;
+        } else if let Some(digits) = arg.strip_prefix('-') {
+            if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+            index += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 fn clearly_read_only(command: &str, head: &[String]) -> bool {
     let Some(first) = head.first() else {
         return false;
@@ -995,6 +1175,7 @@ fn clearly_read_only(command: &str, head: &[String]) -> bool {
     }
     match first.as_str() {
         "echo" | "printf" | "pwd" | "true" | "false" => true,
+        "head" | "tail" => is_head_tail_count_only(args),
         "git" => read_only_git_args(command).is_some(),
         _ => false,
     }
@@ -1253,11 +1434,15 @@ fn classify_single_command_risk(command: &str) -> CommandRisk {
         }
     }
 
-    if risk == CommandRisk::ReadOnly && !clearly_read_only(command, &head) {
-        CommandRisk::Unknown
-    } else {
-        risk
+    if risk == CommandRisk::ReadOnly {
+        if is_project_build_command(&head) {
+            return CommandRisk::ProjectBuild;
+        }
+        if !clearly_read_only(command, &head) {
+            return CommandRisk::Unknown;
+        }
     }
+    risk
 }
 
 /// Resolve `relative` under `project`, refusing escapes outside the root
@@ -2211,8 +2396,7 @@ mod tests {
         for command in [
             "python -c 'print(1)'",
             "make",
-            "npm test",
-            "cargo check",
+            "npm run deploy",
             "sh script.sh",
             "PATH=other git status",
             "git -C src status",
@@ -2228,6 +2412,22 @@ mod tests {
                 "{command}"
             );
         }
+        // Recognized build/test commands are the Full-mode exception.
+        for command in ["npm test", "cargo check"] {
+            assert_eq!(
+                classify_command_risk(command),
+                CommandRisk::ProjectBuild,
+                "{command}"
+            );
+            assert!(
+                !classify_command_risk(command).needs_approval_in_full(),
+                "{command}"
+            );
+            assert!(
+                classify_command_risk(command).needs_approval_in_auto(),
+                "{command}"
+            );
+        }
         assert_eq!(
             classify_command_risk("git -C src push --force"),
             CommandRisk::DestructiveGit
@@ -2239,6 +2439,123 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn recognized_project_builds_auto_run_only_in_full() {
+        for command in [
+            "cargo check",
+            "cargo check --workspace",
+            "cargo test -p kodo-agent",
+            "cargo clippy --all-targets -- -D warnings",
+            "cargo fmt --all -- --check",
+            "cargo build --release",
+            "npm test",
+            "npm test -- --watchAll=false",
+            "npm run build",
+            "npm run typecheck",
+            "npm run test:visual",
+            "pnpm test",
+            "pnpm run build",
+            "yarn build",
+            "yarn run lint",
+            "pytest -q",
+            "python3 -m pytest -q",
+            "go test ./...",
+            "go build ./...",
+            "go vet ./...",
+        ] {
+            assert_eq!(
+                classify_command_risk(command),
+                CommandRisk::ProjectBuild,
+                "{command}"
+            );
+            assert!(
+                crate::Permission::Ask.needs_approval(crate::StepKind::Command, Some(command)),
+                "ask {command}"
+            );
+            assert!(
+                crate::Permission::Auto.needs_approval(crate::StepKind::Command, Some(command)),
+                "auto {command}"
+            );
+            assert!(
+                !crate::Permission::Full.needs_approval(crate::StepKind::Command, Some(command)),
+                "full {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn transparent_build_wrappers_stay_in_full_mode() {
+        for command in [
+            "cd apps/desktop && npm test",
+            "cd crates/agent && cargo test -p kodo-agent 2>&1 | tail -40",
+            "npm run build 2>&1 | head -20",
+            "cargo check 2>&1 | tail -n 50",
+            "pytest -q 2>&1 | tail -5",
+            "cd apps/desktop && npm run build && git status --short",
+            // Exact shapes from the failed k2k-rust evaluation run.
+            "cargo check --locked 2>&1 | tail -20",
+            "cargo check --manifest-path k2k-rust/Cargo.toml --locked 2>&1 | tail -15",
+            "cd k2k-rust && cargo check --locked 2>&1 | tail -20",
+        ] {
+            assert_eq!(
+                classify_command_risk(command),
+                CommandRisk::ProjectBuild,
+                "{command}"
+            );
+            assert!(
+                !crate::Permission::Full.needs_approval(crate::StepKind::Command, Some(command)),
+                "full {command}"
+            );
+            assert!(
+                crate::Permission::Auto.needs_approval(crate::StepKind::Command, Some(command)),
+                "auto {command}"
+            );
+        }
+        // `head`/`tail` as pipe sinks are read-only on their own.
+        assert_eq!(
+            classify_command_risk("git status | tail -20"),
+            CommandRisk::ReadOnly
+        );
+    }
+
+    #[test]
+    fn build_wrappers_cannot_escape_the_project_or_hide_other_risks() {
+        for command in [
+            "cd .. && npm test",
+            "cd /tmp && npm test",
+            "cd ~ && cargo test",
+            "cargo test --target-dir ../outside",
+            "cargo test --target-dir=/tmp/out",
+            "cargo test --manifest-path ../outside/Cargo.toml",
+            "npm run build --prefix=../outside",
+            "cd apps/desktop && PATH=/tmp/evil npm test",
+            "cd apps/desktop && cargo doc --open",
+            "go build -o /tmp/out ./...",
+            "go test -exec /bin/sh -c true",
+            "npm test; rm -rf /",
+            "npm test &",
+            "npm test > /tmp/out",
+            "npm test > build.log",
+            "make",
+            "make test",
+            "tail -f build.log",
+            "head ../outside.txt",
+        ] {
+            let risk = classify_command_risk(command);
+            if command == "npm test > /tmp/out" {
+                assert_eq!(risk, CommandRisk::Catastrophic, "{command}");
+            } else {
+                assert!(risk.needs_approval_in_full(), "{command} actual={risk:?}");
+            }
+        }
+        // A chain that appends a destructive segment collapses to the worst
+        // class, not to a build allowance.
+        assert_eq!(
+            classify_command_risk("npm test && rm -rf /"),
+            CommandRisk::Catastrophic
+        );
     }
 
     #[cfg(unix)]

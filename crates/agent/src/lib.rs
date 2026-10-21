@@ -131,7 +131,8 @@ pub enum Permission {
     Ask,
     /// Safe commands auto-run; dangerous ones and writes require approval.
     Auto,
-    /// Project file tools and recognized read-only commands auto-run; other effects ask.
+    /// Project file tools, recognized read-only commands and project
+    /// build/test commands auto-run; other effects ask.
     Full,
 }
 
@@ -639,7 +640,10 @@ fn command_category(command: &str) -> &'static str {
 fn verify_allowable_command(command: &str) -> bool {
     matches!(
         classify_command_risk(command),
-        CommandRisk::ReadOnly | CommandRisk::FilesystemWrite | CommandRisk::Unknown
+        CommandRisk::ReadOnly
+            | CommandRisk::ProjectBuild
+            | CommandRisk::FilesystemWrite
+            | CommandRisk::Unknown
     )
 }
 
@@ -8093,6 +8097,9 @@ mod tests {
         assert!(Permission::Auto.needs_approval(StepKind::FileChange, Some("write a.rs")));
         assert!(!Permission::Full.needs_approval(StepKind::FileChange, Some("write a.rs")));
         assert!(Permission::Auto.needs_approval(StepKind::Command, Some("cargo check")));
+        // Full accepts recognized project build/test commands as its verification loop.
+        assert!(!Permission::Full.needs_approval(StepKind::Command, Some("cargo check")));
+        assert!(!Permission::Full.needs_approval(StepKind::Command, Some("npm test")));
         assert!(Permission::Auto.needs_approval(StepKind::Command, Some("rm -rf x")));
         // Network + package install require approval even beyond Full catastrophic set.
         assert!(Permission::Ask.needs_approval(StepKind::Command, Some("npm install lodash")));
@@ -9074,6 +9081,71 @@ mod tests {
                 assert!(result.ok, "{}", result.output);
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recognized_build_command_runs_in_full_without_asking() {
+        let dir =
+            std::env::temp_dir().join(format!("kodo-permission-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let call = ToolCall {
+            id: ToolCallId::new("build-check"),
+            name: ToolName::RunCommand,
+            args: ToolArgs::RunCommand {
+                command: "cargo check".into(),
+            },
+        };
+        for permission in [Permission::Ask, Permission::Auto] {
+            let request = temp_request(&dir, permission);
+            let approvals = std::cell::Cell::new(0);
+            let (_, result) = execute_tool_call(
+                &call,
+                &dir,
+                &request,
+                &|| true,
+                &|_, _| {
+                    approvals.set(approvals.get() + 1);
+                    false
+                },
+                &mut |_| true,
+                &mut Vec::new(),
+                &mut dedup::TurnDedup::new(),
+            )
+            .unwrap();
+            let result = result.unwrap();
+            assert_eq!(
+                result.error.as_ref().map(|e| e.code),
+                Some(ToolErrorCode::PermissionDenied),
+                "{permission:?}"
+            );
+            assert_eq!(approvals.get(), 1, "{permission:?}");
+        }
+        // Full runs the build without consulting the approval closure. The
+        // empty temp dir makes cargo fail, but execution (not permission) is
+        // what failed.
+        let request = temp_request(&dir, Permission::Full);
+        let approvals = std::cell::Cell::new(0);
+        let (_, result) = execute_tool_call(
+            &call,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| {
+                approvals.set(approvals.get() + 1);
+                false
+            },
+            &mut |_| true,
+            &mut Vec::new(),
+            &mut dedup::TurnDedup::new(),
+        )
+        .unwrap();
+        let result = result.unwrap();
+        assert_ne!(
+            result.error.as_ref().map(|e| e.code),
+            Some(ToolErrorCode::PermissionDenied)
+        );
+        assert_eq!(approvals.get(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

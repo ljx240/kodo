@@ -488,6 +488,7 @@ pub fn start(
                     kodo_agent::tools::CommandRisk::PackageInstall => "PackageInstall",
                     kodo_agent::tools::CommandRisk::Network => "Network",
                     kodo_agent::tools::CommandRisk::FilesystemWrite => "FilesystemWrite",
+                    kodo_agent::tools::CommandRisk::ProjectBuild => "ProjectBuild",
                     kodo_agent::tools::CommandRisk::ReadOnly => {
                         if matches!(kind, StepKind::FileChange) {
                             "FilesystemWrite"

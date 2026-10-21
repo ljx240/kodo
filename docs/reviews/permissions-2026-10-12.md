@@ -107,3 +107,28 @@ npm run test:visual -- --project=behaviour behaviour.spec.ts --grep 'permission 
 - 共享设置 hook 仍乐观更新、异步保存，保存失败尚无专门界面反馈；极端保存失败或立即发送时，显示值与下一轮实际读取值仍可能暂时不一致。本次没有修改通用设置持久化协议。
 - 未启动或重新打包安装用户当前运行的 Kodo，未检查真实会话和本地敏感运行数据。界面验证采用本地 Tauri stub，安全验证采用隔离临时仓库。
 - 未运行完整 Rust / 全量截图套件、Windows 运行验证、联网模型调用或远程 CI；本次为本地源码审查与针对性回归，未宣称独立审查通过。
+
+## 后续变更（2026-10-21）：Full 模式接受项目构建/测试命令
+
+用户选择了扩展 `Permission::Full`：新增 `CommandRisk::ProjectBuild`，只有 Full 自动执行已识别的项目构建/测试命令，Auto 与 Ask 仍然审批。识别范围：
+
+- `cargo check` / `test` / `clippy` / `fmt` / `build` / `bench` / `doc`
+- `npm test`、`npm run <build|test|lint|typecheck|check|fmt|format>[:变体]`；`pnpm` / `yarn` 的同名脚本
+- `pytest`、`python -m pytest`、`go test` / `build` / `vet`
+
+允许的无副作用包装：`cd <项目相对子目录> && …`、`| head -n N` / `| tail -n N`（仅数字参数）、`2>&1`。以下仍进入审批：Auto/Ask 的全部命令、网络、安装依赖、敏感数据、进程控制、破坏性 Git、任意脚本与 heredoc、以赋值开头的命令、`;` / 后台 `&` / 子 shell、以及把构建指向项目外的参数（绝对路径、`~`、`..`、`--target-dir=` / `--prefix=` 等）。
+
+构建脚本、测试代码与 proc-macro 可以执行任意代码，因此该扩展不构成操作系统沙箱；上面的“`cargo check`、`npm test` 等仍需要批准”只描述本次扩展前的行为。
+
+验证命令：
+
+```text
+cargo test --offline -p kodo-agent --lib
+test result: ok. 709 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+cargo test --offline -p kodo-desktop --bin kodo-desktop
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+cargo check --offline -p kodo-desktop -p kodo-cli
+cd apps/desktop && npm run typecheck && npm run build
+```
