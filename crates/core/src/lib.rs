@@ -7,6 +7,7 @@ pub mod apps;
 pub mod scheduler;
 pub mod session;
 pub mod settings;
+pub mod skill_paths;
 pub mod traces;
 pub mod workspace;
 

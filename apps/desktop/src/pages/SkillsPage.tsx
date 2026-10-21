@@ -9,7 +9,7 @@
  */
 import { Pencil, Plus, Puzzle, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { deleteSkill, listSkills, type SkillView } from "../api";
+import { deleteSkill, listSkills, type SkillSource, type SkillView } from "../api";
 import { skillSpace, skillsFor } from "../data/skills";
 import { T } from "../i18n";
 import { SkillDetailModal } from "./SkillDetailModal";
@@ -20,7 +20,7 @@ type ModalState =
   | {
       mode: "view";
       name: string;
-      source: "builtin" | StoreSource;
+      source: SkillSource;
       label?: string;
       detail?: string;
       initial?: SkillView | null;
@@ -28,6 +28,14 @@ type ModalState =
   | { mode: "edit"; name: string; source: StoreSource; initial: SkillView }
   | { mode: "new"; source: StoreSource }
   | null;
+
+/** Human label for a skill source. `plugin:<tool>` gets the tool name. */
+function sourceLabel(source: SkillSource): string {
+  if (source.startsWith("plugin:")) {
+    return T.skill.pluginSource(source.slice("plugin:".length));
+  }
+  return T.skill.sources[source] ?? source;
+}
 
 export function SkillsTab({
   agentMode,
@@ -41,6 +49,8 @@ export function SkillsTab({
 }) {
   const [userSkills, setUserSkills] = useState<SkillView[]>([]);
   const [projectSkills, setProjectSkills] = useState<SkillView[]>([]);
+  /** Read-only skills found in other agents' global/project directories. */
+  const [externalSkills, setExternalSkills] = useState<SkillView[]>([]);
   const [modal, setModal] = useState<ModalState>(null);
   /** Armed two-step delete on a row: `"<scope>:<name>"` awaiting confirmation. */
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -62,6 +72,12 @@ export function SkillsTab({
       const inSpace = (skill: SkillView) => skillSpace(skill.taskTypes) === agentMode;
       setUserSkills(list.filter((skill) => skill.source === "user" && inSpace(skill)));
       setProjectSkills(list.filter((skill) => skill.source === "project" && inSpace(skill)));
+      setExternalSkills(
+        list.filter(
+          (skill) =>
+            !["builtin", "user", "project"].includes(skill.source) && inSpace(skill),
+        ),
+      );
     });
   }, [agentMode, projectPath]);
 
@@ -144,6 +160,28 @@ export function SkillsTab({
     );
   };
 
+  /** One read-only external row — preview only, no edit/delete controls. */
+  const externalRow = (skill: SkillView) => (
+    <div
+      className="external-skill-row"
+      key={`${skill.source}:${skill.name}`}
+      data-external-skill-id={skill.name}
+      data-source={skill.source}
+    >
+      <button
+        type="button"
+        className="external-skill-open"
+        onClick={() => openRow(skill)}
+      >
+        <Puzzle size={17} strokeWidth={1.7} />
+        <span className="skill-row-label">{skill.name}</span>
+        <span className="skill-source-badge">{sourceLabel(skill.source)}</span>
+        <span className="skill-row-readonly">{T.skill.externalReadOnly}</span>
+        <code>/{skill.name}</code>
+      </button>
+    </div>
+  );
+
   return (
     <>
       <section className="skills-card" aria-label={T.page.skillsCard}>
@@ -203,6 +241,24 @@ export function SkillsTab({
           </div>
         ) : (
           userSkills.map((skill) => storeRow(skill, "user"))
+        )}
+      </section>
+
+      <section
+        className="skills-card"
+        aria-label={T.page.skillsLocalCard}
+        data-testid="skills-local-card"
+      >
+        <div className="skills-card-head">
+          {T.page.skillsLocalCard}
+          <span className="skills-card-hint">{T.page.skillsLocalHint}</span>
+        </div>
+        {externalSkills.length === 0 ? (
+          <div className="skills-empty" data-testid="skills-local-empty">
+            {T.page.skillsLocalEmpty}
+          </div>
+        ) : (
+          externalSkills.map(externalRow)
         )}
       </section>
 

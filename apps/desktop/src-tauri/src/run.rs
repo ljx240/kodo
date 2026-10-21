@@ -791,6 +791,7 @@ pub fn start(
             session_id: Some(args.id.clone()),
             // Same directory the skill CRUD commands read/write.
             user_skills_dir: kodo_core::settings::state_dir().map(|d| d.join("skills")),
+            skill_roots: kodo_core::skill_paths::local_skill_roots(args.project.as_deref()),
             mcp_servers: args.mcp_servers.clone(),
             agent_instructions: args.agent_instructions.clone(),
             personas: args.personas.clone(),

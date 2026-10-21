@@ -2179,6 +2179,7 @@ fn run_one_live_task(
         local_trace: false,
         session_id: Some(format!("eval_{id}")),
         user_skills_dir: None,
+        skill_roots: Vec::new(),
         mcp_servers: Vec::new(),
         agent_instructions: None,
         personas: Vec::new(),

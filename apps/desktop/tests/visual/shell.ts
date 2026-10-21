@@ -946,10 +946,28 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             return skillsState;
           case "read_skill": {
             const name = String(args?.name ?? "");
-            const fromStore = skillsState.find((skill) => skill.name === name);
+            const wanted = typeof args?.source === "string" ? args.source : null;
+            // New view fields default the way `skill_record_view` fills them so
+            // fixtures written before the discovery work stay valid.
+            const normalize = (skill: Record<string, unknown>) => {
+              const format = typeof skill.format === "string" ? skill.format : "kodo";
+              return {
+                scope: skill.source === "project" ? "project" : "global",
+                readOnly: skill.source !== "user" && skill.source !== "project",
+                format,
+                path: "",
+                guidanceOnly: format === "agent",
+                ...skill,
+              };
+            };
+            const fromStore = skillsState.find(
+              (skill) =>
+                skill.name === name &&
+                (wanted === null || skill.source === wanted || skill.source === undefined),
+            );
             const detail = fromStore ?? config.skillDetails?.[name];
             if (!detail) throw "技能不存在";
-            return detail;
+            return normalize(detail as Record<string, unknown>);
           }
           case "save_skill": {
             if (config.failSaveSkill) throw config.failSaveSkill;
@@ -974,6 +992,11 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
             const view = {
               name,
               source: args?.scope === "project" ? "project" : "user",
+              scope: args?.scope === "project" ? "project" : "global",
+              readOnly: false,
+              format: "kodo",
+              path: "",
+              guidanceOnly: false,
               description:
                 section("description").trim().split("\n")[0] || firstBullet("completion_criteria"),
               taskTypes: taskTypes.length > 0 ? taskTypes : ["docs"],

@@ -12,6 +12,7 @@ import {
   readSkill,
   saveSkill,
   type SkillScope,
+  type SkillSource,
   type SkillView,
 } from "../api";
 import { T } from "../i18n";
@@ -22,7 +23,7 @@ type Props = {
   /** Skill id the row opened; absent when creating. */
   name?: string;
   /** Source known from the row (also the create target for `new` mode). */
-  source?: "builtin" | "user" | "project";
+  source?: SkillSource;
   /** Static display label from the list (builtin rows: 缺陷修复 …). */
   label?: string;
   /** Static one-line description from the display list (builtin rows). */
@@ -166,6 +167,14 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 const KIND_LABELS = T.skill.kinds as Record<string, string>;
 
+/** Human label for an external source (`claude`, `plugin:codex`, …). */
+function sourceLabel(source: string): string {
+  if (source.startsWith("plugin:")) {
+    return T.skill.pluginSource(source.slice("plugin:".length));
+  }
+  return T.skill.sources[source] ?? source;
+}
+
 export function SkillDetailModal({
   mode,
   name,
@@ -191,7 +200,7 @@ export function SkillDetailModal({
     if (!name || mode === "new") return;
     let alive = true;
     const scope = source === "project" || source === "user" ? source : undefined;
-    void readSkill(name, { scope, project: projectPath }).then((full) => {
+    void readSkill(name, { scope, project: projectPath, source }).then((full) => {
       if (alive && full) setView(full);
     });
     return () => {
@@ -210,6 +219,8 @@ export function SkillDetailModal({
   const resolved = view?.source ?? source;
   /** Where writes land: the row's own store (user is the default). */
   const scope: SkillScope = resolved === "project" || source === "project" ? "project" : "user";
+  /** External and builtin rows never expose edit/delete. */
+  const editable = view ? !view.readOnly : resolved === "user" || resolved === "project";
   const title = editing
     ? mode === "new"
       ? T.skill.newTitle
@@ -288,7 +299,9 @@ export function SkillDetailModal({
                 ? T.skill.user
                 : resolved === "project"
                   ? T.skill.project
-                  : T.skill.builtin}
+                  : resolved === "builtin"
+                    ? T.skill.builtin
+                    : sourceLabel(resolved)}
             </span>
           )}
           <span className="spacer" />
@@ -333,6 +346,9 @@ export function SkillDetailModal({
           <div className="skill-detail-body">
             {(detail || view?.description) && (
               <p className="skill-detail-detail">{detail ?? view?.description}</p>
+            )}
+            {view?.guidanceOnly && (
+              <p className="skill-detail-note">{T.skill.guidanceOnly}</p>
             )}
             {view && (
               <>
@@ -394,6 +410,11 @@ export function SkillDetailModal({
                     <pre className="skill-detail-md">{view.markdown}</pre>
                   </Section>
                 )}
+                {view.path && (
+                  <Section title={T.skill.path}>
+                    <code className="skill-detail-path">{view.path}</code>
+                  </Section>
+                )}
               </>
             )}
             {!view && !detail && (
@@ -407,7 +428,7 @@ export function SkillDetailModal({
           </div>
         )}
 
-        {(editing || resolved === "user" || resolved === "project") && (
+        {(editing || editable) && (
           <footer className="skill-detail-foot">
             {editing ? (
               <>

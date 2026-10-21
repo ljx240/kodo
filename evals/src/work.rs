@@ -230,6 +230,7 @@ fn attempt(case: &Case, root: &Path, run_no: usize) -> Result<Attempt, String> {
         local_trace: false,
         session_id: None,
         user_skills_dir: None,
+        skill_roots: Vec::new(),
         mcp_servers: Vec::new(),
         agent_instructions: None,
         personas: Vec::new(),

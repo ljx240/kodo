@@ -109,9 +109,10 @@ pub use provider::{
 };
 pub use repomap::{repo_map_cached, repo_map_invalidate, ReferenceEntry, RepoMap, SymbolEntry};
 pub use skill::{
-    builtin_markdown, delete_user_skill, load_user_skills, parse_skill, save_user_skill,
-    ContextStrategy, SkillRegistry as AgentSkillRegistry, SkillSpec as AgentSkillSpec,
-    VerificationPolicy, WorkflowStep,
+    builtin_markdown, delete_user_skill, discover_skills, load_user_skills, parse_agent_skill,
+    parse_skill, save_user_skill, ContextStrategy, SkillFormat, SkillRecord,
+    SkillRegistry as AgentSkillRegistry, SkillSpec as AgentSkillSpec, VerificationPolicy,
+    WorkflowStep,
 };
 pub use state::{AgentState as TurnState, Budget as TurnBudget, FailReason as TurnFailReason};
 pub use tools::{dangerous_reason, CommandOutcome, CommandRisk};
@@ -553,6 +554,11 @@ pub struct RunRequest {
     /// the entry points). `None` = built-in skills only — tests and evals
     /// stay hermetic and never read the real user directory.
     pub user_skills_dir: Option<PathBuf>,
+    /// Additional read-only skill roots discovered on this machine
+    /// (`kodo_core::skill_paths::local_skill_roots` at the entry points:
+    /// Claude / Codex / Qoder / plugin caches / `~/.kodo/skills`). Empty =
+    /// built-ins plus the Kodo stores only — tests and evals stay hermetic.
+    pub skill_roots: Vec<kodo_core::skill_paths::SkillRoot>,
     /// MCP servers to connect for this run (`ShellConfig.mcp_servers` at the
     /// entry points). Empty = no external tools — tests and evals stay
     /// hermetic. Disabled servers are skipped by `McpClients::connect`.
@@ -3258,6 +3264,7 @@ pub fn run(
     let skill_registry = build_skill_registry(
         request.user_skills_dir.as_deref(),
         request.project.as_deref(),
+        &request.skill_roots,
     );
     let chip_skill = resolve_skill(&skill_registry, &chip_ids, request.mode).cloned();
     // The local rule's answer. It stays the baseline for the whole run:
@@ -3369,8 +3376,10 @@ pub fn run(
         TaskPlan::conversational(&request.message)
     } else {
         match &skill {
-            Some(sk) => TaskPlan::from_skill(sk, &request.message),
-            None => TaskPlan::from_task(&request.message),
+            // External Agent Skills carry guidance, not Kodo's workflow
+            // contract — they must not rewrite the plan or its gates.
+            Some(sk) if !sk.guidance_only => TaskPlan::from_skill(sk, &request.message),
+            _ => TaskPlan::from_task(&request.message),
         }
     };
     if has_project
@@ -5661,14 +5670,61 @@ fn system_prompt(
 /// checked into the repo win over personal ones. Builtin names stay reserved
 /// in both dirs (the loaders skip them), and `select()` keeps landing on
 /// builtins first. Missing dirs are fine; tests pass no dirs and stay hermetic.
-fn build_skill_registry(user_skills_dir: Option<&Path>, project: Option<&Path>) -> SkillRegistry {
-    let user = user_skills_dir.map(load_user_skills).unwrap_or_default();
-    let project_skills = project
-        .map(|p| load_user_skills(&p.join(".kodo").join("skills")))
-        .unwrap_or_default();
-    SkillRegistry::builtin()
-        .with_user(user)
-        .with_user(project_skills)
+fn build_skill_registry(
+    user_skills_dir: Option<&Path>,
+    project: Option<&Path>,
+    extra_roots: &[kodo_core::skill_paths::SkillRoot],
+) -> SkillRegistry {
+    let mut layers: Vec<(u8, Vec<SkillSpec>)> = extra_roots
+        .iter()
+        .map(|root| {
+            (
+                root.priority,
+                discover_skills(root)
+                    .into_iter()
+                    .map(|record| record.spec)
+                    .collect(),
+            )
+        })
+        .collect();
+    if let Some(dir) = user_skills_dir {
+        let root = kodo_core::skill_paths::SkillRoot::new(
+            "user",
+            kodo_core::skill_paths::SkillScope::Global,
+            dir,
+            20,
+            false,
+        );
+        layers.push((
+            20,
+            discover_skills(&root)
+                .into_iter()
+                .map(|record| record.spec)
+                .collect(),
+        ));
+    }
+    if let Some(project) = project {
+        let root = kodo_core::skill_paths::SkillRoot::new(
+            "project",
+            kodo_core::skill_paths::SkillScope::Project,
+            project.join(".kodo").join("skills"),
+            40,
+            false,
+        );
+        layers.push((
+            40,
+            discover_skills(&root)
+                .into_iter()
+                .map(|record| record.spec)
+                .collect(),
+        ));
+    }
+    layers.sort_by_key(|(priority, _)| *priority);
+    let mut registry = SkillRegistry::builtin();
+    for (_, specs) in layers {
+        registry = registry.with_user(specs);
+    }
+    registry
 }
 
 /// The active-skill block appended to the system prompt. The skill body is
@@ -5685,6 +5741,21 @@ fn skill_prompt_block(skill: &SkillSpec, task_type: TaskType) -> String {
         skill.context_strategy.label(),
         skill.verification_policy.label(),
     );
+    if skill.guidance_only {
+        let source = if skill.source.is_empty() {
+            "local"
+        } else {
+            &skill.source
+        };
+        out.push_str(&format!(
+            "Skill source: {source} (Agent Skills format; guidance only). \
+             Kodo's plan, Permission gates and verification policy still apply. \
+             Only an explicit `allowed-tools` list can narrow this turn's tool list; \
+             it can never widen it.\n"
+        ));
+    } else if !skill.source.is_empty() && skill.source != "builtin" {
+        out.push_str(&format!("Skill source: {}\n", skill.source));
+    }
     if !skill.description.is_empty() {
         out.push_str(&format!("Skill description: {}\n", skill.description));
     }
@@ -6825,7 +6896,7 @@ mod tests {
         // Builtin name in the project dir must never shadow an embedded skill.
         write_dir_skill(&project_skills, "work", "Hijack attempt.");
 
-        let reg = build_skill_registry(Some(&user_dir), Some(&project));
+        let reg = build_skill_registry(Some(&user_dir), Some(&project), &[]);
         // Project shadows user on collision (first extras win get()).
         assert_eq!(reg.get("my-notes").unwrap().description, "Project copy.");
         // Project-only skill is chip-reachable.
@@ -6839,9 +6910,71 @@ mod tests {
         assert_eq!(reg.select(TaskType::Work).unwrap().name, "work");
 
         // No dirs → builtins only, hermetic.
-        let bare = build_skill_registry(None, None);
+        let bare = build_skill_registry(None, None, &[]);
         assert!(bare.get("my-notes").is_none());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn external_skill_roots_layer_by_priority_and_never_hijack_dispatch() {
+        let base = std::env::temp_dir().join(format!("kodo-extskreg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let claude = base.join("claude");
+        let kodo_home = base.join("kodo-home");
+        for (root, description) in [(&claude, "Low copy."), (&kodo_home, "High copy.")] {
+            let dir = root.join("shared");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: shared\ndescription: {description}\n---\nBody.\n"),
+            )
+            .unwrap();
+        }
+        let notes = kodo_home.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(
+            notes.join("SKILL.md"),
+            "---\nname: notes\ndescription: Notes\n---\nNo tool list here.\n",
+        )
+        .unwrap();
+
+        let roots = vec![
+            kodo_core::skill_paths::SkillRoot::new(
+                "claude",
+                kodo_core::skill_paths::SkillScope::Global,
+                &claude,
+                10,
+                true,
+            ),
+            kodo_core::skill_paths::SkillRoot::new(
+                "kodo-home",
+                kodo_core::skill_paths::SkillScope::Global,
+                &kodo_home,
+                18,
+                true,
+            ),
+        ];
+        let reg = build_skill_registry(None, None, &roots);
+        let shared = reg.get("shared").expect("external skill");
+        assert_eq!(shared.description, "High copy.");
+        assert_eq!(shared.source, "kodo-home");
+        assert!(shared.guidance_only);
+        // Guidance-only without an allowlist keeps every tool available.
+        assert!(reg.get("notes").unwrap().allows_label("run_command"));
+        // Builtin dispatch still wins: an external Feature skill is chip-only.
+        assert_eq!(reg.select(TaskType::Feature).unwrap().name, "feature");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn skill_prompt_block_marks_guidance_only_sources() {
+        let spec = parse_agent_skill("---\nname: ext\ndescription: Ext\n---\nBody.\n", "ext")
+            .expect("agent skill");
+        let block = skill_prompt_block(&spec, TaskType::Feature);
+        assert!(block.contains("Skill source: "));
+        assert!(block.contains("guidance only"));
+        assert!(block.contains("Permission gates"));
+        assert!(block.contains("Skill guidance:\nBody."));
     }
 
     #[test]
@@ -7144,6 +7277,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -10409,6 +10543,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: vec![mcp::McpServerConfig {
                 id: "fake".to_owned(),
                 name: "Fake".to_owned(),
@@ -10739,6 +10874,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -10782,6 +10918,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -10826,6 +10963,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -10903,6 +11041,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -10964,6 +11103,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -11016,6 +11156,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -11071,6 +11212,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -11129,6 +11271,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -11203,6 +11346,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -11253,6 +11397,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -11366,6 +11511,7 @@ mod tests {
             local_trace: true,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -11509,6 +11655,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -11643,6 +11790,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],
@@ -11717,6 +11865,7 @@ mod tests {
             local_trace: false,
             session_id: None,
             user_skills_dir: None,
+            skill_roots: Vec::new(),
             mcp_servers: Vec::new(),
             agent_instructions: None,
             personas: vec![],

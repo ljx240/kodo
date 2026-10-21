@@ -5,6 +5,11 @@ import { project, sessionRef, stubShell, switchMode } from "./shell";
 const changelog = {
   name: "changelog",
   source: "user",
+  scope: "global",
+  readOnly: false,
+  format: "kodo",
+  path: "",
+  guidanceOnly: false,
   description: "Group the changes by audience into dated changelog entries",
   taskTypes: ["docs"],
   strategy: "docs-focused",
@@ -28,6 +33,11 @@ const changelog = {
 const releaseCheck = {
   name: "release-check",
   source: "project",
+  scope: "project",
+  readOnly: false,
+  format: "kodo",
+  path: "",
+  guidanceOnly: false,
   description: "Walk the pre-release checklist for the selected project",
   taskTypes: ["docs"],
   strategy: "docs-focused",
@@ -44,6 +54,11 @@ const releaseCheck = {
 const bugFixDetail = {
   name: "bug-fix",
   source: "builtin",
+  scope: "global",
+  readOnly: true,
+  format: "kodo",
+  path: "",
+  guidanceOnly: false,
   description: "Reproduce first, fix second",
   taskTypes: ["bug-fix"],
   strategy: "repro-first",
@@ -57,6 +72,27 @@ const bugFixDetail = {
   completionCriteria: ["The bug is fixed", "The tests pass"],
   guidance: "Reproduce first, fix second.",
   markdown: "# Skill: bug-fix\n\n## applicable_task_types\n- bug-fix\n",
+};
+
+/** A skill found in another agent's global directory (Agent Skills format). */
+const pdfTools = {
+  name: "pdf-tools",
+  source: "claude",
+  scope: "global",
+  readOnly: true,
+  format: "agent",
+  path: "/Users/demo/.claude/skills/pdf-tools/SKILL.md",
+  guidanceOnly: true,
+  description: "Extract text and fill forms in PDF files",
+  taskTypes: ["feature"],
+  strategy: "minimal-change",
+  policy: "full",
+  workflow: [],
+  allowedTools: ["read_file", "run_command"],
+  completionCriteria: ["Follow the pdf-tools skill guidance"],
+  guidance: "Use pdfplumber for extraction and pdf-lib for form filling.",
+  markdown:
+    "---\nname: pdf-tools\ndescription: Extract text and fill forms in PDF files\nallowed-tools:\n  - Read\n  - Bash\n---\n\n# PDF tools\n\nUse pdfplumber for extraction and pdf-lib for form filling.\n",
 };
 
 const UPDATED_MARKDOWN = [
@@ -230,6 +266,46 @@ test("user section shows the empty state when the space has no skills", async ({
   await expect(page.locator(".user-skill-row")).toHaveCount(0);
 });
 
+test("local installs land in the read-only 本地已安装 card", async ({ page }) => {
+  await stubShell(page, { skills: [pdfTools] });
+  await page.goto("/ui-demo/plugins");
+
+  const card = page.locator('[data-testid="skills-local-card"]');
+  await expect(card).toBeVisible();
+  const row = page.locator('[data-external-skill-id="pdf-tools"]');
+  await expect(row).toBeVisible();
+  await expect(row).toHaveAttribute("data-source", "claude");
+  await expect(row.locator(".skill-source-badge")).toHaveText("Claude Code");
+  await expect(row.locator(".skill-row-readonly")).toHaveText("只读");
+  // The card's rows are discovered files, never store rows with CRUD.
+  await expect(card.locator(".user-skill-row")).toHaveCount(0);
+  await expect(page.locator('[data-testid="skill-edit-pdf-tools"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="skill-delete-pdf-tools"]')).toHaveCount(0);
+  // And they never leak into the user section.
+  await expect(page.locator('[data-user-skill-id="pdf-tools"]')).toHaveCount(0);
+
+  await row.click();
+  const modal = page.locator('[data-testid="skill-detail"]');
+  await expect(modal).toBeVisible();
+  await expect(page.locator(".skill-detail-source")).toHaveText("Claude Code");
+  await expect(page.locator(".skill-detail-note")).toContainText("外部技能仅注入指导内容");
+  await expect(page.locator(".skill-detail-path")).toHaveText(
+    "/Users/demo/.claude/skills/pdf-tools/SKILL.md",
+  );
+  await expect(modal).toContainText("Use pdfplumber for extraction");
+  await expect(page.locator('[data-testid="skill-detail-edit"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="skill-detail-delete"]')).toHaveCount(0);
+});
+
+test("local card explains an empty discovery result", async ({ page }) => {
+  await stubShell(page, { skills: [] });
+  await page.goto("/ui-demo/plugins");
+
+  await expect(page.locator('[data-testid="skills-local-empty"]')).toHaveText(
+    "未发现其他编码工具的本地技能。",
+  );
+});
+
 test("project card holds project skills and scopes saves to the project store", async ({ page }) => {
   await stubShell(page, { skills: [releaseCheck, changelog] });
   await page.goto("/ui-demo/plugins");
@@ -262,6 +338,41 @@ test("project card shows its empty state when the project has no skills", async 
 
   await expect(page.locator('[data-testid="skills-project-empty"]')).toHaveText(
     "当前项目还没有项目技能。",
+  );
+});
+
+test("composer offers locally discovered skills in + and /", async ({ page }) => {
+  await stubShell(page, {
+    workspace: {
+      projects: [project("/tmp/ws/alpha", "alpha")],
+      sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")],
+    },
+    session: {
+      id: "s1",
+      project: "/tmp/ws/alpha",
+      title: "修复路由",
+      at: 1_700_000_000,
+      archived: false,
+      turns: [],
+    },
+    providers: [{ id: "p1", name: "Local", template: "openai", apiKey: "••••dead", endpoint: "", model: "gpt-test" }],
+    settings: { "active-provider": "0" },
+    skills: [pdfTools],
+  });
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  await page.locator(".tree-conversation").click();
+  await expect(page.locator(".crumb-current")).toHaveText("修复路由");
+
+  await page.locator('[data-testid="composer-input"]').fill("/pdf");
+  await expect(page.locator('[data-slash-id="pdf-tools"]')).toBeVisible();
+  await page.locator('[data-testid="composer-input"]').fill("");
+
+  await page.locator('.composer button[aria-label="添加内容"]').click();
+  await page.locator(".composer-plus-menu").getByRole("menuitem", { name: "技能" }).click();
+  await page.locator('.composer-plus-panel [data-skill-id="pdf-tools"]').click();
+  await expect(page.locator('.composer-skill[data-skill-id="pdf-tools"]')).toContainText(
+    "pdf-tools",
   );
 });
 
