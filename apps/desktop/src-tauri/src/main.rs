@@ -122,6 +122,46 @@ fn parse_safe_external_url(url: &str) -> Result<Url, String> {
     Url::parse(trimmed).map_err(|error| format!("invalid url: {error}: {trimmed}"))
 }
 
+/// The measured sandbox state of this machine.
+///
+/// The levels come from the backend's functional probe, never from a
+/// hand-written string, so the GUI cannot claim an isolation the host does
+/// not provide.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxStatus {
+    /// The configured mode: `read-only` | `workspace-write` | `unrestricted`.
+    mode: String,
+    /// The mode label in Chinese.
+    mode_label: String,
+    /// The backend that enforces it, e.g. `seatbelt`.
+    backend: String,
+    /// `full` | `partial` | `unsupported` per axis.
+    file_read: String,
+    file_write: String,
+    network_egress: String,
+    /// True when this host can confine commands at all.
+    available: bool,
+    /// Caveats worth showing. Never contains secrets.
+    notes: Vec<String>,
+}
+
+#[tauri::command]
+fn sandbox_status() -> SandboxStatus {
+    let config = kodo_shell::ShellConfig::load(kodo_shell::Overrides::default());
+    let capabilities = config.sandbox_runtime.capabilities();
+    SandboxStatus {
+        mode: config.sandbox_mode.as_str().to_owned(),
+        mode_label: config.sandbox_mode.label().to_owned(),
+        backend: capabilities.backend.clone(),
+        file_read: capabilities.file_read.label().to_owned(),
+        file_write: capabilities.file_write.label().to_owned(),
+        network_egress: capabilities.network_egress.label().to_owned(),
+        available: config.sandbox_runtime.is_available(),
+        notes: capabilities.notes.clone(),
+    }
+}
+
 #[tauri::command]
 fn core_info() -> CoreInfo {
     let info = kodo_core::info();
@@ -1367,6 +1407,9 @@ fn send_message(
         } else {
             None
         };
+        // Same confinement the CLI enforces: the shared sandbox config.
+        // Computed before `config.provider` is moved out of `config`.
+        let sandbox = config.sandbox_context(effective_project.as_deref().unwrap_or(Path::new("")));
         let mut provider = config.provider;
         if knowledge_context.is_some() {
             if let Some(provider) = &mut provider {
@@ -1405,6 +1448,7 @@ fn send_message(
             force_inline: force_inline.unwrap_or_default(),
             provider,
             permission: config.permission,
+            sandbox,
             // Interactive runs wait for the user; cancellation is the bound.
             approval_timeout: None,
             mode: agent_mode(found.mode),
@@ -2018,6 +2062,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             core_info,
+            sandbox_status,
             workspace,
             add_project,
             create_project,

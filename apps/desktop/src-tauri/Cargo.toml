@@ -11,6 +11,7 @@ tauri-build = { version = "2", features = [] }
 kodo-core = { path = "../../../crates/core" }
 kodo-agent = { path = "../../../crates/agent" }
 kodo-shell = { path = "../../../crates/shell" }
+kodo-sandbox = { path = "../../../crates/sandbox" }
 kodo-memory = { path = "../../../crates/memory" }
 kodo-knowledge = { path = "../../../crates/knowledge" }
 sha2 = "0.10"

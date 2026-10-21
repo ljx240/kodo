@@ -87,6 +87,9 @@ pub struct PendingApprovalView {
     pub risk_category: String,
     #[serde(default)]
     pub reason: String,
+    /// The sandbox scope the step runs under. Empty when unconfined.
+    #[serde(default)]
+    pub sandbox: String,
 }
 
 /// Authoritative live facts for one session. `approval` is only populated for
@@ -98,6 +101,15 @@ pub struct RunStateView {
     pub started_at: Option<u64>,
     pub progress: Option<RunProgressView>,
     pub approval: Option<PendingApprovalView>,
+}
+
+/// Chinese label for one enforcement level.
+fn level_label(level: kodo_sandbox::EnforcementLevel) -> &'static str {
+    match level {
+        kodo_sandbox::EnforcementLevel::Full => "完整",
+        kodo_sandbox::EnforcementLevel::Partial => "部分",
+        kodo_sandbox::EnforcementLevel::Unsupported => "不支持",
+    }
 }
 
 fn now_ms() -> u64 {
@@ -349,6 +361,11 @@ pub struct StartArgs {
     pub force_inline: Vec<String>,
     pub provider: Option<agent::Provider>,
     pub permission: Permission,
+    /// OS-level confinement for model-driven commands.
+    ///
+    /// `None` only when the user explicitly turned the sandbox off
+    /// (`unrestricted`); the desktop never drops confinement silently.
+    pub sandbox: Option<kodo_sandbox::SandboxContext>,
     /// How long to wait for a human approval decision. `None` = wait until
     /// the user answers or the run is cancelled. Only headless callers, which
     /// have no UI to answer the card, pass a bound.
@@ -450,6 +467,7 @@ pub fn start(
         let approve_approvals = approvals.clone();
         let approve_app = app.clone();
         let approve_project = args.project.clone().unwrap_or_default();
+        let approve_sandbox = args.sandbox.clone();
         let approve_token = token.clone();
         let permission = args.permission;
         let approval_timeout = args.approval_timeout;
@@ -501,6 +519,20 @@ pub fn start(
                 let safe_command = kodo_agent::tools::redact_secrets(command);
                 let kind_label = step_kind_label(kind).to_owned();
                 let detail = format!("{safe_command}  ·  {reason}");
+                // The approval card must state the protected scope, so the
+                // user knows what the command is confined to.
+                let sandbox = match approve_sandbox.as_ref() {
+                    Some(context) => {
+                        let capabilities = context.runtime().capabilities();
+                        format!(
+                            "{} · 文件写={} · 网络={}",
+                            context.mode().label(),
+                            level_label(capabilities.file_write),
+                            level_label(capabilities.network_egress)
+                        )
+                    }
+                    None => String::new(),
+                };
                 // Mirror the request before emitting: a conversation that is
                 // not open right now still needs this card when it comes back.
                 approve_approvals.set_pending(
@@ -514,6 +546,7 @@ pub fn start(
                         cwd: cwd.clone(),
                         risk_category: risk_category.to_owned(),
                         reason: reason.to_owned(),
+                        sandbox: sandbox.clone(),
                     },
                 );
                 emit_run(
@@ -528,6 +561,7 @@ pub fn start(
                         cwd,
                         risk_category: risk_category.to_owned(),
                         reason: reason.to_owned(),
+                        sandbox,
                     },
                 );
                 // Approval waits on the human, not on a clock: a card left
@@ -783,6 +817,7 @@ pub fn start(
             pinned_force_inline: args.force_inline.clone(),
             provider: args.provider.clone(),
             permission: args.permission,
+            sandbox: args.sandbox.clone(),
             mode: args.mode,
             fallback_to_local: args.fallback_to_local,
             max_output_tokens: args.max_output_tokens,
@@ -1014,6 +1049,7 @@ mod tests {
             cwd: "/tmp/project".into(),
             risk_category: "Safe".into(),
             reason: "tests".into(),
+            sandbox: "工作区写入 · 文件写=完整 · 网络=完整".into(),
         }
     }
 

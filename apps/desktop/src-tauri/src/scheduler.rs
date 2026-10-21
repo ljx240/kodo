@@ -643,6 +643,9 @@ fn execute_agent_run(
     emit_run_changed(&app, &scheduler, &run_id);
 
     let config = kodo_shell::ShellConfig::load(kodo_shell::Overrides::default());
+    // The sandbox is *not* widened for headless runs: an unattended job
+    // gets exactly the confinement a human-driven run gets.
+    let sandbox = config.sandbox_context(&project_path);
     let (terminal_tx, terminal_rx) = std::sync::mpsc::channel();
     let start_args = StartArgs {
         dir: prepared.dir,
@@ -657,6 +660,7 @@ fn execute_agent_run(
         // Scheduled triggers never expand permissions: Ask stays the default
         // regardless of mode, persona or trigger source.
         permission: AGENT_RUN_PERMISSION,
+        sandbox,
         approval_timeout: Some(SCHEDULED_APPROVAL_TIMEOUT),
         mode: agent_mode,
         fallback_to_local: config.fallback_to_local,

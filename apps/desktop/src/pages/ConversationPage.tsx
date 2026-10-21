@@ -138,6 +138,8 @@ type Approval = {
   cwd?: string;
   riskCategory?: string;
   reason?: string;
+  /** The sandbox scope the step runs under, e.g. "工作区写入 · 文件写=完整". */
+  sandbox?: string;
 };
 
 /** Recoverable failure: message + optional retry / recovery action. */
@@ -463,6 +465,7 @@ export function ConversationPage({
                 cwd: live.approval.cwd,
                 riskCategory: live.approval.riskCategory,
                 reason: live.approval.reason,
+                sandbox: live.approval.sandbox,
               }
             : null,
         );
@@ -2037,6 +2040,11 @@ export function ConversationPage({
                   {approval.riskCategory && (
                     <span className="approval-risk" data-testid="approval-risk">
                       风险：{approval.riskCategory}
+                    </span>
+                  )}
+                  {approval.sandbox && (
+                    <span className="approval-sandbox" data-testid="approval-sandbox">
+                      沙箱：{approval.sandbox}
                     </span>
                   )}
                 </div>
