@@ -1990,16 +1990,17 @@ fn patch_approval_step(
 #[allow(clippy::too_many_arguments)]
 fn record_opaque_changes(
     project: &Path,
-    before: std::collections::BTreeMap<String, checkpoint::FileSnapshot>,
+    before: checkpoint::CommandSnapshot,
     result: &mut ToolResult,
     changeset: &mut TurnChangeSet,
     alive: &Alive,
     emit: &mut Emit,
     local_trace: bool,
-) -> Result<(), String> {
-    result.changed_files = changeset.record_command_changes(project, &before)?;
+) {
+    result.changed_files = changeset.record_command_changes(project, &before);
     for path in &result.changed_files {
         let old = before
+            .files
             .get(path)
             .and_then(|s| s.bytes.as_deref())
             .unwrap_or_default();
@@ -2034,7 +2035,6 @@ fn record_opaque_changes(
             emit,
         );
     }
-    Ok(())
 }
 
 /// Drive one model turn's invocations → results (rejections become results).
@@ -2086,18 +2086,7 @@ fn run_invocations(
                         continue;
                     }
                 }
-                let before = match changeset.capture_command_files(project) {
-                    Ok(before) => before,
-                    Err(error) => {
-                        results.push(ToolResult::failure(
-                            call.id,
-                            call.name,
-                            args_label,
-                            ToolError::execution(error),
-                        ));
-                        continue;
-                    }
-                };
+                let before = changeset.capture_command_files(project);
                 let (keep, result) =
                     external_step(call, project, request, mcp, alive, approve, emit, notes)?;
                 if let Some(mut result) = result {
@@ -2109,7 +2098,7 @@ fn run_invocations(
                         alive,
                         emit,
                         request.local_trace,
-                    )?;
+                    );
                     *wrote_files |= !result.changed_files.is_empty();
                     persist_changeset(project, request.session_id.as_deref(), changeset)?;
                     results.push(result);
@@ -2156,18 +2145,7 @@ fn run_invocations(
                     }
                 }
                 let command_baseline = if call.name == ToolName::RunCommand {
-                    match changeset.capture_command_files(project) {
-                        Ok(before) => Some(before),
-                        Err(error) => {
-                            results.push(ToolResult::failure(
-                                call.id.clone(),
-                                call.name.label(),
-                                call.args.label(),
-                                ToolError::execution(error),
-                            ));
-                            continue;
-                        }
-                    }
+                    Some(changeset.capture_command_files(project))
                 } else {
                     None
                 };
@@ -2183,7 +2161,7 @@ fn run_invocations(
                             alive,
                             emit,
                             request.local_trace,
-                        )?;
+                        );
                     }
                     *wrote_files |= !result.changed_files.is_empty();
                     let awaiting_user = result.ok && result.name == ToolName::AskUser.label();
@@ -4219,7 +4197,7 @@ pub fn run(
                     machine.handle(AgentEvent::Cancel);
                     break;
                 }
-                let verify_before = changeset.capture_command_files(project)?;
+                let verify_before = changeset.capture_command_files(project);
                 let evidence_list =
                     verifier.run_plan_with_approval(project, &plan, alive, true, &|cmd| {
                         // Headless opt-in: the plan's own commands, capped by
@@ -4246,7 +4224,7 @@ pub fn run(
                     alive,
                     emit,
                     request.local_trace,
-                )?;
+                );
                 wrote_files |= !effects.changed_files.is_empty();
                 for path in &effects.changed_files {
                     context_mgr.invalidate(path);
@@ -9743,6 +9721,45 @@ mod tests {
         .unwrap();
         assert!(!live.get());
         assert!(results.is_none());
+    }
+
+    #[test]
+    fn run_command_survives_oversized_workspace_files() {
+        let dir = std::env::temp_dir().join(format!("kodo-big-command-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("artifact.bin"), vec![0u8; 8 * 1024 * 1024 + 1]).unwrap();
+        let request = temp_request(&dir, Permission::Full);
+        let calls = vec![ToolInvocation::Ready(ToolCall {
+            id: ToolCallId::new("big-command"),
+            name: ToolName::RunCommand,
+            args: ToolArgs::RunCommand {
+                command: "printf ok > out.txt".into(),
+            },
+        })];
+        let mut wrote_files = false;
+        let results = run_invocations(
+            calls,
+            &dir,
+            &request,
+            None,
+            &mut McpClients::default(),
+            &|| true,
+            &|_, _| true,
+            &mut |_| true,
+            &mut Vec::new(),
+            &mut wrote_files,
+            &mut TurnChangeSet::default(),
+            &mut dedup::TurnDedup::new(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(results[0].ok, "{:?}", results[0].error);
+        assert_eq!(std::fs::read_to_string(dir.join("out.txt")).unwrap(), "ok");
+        assert!(wrote_files, "the command's write must be tracked");
+        assert_eq!(results[0].changed_files, ["out.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
