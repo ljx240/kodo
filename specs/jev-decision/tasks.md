@@ -42,7 +42,8 @@ Assist 的**代码路径**已经存在并通过模拟验收（`decision_scenario
 | R005 | 共享并发与按来源/凭据代次熔断 | RF-005 | 跨运行并发、401 与冷却探测 | 已本地验证 |
 | R006 | 对应编译、回归与交付记录 | RF-001～005 | 离线 Rust、前端检查和模拟边界 | 本地验证通过，已获提交与本地集成授权；最终 Git 结果见交付说明 |
 | R007 | 按用户明确要求开放 Assist（覆盖 RF-002 的禁用），同步测试与文档 | RF-006 | `assist_is_selectable_and_the_default_stays_off`、`saved_assist_applies_a_high_probability_response`、设置页采纳可选用例 | 已本地验证 |
-| R008 | 待确认 Jev 预览跨会话恢复（`decision_pending_preview`）+ 授权等待按 TTL 截止 + 前端恢复对话框 | RF-007 | `a_pending_preview_is_visible_only_to_its_current_run`、`an_expired_preview_is_skipped_without_an_answer`、桌面全套测试、`npm run typecheck` / `build` | 已本地验证（实机切换恢复未演练） |
+| R008 | 待确认 Jev 预览跨会话恢复（`decision_pending_preview`）+ 授权等待按 TTL 截止 + 前端恢复对话框 | RF-007 | `a_pending_preview_is_visible_only_to_its_current_run`、`an_expired_preview_is_skipped_without_an_answer`、桌面全套测试、`npm run typecheck` / `build` | 已被 R009 取代 |
+| R009 | 按用户明确要求移除桌面端逐次确认：运行存活自动放行，删除预览弹框、IPC 与事件 | RF-008 | `a_live_run_sends_without_a_confirmation`、`a_stopped_run_cancels_the_request`、桌面全套测试、`decision.spec.ts` | 已本地验证 |
 
 ## 未纳入本期的范围
 

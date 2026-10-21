@@ -476,3 +476,44 @@ exit 0
 ### 9.4 Git 现场
 
 基线为本地 `main` @ `cf503c2ea6c978c44ccbc43d2714aa406a347d54`；任务分支 `fix/jev-preview-recovery`。改动 4 个代码文件（`apps/desktop/src-tauri/src/{decision,main}.rs`、`apps/desktop/src/{decisionApi.ts,pages/ConversationPage.tsx}`）与 3 份规格文件。本次未 fetch，远程新鲜度未核验；未推送、未创建 PR、未合并；7 条既有 stash 未 pop / drop / clear。旧卡死运行已由 Tauri dev 自动重建终止，修复需重启后的应用才生效。
+
+## 10. 2026-10-21 桌面端取消逐次 Jev 确认（RF-008）
+
+本节取代第 9 节中与预览界面相关的部分；壳层的授权 TTL、代次校验与一次性消费仍保留，CLI 仍使用终端预览确认。
+
+### 10.1 点击“允许本次发送”为什么没有生效
+
+`RunEvent::DecisionPreview` 的字段按 Rust 字段名序列化为 snake_case（`request_id`、`request_body`、`expires_in_seconds` 等），而前端事件类型按 camelCase 读取（`event.requestId` 等）。因此弹框中的请求正文、请求大小和有效期都是空的；点击批准时 `requestId` 为 `undefined`，`decision_confirm_preview` 因缺少参数被拒绝，运行继续等待到 300 秒 TTL，看起来就是“点了允许还是卡住”。
+
+### 10.2 变更
+
+- 按用户明确要求，桌面端不再逐次确认：`DesktopDecisionConsent` 在运行存活时直接返回 `Allow`，停止时返回 `Cancelled`。
+- 删除 `decision_confirm_preview`、`decision_pending_preview`、`DecisionRegistry`、`RunEvent::DecisionPreview` 以及前端预览弹框、DTO、事件分支和恢复逻辑。
+- 设置页外发说明改为“启用场景并保存后自动外发，不再逐次弹窗确认”；CLI 行为不变。
+- 新增用例：`a_live_run_sends_without_a_confirmation`、`a_stopped_run_cancels_the_request`。
+
+### 10.3 验证
+
+```text
+cargo check -p kodo-desktop --offline --locked
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.48s
+
+cargo test --offline --locked -p kodo-desktop --bin kodo-desktop
+test result: ok. 63 passed; 0 failed
+
+npm run typecheck
+exit 0
+
+npm run build
+✓ built in 1.07s
+
+playwright --project=behaviour tests/visual/decision.spec.ts
+3 passed (2.3s)
+```
+
+**未验证**：真实 Jev 请求是否在自动放行后正常返回；本次只验证了授权桥与构建，没有发起真实外发。
+
+### 10.4 风险与 Git 现场
+
+- 隐私边界变化：桌面端只要启用场景并保存配置，符合条件时就会自动向所选服务外发，不再有逐次确认。设置页的外发说明是唯一提示；如需恢复确认，需要重新引入预览或开关。
+- 基线为本地 `main` @ `cf503c2ea6c978c44ccbc43d2714aa406a347d54`；任务分支 `fix/jev-auto-send`（由 `fix/jev-preview-recovery` 重命名）。本次未 fetch，远程新鲜度未核验；未推送、未创建 PR、未合并；7 条既有 stash 未 pop / drop / clear。

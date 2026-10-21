@@ -233,23 +233,6 @@ type RunEventPayload =
       riskCategory?: string;
       reason?: string;
     }
-  | {
-      type: "decisionPreview";
-      session: string;
-      requestId: string;
-      runGeneration: number;
-      scenario: string;
-      mode: string;
-      origin: string;
-      path: string;
-      model: string;
-      purpose: string;
-      requestBody: string;
-      questions: string;
-      requestBytes: number;
-      stateBytes: number;
-      expiresInSeconds: number;
-    }
   | { type: "textDelta"; session: string; text: string }
   | { type: "progress"; session: string; phase: string; detail: string }
   | {

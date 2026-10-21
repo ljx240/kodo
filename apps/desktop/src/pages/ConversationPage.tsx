@@ -26,7 +26,6 @@ import {
 import { AssistantReply } from "../conversation/AssistantReply";
 import { Composer } from "../conversation/Composer";
 import { ContextCard } from "../conversation/ContextCard";
-import { DecisionPreviewDialog } from "../conversation/DecisionPreviewDialog";
 import { FindBar } from "../conversation/FindBar";
 import { KnowledgeBinding } from "../conversation/KnowledgeBinding";
 import { KnowledgeSources } from "../conversation/KnowledgeSources";
@@ -60,12 +59,6 @@ import {
 import { snapshotFromTurn, type LiveSnapshot } from "../data/liveContext";
 import { type ProviderConfig } from "../data/providers";
 import type { Project } from "../data/types";
-import {
-  decisionConfirmPreview,
-  decisionPendingPreview,
-  demoDecisionPreview,
-  type DecisionPreviewDto,
-} from "../decisionApi";
 import { T } from "../i18n";
 import { navigate } from "../routes";
 import type { ConvActions } from "../shell/TopBar";
@@ -434,7 +427,6 @@ export function ConversationPage({
     setRunning(false);
     setRunStartedAt(null);
     setApproval(null);
-    setDecisionPreview(null);
     setProgress(null);
     // A run can be live while the user is elsewhere. The log carries every
     // finished step; `run_state` adds the facts the log cannot: still running,
@@ -446,15 +438,7 @@ export function ConversationPage({
     let alive = true;
     void (async () => {
       const live = await runState(conversationId);
-      const [loaded, pendingPreview] = await Promise.all([
-        loadSession(conversationId),
-        // The preview event only reaches the conversation that was open
-        // when it was emitted. A user returning to this one must get the
-        // dialog back, or the run waits for an answer nobody can give.
-        live?.running
-          ? decisionPendingPreview(conversationId)
-          : Promise.resolve(null),
-      ]);
+      const loaded = await loadSession(conversationId);
       if (!alive || !loaded) {
         if (loadingEventsRef.current === loading) loadingEventsRef.current = null;
         return;
@@ -464,9 +448,9 @@ export function ConversationPage({
       const last = loaded.turns.length > 0 ? loaded.turns[loaded.turns.length - 1] : null;
       const logFinished = Boolean(last && (last.done || last.stopped || last.error));
       // A run that already wrote its terminal envelope may still be registered
-      // for a few milliseconds; a pending approval or decision preview is the
-      // one case where a finished-looking log still needs the live UI.
-      if (live?.running && (!logFinished || live.approval || pendingPreview)) {
+      // for a few milliseconds; the approval branch is the one case where a
+      // finished-looking log still needs the live UI.
+      if (live?.running && (!logFinished || live.approval)) {
         setRunning(true);
         setRunStartedAt(live.startedAt ?? Date.now());
         setApproval(
@@ -482,19 +466,13 @@ export function ConversationPage({
               }
             : null,
         );
-        setDecisionPreview(pendingPreview);
         setProgress(
-          live.approval
-            ? { phase: "等待审批", detail: "请确认后继续执行" }
-            : pendingPreview
-              ? { phase: "等待确认外发", detail: "请检查预览后决定是否允许发送" }
-              : live.progress,
+          live.approval ? { phase: "等待审批", detail: "请确认后继续执行" } : live.progress,
         );
       } else {
         setRunning(false);
         setRunStartedAt(null);
         setApproval(null);
-        setDecisionPreview(null);
       }
       if (loadingEventsRef.current === loading) {
         loadingEventsRef.current = null;
@@ -577,11 +555,6 @@ export function ConversationPage({
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [knowledgeFallbackAvailable, setKnowledgeFallbackAvailable] = useState(false);
   const [knowledgeApproval, setKnowledgeApproval] = useState<PreparedTurn | null>(null);
-  /** The pending decision send preview. Only one may be open at a time:
-   *  the run waits for the answer before it continues. */
-  const [decisionPreview, setDecisionPreview] = useState<DecisionPreviewDto | null>(() =>
-    demoDecisionPreview(),
-  );
   const [knowledgeReload, setKnowledgeReload] = useState(0);
   const knowledgeSelectionRef = useRef(knowledgeSelection);
   knowledgeSelectionRef.current = knowledgeSelection;
@@ -699,20 +672,6 @@ export function ConversationPage({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [knowledgeApproval]);
-
-  /** Answer the pending decision send preview. A failed answer means the
-   *  grant is already gone — the run has moved on, and the preview must
-   *  not stay on screen. */
-  const answerDecisionPreview = async (approved: boolean) => {
-    const pending = decisionPreview;
-    setDecisionPreview(null);
-    if (!pending) return;
-    try {
-      await decisionConfirmPreview(pending.requestId, approved);
-    } catch {
-      // The backend refused: the run already stopped waiting.
-    }
-  };
 
   // A create-send races its own run: the first answer can finish before
   // send_message returns the new session id. Keep one long-lived subscription,
@@ -1230,26 +1189,6 @@ export function ConversationPage({
       setProgress({ phase: "等待审批", detail: "请确认后继续执行" });
       return;
     }
-    if (event.type === "decisionPreview") {
-      setDecisionPreview({
-        session: event.session,
-        requestId: event.requestId,
-        runGeneration: event.runGeneration,
-        scenario: event.scenario,
-        mode: event.mode,
-        origin: event.origin,
-        path: event.path,
-        model: event.model,
-        purpose: event.purpose,
-        requestBody: event.requestBody,
-        questions: event.questions,
-        requestBytes: event.requestBytes,
-        stateBytes: event.stateBytes,
-        expiresInSeconds: event.expiresInSeconds,
-      });
-      setProgress({ phase: "等待确认外发", detail: "请检查预览后决定是否允许发送" });
-      return;
-    }
     if (event.type === "textDelta") {
       if (acceptStreamRef.current) {
         textBufRef.current += event.text;
@@ -1349,7 +1288,6 @@ export function ConversationPage({
       acceptStreamRef.current = false;
       setRunning(false);
       setApproval(null);
-      setDecisionPreview(null);
       textBufRef.current = "";
       setProgress(null);
       setBudget(null);
@@ -2076,14 +2014,6 @@ export function ConversationPage({
                 </ul>
               </div>
             )}
-
-            {/* The decision send preview sits outside the turn list: the run
-                is waiting for the answer, not for another step. */}
-            <DecisionPreviewDialog
-              preview={decisionPreview}
-              onApprove={() => void answerDecisionPreview(true)}
-              onSkip={() => void answerDecisionPreview(false)}
-            />
 
             {/* Approval sits outside the turn list so it also shows on an empty turn. */}
             {liveSession && approval && (

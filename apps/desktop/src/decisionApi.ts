@@ -31,25 +31,6 @@ export type DecisionCredentialDto = {
   credentialMask: string;
 };
 
-/** The one outbound request the user is asked about. The body is the exact
- *  bytes that would be sent — a summary cannot be approved, only read. */
-export type DecisionPreviewDto = {
-  session: string;
-  requestId: string;
-  runGeneration: number;
-  scenario: string;
-  mode: string;
-  origin: string;
-  path: string;
-  model: string;
-  purpose: string;
-  requestBody: string;
-  questions: string;
-  requestBytes: number;
-  stateBytes: number;
-  expiresInSeconds: number;
-};
-
 /** Mirrors `kodo_agent::decision::DecisionRecord` — the bounded metadata the
  *  Inspector shows. It never carries the request body. */
 export type DecisionRecordDto = {
@@ -147,95 +128,6 @@ export function decisionSetCredential(
 export function decisionClearCredential(provider: string): Promise<number | null> {
   if (!isDesktop()) return Promise.resolve(BROWSER_SETTINGS.configGeneration);
   return invoke<number>("decision_clear_credential", { provider });
-}
-
-/** Answer one pending send preview. The request id is the only thing the
- *  frontend supplies: the session, the run and the bytes come from the
- *  backend's own record. */
-export function decisionConfirmPreview(
-  requestId: string,
-  approved: boolean,
-): Promise<void | null> {
-  if (!isDesktop()) return Promise.resolve(null);
-  return invoke<void>("decision_confirm_preview", { requestId, approved });
-}
-
-/** The preview a live conversation is still waiting on.
- *
- *  The run event reaches only the conversation that was open when it was
- *  emitted. A user who switched away gets the dialog back from this call
- *  when they return; the backend refuses a run that no longer owns the
- *  session. */
-export function decisionPendingPreview(
-  session: string,
-): Promise<DecisionPreviewDto | null> {
-  if (!isDesktop()) return Promise.resolve(null);
-  return invoke<DecisionPreviewDto | null>("decision_pending_preview", {
-    session,
-  }).catch((error: unknown) => {
-    console.warn("kodo: decision_pending_preview failed:", error);
-    return null;
-  });
-}
-
-/**
- * The demo send preview.
- *
- * The visual suite drives the preview from the address bar, the same way
- * the knowledge fixture does. The content is fictional: no real request,
- * no real credential, no live clock.
- */
-export function demoDecisionPreview(): DecisionPreviewDto | null {
-  if (isDesktop()) return null;
-  if (new URLSearchParams(window.location.search).get("decision-preview") !== "demo") {
-    return null;
-  }
-  const requestBody = JSON.stringify({
-    model: "jev-1.13.0",
-    state: { message: "把重复的校验逻辑合并一下", mode: "code" },
-    questions: {
-      task_type: {
-        type: "choice",
-        instructions: "Classify the primary requested coding task in state.message.",
-        criteria: {
-          "bug-fix": "Repair an existing incorrect behavior",
-          feature: "Add new product behavior",
-          refactor: "Restructure code while preserving behavior",
-          unknown: "Insufficient information or no clear primary task",
-        },
-      },
-    },
-  });
-  return {
-    session: "demo-session",
-    requestId: "jev-demo",
-    runGeneration: 1,
-    scenario: "taskRoute",
-    mode: "observe",
-    origin: "https://api.typesafe.ai",
-    path: "/v1/systemone",
-    model: "jev-1.13.0",
-    purpose: "判断这次任务应归入哪一类工作流程（只影响任务分类，不改变权限与预算）",
-    requestBody,
-    questions: JSON.stringify(
-      {
-        task_type: {
-          type: "choice",
-          criteria: {
-            "bug-fix": "Repair an existing incorrect behavior",
-            feature: "Add new product behavior",
-            refactor: "Restructure code while preserving behavior",
-            unknown: "Insufficient information or no clear primary task",
-          },
-        },
-      },
-      null,
-      2,
-    ),
-    requestBytes: requestBody.length,
-    stateBytes: 48,
-    expiresInSeconds: 300,
-  };
 }
 
 /** Read a decision record out of a reasoning diagnostic. Returns `null` when

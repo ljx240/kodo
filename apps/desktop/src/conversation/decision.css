@@ -1,6 +1,5 @@
-/* The decision-assistance surfaces: the settings section, the send preview
-   and the Inspector record. The geometry follows the knowledge approval
-   dialog so the two read as one system. */
+/* The decision-assistance surfaces: the settings section and the Inspector
+   record. */
 
 .decision-settings {
   display: grid;
@@ -96,142 +95,6 @@
   margin-top: 12px;
 }
 
-.decision-preview-backdrop {
-  position: fixed;
-  z-index: 1200;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 20px;
-  background: rgb(18 26 39 / 45%);
-}
-
-.decision-preview-dialog {
-  display: flex;
-  flex-direction: column;
-  width: min(720px, 100%);
-  max-height: min(82vh, 820px);
-  overflow: hidden;
-  border: 1px solid var(--kodo-border);
-  border-radius: var(--kodo-radius-lg, 12px);
-  background: var(--kodo-surface, #fff);
-  box-shadow: 0 22px 64px rgb(18 26 39 / 25%);
-}
-
-.decision-preview-head {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
-  justify-content: space-between;
-  padding: 19px 22px 10px;
-}
-
-.decision-eyebrow {
-  margin: 0 0 5px;
-  color: var(--kodo-accent);
-  font-size: var(--kodo-font-xs);
-  font-weight: 650;
-}
-
-.decision-preview-head h2 {
-  margin: 0;
-  color: var(--kodo-text-primary);
-  font-size: 18px;
-  font-weight: 650;
-}
-
-.decision-preview-badge {
-  padding: 3px 9px;
-  border: 1px solid var(--kodo-border);
-  border-radius: 999px;
-  color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-xs);
-  white-space: nowrap;
-}
-
-.decision-preview-copy {
-  margin: 0;
-  padding: 0 22px 12px;
-  color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-sm);
-  line-height: 1.6;
-}
-
-/* The destination gets a full row: a URL must not be broken in the middle
-   of a hostname. */
-.decision-preview-facts {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px 16px;
-  margin: 0;
-  padding: 0 22px 12px;
-}
-
-.decision-preview-facts > div:first-child {
-  grid-column: 1 / -1;
-}
-
-.decision-preview-facts dt {
-  color: var(--kodo-text-tertiary, var(--kodo-text-secondary));
-  font-size: var(--kodo-font-xs);
-}
-
-.decision-preview-facts dd {
-  margin: 2px 0 0;
-  color: var(--kodo-text-primary);
-  font-size: var(--kodo-font-sm);
-  overflow-wrap: break-word;
-}
-
-.decision-preview-body {
-  display: grid;
-  gap: 10px;
-  overflow: auto;
-  min-height: 48px;
-  padding: 0 22px 12px;
-}
-
-.decision-preview-block h3 {
-  margin: 0 0 5px;
-  color: var(--kodo-text-primary);
-  font-size: var(--kodo-font-xs);
-  font-weight: 650;
-}
-
-.decision-preview-block pre {
-  margin: 0;
-  padding: 10px 11px;
-  border: 1px solid var(--kodo-border);
-  border-radius: var(--kodo-radius-sm);
-  background: var(--kodo-surface-muted, #f7f8fa);
-  color: var(--kodo-text-primary);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.decision-preview-warning {
-  display: flex;
-  gap: 7px;
-  align-items: flex-start;
-  margin: 0;
-  padding: 0 22px 12px;
-  color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-xs);
-  line-height: 1.6;
-}
-
-.decision-preview-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 12px 22px;
-  border-top: 1px solid var(--kodo-border);
-  background: var(--kodo-surface);
-}
-
 .decision-record {
   display: grid;
   gap: 4px;
@@ -270,16 +133,4 @@
 
 .decision-record-probs code {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-}
-
-@media (max-width: 720px) {
-  .decision-preview-backdrop {
-    align-items: end;
-    padding: 8px;
-  }
-
-  .decision-preview-dialog {
-    width: 100%;
-    max-height: 92vh;
-  }
 }
