@@ -211,6 +211,7 @@ fn attempt(case: &Case, root: &Path, run_no: usize) -> Result<Attempt, String> {
     )
     .map_err(|e| e.to_string())?;
     let request = RunRequest {
+        sandbox: None,
         project: Some(project.clone()),
         message: format!("请根据 source.txt 的资料生成文件，保存到 `{}`", case.path),
         conversation_history: Vec::new(),

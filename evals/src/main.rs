@@ -2165,6 +2165,7 @@ fn run_one_live_task(
     let mut claimed_verified = false;
     let mut trace: Vec<String> = Vec::new();
     let request = RunRequest {
+        sandbox: None,
         project: Some(work.to_path_buf()),
         message: prompt.to_string(),
         conversation_history: Vec::new(),
