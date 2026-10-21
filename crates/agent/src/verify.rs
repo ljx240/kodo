@@ -748,7 +748,12 @@ pub fn failure_triage_eligible(evidence: &[VerificationEvidence], budget_exhaust
         return false;
     }
     failed.iter().all(|e| {
-        e.failure_class == Some(FailureClass::Product) && e.exit_code.is_some_and(|code| code != 0)
+        e.failure_class == Some(FailureClass::Product)
+            && !matches!(
+                e.triage,
+                Some(FailureTriage::Infrastructure | FailureTriage::Transient)
+            )
+            && e.exit_code.is_some_and(|code| code != 0)
     })
 }
 
@@ -789,23 +794,22 @@ impl RepairDecision {
                 budget_exhausted: false,
             };
         }
-        let infra = failed
-            .iter()
-            .all(|e| e.failure_class == Some(FailureClass::Infrastructure))
-            || failed
-                .iter()
-                .any(|e| e.failure_class == Some(FailureClass::Infrastructure))
-                && failed.iter().all(|e| {
-                    matches!(
-                        e.failure_class,
-                        Some(FailureClass::Infrastructure) | Some(FailureClass::Timeout)
-                    )
-                });
+        // The persisted class says which marker matched; the triage says
+        // whether the failure has anything to do with the source. An
+        // environment fault must block repair even when the legacy marker
+        // defaulted to `Product` (e.g. a verify command that cannot find its
+        // own `Cargo.toml`).
+        let all_environment = failed.iter().all(|e| {
+            e.failure_class == Some(FailureClass::Infrastructure)
+                || e.triage.is_some_and(FailureTriage::blocks_code_repair)
+        });
         let class = if failed
             .iter()
             .any(|e| e.failure_class == Some(FailureClass::Denied))
         {
             FailureClass::Denied
+        } else if all_environment {
+            FailureClass::Infrastructure
         } else if failed
             .iter()
             .any(|e| e.failure_class == Some(FailureClass::Product))
@@ -824,7 +828,6 @@ impl RepairDecision {
         } else {
             FailureClass::Cancelled
         };
-        let _ = infra;
 
         let failed_cmds: Vec<String> = failed.iter().map(|e| e.command.clone()).collect();
         let targeted = plan.failed_commands(&failed_cmds);
@@ -1082,6 +1085,14 @@ fn test_command_for_filter(
     if has_file("Cargo.toml") {
         return Some(format!("cargo test {filter} --quiet"));
     }
+    if let Some(dir) = nearest_pkg_dirs(project, changed_files, "Cargo.toml")
+        .into_iter()
+        .next()
+    {
+        return Some(format!(
+            "cargo test --manifest-path {dir}/Cargo.toml --quiet {filter}"
+        ));
+    }
     if let Some(dir) = nearest_pkg_dirs(project, changed_files, "package.json")
         .into_iter()
         .next()
@@ -1099,6 +1110,35 @@ fn test_command_for_filter(
         return Some(format!("python -m pytest -q -k {filter}"));
     }
     None
+}
+
+/// Prose files whose change cannot be exercised by compiling or testing code.
+fn only_documentation_changed(changed_files: &[String]) -> bool {
+    !changed_files.is_empty()
+        && changed_files.iter().all(|path| {
+            let lower = path.to_ascii_lowercase();
+            [".md", ".mdx", ".markdown", ".rst", ".adoc"]
+                .iter()
+                .any(|ext| lower.ends_with(ext))
+        })
+}
+
+/// A cargo test invocation that resolves the package from the project root,
+/// whether its manifest is the root manifest or a nested one.
+fn cargo_test_command(rel_dir: &str, package: &str) -> String {
+    if rel_dir == "." {
+        format!("cargo test -p {package} --quiet")
+    } else {
+        format!("cargo test --manifest-path {rel_dir}/Cargo.toml -p {package} --quiet")
+    }
+}
+
+fn cargo_check_command(rel_dir: &str) -> String {
+    if rel_dir == "." {
+        "cargo check --quiet".to_owned()
+    } else {
+        format!("cargo check --manifest-path {rel_dir}/Cargo.toml --quiet")
+    }
 }
 
 impl VerificationRunner {
@@ -1256,14 +1296,17 @@ impl VerificationRunner {
         }
 
         let cargo_dirs = nearest_pkg_dirs(project, changed_files, "Cargo.toml");
-        let mut crates_changed: Vec<String> = Vec::new();
+        let mut cargo_packages: Vec<(String, String)> = Vec::new();
         for dir in &cargo_dirs {
             let name = cargo_pkg_name(project, dir);
-            if !crates_changed.contains(&name) {
-                crates_changed.push(name.clone());
+            if !cargo_packages.iter().any(|(_, n)| n == &name) {
+                cargo_packages.push((dir.clone(), name));
             }
         }
-        let package = crates_changed.first().cloned();
+        let package = cargo_packages.first().map(|(_, name)| name.clone());
+        let docs_only = only_documentation_changed(changed_files);
+        let root_manifest =
+            crate::tools::resolve_in_project(project, "Cargo.toml").is_ok_and(|p| p.is_file());
 
         let mut commands: Vec<PlannedVerifyCommand> = Vec::new();
         struct PushCtx<'a> {
@@ -1346,19 +1389,16 @@ impl VerificationRunner {
             } else {
                 generic_ids.clone()
             };
-            if !generic_for_package.is_empty() {
-                if !crates_changed.is_empty() {
-                    for pkg in crates_changed.iter().take(3) {
-                        ctx.push(
-                            VerifyKind::Test,
-                            format!("cargo test -p {pkg} --quiet"),
-                            VerifyTier::Package,
-                            generic_for_package.clone(),
-                        );
-                    }
-                } else if crate::tools::resolve_in_project(project, "Cargo.toml")
-                    .is_ok_and(|p| p.is_file())
-                {
+            if !docs_only && !generic_for_package.is_empty() {
+                for (dir, pkg) in cargo_packages.iter().take(3) {
+                    ctx.push(
+                        VerifyKind::Test,
+                        cargo_test_command(dir, pkg),
+                        VerifyTier::Package,
+                        generic_for_package.clone(),
+                    );
+                }
+                if cargo_packages.is_empty() && root_manifest {
                     ctx.push(
                         VerifyKind::Test,
                         "cargo test --quiet".to_owned(),
@@ -1369,7 +1409,7 @@ impl VerificationRunner {
             }
 
             // Reuse manifest inference for npm/Python instead of a Rust-only plan.
-            if !generic_for_package.is_empty() {
+            if !docs_only && !generic_for_package.is_empty() {
                 for command in Self::default()
                     .infer_targeted(project, changed_files)
                     .into_iter()
@@ -1390,32 +1430,37 @@ impl VerificationRunner {
             }
 
             // 3) Typecheck / check
-            if !generic_for_package.is_empty() || !exact_targets.is_empty() {
+            if !docs_only && (!generic_for_package.is_empty() || !exact_targets.is_empty()) {
                 let typecheck_ids: Vec<String> = if exact_targets.is_empty() {
                     all_ids.clone()
                 } else {
                     generic_ids.clone()
                 };
-                if !typecheck_ids.is_empty()
-                    && crate::tools::resolve_in_project(project, "Cargo.toml")
-                        .is_ok_and(|p| p.is_file())
-                {
-                    ctx.push(
-                        VerifyKind::Build,
-                        "cargo check --quiet".to_owned(),
-                        VerifyTier::Typecheck,
-                        typecheck_ids.clone(),
-                    );
+                if !typecheck_ids.is_empty() {
+                    if root_manifest {
+                        ctx.push(
+                            VerifyKind::Build,
+                            cargo_check_command("."),
+                            VerifyTier::Typecheck,
+                            typecheck_ids.clone(),
+                        );
+                    } else {
+                        for (dir, _) in cargo_packages.iter().take(3) {
+                            ctx.push(
+                                VerifyKind::Build,
+                                cargo_check_command(dir),
+                                VerifyTier::Typecheck,
+                                typecheck_ids.clone(),
+                            );
+                        }
+                    }
                 }
             }
         }
 
         // 4) Broader suite last — only when no package-level test was planned.
         let has_package_cmd = commands.iter().any(|c| c.tier == VerifyTier::Package);
-        if !generic_ids.is_empty()
-            && crate::tools::resolve_in_project(project, "Cargo.toml").is_ok_and(|p| p.is_file())
-            && !has_package_cmd
-        {
+        if !docs_only && !generic_ids.is_empty() && root_manifest && !has_package_cmd {
             commands.push(PlannedVerifyCommand {
                 command: VerifyCommand {
                     kind: VerifyKind::Test,
@@ -2541,6 +2586,59 @@ error[E0308]: mismatched types
         assert_eq!(ev.failure_class, Some(FailureClass::Product));
     }
 
+    /// The exact evidence of the failed k2k-rust assessment run: the command
+    /// could not find a manifest, so nothing about the source was tested. The
+    /// legacy marker defaulted to `Product`; the triage read the output
+    /// correctly. Repair must follow the triage.
+    #[test]
+    fn repair_decision_honors_triage_over_the_legacy_marker() {
+        let plan = VerificationPlan {
+            criterion_ids: vec!["skill_c3".into()],
+            changed_files: vec!["k2k-rust/docs/CAPABILITY-ASSESSMENT.md".into()],
+            package: Some("k2k-rust".into()),
+            task_type: "feature".into(),
+            commands: vec![PlannedVerifyCommand {
+                command: VerifyCommand::test("cargo test -p k2k-rust --quiet"),
+                criterion_ids: vec!["skill_c3".into()],
+                tier: VerifyTier::Package,
+            }],
+        };
+        let ev = VerificationEvidence {
+            command: "cargo test -p k2k-rust --quiet".into(),
+            cwd: "/Users/lijianxue/work/WorkSpace/realtime".into(),
+            exit_code: Some(101),
+            duration_ms: 96,
+            criterion_ids: vec!["skill_c3".into()],
+            output_summary: "error: could not find `Cargo.toml` in \
+                             `/Users/lijianxue/work/WorkSpace/realtime` or any parent directory"
+                .into(),
+            truncated: false,
+            ok: false,
+            failure_class: Some(FailureClass::Product),
+            triage: Some(FailureTriage::Infrastructure),
+        };
+        let decision = RepairDecision::from_evidence(std::slice::from_ref(&ev), &plan, true);
+        assert!(
+            !decision.can_repair,
+            "a manifest resolution failure is not a product regression: {decision:?}"
+        );
+        assert_eq!(decision.failure_class, FailureClass::Infrastructure);
+        assert!(!failure_triage_eligible(std::slice::from_ref(&ev), false));
+
+        // An ambiguous legacy `Product` marker without an explicit triage
+        // verdict still goes to repair and remains eligible for assistance.
+        let ambiguous = VerificationEvidence {
+            exit_code: Some(1),
+            output_summary: "something went wrong".into(),
+            triage: Some(FailureTriage::Unknown),
+            ..ev
+        };
+        assert!(
+            RepairDecision::from_evidence(std::slice::from_ref(&ambiguous), &plan, true).can_repair
+        );
+        assert!(failure_triage_eligible(&[ambiguous], false));
+    }
+
     fn temp_verify_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "kodo-vplan-{}-{}-{}",
@@ -2733,6 +2831,96 @@ error[E0308]: mismatched types
             "repro command missing from plan: {plan:?}"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A changed file inside a nested crate must not yield `cargo test -p X`
+    /// for a project root with no manifest: that invocation failed the
+    /// k2k-rust assessment run before a single test was compiled.
+    #[test]
+    fn nested_crate_plan_uses_a_manifest_path_from_the_project_root() {
+        let project = temp_verify_dir("nested-crate");
+        fs::create_dir_all(project.join("k2k-rust/src")).unwrap();
+        fs::write(
+            project.join("k2k-rust/Cargo.toml"),
+            "[package]\nname = \"k2k-rust\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("k2k-rust/src/lib.rs"), "").unwrap();
+        let plan = VerificationRunner::build_plan(
+            &project,
+            &[("c1".into(), "Verification commands pass".into())],
+            &["k2k-rust/src/lib.rs".into()],
+            "bug-fix",
+            &[],
+        );
+        let commands: Vec<&str> = plan
+            .commands
+            .iter()
+            .map(|c| c.command.command.as_str())
+            .collect();
+        assert!(
+            commands
+                .contains(&"cargo test --manifest-path k2k-rust/Cargo.toml -p k2k-rust --quiet"),
+            "{commands:?}"
+        );
+        assert!(
+            commands.contains(&"cargo check --manifest-path k2k-rust/Cargo.toml --quiet"),
+            "{commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|c| c.starts_with("cargo test -p ")),
+            "no command may assume the project root owns a manifest: {commands:?}"
+        );
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    /// Writing a report is not a code change: a docs-only change must not
+    /// trigger package tests that cannot prove anything about prose.
+    #[test]
+    fn docs_only_change_plans_no_code_verification() {
+        let project = temp_verify_dir("docs-only");
+        fs::create_dir_all(project.join("k2k-rust/docs")).unwrap();
+        fs::write(
+            project.join("k2k-rust/Cargo.toml"),
+            "[package]\nname = \"k2k-rust\"\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("k2k-rust/docs/CAPABILITY-ASSESSMENT.md"),
+            "# Assessment\n",
+        )
+        .unwrap();
+        let plan = VerificationRunner::build_plan(
+            &project,
+            &[("c1".into(), "Verification commands pass".into())],
+            &["k2k-rust/docs/CAPABILITY-ASSESSMENT.md".into()],
+            "feature",
+            &[],
+        );
+        assert!(plan.commands.is_empty(), "plan={:?}", plan.commands);
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn exact_filter_in_a_nested_crate_uses_its_manifest() {
+        let project = temp_verify_dir("nested-filter");
+        fs::create_dir_all(project.join("k2k-rust/src")).unwrap();
+        fs::write(
+            project.join("k2k-rust/Cargo.toml"),
+            "[package]\nname = \"k2k-rust\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("k2k-rust/src/lib.rs"), "").unwrap();
+        assert_eq!(
+            test_command_for_filter(
+                &project,
+                &["k2k-rust/src/lib.rs".into()],
+                "test_login_panic"
+            )
+            .as_deref(),
+            Some("cargo test --manifest-path k2k-rust/Cargo.toml --quiet test_login_panic")
+        );
+        fs::remove_dir_all(project).unwrap();
     }
 
     /// The exact-regression tier must not invent a Rust command for a project
