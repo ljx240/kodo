@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 /** Mirrors `kodo_shell::decision::DecisionSettingsView`. The credential never
  *  comes back as plaintext — only a mask and a boolean. */
 export type DecisionSettingsDto = {
-  /** `typeSafe` or `openRouter`. */
+  /** `typeSafe`, `openRouter` or `tencent`. */
   provider: string;
   mode: string;
   assistAvailable: boolean;
@@ -56,7 +56,7 @@ export type DecisionRecordDto = {
   schema: string;
   requestId: string;
   mode: string;
-  /** `typeSafe` or `openRouter` — the service that answered. */
+  /** `typeSafe`, `openRouter` or `tencent` — the service that answered. */
   provider: string;
   model: string;
   policyVersion: string;
@@ -110,6 +110,7 @@ const BROWSER_SETTINGS: DecisionSettingsDto = {
   credentials: [
     { provider: "typeSafe", id: "jev", hasCredential: false, credentialMask: "" },
     { provider: "openRouter", id: "openrouter", hasCredential: false, credentialMask: "" },
+    { provider: "tencent", id: "tencent", hasCredential: false, credentialMask: "" },
   ],
   configError: null,
   recovered: false,

@@ -19,6 +19,7 @@
 | T011 | 冻结策略后按场景实现 Assist 与硬约束复核 | T009/T010 且质量门通过 | FR-003/004/005 | 质量门评测 | **未开始 — 质量门未通过** |
 | T012 | 兼容、回退、完整验收与交付记录 | T011 | 全部 | AC-001～020 | 已实现，验收记录见 `acceptance.md` |
 | T013 | OpenRouter 来源：目的地、凭据隔离、单字母作答与 logprobs 概率、模型一致性、无概率不采纳 | T012 | FR-015 | `cargo test -p kodo-agent --lib decision::`、`cargo test -p kodo-shell --test decision_transport`、`cargo test -p kodo-agent --test decision_scenarios` | 已验证 |
+| T014 | 腾讯 EdgeOne 来源：固定目的地 `/v1/systemone`、`decision.tencent` 凭据、原生 System One、`@makers/jev` 别名与解析版本校验、设置页锁定模型 | T013 | FR-015 | `cargo test -p kodo-agent --lib decision::`、`cargo test -p kodo-shell --lib decision::`、`cargo test -p kodo-shell --test decision_transport`、`npm run typecheck`、视觉 `decision.spec.ts` | 已验证（回环模拟） |
 
 ## 关于 T011
 

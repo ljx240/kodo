@@ -1383,13 +1383,14 @@ export const T = {
     loading: "读取决策辅助配置…",
     saved: "已保存决策辅助配置。",
     outboundNotice:
-      "此功能会向所选的 TypeSafe 或 OpenRouter 发送您逐次批准的内容。每次发送前都会显示完整预览；不批准就不会发送。",
+      "此功能会向所选的 TypeSafe、OpenRouter 或腾讯 EdgeOne 发送您逐次批准的内容。每次发送前都会显示完整预览；不批准就不会发送。",
     providerLabel: "服务来源",
     providerHint:
-      "官方 Jev（TypeSafe）或 OpenRouter 路由。两者一次只启用一个；失败不会自动换到另一个。",
+      "官方 Jev（TypeSafe）、OpenRouter 路由或腾讯 EdgeOne Makers。三者一次只启用一个；失败不会自动换到另一个。",
     providers: {
       typeSafe: "官方 Jev",
       openRouter: "OpenRouter",
+      tencent: "腾讯 EdgeOne",
     },
     recovered:
       "上次的配置记录被截断，已从日志中恢复并重写为完整记录；设置值保持不变。",
@@ -1403,13 +1404,15 @@ export const T = {
     },
     modelLabel: "模型版本",
     modelHint: "首期固定官方版本；切换版本需要重新验收。",
+    modelTencentHint:
+      "腾讯 EdgeOne 只接受固定别名 @makers/jev；响应里的实际版本按别名规则校验，不能改成其他模型。",
     taskRouteLabel: "任务分类",
     taskRouteHint: "任务描述含糊时，询问外部模型应归入哪一类工作流程。",
     failureTriageLabel: "失败分流",
     failureTriageHint: "验证失败且证据含糊时，询问外部模型这是产品问题还是环境问题。",
     credentialLabel: "API 密钥",
     credentialHint: "密钥只写入 credentials.log 的 decision 命名空间，界面只显示掩码。",
-    credentialPlaceholder: "粘贴 TypeSafe API 密钥",
+    credentialPlaceholder: "粘贴所选服务的 API 密钥",
     credentialSave: "保存密钥",
     credentialClear: "清除密钥",
     credentialSaved: "已保存密钥。",

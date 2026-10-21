@@ -28,23 +28,25 @@
 | FR-012 | 桌面、CLI、后台任务的行为边界明确；无交互授权能力的入口不隐式发送 |
 | FR-013 | 通过虚构语料、离线契约检查与经单独授权的实测决定是否启用，中文结果单独报告 |
 | FR-014 | 旧配置和会话继续可读；新增配置出错时仅禁用 Jev，不导致程序启动失败 |
-| FR-015 | 支持两种服务来源（官方 Jev / OpenRouter），一次只启用一个；凭据按来源隔离；失败不自动换源；没有概率分布的答案不采纳 |
+| FR-015 | 支持三种服务来源（官方 Jev / OpenRouter / 腾讯 EdgeOne），一次只启用一个；凭据按来源隔离；失败不自动换源；没有概率分布的答案不采纳 |
 
 ### 服务来源（provider）
 
-决策请求可以走两个服务之一，**一次只启用一个**：
+决策请求可以走三个服务之一，**一次只启用一个**：
 
 | provider | 接收方 | 凭据 | 请求/响应 |
 | --- | --- | --- | --- |
 | `typeSafe` | `https://api.typesafe.ai/v1/systemone` | `decision.jev` | System One 原生格式：请求 `{model, state, questions}`，响应 `answers` 带概率分布 |
 | `openRouter` | `https://openrouter.ai/api/v1/chat/completions` | `decision.openrouter` | OpenAI 兼容 chat completions：请求单字母选择 + `logprobs`，概率由首 token 的候选归一化得到 |
+| `tencent` | `https://ai-gateway.edgeone.link/v1/systemone` | `decision.tencent` | EdgeOne Makers 原生 System One 格式，与 TypeSafe 相同；模型固定为别名 `@makers/jev`，响应报告解析后的 `jev-<版本>` |
 
 约束：
 
-- **失败不自动换源**。TypeSafe 失败不会改投 OpenRouter，反之亦然：换源等于把同一份内容发给用户没有批准过的第二个接收方。
+- **失败不自动换源**。任一来源失败都不会改投另外两个：换源等于把同一份内容发给用户没有批准过的第二个接收方。
 - 凭据按 provider 隔离，各自的密钥只发给各自的服务。
 - `openRouter` 的模型 id 由用户指定（默认 `typesafe/jev-1.14` —— 路由器是传输，模型仍是评估所依据的那一个），与 TypeSafe 的固定版本（`jev-1.13.0`）是两件事。
-- 响应里的模型必须与请求的模型一致（允许路由解析出的日期后缀与 provider 前缀），否则拒绝。
+- `tencent` 只接受固定别名 `@makers/jev`，设置页锁定模型输入；保存其他模型视为配置错误，不发起请求。
+- 响应里的模型必须与请求的模型一致：TypeSafe 要求逐字一致；OpenRouter 允许路由解析出的日期后缀与 provider 前缀；Tencent 只接受 `@makers/jev` 本身或按别名解析出的 `jev-<数字与点组成的版本>`。其他结果一律拒绝。
 - **没有概率分布的答案不采纳**。路由器不返回 token 概率时，答案只作为观察记录，`applied` 恒为 false —— 门槛假设的是真实概率，不是模型的自评。
 
 ### 本期不做
@@ -147,3 +149,12 @@
 - RF-005：进程共享最多两个在途请求；熔断按来源及凭据代次跨运行共享，凭据更新隔离旧状态，单轮授权和调用额度继续隔离（AC-011/013）。
 
 本轮只做本地修复和虚构数据验证，不执行真实模型评测或新增依赖。工程基线为 `a7133b220cefce56c3da760c3096f3c5f9b76507`；任务分支 `fix/jev-decision-review`，7 条既有 stash 保留，远程新鲜度未核验。
+
+## 10. 2026-10-21 腾讯 EdgeOne 来源（FR-015 扩展）
+
+- 新增 `tencent` provider：`https://ai-gateway.edgeone.link/v1/systemone`，凭据 id `decision.tencent`，模型别名固定 `@makers/jev`。
+- 协议复用原生 System One：请求体与 TypeSafe 相同（`{model, state, questions}`），响应 `answers` 直接带概率分布；不经过 chat completions，也不需要 logprobs。
+- 响应模型按别名规则校验：接受 `@makers/jev` 本身，或解析出的 `jev-<版本>`（版本只允许数字与点）；`jev-1.13.0-experimental`、其他模型或裸 `jev` 一律拒绝。
+- 设置页增加第三个来源；选择腾讯时模型输入锁定为 `@makers/jev`，服务端也拒绝其他模型值。三个来源的凭据、熔断代次与设置仍相互隔离，失败不自动换源。
+- 本轮只做本地实现、虚构数据与回环模拟验证，**未**向腾讯 EdgeOne 发起真实请求。真实连通性、鉴权头是否仍为 `Authorization: Bearer $MAKERS_MODELS_KEY`、实际解析版本与限流行为均未核验。
+- 工程基线为本地 `main` @ `e5b8fa6c46ef4bade3871aa5598bcba935e44a20`；本次未 fetch，远程新鲜度未核验。
