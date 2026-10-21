@@ -4,7 +4,7 @@
 //! fake decision host. Nothing leaves the machine: the decision host is a
 //! Rust object that records what it was asked and answers from a script.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kodo_agent::decision::{
@@ -17,6 +17,7 @@ use kodo_agent::{AgentMode, Permission, Provider, RunRequest, SinkEvent, Step};
 struct RecordingDecision {
     calls: Mutex<Vec<DecisionInput>>,
     outcome: Mutex<DecisionOutcome>,
+    current: AtomicBool,
 }
 
 impl RecordingDecision {
@@ -24,6 +25,7 @@ impl RecordingDecision {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
             outcome: Mutex::new(outcome),
+            current: AtomicBool::new(true),
         })
     }
 
@@ -33,6 +35,10 @@ impl RecordingDecision {
 }
 
 impl DecisionAccess for RecordingDecision {
+    fn is_current(&self) -> bool {
+        self.current.load(Ordering::SeqCst)
+    }
+
     fn evaluate(&self, input: &DecisionInput, _alive: &dyn Fn() -> bool) -> DecisionOutcome {
         self.calls.lock().unwrap().push(input.clone());
         self.outcome.lock().unwrap().clone()
@@ -345,6 +351,30 @@ fn a_low_confidence_suggestion_is_recorded_but_not_applied() {
             .any(|text| text.contains("task_type=refactor")),
         "a low-confidence suggestion must not change the category"
     );
+    let _ = std::fs::remove_dir_all(project.parent().unwrap());
+}
+
+#[test]
+fn the_agent_rechecks_host_validity_before_adopting_a_result() {
+    let (project, script) = fixture();
+    let handle = RecordingDecision::new(suggested(DecisionMode::Assist, "refactor", 0.99));
+    handle.current.store(false, Ordering::SeqCst);
+    let request = request(
+        project.clone(),
+        script,
+        AgentMode::Code,
+        "把重复的校验逻辑合并一下",
+        Some(handle.clone() as kodo_agent::DecisionHandle),
+    );
+    let (_, steps) = run_and_collect(request);
+    assert_eq!(handle.calls(), 1);
+    let records = diagnostics(&steps);
+    assert!(records
+        .iter()
+        .any(|record| record.contains("\"fallbackCode\":\"config_changed\"")));
+    assert!(!records
+        .iter()
+        .any(|record| record.contains("task_type=refactor")));
     let _ = std::fs::remove_dir_all(project.parent().unwrap());
 }
 

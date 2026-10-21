@@ -6,6 +6,7 @@ export type DecisionSettingsDto = {
   /** `typeSafe` or `openRouter`. */
   provider: string;
   mode: string;
+  assistAvailable: boolean;
   model: string;
   taskRouteEnabled: boolean;
   failureTriageEnabled: boolean;
@@ -100,6 +101,7 @@ const DEFAULT_SETTINGS_JSON = JSON.stringify({
 const BROWSER_SETTINGS: DecisionSettingsDto = {
   provider: "typeSafe",
   mode: "off",
+  assistAvailable: false,
   model: "jev-1.13.0",
   taskRouteEnabled: false,
   failureTriageEnabled: false,

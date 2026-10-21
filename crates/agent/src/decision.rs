@@ -45,6 +45,8 @@ pub const DEFAULT_MODEL: &str = "jev-1.13.0";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "typesafe/jev-1.14";
 /// The policy version recorded with every request and every decision record.
 pub const DEFAULT_POLICY_VERSION: &str = "kodo-jev-v1";
+/// No provider/model/scenario has passed the real quality evaluation yet.
+pub const ASSIST_AVAILABLE: bool = false;
 /// The settings key this component reads from `settings.log`.
 pub const SETTINGS_KEY: &str = "jev-decision";
 /// The credential namespace inside `credentials.log`. Every decision
@@ -61,7 +63,7 @@ pub const OPENROUTER_CREDENTIAL_ID: &str = "openrouter";
 /// Exactly one provider is configured at a time. A failure never falls back
 /// to the other one: switching destinations silently would send the same
 /// content to a second receiver the user did not approve for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DecisionProvider {
     /// TypeSafe System One — the official Jev endpoint.
     #[default]
@@ -239,6 +241,14 @@ impl Default for DecisionSettings {
 }
 
 impl DecisionSettings {
+    pub fn effective_mode(&self) -> DecisionMode {
+        if self.mode == DecisionMode::Assist && !ASSIST_AVAILABLE {
+            DecisionMode::Observe
+        } else {
+            self.mode
+        }
+    }
+
     /// True when the scenario may be considered at all. `mode = off` wins
     /// over every scenario switch.
     pub fn scenario_enabled(&self, scenario: DecisionScenario) -> bool {
@@ -829,7 +839,15 @@ pub fn consult_task_route(
     alive: &crate::Alive<'_>,
     emit: &mut crate::Emit<'_>,
 ) -> TaskRouteOutcome {
-    let outcome = handle.evaluate(&DecisionInput::TaskRoute(input.clone()), alive);
+    let mut outcome = handle.evaluate(&DecisionInput::TaskRoute(input.clone()), alive);
+    if !alive() {
+        outcome.result = DecisionResult::Cancelled;
+    } else if !handle.is_current() {
+        outcome.result = DecisionResult::Fallback(DecisionFailure::new(
+            "config_changed",
+            "the decision configuration is no longer current",
+        ));
+    }
     let receipt = outcome.receipt;
     // The host owns the mode: it is the one that read the setting and
     // decided whether a request was allowed at all.
@@ -927,7 +945,15 @@ pub fn consult_failure_triage(
     alive: &crate::Alive<'_>,
     emit: &mut crate::Emit<'_>,
 ) -> FailureTriageOutcome {
-    let outcome = handle.evaluate(&DecisionInput::FailureTriage(input.clone()), alive);
+    let mut outcome = handle.evaluate(&DecisionInput::FailureTriage(input.clone()), alive);
+    if !alive() {
+        outcome.result = DecisionResult::Cancelled;
+    } else if !handle.is_current() {
+        outcome.result = DecisionResult::Fallback(DecisionFailure::new(
+            "config_changed",
+            "the decision configuration is no longer current",
+        ));
+    }
     let receipt = outcome.receipt;
     let mode = receipt.mode;
     let mut record = DecisionRecord {
@@ -1058,6 +1084,11 @@ impl DecisionInput {
 /// The host-side access point. Implemented by the shell; the agent only
 /// ever sees this trait.
 pub trait DecisionAccess: Send + Sync {
+    /// Rechecked by the agent before adopting a host result.
+    fn is_current(&self) -> bool {
+        true
+    }
+
     /// Ask for a decision. Implementations must not block forever and must
     /// honour `alive` — a cancelled round must not wait for a network
     /// response.
@@ -1481,18 +1512,12 @@ pub fn parse_openrouter_response(
         .and_then(|choice| choice.message.as_ref())
         .ok_or_else(|| DecisionFailure::new("invalid_response", "the answer carries no message"))?;
     let options = &plan.question.options;
-    let letter = choice
-        .content
-        .trim()
-        .chars()
-        .next()
-        .filter(|c| c.is_ascii_alphabetic())
-        .ok_or_else(|| {
-            DecisionFailure::new(
-                "invalid_response",
-                "the answer is not a single option letter",
-            )
-        })?;
+    let letter = exact_option_letter(&choice.content).ok_or_else(|| {
+        DecisionFailure::new(
+            "invalid_response",
+            "the answer is not a single option letter",
+        )
+    })?;
     let index = letter_index(letter).ok_or_else(|| {
         DecisionFailure::new("invalid_response", "the answer letter is not valid")
     })?;
@@ -1509,6 +1534,17 @@ pub fn parse_openrouter_response(
         .first()
         .and_then(|choice| choice.logprobs.as_ref())
         .and_then(|logprobs| logprobs.content.first());
+    if let Some(token) = logprobs {
+        if exact_option_letter(&token.token) != Some(letter)
+            || !token.logprob.is_finite()
+            || token.logprob > 0.0
+        {
+            return Err(DecisionFailure::new(
+                "invalid_response",
+                "the generated token does not match the option letter",
+            ));
+        }
+    }
     let Some(probabilities) = logprobs.and_then(|token| letter_probabilities(token, options))
     else {
         // The router did not report token probabilities. The answer is
@@ -1545,12 +1581,14 @@ pub fn parse_openrouter_response(
     ))
 }
 
-/// The probability of every option, read from the first token's
-/// alternatives.
-///
-/// An option the router did not list gets the smallest probability it did
-/// list: pretending an unlisted option is impossible would overstate the
-/// runner-up and could turn a clear answer into an ambiguous one.
+fn exact_option_letter(text: &str) -> Option<char> {
+    let mut chars = text.trim().chars();
+    let letter = chars.next()?;
+    (chars.next().is_none() && letter.is_ascii_alphabetic()).then_some(letter.to_ascii_uppercase())
+}
+
+/// Keep only complete option probabilities; never invent missing mass or
+/// turn the probability of a word into that of its first letter.
 fn letter_probabilities(
     token: &TokenLogprobs,
     options: &[String],
@@ -1558,52 +1596,26 @@ fn letter_probabilities(
     if token.top_logprobs.is_empty() {
         return None;
     }
-    let mut raw: BTreeMap<String, f64> = BTreeMap::new();
-    let mut floor = f64::INFINITY;
-    for (index, option) in options.iter().enumerate() {
-        let letter = option_letter(index);
-        let mut best: Option<f64> = None;
-        for candidate in &token.top_logprobs {
-            let candidate_letter = candidate
-                .token
-                .trim()
-                .chars()
-                .next()
-                .map(|c| c.to_ascii_uppercase());
-            if candidate_letter == Some(letter) {
-                let value = candidate.logprob;
-                best = Some(best.map_or(value, |current: f64| current.max(value)));
-            }
+    let mut probabilities = BTreeMap::new();
+    for candidate in &token.top_logprobs {
+        if !candidate.logprob.is_finite() || candidate.logprob > 0.0 {
+            return None;
         }
-        if let Some(value) = best {
-            if value.is_finite() {
-                raw.insert(option.clone(), value);
-                floor = floor.min(value);
-            }
+        let Some(index) = exact_option_letter(&candidate.token).and_then(letter_index) else {
+            continue;
+        };
+        if let Some(option) = options.get(index) {
+            *probabilities.entry(option.clone()).or_insert(0.0) += candidate.logprob.exp();
         }
     }
-    if raw.is_empty() || !floor.is_finite() {
+    let total: f64 = probabilities.values().sum();
+    if probabilities.len() != options.len()
+        || !total.is_finite()
+        || (total - 1.0).abs() > PROBABILITY_SUM_TOLERANCE
+    {
         return None;
     }
-    // Turn the log-probabilities into weights and normalize over the
-    // options we know. A missing option gets the floor.
-    let weights: BTreeMap<String, f64> = options
-        .iter()
-        .map(|option| {
-            let logprob = raw.get(option).copied().unwrap_or(floor);
-            (option.clone(), logprob.exp())
-        })
-        .collect();
-    let total: f64 = weights.values().sum();
-    if !total.is_finite() || total <= 0.0 {
-        return None;
-    }
-    Some(
-        weights
-            .into_iter()
-            .map(|(option, weight)| (option, weight / total))
-            .collect(),
-    )
+    Some(probabilities)
 }
 
 /// The maximum accepted difference between the sum of the reported
@@ -2572,5 +2584,72 @@ mod tests {
         let text = String::from_utf8(first).unwrap();
         assert!(text.contains("\"model\":\"jev-1.13.0\""), "{text}");
         assert!(text.contains("\"task_type\""), "{text}");
+    }
+
+    #[test]
+    fn unevaluated_assist_is_effectively_observe() {
+        let settings = DecisionSettings {
+            mode: DecisionMode::Assist,
+            ..DecisionSettings::default()
+        };
+        assert!(!ASSIST_AVAILABLE);
+        assert_eq!(settings.effective_mode(), DecisionMode::Observe);
+        assert_eq!(
+            DecisionSettings::default().effective_mode(),
+            DecisionMode::Off
+        );
+    }
+
+    #[test]
+    fn openrouter_refusals_and_explanations_are_not_option_letters() {
+        for text in [
+            "Cannot classify this request",
+            "D. refactor",
+            "D or A",
+            "",
+            "Ｄ",
+        ] {
+            let mut raw = openrouter_body("refactor", 0.93);
+            raw["choices"][0]["message"]["content"] = serde_json::json!(text);
+            assert!(
+                parse_openrouter_response(&raw, "openai/gpt-4o-mini", &openrouter_plan()).is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn openrouter_generated_token_must_match_the_answer() {
+        let mut raw = openrouter_body("refactor", 0.93);
+        raw["choices"][0]["logprobs"]["content"][0]["token"] = serde_json::json!("Cannot");
+        assert!(parse_openrouter_response(&raw, "openai/gpt-4o-mini", &openrouter_plan()).is_err());
+    }
+
+    #[test]
+    fn openrouter_does_not_invent_missing_option_probabilities() {
+        let plan = openrouter_plan();
+        for word_candidate in [false, true] {
+            let mut raw = openrouter_body("refactor", 0.93);
+            let alternatives = raw["choices"][0]["logprobs"]["content"][0]["top_logprobs"]
+                .as_array_mut()
+                .unwrap();
+            if word_candidate {
+                alternatives[0]["token"] = serde_json::json!("Apple");
+            } else {
+                alternatives.remove(0);
+            }
+            let (_, answer) = parse_openrouter_response(&raw, "openai/gpt-4o-mini", &plan).unwrap();
+            assert!(matches!(answer, OpenRouterAnswer::Uncalibrated { .. }));
+        }
+        let mut raw = openrouter_body("refactor", 0.93);
+        for alternative in raw["choices"][0]["logprobs"]["content"][0]["top_logprobs"]
+            .as_array_mut()
+            .unwrap()
+        {
+            let scaled = alternative["logprob"].as_f64().unwrap() + 0.1_f64.ln();
+            alternative["logprob"] = serde_json::json!(scaled);
+        }
+        let (_, answer) = parse_openrouter_response(&raw, "openai/gpt-4o-mini", &plan).unwrap();
+        assert!(matches!(answer, OpenRouterAnswer::Uncalibrated { .. }));
     }
 }

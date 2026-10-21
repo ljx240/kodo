@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kodo_agent::decision::{
@@ -24,7 +24,7 @@ use kodo_agent::decision::{
     plan_task_route, validate_response, DecisionAccess, DecisionClient, DecisionFailure,
     DecisionInput, DecisionMode, DecisionOutcome, DecisionProvider, DecisionReceipt,
     DecisionResult, DecisionScenario, DecisionSettings, OpenRouterAnswer, TaskRouteInput,
-    CREDENTIAL_NAMESPACE, SETTINGS_KEY,
+    ASSIST_AVAILABLE, CREDENTIAL_NAMESPACE, SETTINGS_KEY,
 };
 use kodo_core::settings;
 
@@ -46,6 +46,15 @@ const BREAKER_COOLDOWN: Duration = Duration::from_secs(60);
 /// feature off bumps the generation, which makes every older grant and
 /// every late answer inert.
 static CONFIG_GENERATION: AtomicU64 = AtomicU64::new(1);
+static TYPESAFE_CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(1);
+static OPENROUTER_CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn credential_generation(provider: DecisionProvider) -> &'static AtomicU64 {
+    match provider {
+        DecisionProvider::TypeSafe => &TYPESAFE_CREDENTIAL_GENERATION,
+        DecisionProvider::OpenRouter => &OPENROUTER_CREDENTIAL_GENERATION,
+    }
+}
 
 /// The current configuration generation.
 pub fn current_config_generation() -> u64 {
@@ -162,7 +171,7 @@ pub fn load_decision_config_from(
         .unwrap_or((None, None));
     let raw = raw.filter(|value| !value.trim().is_empty());
 
-    let (parsed, config_error) = match raw.as_deref() {
+    let (parsed, mut config_error) = match raw.as_deref() {
         None => (DecisionSettings::default(), None),
         Some(value) => match DecisionSettings::from_json_checked(value) {
             Ok(parsed) => (parsed, None),
@@ -173,8 +182,14 @@ pub fn load_decision_config_from(
     // A record that had to be recovered from a truncated write is written
     // back in the compact form, so the next read is a plain one and the
     // log stops growing a broken copy on every start.
-    if let (Some(path), Some(recovered)) = (settings_path, recovered.as_ref()) {
-        let _ = settings::append(path, SETTINGS_KEY, recovered);
+    if config_error.is_none() && recovered.is_some() {
+        if let Some(path) = settings_path {
+            if let Err(error) = settings::append(path, SETTINGS_KEY, &parsed.to_json()) {
+                config_error = Some(format!(
+                    "jev-decision: failed to store recovered settings: {error}"
+                ));
+            }
+        }
     }
 
     // The credential belongs to the configured provider. One provider's key
@@ -188,7 +203,11 @@ pub fn load_decision_config_from(
 
     // A content change invalidates every outstanding grant.
     let fingerprint = (
-        raw.clone().unwrap_or_default(),
+        if config_error.is_none() {
+            parsed.to_json()
+        } else {
+            raw.clone().unwrap_or_default()
+        },
         parsed.provider,
         credential.is_some(),
     );
@@ -223,6 +242,7 @@ pub struct DecisionSettingsView {
     /// The configured provider: `typeSafe` or `openRouter`.
     pub provider: String,
     pub mode: String,
+    pub assist_available: bool,
     pub model: String,
     pub task_route_enabled: bool,
     pub failure_triage_enabled: bool,
@@ -273,7 +293,8 @@ pub fn decision_settings_view() -> DecisionSettingsView {
         .collect();
     DecisionSettingsView {
         provider: config.settings.provider.label().to_owned(),
-        mode: config.settings.mode.label().to_owned(),
+        mode: config.settings.effective_mode().label().to_owned(),
+        assist_available: ASSIST_AVAILABLE,
         model: config.settings.model.clone(),
         task_route_enabled: config.settings.task_route_enabled,
         failure_triage_enabled: config.settings.failure_triage_enabled,
@@ -355,6 +376,7 @@ pub fn save_decision_credential(provider: DecisionProvider, secret: &str) -> Res
         secret,
     )
     .map_err(|error| error.to_string())?;
+    credential_generation(provider).fetch_add(1, Ordering::SeqCst);
     Ok(bump_config_generation())
 }
 
@@ -375,6 +397,7 @@ pub fn clear_decision_credential(provider: DecisionProvider) -> Result<u64, Stri
     }
     settings::clear_secrets(&path, CREDENTIAL_NAMESPACE, &keep)
         .map_err(|error| error.to_string())?;
+    credential_generation(provider).fetch_add(1, Ordering::SeqCst);
     Ok(bump_config_generation())
 }
 
@@ -462,16 +485,48 @@ struct Breaker {
     consecutive_failures: u32,
     open_until: Option<Instant>,
     probe_in_flight: bool,
-    /// Set when the credential was rejected. It stays blocked until a new
-    /// credential is loaded into a new service.
+    /// Shared by runs until this provider's credential generation changes.
     auth_blocked: bool,
+}
+
+/// Host-process protection; per-run grants and budgets remain in the service.
+#[derive(Default)]
+pub struct DecisionRuntime {
+    inflight: AtomicU64,
+    breakers: Mutex<HashMap<(DecisionProvider, u64), Arc<Mutex<Breaker>>>>,
+}
+
+impl DecisionRuntime {
+    fn breaker(&self, provider: DecisionProvider) -> Arc<Mutex<Breaker>> {
+        let generation = credential_generation(provider).load(Ordering::SeqCst);
+        let mut breakers = self.breakers.lock().unwrap_or_else(|p| p.into_inner());
+        breakers.retain(|(source, epoch), _| *source != provider || *epoch == generation);
+        breakers.entry((provider, generation)).or_default().clone()
+    }
+}
+
+struct RequestSlot {
+    runtime: Arc<DecisionRuntime>,
+    breaker: Arc<Mutex<Breaker>>,
+    probe: bool,
+}
+
+impl Drop for RequestSlot {
+    fn drop(&mut self) {
+        self.runtime.inflight.fetch_sub(1, Ordering::SeqCst);
+        if self.probe {
+            self.breaker
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .probe_in_flight = false;
+        }
+    }
 }
 
 /// The run-level decision service.
 ///
-/// One instance per run. It holds the credential, the pending grants, the
-/// per-turn quotas and the circuit breaker. Everything it knows dies with
-/// the run.
+/// One instance per run owns the credential, grants and turn quotas.
+/// The host-process runtime shares concurrency and credential-scoped breakers.
 pub struct DecisionService {
     config: DecisionConfig,
     client: DecisionClient,
@@ -484,10 +539,10 @@ pub struct DecisionService {
     /// The scenarios the user refused in this run.
     denied: Mutex<HashSet<DecisionScenario>>,
     calls_used: AtomicU64,
-    inflight: AtomicU64,
+    runtime: Arc<DecisionRuntime>,
     /// Milliseconds spent waiting for the service in this run.
     transport_wait_ms: AtomicU64,
-    breaker: Mutex<Breaker>,
+    breaker: Arc<Mutex<Breaker>>,
     request_seq: AtomicU64,
 }
 
@@ -500,6 +555,11 @@ impl DecisionService {
         session_id: impl Into<String>,
         run_generation: u64,
     ) -> Self {
+        static RUNTIME: OnceLock<Arc<DecisionRuntime>> = OnceLock::new();
+        let runtime = RUNTIME
+            .get_or_init(|| Arc::new(DecisionRuntime::default()))
+            .clone();
+        let breaker = runtime.breaker(config.settings.provider);
         Self {
             config,
             client,
@@ -510,11 +570,18 @@ impl DecisionService {
             asked: Mutex::new(HashSet::new()),
             denied: Mutex::new(HashSet::new()),
             calls_used: AtomicU64::new(0),
-            inflight: AtomicU64::new(0),
+            runtime,
             transport_wait_ms: AtomicU64::new(0),
-            breaker: Mutex::new(Breaker::default()),
+            breaker,
             request_seq: AtomicU64::new(0),
         }
+    }
+
+    /// Inject an isolated host runtime for deterministic local tests.
+    pub fn with_runtime(mut self, runtime: Arc<DecisionRuntime>) -> Self {
+        self.breaker = runtime.breaker(self.config.settings.provider);
+        self.runtime = runtime;
+        self
     }
 
     /// The service pointed at the configured provider's pinned destination.
@@ -568,7 +635,7 @@ impl DecisionService {
         Binding {
             session_id: self.session_id.clone(),
             run_generation: self.run_generation,
-            config_generation: current_config_generation(),
+            config_generation: self.config.config_generation,
             scenario,
             model: self.config.settings.model.clone(),
             policy_version: self.config.settings.policy_version.clone(),
@@ -648,43 +715,56 @@ impl DecisionService {
         Ok(pending)
     }
 
-    /// Take one of the two in-flight slots. `false` means the caller must
-    /// skip: the service never queues behind itself.
-    fn acquire_slot(&self) -> bool {
-        let mut current = self.inflight.load(Ordering::SeqCst);
-        loop {
-            if current >= MAX_INFLIGHT as u64 {
-                return false;
-            }
-            match self.inflight.compare_exchange(
-                current,
-                current + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return true,
-                Err(actual) => current = actual,
-            }
+    /// Take a host-process slot and, after cooldown, the single probe.
+    /// Dropping the slot releases both, including on refusal or cancellation.
+    fn acquire_slot(&self) -> Result<RequestSlot, DecisionFailure> {
+        let mut breaker = Self::lock(&self.breaker);
+        if breaker.auth_blocked {
+            return Err(DecisionFailure::new(
+                "authentication",
+                "update the rejected credential",
+            ));
         }
-    }
-
-    fn release_slot(&self) {
-        let _ = self
+        if breaker
+            .open_until
+            .is_some_and(|until| Instant::now() < until)
+            || breaker.probe_in_flight
+        {
+            return Err(DecisionFailure::new(
+                "circuit_open",
+                "the decision service is cooling down",
+            ));
+        }
+        self.runtime
             .inflight
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                Some(value.saturating_sub(1))
-            });
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                (count < MAX_INFLIGHT as u64).then_some(count + 1)
+            })
+            .map_err(|_| {
+                DecisionFailure::new("busy", "too many decision requests are in flight")
+            })?;
+        let probe = breaker.open_until.is_some();
+        breaker.probe_in_flight = probe;
+        Ok(RequestSlot {
+            runtime: self.runtime.clone(),
+            breaker: self.breaker.clone(),
+            probe,
+        })
     }
 }
 
 impl DecisionAccess for DecisionService {
+    fn is_current(&self) -> bool {
+        self.config.config_generation == current_config_generation()
+    }
+
     fn evaluate(&self, input: &DecisionInput, alive: &dyn Fn() -> bool) -> DecisionOutcome {
         let scenario = input.scenario();
         let started = Instant::now();
 
         let mut receipt = DecisionReceipt {
             request_id: String::new(),
-            mode: self.config.settings.mode,
+            mode: self.config.settings.effective_mode(),
             provider: self.config.settings.provider,
             model: self.config.settings.model.clone(),
             policy_version: self.config.settings.policy_version.clone(),
@@ -692,6 +772,22 @@ impl DecisionAccess for DecisionService {
             consent_wait_ms: 0,
             input_tokens: None,
         };
+
+        if !alive() {
+            return DecisionOutcome {
+                receipt,
+                result: DecisionResult::Cancelled,
+            };
+        }
+        if !self.is_current() {
+            return DecisionOutcome {
+                receipt,
+                result: DecisionResult::Fallback(DecisionFailure::new(
+                    "config_changed",
+                    "the service configuration is stale",
+                )),
+            };
+        }
 
         // 1. The configuration itself. An unusable record keeps the feature
         //    off; it never falls back to "on".
@@ -733,42 +829,6 @@ impl DecisionAccess for DecisionService {
                 )),
             };
         };
-
-        // 3. The circuit breaker.
-        {
-            let mut breaker = Self::lock(&self.breaker);
-            if breaker.auth_blocked {
-                return DecisionOutcome {
-                    receipt,
-                    result: DecisionResult::Fallback(DecisionFailure::new(
-                        "authentication",
-                        "the stored credential was rejected; update it in the settings",
-                    )),
-                };
-            }
-            if let Some(until) = breaker.open_until {
-                if Instant::now() < until {
-                    return DecisionOutcome {
-                        receipt,
-                        result: DecisionResult::Fallback(DecisionFailure::new(
-                            "circuit_open",
-                            "the decision service is temporarily disabled after repeated failures",
-                        )),
-                    };
-                }
-                // The cooldown is over: let exactly one probe through.
-                if breaker.probe_in_flight {
-                    return DecisionOutcome {
-                        receipt,
-                        result: DecisionResult::Fallback(DecisionFailure::new(
-                            "circuit_open",
-                            "the decision service is running a recovery probe",
-                        )),
-                    };
-                }
-                breaker.probe_in_flight = true;
-            }
-        }
 
         // 4. The per-turn quotas.
         let max_calls = if self.config.settings.max_calls_per_turn == 0 {
@@ -889,19 +949,13 @@ impl DecisionAccess for DecisionService {
 
         // 7. Take a slot before the user is asked: a run that cannot be
         //    served must not open a prompt.
-        if !self.acquire_slot() {
-            return DecisionOutcome {
-                receipt,
-                result: DecisionResult::Fallback(DecisionFailure::new(
-                    "busy",
-                    "too many decision requests are already in flight",
-                )),
-            };
-        }
-        let slot_taken = true;
-        let release = || {
-            if slot_taken {
-                self.release_slot();
+        let _slot = match self.acquire_slot() {
+            Ok(slot) => slot,
+            Err(failure) => {
+                return DecisionOutcome {
+                    receipt,
+                    result: DecisionResult::Fallback(failure),
+                }
             }
         };
 
@@ -911,7 +965,7 @@ impl DecisionAccess for DecisionService {
         let preview = DecisionPreview {
             request_id: request_id.clone(),
             scenario,
-            mode: self.config.settings.mode,
+            mode: self.config.settings.effective_mode(),
             origin: self.client.origin().to_owned(),
             path: self.client.path().to_owned(),
             model: self.config.settings.model.clone(),
@@ -927,7 +981,7 @@ impl DecisionAccess for DecisionService {
             request_id: request_id.clone(),
             session_id: self.session_id.clone(),
             run_generation: self.run_generation,
-            config_generation: current_config_generation(),
+            config_generation: self.config.config_generation,
             scenario,
             origin: self.client.origin().to_owned(),
             path: self.client.path().to_owned(),
@@ -947,7 +1001,6 @@ impl DecisionAccess for DecisionService {
             DecisionConsentAnswer::Skip => {
                 Self::lock(&self.pending).remove(&request_id);
                 Self::lock(&self.denied).insert(scenario);
-                release();
                 receipt.duration_ms = started.elapsed().as_millis() as u64;
                 return DecisionOutcome {
                     receipt,
@@ -959,7 +1012,6 @@ impl DecisionAccess for DecisionService {
             }
             DecisionConsentAnswer::Cancelled => {
                 Self::lock(&self.pending).remove(&request_id);
-                release();
                 receipt.duration_ms = started.elapsed().as_millis() as u64;
                 return DecisionOutcome {
                     receipt,
@@ -974,7 +1026,6 @@ impl DecisionAccess for DecisionService {
         let pending = match self.consume(&request_id, &binding) {
             Ok(pending) => pending,
             Err(failure) => {
-                release();
                 receipt.duration_ms = started.elapsed().as_millis() as u64;
                 return DecisionOutcome {
                     receipt,
@@ -985,7 +1036,6 @@ impl DecisionAccess for DecisionService {
 
         // 10. Re-check the world before the request goes out.
         if !alive() {
-            release();
             receipt.duration_ms = started.elapsed().as_millis() as u64;
             return DecisionOutcome {
                 receipt,
@@ -995,7 +1045,6 @@ impl DecisionAccess for DecisionService {
         if current_config_generation() != pending.config_generation
             || self.config.settings.mode == DecisionMode::Off
         {
-            release();
             receipt.duration_ms = started.elapsed().as_millis() as u64;
             return DecisionOutcome {
                 receipt,
@@ -1017,7 +1066,22 @@ impl DecisionAccess for DecisionService {
         );
         let waited = transport_started.elapsed().as_millis() as u64;
         let _ = self.transport_wait_ms.fetch_add(waited, Ordering::SeqCst);
-        release();
+
+        if !alive() {
+            return DecisionOutcome {
+                receipt,
+                result: DecisionResult::Cancelled,
+            };
+        }
+        if !self.is_current() {
+            return DecisionOutcome {
+                receipt,
+                result: DecisionResult::Fallback(DecisionFailure::new(
+                    "config_changed",
+                    "the response belongs to a stale configuration",
+                )),
+            };
+        }
 
         let response = match response {
             Ok(response) => {
@@ -1164,6 +1228,7 @@ fn purpose_for(scenario: DecisionScenario) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
     use kodo_agent::decision::{DecisionSkip, FailureTriageInput, ValidatedDecision};
 
     /// A consent host that answers from a script.
@@ -1223,17 +1288,32 @@ mod tests {
     }
 
     fn service(config: DecisionConfig, consent: Arc<dyn DecisionConsent>) -> Arc<DecisionService> {
-        Arc::new(DecisionService::new(
-            config,
-            DecisionClient::for_local_endpoint(DecisionProvider::TypeSafe, "http://127.0.0.1:1"),
-            consent,
-            "session-1",
-            7,
-        ))
+        service_in_runtime(config, consent, Arc::new(DecisionRuntime::default()))
+    }
+
+    fn service_in_runtime(
+        config: DecisionConfig,
+        consent: Arc<dyn DecisionConsent>,
+        runtime: Arc<DecisionRuntime>,
+    ) -> Arc<DecisionService> {
+        Arc::new(
+            DecisionService::new(
+                config,
+                DecisionClient::for_local_endpoint(
+                    DecisionProvider::TypeSafe,
+                    "http://127.0.0.1:1",
+                ),
+                consent,
+                "session-1",
+                7,
+            )
+            .with_runtime(runtime),
+        )
     }
 
     #[test]
     fn off_never_asks_the_host() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let service = service(config(DecisionMode::Off, Some("secret")), consent.clone());
         let outcome = service.evaluate(&task_route_input(), &|| true);
@@ -1249,6 +1329,7 @@ mod tests {
 
     #[test]
     fn a_missing_credential_is_skipped() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let service = service(config(DecisionMode::Observe, None), consent.clone());
         let outcome = service.evaluate(&task_route_input(), &|| true);
@@ -1264,6 +1345,7 @@ mod tests {
 
     #[test]
     fn a_disabled_scenario_is_skipped() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let mut cfg = config(DecisionMode::Observe, Some("secret"));
         cfg.settings.failure_triage_enabled = false;
@@ -1288,6 +1370,7 @@ mod tests {
 
     #[test]
     fn an_invalid_configuration_keeps_the_feature_off() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let mut cfg = config(DecisionMode::Observe, Some("secret"));
         cfg.config_error = Some("jev-decision: unknown mode `maybe`".to_owned());
@@ -1305,6 +1388,7 @@ mod tests {
 
     #[test]
     fn a_refusal_is_remembered_for_the_rest_of_the_run() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![
             DecisionConsentAnswer::Skip,
             DecisionConsentAnswer::Allow,
@@ -1335,6 +1419,7 @@ mod tests {
 
     #[test]
     fn the_preview_shows_the_exact_bytes() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Skip]);
         let service = service(
             config(DecisionMode::Observe, Some("secret")),
@@ -1356,6 +1441,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_consent_stops_the_round() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Cancelled]);
         let service = service(config(DecisionMode::Observe, Some("secret")), consent);
         let outcome = service.evaluate(&task_route_input(), &|| true);
@@ -1364,6 +1450,7 @@ mod tests {
 
     #[test]
     fn a_grant_is_consumed_once() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let service = service(config(DecisionMode::Observe, Some("secret")), consent);
         let pending = PendingDecision {
@@ -1390,6 +1477,7 @@ mod tests {
 
     #[test]
     fn a_changed_payload_invalidates_the_grant() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let service = service(config(DecisionMode::Observe, Some("secret")), consent);
         let pending = PendingDecision {
@@ -1418,6 +1506,7 @@ mod tests {
 
     #[test]
     fn another_sessions_grant_is_refused() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let service = service(config(DecisionMode::Observe, Some("secret")), consent);
         let pending = PendingDecision {
@@ -1443,6 +1532,7 @@ mod tests {
 
     #[test]
     fn a_changed_configuration_invalidates_the_grant() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let service = service(config(DecisionMode::Observe, Some("secret")), consent);
         let pending = PendingDecision {
@@ -1469,6 +1559,7 @@ mod tests {
 
     #[test]
     fn the_per_turn_budget_stops_further_requests() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![
             DecisionConsentAnswer::Allow,
             DecisionConsentAnswer::Allow,
@@ -1501,6 +1592,7 @@ mod tests {
 
     #[test]
     fn a_secret_shaped_state_is_never_sent() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let service = service(
             config(DecisionMode::Observe, Some("secret")),
@@ -1527,6 +1619,7 @@ mod tests {
 
     #[test]
     fn an_oversized_state_is_refused_before_the_prompt() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let mut cfg = config(DecisionMode::Observe, Some("secret"));
         cfg.settings.max_state_bytes = 256;
@@ -1552,6 +1645,7 @@ mod tests {
 
     #[test]
     fn the_same_snapshot_is_asked_once_per_run() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![
             DecisionConsentAnswer::Allow,
             DecisionConsentAnswer::Allow,
@@ -1574,6 +1668,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_run_never_sends() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
         let service = service(config(DecisionMode::Observe, Some("secret")), consent);
         let outcome = service.evaluate(&task_route_input(), &|| false);
@@ -1582,6 +1677,7 @@ mod tests {
 
     #[test]
     fn a_saved_record_can_be_read_back() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The settings log is line-based: a record written as more than
         // one line is cut at the first newline and comes back as a
         // truncated object. The round trip is the contract.
@@ -1624,6 +1720,7 @@ mod tests {
 
     #[test]
     fn a_pretty_printed_record_is_normalized_before_it_is_written() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("kodo-jev-pretty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
@@ -1638,6 +1735,7 @@ mod tests {
 
     #[test]
     fn a_truncated_record_is_recovered_and_written_back() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // What an older writer left behind: the record was cut at the
         // first newline and the rest of it is still in the log.
         let dir = std::env::temp_dir().join(format!("kodo-jev-recover-{}", std::process::id()));
@@ -1672,6 +1770,9 @@ mod tests {
             .expect("the record");
         assert!(!last["jev-decision=".len()..].contains('\n'));
         let again = load_decision_config_from(Some(&path), None);
+        assert!(!again.recovered);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert_eq!(again.config_generation, config.config_generation);
         assert!(again.config_error.is_none());
         assert_eq!(again.settings.model, "typesafe/jev-1.14");
         let _ = std::fs::remove_dir_all(dir);
@@ -1679,6 +1780,7 @@ mod tests {
 
     #[test]
     fn a_damaged_record_says_how_to_repair_it() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The settings log is line-based: a record written as more than
         // one line comes back as a truncated object. When the rest of the
         // record is gone too, the message has to say what to do, not just
@@ -1701,6 +1803,7 @@ mod tests {
 
     #[test]
     fn the_openrouter_default_model_is_the_typesafe_one() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(
             DecisionProvider::OpenRouter.default_model(),
             "typesafe/jev-1.14"
@@ -1710,6 +1813,7 @@ mod tests {
 
     #[test]
     fn clearing_one_providers_credential_keeps_the_other_one() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The two providers have separate keys; clearing one must not take
         // the other with it.
         let dir = std::env::temp_dir().join(format!("kodo-jev-providers-{}", std::process::id()));
@@ -1767,6 +1871,7 @@ mod tests {
 
     #[test]
     fn clearing_the_decision_credential_leaves_the_others_alone() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("kodo-jev-credentials-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("credentials.log");
@@ -1809,6 +1914,7 @@ mod tests {
 
     #[test]
     fn a_decision_record_never_reaches_the_memory_outbox() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The record rides on a reasoning item. The outbox bridge drops
         // every reasoning kind, so a decision record can never be recalled
         // into a later turn.
@@ -1832,12 +1938,110 @@ mod tests {
 
     #[test]
     fn the_secret_is_masked_for_the_settings_screen() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(mask_secret("sk-abcdefgh"), "••••efgh");
         assert_eq!(mask_secret(""), "");
     }
 
     #[test]
+    fn a_stale_service_cannot_create_a_new_preview() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let consent = ScriptedConsent::new(vec![DecisionConsentAnswer::Allow]);
+        let service = service(
+            config(DecisionMode::Assist, Some("synthetic")),
+            consent.clone(),
+        );
+        bump_config_generation();
+        let outcome = service.evaluate(&task_route_input(), &|| true);
+        assert!(
+            matches!(outcome.result, DecisionResult::Fallback(f) if f.code == "config_changed")
+        );
+        assert!(consent.seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn multiple_runs_share_two_slots_and_release_them_on_drop() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let runtime = Arc::new(DecisionRuntime::default());
+        let make = || {
+            service_in_runtime(
+                config(DecisionMode::Observe, Some("synthetic")),
+                ScriptedConsent::new(vec![]),
+                runtime.clone(),
+            )
+        };
+        let first = make();
+        let second = make();
+        let third = make();
+        let one = first.acquire_slot().unwrap();
+        let two = second.acquire_slot().unwrap();
+        assert!(matches!(third.acquire_slot(), Err(f) if f.code == "busy"));
+        drop(one);
+        assert!(third.acquire_slot().is_ok());
+        drop(two);
+        assert_eq!(runtime.inflight.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn authentication_block_is_shared_until_the_credential_changes() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let runtime = Arc::new(DecisionRuntime::default());
+        let make = |provider| {
+            let mut cfg = config(DecisionMode::Observe, Some("synthetic"));
+            cfg.settings.provider = provider;
+            service_in_runtime(cfg, ScriptedConsent::new(vec![]), runtime.clone())
+        };
+        let first = make(DecisionProvider::TypeSafe);
+        first.record_transport_failure(&DecisionFailure::new("authentication", "rejected"));
+        let next_run = make(DecisionProvider::TypeSafe);
+        assert!(matches!(next_run.acquire_slot(), Err(f) if f.code == "authentication"));
+        assert!(make(DecisionProvider::OpenRouter).acquire_slot().is_ok());
+        credential_generation(DecisionProvider::TypeSafe).fetch_add(1, Ordering::SeqCst);
+        assert!(make(DecisionProvider::TypeSafe).acquire_slot().is_ok());
+        assert!(matches!(first.acquire_slot(), Err(f) if f.code == "authentication"));
+    }
+
+    #[test]
+    fn cooldown_and_single_probe_are_shared_across_runs() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let runtime = Arc::new(DecisionRuntime::default());
+        let make = || {
+            service_in_runtime(
+                config(DecisionMode::Observe, Some("synthetic")),
+                ScriptedConsent::new(vec![]),
+                runtime.clone(),
+            )
+        };
+        let first = make();
+        for _ in 0..BREAKER_THRESHOLD {
+            first.record_transport_failure(&DecisionFailure::new("unavailable", "temporary"));
+        }
+        let second = make();
+        assert!(matches!(second.acquire_slot(), Err(f) if f.code == "circuit_open"));
+        first.breaker.lock().unwrap().open_until = Some(Instant::now() - Duration::from_secs(1));
+        let probe = second.acquire_slot().unwrap();
+        assert!(matches!(first.acquire_slot(), Err(f) if f.code == "circuit_open"));
+        drop(probe);
+        assert!(first.acquire_slot().is_ok());
+    }
+
+    #[test]
+    fn production_services_default_to_the_same_runtime() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let make = || {
+            DecisionService::with_official_destination(
+                config(DecisionMode::Off, None),
+                ScriptedConsent::new(vec![]),
+                "synthetic",
+                1,
+            )
+        };
+        assert!(Arc::ptr_eq(&make().runtime, &make().runtime));
+    }
+
+    #[test]
     fn a_validated_decision_carries_no_request_content() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let decision = ValidatedDecision {
             scenario: DecisionScenario::TaskRoute,
             model: "jev-1.13.0".to_owned(),
