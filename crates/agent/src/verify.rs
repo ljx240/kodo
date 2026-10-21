@@ -262,6 +262,11 @@ pub struct VerificationEvidence {
     pub truncated: bool,
     pub ok: bool,
     pub failure_class: Option<FailureClass>,
+    /// Why it failed, read from the process state and the output itself.
+    /// `None` when the run passed, and `None` for a record written before this
+    /// field existed.
+    #[serde(default)]
+    pub triage: Option<FailureTriage>,
 }
 
 impl VerificationEvidence {
@@ -297,6 +302,17 @@ impl VerificationEvidence {
         if outcome.output_tail.len() >= 2000 {
             truncated = true;
         }
+        let triage = if outcome.ok {
+            None
+        } else {
+            Some(triage_verify_failure(
+                &outcome.command.command,
+                outcome.exit_code,
+                outcome.timed_out,
+                outcome.cancelled,
+                &outcome.output_tail,
+            ))
+        };
         Self {
             command: outcome.command.command.clone(),
             cwd: cwd.to_owned(),
@@ -307,6 +323,7 @@ impl VerificationEvidence {
             truncated,
             ok: outcome.ok,
             failure_class,
+            triage,
         }
     }
 }
@@ -348,6 +365,322 @@ pub fn classify_verify_failure(command: &str, output: &str) -> FailureClass {
         return FailureClass::Infrastructure;
     }
     FailureClass::Product
+}
+
+/// What a failed command means for the next move.
+///
+/// [`FailureClass`] answers "which marker did the runtime land on" and is
+/// persisted, so its shape cannot change. This answers "why did it fail, and
+/// is there anything to repair?" over the same evidence:
+/// * `Product` — the output names source or tests; code repair is the job.
+/// * `Infrastructure` — the environment blocked the run; code repair must not
+///   be attempted, because that is how an outage turns into a bad diff.
+/// * `Transient` — a temporary external condition; a re-run is the move.
+/// * `Unknown` — a non-zero exit with nothing identifiable in the output. It
+///   stays on the repair path (unattributed is not the same as environmental),
+///   but it does not pretend to know a category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FailureTriage {
+    Product,
+    Infrastructure,
+    Transient,
+    Unknown,
+}
+
+impl FailureTriage {
+    /// The stable wire label, shared with the frozen corpus and the decision
+    /// assistant's option list.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Product => "product",
+            Self::Infrastructure => "infrastructure",
+            Self::Transient => "transient",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Only a confirmed environment fault may suppress a code repair.
+    pub fn blocks_code_repair(self) -> bool {
+        matches!(self, Self::Infrastructure)
+    }
+
+    /// A temporary external fault is worth re-running before anything else.
+    pub fn is_retryable(self) -> bool {
+        matches!(self, Self::Transient)
+    }
+
+    /// Everything this class can say — used to keep the label vocabulary and
+    /// the corpus in one place.
+    pub const ALL: [FailureTriage; 4] = [
+        Self::Product,
+        Self::Infrastructure,
+        Self::Transient,
+        Self::Unknown,
+    ];
+}
+
+/// Triage a failed verification command from real evidence.
+///
+/// Signals are used strongest-first, because each kind answers a different
+/// question and a weaker one must never override a harder one:
+///
+/// 1. the process exit code — a shell convention about the *process*, not the code;
+/// 2. network-interruption shapes — a temporary external condition;
+/// 3. environment/toolchain shapes — a persistent external condition;
+/// 4. source-or-test shapes — an actual product failure;
+/// 5. nothing identifiable — `Unknown`.
+///
+/// Every entry in 2–4 is an error-code name, an exit-code convention, an HTTP
+/// status phrase, a toolchain object or a *source location* — not a loose word.
+/// A failure whose output carries no identifiable subject is deliberately left
+/// unattributed rather than guessed at.
+pub fn triage_verify_failure(
+    command: &str,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    cancelled: bool,
+    output: &str,
+) -> FailureTriage {
+    let lower_output = output.to_ascii_lowercase();
+    let lower_all = format!("{} \n{lower_output}", command.to_ascii_lowercase());
+
+    // (1) Process state. A deadline or a cancel is an interrupted attempt: it
+    // says nothing about the source, and re-running is a legitimate next move.
+    // A user-initiated cancel still reaches the caller as
+    // `FailureClass::Cancelled`, so nothing here re-runs it on its own.
+    if timed_out || cancelled {
+        return FailureTriage::Transient;
+    }
+    // 126 = found but not executable, 127 = command not found: shell
+    // conventions about the *process*, so they outrank any text. 137/139 are
+    // deliberately absent — SIGKILL may be the OOM killer or a timeout
+    // wrapper, and a segfault may be the code under test, so those need the
+    // output to say which.
+    if matches!(exit_code, Some(126) | Some(127)) {
+        return FailureTriage::Infrastructure;
+    }
+
+    // (2) Temporary external conditions.
+    const TRANSIENT: [&str; 15] = [
+        "econnreset",
+        "econnaborted",
+        "etimedout",
+        "ehostunreach",
+        "enethunreach",
+        "eai_again",
+        "connection reset",
+        "connection timed out",
+        "name resolution",
+        "rate limit",
+        "retry after",
+        "upstream connect",
+        "socket hang up",
+        "unexpected end of stream",
+        "spurious network error",
+    ];
+    // The status codes that mean "the transport failed, ask again later". A
+    // `500` from the code under test is deliberately absent: that is a product
+    // answer, not a transport one, so only the `status 5xx` / gateway-reason
+    // shapes count and a bare three-digit number never does.
+    const TRANSIENT_STATUS: [&str; 7] = [
+        "bad gateway",
+        "service unavailable",
+        "gateway time-out",
+        "gateway timeout",
+        "too many requests",
+        "status 429",
+        "status 50",
+    ];
+    // `timed out` / `was canceled` only count as transport when they name a
+    // request or an operation, never as a bare word.
+    const TRANSIENT_PHRASES: [&str; 4] = [
+        "request timed out",
+        "timed out after",
+        "operation was canceled",
+        "operation was cancelled",
+    ];
+    if TRANSIENT.iter().any(|m| lower_all.contains(m))
+        || TRANSIENT_STATUS.iter().any(|m| lower_output.contains(m))
+        || TRANSIENT_PHRASES.iter().any(|m| lower_output.contains(m))
+    {
+        return FailureTriage::Transient;
+    }
+
+    // (3) Persistent environment faults: the tool, the dependency set, the
+    // filesystem or the socket the environment owns.
+    const INFRASTRUCTURE: [&str; 26] = [
+        "command not found",
+        "no such file or directory",
+        "cannot find crate",
+        "can't find crate",
+        "linking with",
+        "linker `",
+        "custom build command",
+        "failed to select a version",
+        "could not find `cargo.toml`",
+        "cannot find module",
+        "cannot find type definition",
+        "missing script",
+        "no space left",
+        "disk quota",
+        "killed (oom)",
+        "out of memory",
+        "eacces",
+        "enospc",
+        "enoent",
+        "eperm",
+        "econnrefused",
+        "eaddrinuse",
+        "eaddrnotavail",
+        "docker daemon",
+        "network is unreachable",
+        "proxy error",
+    ];
+    if INFRASTRUCTURE.iter().any(|m| lower_all.contains(m)) {
+        return FailureTriage::Infrastructure;
+    }
+
+    // (4) The failure names source or tests. Each marker is a diagnostic the
+    // product itself produced, not a word that happens to appear in prose.
+    const PRODUCT: [&str; 16] = [
+        "error[",
+        "error ts",
+        "panicked at",
+        "assertion",
+        "test failed",
+        "test result:",
+        "could not compile",
+        "not assignable",
+        "is not satisfied",
+        "no method named",
+        "failed to resolve",
+        "syntaxerror",
+        "referenceerror",
+        "typeerror:",
+        // Assertion wording. `unexpected token` also contains this, and that
+        // is intended: a parse complaint is the product talking.
+        "expected",
+        // `Tests: 1 failed, 2 passed` and `1 passed; 2 failed`
+        "tests:",
+    ];
+    if PRODUCT.iter().any(|m| lower_output.contains(m)) {
+        return FailureTriage::Product;
+    }
+    // A compiler or test diagnostic that names a file and a position is about
+    // this repository's code, whatever else it says.
+    if has_source_location(&lower_output) || names_failing_test(&lower_output) {
+        return FailureTriage::Product;
+    }
+
+    // (5) No identifiable subject. `error: test failed` style lines are caught
+    // above; what is left here is a bare exit with nothing to attribute.
+    if has_identifiable_subject(&lower_output) {
+        FailureTriage::Product
+    } else {
+        FailureTriage::Unknown
+    }
+}
+
+/// Source extensions the toolchains in this project report diagnostics against.
+const SOURCE_EXTENSIONS: [&str; 11] = [
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt",
+];
+
+fn is_file_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '\\' | '[' | ']' | '.')
+}
+
+/// A file-name token that carries a known source extension.
+fn is_source_file(token: &str) -> bool {
+    match token.rfind('.') {
+        Some(dot) if dot > 0 => SOURCE_EXTENSIONS.contains(&&token[dot + 1..]),
+        _ => false,
+    }
+}
+
+/// The maximal run of file-name characters ending just before `upto`.
+fn file_token(output: &str, upto: usize) -> Option<&str> {
+    let start = output[..upto]
+        .char_indices()
+        .rfind(|(_, c)| !is_file_char(*c))
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    Some(&output[start..upto])
+}
+
+/// `path/to/file.ext` followed by a line position, in either the rustc and
+/// node `foo.rs:12:5` shape or the tsc `foo.tsx(12,7)` shape.
+fn has_source_location(output: &str) -> bool {
+    for (pos, ch) in output.char_indices() {
+        if ch != ':' && ch != '(' {
+            continue;
+        }
+        // A position must start with a digit: `foo.rs: warning` is prose.
+        if !output[pos + ch.len_utf8()..].starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        if file_token(output, pos).is_some_and(is_source_file) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A test runner's own per-test failure line: `FAIL src/verify.test.ts > …`,
+/// `FAILED tests/a.py::test_b`, `not ok 1 - …`.
+///
+/// The status token alone is not evidence — a bare `FAILED` is exactly what an
+/// unattributed run leaves on the wire — so the line must also name a file.
+fn names_failing_test(output: &str) -> bool {
+    output.lines().any(|line| {
+        let trimmed = line.trim_start().to_ascii_lowercase();
+        if !["fail ", "failed ", "not ok "]
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix))
+        {
+            return false;
+        }
+        trimmed.split(|c| !is_file_char(c)).any(is_source_file)
+    })
+}
+
+/// Does the output carry anything an attribution could hang on?
+///
+/// Three diagnostic shapes count: an identifier-style error code (`E0308`,
+/// `TS2322`), a counted summary (`2 failed`, `1 passed`), or an assertion
+/// comparison (`expected … actual …`). `exit status 1`, `exit code 1`,
+/// `command failed`, `FAILED`, `???` and an empty tail carry none of them, so
+/// naming a class from them would be a guess rather than a reading.
+fn has_identifiable_subject(output: &str) -> bool {
+    if output.trim().is_empty() {
+        return false;
+    }
+    // Letters then two or more digits inside one token: an error code, not a
+    // version number or a count.
+    let coded = output
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| {
+            let letters = token
+                .find(|c: char| c.is_ascii_digit())
+                .unwrap_or(token.len());
+            let digits = token.len() - letters;
+            letters >= 1 && letters <= 6 && digits >= 2
+        });
+    // `1 passed; 2 failed` — a count immediately before a result word.
+    let words: Vec<&str> = output
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .collect();
+    let counted = words.windows(2).any(|pair| {
+        !pair[0].is_empty()
+            && pair[0].chars().all(|c| c.is_ascii_digit())
+            && matches!(
+                pair[1],
+                "failed" | "passed" | "failures" | "errors" | "error" | "expected"
+            )
+    });
+    let comparison = output.contains("expected") && output.contains("actual");
+    coded || counted || comparison
 }
 
 /// Where a failure classification came from.
@@ -1875,6 +2208,7 @@ error[E0308]: mismatched types
             truncated: false,
             ok: true,
             failure_class: None,
+            triage: None,
         };
         // Empty criterion_ids must not prove c_target.
         assert!(!evidence.criterion_ids.iter().any(|id| id == "c_target"));
@@ -1982,6 +2316,7 @@ error[E0308]: mismatched types
             truncated: false,
             ok: false,
             failure_class: Some(FailureClass::Infrastructure),
+            triage: Some(FailureTriage::Infrastructure),
         };
         let decision = RepairDecision::from_evidence(&[ev], &plan, true);
         assert!(!decision.can_repair, "infra must not open product repair");
@@ -2002,6 +2337,7 @@ error[E0308]: mismatched types
             truncated: false,
             ok: false,
             failure_class: Some(FailureClass::Product),
+            triage: Some(FailureTriage::Product),
         };
         let decision = RepairDecision::from_evidence(std::slice::from_ref(&ev), &plan, true);
         assert!(decision.can_repair);
@@ -2039,6 +2375,170 @@ error[E0308]: mismatched types
         let ev = VerificationEvidence::from_outcome(&long, "/tmp", vec![], 500);
         assert!(ev.truncated);
         assert!(ev.output_summary.chars().count() <= 501);
+    }
+
+    #[test]
+    fn triage_reads_process_state_before_any_text() {
+        // A deadline or a cancel says nothing about the source.
+        assert_eq!(
+            triage_verify_failure("cargo test", Some(101), true, false, ""),
+            FailureTriage::Transient
+        );
+        assert_eq!(
+            triage_verify_failure("cargo test", Some(101), false, true, ""),
+            FailureTriage::Transient
+        );
+        // 127 is a shell convention about the process, so it outranks a
+        // compiler-shaped message in the tail.
+        assert_eq!(
+            triage_verify_failure(
+                "cargo test",
+                Some(127),
+                false,
+                false,
+                "error[E0308]: mismatched types",
+            ),
+            FailureTriage::Infrastructure
+        );
+    }
+
+    #[test]
+    fn triage_environment_faults_block_code_repair() {
+        for (cmd, out) in [
+            (
+                "cargo test",
+                "error: linking with `cc` failed: exit status 1",
+            ),
+            ("cargo test", "rustc: command not found"),
+            ("npm run build", "npm ERR! missing script: build"),
+            ("cargo test", "No space left on device"),
+            (
+                "docker build .",
+                "docker: Cannot connect to the Docker daemon",
+            ),
+            (
+                "cargo test",
+                "error: failed to select a version for the requirement `serde`",
+            ),
+            (
+                "cargo test",
+                "error: failed to run custom build command for `ring`",
+            ),
+            ("node x.js", "Error: Cannot find module 'vite'"),
+        ] {
+            let triage = triage_verify_failure(cmd, Some(101), false, false, out);
+            assert_eq!(triage, FailureTriage::Infrastructure, "{out}");
+            assert!(triage.blocks_code_repair(), "{out} must block repair");
+        }
+    }
+
+    #[test]
+    fn triage_transient_faults_are_retried_not_repaired() {
+        for (cmd, out) in [
+            ("npm install", "read ECONNRESET"),
+            ("npm install", "connect ETIMEDOUT 10.0.0.1:443"),
+            ("npm install", "502 Bad Gateway"),
+            ("curl https://api", "failed with status 429"),
+            ("git fetch", "Temporary failure in name resolution"),
+            (
+                "cargo build",
+                "warning: spurious network error (3 tries remaining)",
+            ),
+        ] {
+            let triage = triage_verify_failure(cmd, Some(1), false, false, out);
+            assert_eq!(triage, FailureTriage::Transient, "{out}");
+            assert!(
+                triage.is_retryable() && !triage.blocks_code_repair(),
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn triage_product_failures_stay_on_the_repair_path() {
+        for out in [
+            "error[E0308]: mismatched types\n  --> src/lib.rs:42:5",
+            "test result: FAILED. 1 passed; 2 failed",
+            "thread 'main' panicked at 'called `Option::unwrap()` on a `None` value'",
+            "src/App.tsx(12,7): error TS2322: Type 'string' is not assignable to type 'number'",
+            "FAIL src/verify.test.ts > rejects an empty input",
+            "assertion failed: expected 3 actual 4",
+            "error: test failed, to rerun pass `--no-fail-fast`",
+        ] {
+            let triage = triage_verify_failure("cargo test", Some(101), false, false, out);
+            assert_eq!(triage, FailureTriage::Product, "{out}");
+            assert!(!triage.blocks_code_repair(), "{out}");
+        }
+    }
+
+    #[test]
+    fn triage_leaves_an_unattributable_failure_unknown() {
+        for out in [
+            "",
+            "   ",
+            "error",
+            "exit status 1",
+            "exit code 1",
+            "FAILED",
+            "command failed",
+            "???",
+            "something went wrong",
+        ] {
+            let triage = triage_verify_failure("cargo test", Some(1), false, false, out);
+            assert_eq!(triage, FailureTriage::Unknown, "{out:?}");
+            // Unknown is not an environment verdict, so it must not strand a
+            // failure that could still be repaired.
+            assert!(!triage.blocks_code_repair(), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn evidence_records_the_triage_from_real_process_state() {
+        let failing = VerifyOutcome {
+            command: VerifyCommand::test("cargo test"),
+            exit_code: Some(101),
+            ok: false,
+            timed_out: false,
+            cancelled: false,
+            cwd: "/tmp".into(),
+            duration_ms: 1,
+            output_tail: "test result: FAILED. 0 passed; 1 failed".into(),
+            failure: None,
+        };
+        let ev = VerificationEvidence::from_outcome(&failing, "/tmp", vec![], 500);
+        assert_eq!(ev.triage, Some(FailureTriage::Product));
+        assert_eq!(ev.failure_class, Some(FailureClass::Product));
+
+        let timed = VerifyOutcome {
+            timed_out: true,
+            output_tail: String::new(),
+            ..failing
+        };
+        let ev = VerificationEvidence::from_outcome(&timed, "/tmp", vec![], 500);
+        assert_eq!(ev.triage, Some(FailureTriage::Transient));
+        assert_eq!(
+            ev.failure_class,
+            Some(FailureClass::Timeout),
+            "the persisted marker keeps its own vocabulary"
+        );
+
+        let passed = VerifyOutcome {
+            ok: true,
+            exit_code: Some(0),
+            ..timed
+        };
+        let ev = VerificationEvidence::from_outcome(&passed, "/tmp", vec![], 500);
+        assert_eq!(ev.triage, None);
+    }
+
+    #[test]
+    fn evidence_written_before_the_triage_field_still_loads() {
+        let json = r#"{"command":"cargo test","cwd":"/tmp","exit_code":101,"duration_ms":1,
+            "criterion_ids":["c1"],"output_summary":"boom","truncated":false,"ok":false,
+            "failure_class":"Product"}"#;
+        let ev: VerificationEvidence = serde_json::from_str(json).expect("old record must load");
+        assert_eq!(ev.triage, None);
+        assert_eq!(ev.failure_class, Some(FailureClass::Product));
     }
 
     fn temp_verify_dir(tag: &str) -> std::path::PathBuf {

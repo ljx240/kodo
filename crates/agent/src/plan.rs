@@ -611,7 +611,77 @@ fn is_question(message: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
+/// How many of the user's own rules a plan carries. Beyond this the request is
+/// a specification document, and a document does not belong in a checkpoint.
+const MAX_USER_CONSTRAINTS: usize = 6;
+
+/// Longest quoted fragment kept. A rule the model has to re-read twice is not
+/// a rule.
+const MAX_USER_CONSTRAINT_CHARS: usize = 120;
+
+/// Markers that make a sentence a rule about this task rather than a
+/// description of it. Deliberately narrow: widening this until every sentence
+/// matches is how the signal disappears.
+const CONSTRAINT_MARKERS: &[&str] = &[
+    "不要", "不得", "不许", "不能", "不可", "禁止", "必须", "只能", "只用", "仅限", "保留", "保持",
+    "无需", "do not", "don't", "never", "must", "only use", "keep ", "avoid",
+];
+
+/// Copy out the constraints the user stated about this task, each labelled with
+/// where it came from (FR-E2). The text is quoted, not interpreted: no
+/// paraphrase, no inferred rule, nothing that was not in the message.
+pub fn extract_user_constraints(message: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for sentence in message
+        .split(['\n', '。', '！', '？', '；', '!', '?', ';'])
+        .map(str::trim)
+        .filter(|sentence| !sentence.is_empty())
+    {
+        let lower = sentence.to_ascii_lowercase();
+        if !CONSTRAINT_MARKERS
+            .iter()
+            .any(|marker| lower.contains(marker))
+        {
+            continue;
+        }
+        let quoted: String = sentence.chars().take(MAX_USER_CONSTRAINT_CHARS).collect();
+        let quoted = if quoted.chars().count() < sentence.chars().count() {
+            format!("{quoted}…")
+        } else {
+            quoted
+        };
+        let entry = format!("用户原话要求：{quoted}");
+        if !found.contains(&entry) {
+            found.push(entry);
+        }
+        if found.len() == MAX_USER_CONSTRAINTS {
+            break;
+        }
+    }
+    found
+}
+
+/// The plan's standing rules, then the user's own — one checkpoint list with
+/// provenance still readable.
+fn plan_constraints(base: &[&str], message: &str) -> Vec<String> {
+    let mut constraints: Vec<String> = base.iter().map(|entry| (*entry).to_owned()).collect();
+    constraints.extend(extract_user_constraints(message));
+    constraints
+}
+
 impl TaskPlan {
+    /// Re-attach the constraints the user stated to a plan that came from
+    /// somewhere else — the model planner, a restored checkpoint. Without this
+    /// the plan JSON the model writes back repeats only what it chose to
+    /// repeat, and the rule that outranks it disappears mid-run (FR-E2).
+    pub fn with_user_constraints(&mut self, message: &str) {
+        for constraint in extract_user_constraints(message) {
+            if !self.constraints.contains(&constraint) {
+                self.constraints.push(constraint);
+            }
+        }
+    }
+
     /// Layer 1 of the delivery contract (see [`parse_output_contract`]).
     pub fn set_output_contract(&mut self, message: &str) {
         let contract = parse_output_contract(message);
@@ -730,7 +800,7 @@ impl TaskPlan {
             .to_owned();
         Self {
             goal,
-            constraints: Vec::new(),
+            constraints: extract_user_constraints(message),
             subtasks: Vec::new(),
             acceptance_criteria: Vec::new(),
             criteria: Vec::new(),
@@ -861,10 +931,13 @@ impl TaskPlan {
 
         Self {
             goal,
-            constraints: vec![
-                "Paths stay inside the project".to_owned(),
-                "No hidden chain-of-thought is stored".to_owned(),
-            ],
+            constraints: plan_constraints(
+                &[
+                    "Paths stay inside the project",
+                    "No hidden chain-of-thought is stored",
+                ],
+                message,
+            ),
             subtasks,
             acceptance_criteria,
             criteria,
@@ -923,10 +996,13 @@ impl TaskPlan {
         ];
         Self {
             goal,
-            constraints: vec![
-                "Paths stay inside the project".to_owned(),
-                "No hidden chain-of-thought is stored".to_owned(),
-            ],
+            constraints: plan_constraints(
+                &[
+                    "Paths stay inside the project",
+                    "No hidden chain-of-thought is stored",
+                ],
+                message,
+            ),
             subtasks,
             acceptance_criteria: Vec::new(),
             criteria: Vec::new(),
@@ -991,15 +1067,18 @@ impl TaskPlan {
         // the lib.rs empty-final branch in `attempt_finish` handling.
         plan.requires_final_answer = skill.requires_final_answer;
         plan.set_output_contract(message);
-        plan.constraints = vec![
-            "Paths stay inside the project".to_owned(),
-            "No hidden chain-of-thought is stored".to_owned(),
-            format!(
-                "Skill `{}` rules apply; they never bypass Permission approval",
-                skill.name
-            ),
-            "Only tool/verification evidence can mark work done".to_owned(),
-        ];
+        plan.constraints = plan_constraints(
+            &[
+                "Paths stay inside the project",
+                "No hidden chain-of-thought is stored",
+                "Only tool/verification evidence can mark work done",
+            ],
+            message,
+        );
+        plan.constraints.push(format!(
+            "Skill `{}` rules apply; they never bypass Permission approval",
+            skill.name
+        ));
         plan
     }
 
@@ -1965,6 +2044,11 @@ pub struct AcceptanceEvidence {
     pub had_tool_success: bool,
     pub files_written: Vec<String>,
     pub verify_ok: Option<bool>,
+    /// The last passing run predates a write made in the same turn: it really
+    /// happened, but not against the files on disk now, so it cannot accept the
+    /// task again without a fresh run.
+    #[serde(default)]
+    pub verify_stale: bool,
     pub model_claimed_done: bool,
     pub denied_tools: Vec<String>,
     /// Typed evidence bag for criterion matchers.
@@ -2031,6 +2115,7 @@ impl AcceptanceEvidence {
         // Regression fingerprint reappearance fails verification.
         let ok = ok && !self.bag.regression_failed;
         self.verify_ok = Some(ok);
+        self.verify_stale = false;
         // Legacy path: only record overall verify_ok + bound items when we
         // have explicit (command, criterion) bindings.
         self.bag.mark_verify(ok, commands);
@@ -2045,6 +2130,7 @@ impl AcceptanceEvidence {
     ) {
         let ok = ok && !self.bag.regression_failed;
         self.verify_ok = Some(ok);
+        self.verify_stale = false;
         self.verify_infra_failure = infra_failure;
         self.partial_verified = evidence.iter().any(|e| e.ok);
         self.verify_evidence = evidence.clone();
@@ -2066,6 +2152,7 @@ impl AcceptanceEvidence {
         self.verify_not_applicable = true;
         self.verify_infra_failure = false;
         self.verify_ok = Some(true);
+        self.verify_stale = false;
         self.partial_verified = false;
         self.verify_evidence.clear();
     }
@@ -2444,6 +2531,107 @@ mod tests {
         assert!(plan.requires_verify, "bug-fix policy is full");
         assert!(plan.constraints.iter().any(|c| c.contains("Permission")));
         assert!(plan.subtasks.iter().all(|s| !s.is_done()));
+    }
+
+    /// AC-E1: the user's own rule has to outlive the turn it was written in.
+    /// The checkpoint block is what survives the history window, so the rule
+    /// must appear there in the user's words.
+    #[test]
+    fn explicit_user_constraints_ride_the_task_checkpoint() {
+        let message = "给导出功能补上测试。\n不要改动公开 API。必须保留现有 CLI 参数。";
+        let plan = TaskPlan::from_task(message);
+        for stated in ["不要改动公开 API", "必须保留现有 CLI 参数"] {
+            assert!(
+                plan.constraints.iter().any(|c| c.contains(stated)),
+                "`{stated}` lost: {:?}",
+                plan.constraints
+            );
+        }
+        let block = plan.to_prompt_block();
+        assert!(
+            block.contains("constraint: 用户原话要求：不要改动公开 API"),
+            "the checkpoint carries the rule verbatim: {block}"
+        );
+        // The channel that answers without a plan still keeps the rule.
+        let qa = TaskPlan::conversational(message);
+        assert!(
+            qa.constraints
+                .iter()
+                .any(|c| c.contains("不要改动公开 API")),
+            "{:?}",
+            qa.constraints
+        );
+    }
+
+    /// FR-E2: a description of the task is not a rule about the task. Nothing
+    /// may be promoted that the user did not actually state.
+    #[test]
+    fn descriptive_requests_yield_no_constraints() {
+        for message in [
+            "介绍下这个项目的架构",
+            "帮我把导出功能做完，然后告诉我结果",
+            "Why does the parser accept an empty header?",
+        ] {
+            assert!(
+                extract_user_constraints(message).is_empty(),
+                "invented a rule from: {message}"
+            );
+        }
+    }
+
+    /// FR-E2: the list is bounded, and each entry stays a quote, not a summary.
+    #[test]
+    fn user_constraints_are_capped_and_shortened() {
+        let message = (1..=10)
+            .map(|index| format!("不要第{index}项做法"))
+            .collect::<Vec<_>>()
+            .join("。");
+        let found = extract_user_constraints(&message);
+        assert_eq!(found.len(), MAX_USER_CONSTRAINTS, "{found:?}");
+
+        let long = format!("不要{}", "重复".repeat(200));
+        let found = extract_user_constraints(&long);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let text = found[0]
+            .strip_prefix("用户原话要求：")
+            .expect("every entry names its source");
+        assert_eq!(
+            text.chars().count(),
+            MAX_USER_CONSTRAINT_CHARS + 1,
+            "cut with an explicit ellipsis: {text}"
+        );
+    }
+
+    /// FR-E2 / AC-E1: a plan the model writes back repeats only what the model
+    /// chose to repeat, so the user's rule is re-attached — exactly once.
+    #[test]
+    fn a_model_plan_cannot_drop_the_users_rule() {
+        let mut plan = TaskPlan::parse_model_json(
+            r#"{"goal":"修复崩溃","constraints":["Run the test suite"],"acceptance_criteria":["崩溃不再复现"],"subtasks":[{"title":"读取栈"}]}"#,
+        )
+        .expect("model plan");
+        assert!(
+            !plan.constraints.iter().any(|c| c.contains("公开 API")),
+            "precondition: the model plan forgot the rule: {:?}",
+            plan.constraints
+        );
+        let message = "修复崩溃。不要修改公开 API。";
+        plan.with_user_constraints(message);
+        plan.with_user_constraints(message);
+        assert_eq!(
+            plan.constraints
+                .iter()
+                .filter(|c| c.contains("不要修改公开 API"))
+                .count(),
+            1,
+            "{:?}",
+            plan.constraints
+        );
+        assert!(
+            plan.constraints.iter().any(|c| c == "Run the test suite"),
+            "the model's own plan is not overwritten: {:?}",
+            plan.constraints
+        );
     }
 
     #[test]

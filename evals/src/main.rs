@@ -1500,42 +1500,243 @@ fn suite_root(suite: &str) -> PathBuf {
     }
 }
 
-/// Every corpus on disk: `default` first, then each `fixtures-<suite>/`
-/// directory. Baselines run over all of them so a second corpus cannot rot
-/// quietly next to a green report.
-fn suite_names() -> Vec<String> {
-    let mut extras: Vec<String> = std::fs::read_dir(env!("CARGO_MANIFEST_DIR"))
+/// What a corpus directory holds, decided from its contents rather than its
+/// name. A programming fixture suite is a directory *of task repos*; a
+/// classification corpus is a directory *of case files*. They are gated
+/// differently, so mixing them up either silences a real gate or applies a
+/// fixture gate to a corpus that has no oracles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CorpusShape {
+    /// Sub-directories present: a fixture suite with machine-checkable oracles.
+    FixtureSuite { fixtures: Vec<String> },
+    /// No sub-directories, but `*.jsonl` case files: a frozen label corpus.
+    ClassificationCorpus { case_files: Vec<String> },
+    /// Nothing the harness can say anything about. Always reported as a
+    /// failure — never skipped, or a corpus can rot quietly next to green.
+    Unusable { reason: String },
+}
+
+/// Decide a corpus' shape from the entries on disk.
+fn corpus_shape(root: &Path) -> CorpusShape {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return CorpusShape::Unusable {
+            reason: format!("{} missing or unreadable", root.display()),
+        };
+    };
+    let mut fixtures: Vec<String> = Vec::new();
+    let mut case_files: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.path().is_dir() {
+            fixtures.push(name);
+        } else if name.ends_with(".jsonl") {
+            case_files.push(name);
+        }
+    }
+    fixtures.sort();
+    case_files.sort();
+    if !fixtures.is_empty() {
+        return CorpusShape::FixtureSuite { fixtures };
+    }
+    if !case_files.is_empty() {
+        return CorpusShape::ClassificationCorpus { case_files };
+    }
+    CorpusShape::Unusable {
+        reason: format!(
+            "{} holds neither fixture directories nor .jsonl case files",
+            root.display()
+        ),
+    }
+}
+
+/// One discovered corpus directory: its suite name, its path, its shape.
+struct DiscoveredCorpus {
+    suite: String,
+    root: PathBuf,
+    shape: CorpusShape,
+}
+
+/// Every corpus on disk: `fixtures/` as `default`, then each `fixtures-<x>/`
+/// directory. Discovery is by name, *classification* is by shape — so a
+/// corpus added next to the fixtures is always seen, and always gated for
+/// what it actually is.
+fn discover_corpora() -> Vec<DiscoveredCorpus> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut candidates: Vec<(String, PathBuf)> =
+        vec![(DEFAULT_SUITE.to_owned(), manifest.join("fixtures"))];
+    let mut extras: Vec<(String, PathBuf)> = std::fs::read_dir(&manifest)
         .map(|entries| {
             entries
                 .flatten()
                 .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
                 .filter_map(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .strip_prefix("fixtures-")
-                        .map(str::to_owned)
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let suite = name.strip_prefix("fixtures-")?.to_owned();
+                    Some((suite, entry.path()))
                 })
                 .collect()
         })
         .unwrap_or_default();
     extras.sort();
-    let mut names = vec![DEFAULT_SUITE.to_owned()];
-    names.extend(extras);
-    names
+    candidates.extend(extras);
+    candidates
+        .into_iter()
+        .map(|(suite, root)| DiscoveredCorpus {
+            shape: corpus_shape(&root),
+            suite,
+            root,
+        })
+        .collect()
+}
+
+/// The suites that can actually run live coding tasks.
+fn fixture_suite_names() -> Vec<String> {
+    discover_corpora()
+        .into_iter()
+        .filter(|corpus| matches!(corpus.shape, CorpusShape::FixtureSuite { .. }))
+        .map(|corpus| corpus.suite)
+        .collect()
 }
 
 /// Layer B baselines over **every** corpus on disk, so a second suite cannot
 /// rot quietly next to a green report.
 fn run_fixture_baselines(report: &mut EvalReport) {
-    for suite in suite_names() {
-        run_suite_baselines(&suite, report);
+    for corpus in discover_corpora() {
+        let before = report.baseline_total;
+        let fails_before = report.baseline_failures;
+        let kind = match &corpus.shape {
+            CorpusShape::FixtureSuite { fixtures } => {
+                run_suite_baselines(&corpus.suite, fixtures, report);
+                format!("fixture suite, {} fixture(s)", fixtures.len())
+            }
+            CorpusShape::ClassificationCorpus { case_files } => {
+                run_classification_corpus_baselines(
+                    &corpus.suite,
+                    &corpus.root,
+                    case_files,
+                    report,
+                );
+                format!("classification corpus, {} case file(s)", case_files.len())
+            }
+            CorpusShape::Unusable { reason } => {
+                report.baseline(
+                    &format!("corpus_{}_shape_is_usable", corpus.suite),
+                    false,
+                    reason,
+                );
+                "unusable".to_owned()
+            }
+        };
+        // Per-corpus visibility: which gates ran, and what the directory was
+        // judged to be. A green total says nothing without this.
+        println!(
+            "  suite {} — {} — {} check(s), {} fail(s)",
+            corpus.suite,
+            kind,
+            report.baseline_total - before,
+            report.baseline_failures - fails_before
+        );
     }
+}
+
+/// Structural gates for a classification corpus. These are *not* the fixture
+/// gates: there is no oracle to run, but the corpus still has to be there,
+/// parse, and carry both splits — otherwise the classifier numbers printed
+/// next to this report would be measuring nothing.
+///
+/// Returns the checks plus the case count so the caller can both report and
+/// be tested on the exact gate names without printing.
+fn classification_corpus_checks(
+    suite: &str,
+    root: &Path,
+    case_files: &[String],
+) -> (Vec<(String, bool, String)>, usize) {
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+    let mut total_cases = 0usize;
+    let mut malformed = 0usize;
+    let mut missing_fields = 0usize;
+    let mut tune = 0usize;
+    let mut holdout = 0usize;
+    let mut other_splits = 0usize;
+    for file in case_files {
+        let Ok(text) = std::fs::read_to_string(root.join(file)) else {
+            checks.push((
+                format!("corpus_{suite}_case_file_readable_{file}"),
+                false,
+                "case file is not readable".to_owned(),
+            ));
+            continue;
+        };
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            total_cases += 1;
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                malformed += 1;
+                continue;
+            };
+            let field = |key: &str| -> String {
+                value
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            if field("id").is_empty() || field("label").is_empty() || field("split").is_empty() {
+                missing_fields += 1;
+            }
+            match field("split").as_str() {
+                "tune" => tune += 1,
+                "holdout" => holdout += 1,
+                _ => other_splits += 1,
+            }
+        }
+    }
+    checks.push((
+        format!("corpus_{suite}_cases_parse"),
+        malformed == 0,
+        format!("{malformed} of {total_cases} case lines are not valid JSON objects"),
+    ));
+    checks.push((
+        format!("corpus_{suite}_cases_have_id_label_split"),
+        missing_fields == 0,
+        format!("{missing_fields} case lines lack id, label or split"),
+    ));
+    checks.push((
+        format!("corpus_{suite}_splits_defined"),
+        tune > 0 && holdout > 0 && other_splits == 0,
+        format!("tune={tune} holdout={holdout} other={other_splits}"),
+    ));
+    // The point of this gate: a classification corpus must never be counted as
+    // a fixture suite. Zero fixture directories here is the correct answer,
+    // not a failure — and it stays correct only while the shape says so.
+    checks.push((
+        format!("corpus_{suite}_is_not_a_fixture_suite"),
+        corpus_shape(root)
+            == CorpusShape::ClassificationCorpus {
+                case_files: case_files.to_vec(),
+            },
+        "directory holds fixture sub-directories and must be gated as a fixture suite".to_owned(),
+    ));
+    (checks, total_cases)
+}
+
+fn run_classification_corpus_baselines(
+    suite: &str,
+    root: &Path,
+    case_files: &[String],
+    report: &mut EvalReport,
+) {
+    let (checks, total_cases) = classification_corpus_checks(suite, root, case_files);
+    for (name, ok, detail) in checks {
+        report.baseline(&name, ok, &detail);
+    }
+    report.notes.push(format!(
+        "classification corpus {suite}: {total_cases} cases"
+    ));
 }
 
 /// Each fixture has prompt+oracle; unfixed bug/feature oracles must fail; the
 /// blocked task oracle must pass without agent edits.
-fn run_suite_baselines(suite: &str, report: &mut EvalReport) {
+fn run_suite_baselines(suite: &str, ids: &[String], report: &mut EvalReport) {
     // Corpus-level check names keep the historical spelling for `default` so
     // reports stay comparable run to run; another suite is suffixed.
     let named = |key: &str| -> String {
@@ -1546,19 +1747,7 @@ fn run_suite_baselines(suite: &str, report: &mut EvalReport) {
         }
     };
     let root = suite_root(suite);
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        report.baseline(
-            &named("fixtures_directory_exists"),
-            false,
-            &format!("{} missing", root.display()),
-        );
-        return;
-    };
-    let mut ids: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
+    let mut ids = ids.to_vec();
     ids.sort();
     // The toy corpus is a 30-task gate; a named suite only has to be big enough
     // to say something about scale.
@@ -2160,13 +2349,24 @@ fn run_fixture_live(suite: &str, tasks_n: usize, repeat: usize, report: &mut Eva
 
     let root = suite_root(suite);
     // An unknown `--suite` must not silently become a zero-task live run that
-    // reads as "nothing failed".
+    // reads as "nothing failed". A corpus that exists but holds no fixture
+    // repos is called out separately, so `--suite decision` cannot be mistaken
+    // for "an empty programming suite".
     if !root.is_dir() {
         report.live_status = format!("NOT RUN — unknown suite \"{suite}\"");
         report.notes.push(format!(
             "LIVE EVAL: {} (available: {})",
             report.live_status,
-            suite_names().join(", ")
+            fixture_suite_names().join(", ")
+        ));
+        return;
+    }
+    if !fixture_suite_names().iter().any(|name| name == suite) {
+        report.live_status = format!("NOT RUN — \"{suite}\" is not a fixture suite");
+        report.notes.push(format!(
+            "LIVE EVAL: {} (fixture suites: {})",
+            report.live_status,
+            fixture_suite_names().join(", ")
         ));
         return;
     }
@@ -2330,4 +2530,283 @@ fn copy_dir(from: &Path, to: &Path) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// A throwaway corpus directory, removed when the test ends.
+    struct TempCorpus(PathBuf);
+
+    impl TempCorpus {
+        fn new(case: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "kodo_eval_shape_{case}_{}_{}",
+                std::process::id(),
+                std::time::UNIX_EPOCH
+                    .elapsed()
+                    .map(|d| d.subsec_nanos())
+                    .unwrap_or(0)
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("temp corpus root");
+            Self(root)
+        }
+        fn dir(&self, name: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::create_dir_all(&path).expect("temp corpus sub-dir");
+            path
+        }
+        fn file(&self, path: &str, text: &str) {
+            let full = self.0.join(path);
+            if let Some(parent) = full.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&full, text).expect("temp corpus file");
+        }
+    }
+
+    impl Drop for TempCorpus {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn case_line(id: &str, label: &str, split: &str) -> String {
+        format!(
+            "{{\"id\":\"{id}\",\"message\":\"m\",\"label\":\"{label}\",\"split\":\"{split}\"}}\n"
+        )
+    }
+
+    /// The reported bug: `fixtures-decision/` holds only `.jsonl` corpora, and
+    /// the fixture gate counted its (zero) fixture directories and demanded a
+    /// `splits-decision.json` that a classification corpus never has.
+    #[test]
+    fn a_jsonl_only_corpus_is_a_classification_corpus_not_a_fixture_suite() {
+        let tmp = TempCorpus::new("jsonl_only");
+        tmp.file(
+            "task_route.jsonl",
+            &format!(
+                "{}{}",
+                case_line("tr-1", "feature", "tune"),
+                case_line("tr-2", "docs", "holdout")
+            ),
+        );
+        tmp.file(
+            "failure_triage.jsonl",
+            &case_line("ft-1", "product", "holdout"),
+        );
+        let shape = corpus_shape(&tmp.0);
+        let CorpusShape::ClassificationCorpus { case_files } = shape else {
+            panic!("a .jsonl-only corpus is not a fixture suite: {shape:?}");
+        };
+        assert_eq!(
+            case_files,
+            vec![
+                "failure_triage.jsonl".to_owned(),
+                "task_route.jsonl".to_owned()
+            ]
+        );
+        // And its gates never mention fixture counts or a splits file.
+        let (checks, cases) = classification_corpus_checks("decision", &tmp.0, &case_files);
+        assert_eq!(cases, 3);
+        let names: Vec<&str> = checks.iter().map(|(name, _, _)| name.as_str()).collect();
+        assert!(
+            names.iter().any(
+                |name| name.ends_with("corpus_decision_is_not_a_fixture_suite")
+                    || name.contains("corpus_decision_splits_defined")
+            ),
+            "{names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name.contains("fixture_count")),
+            "a classification corpus must not be gated on fixture count: {names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("splits_cover_all_fixtures")),
+            "a classification corpus has no fixture directories to cover: {names:?}"
+        );
+        assert!(checks.iter().all(|(_, ok, _)| *ok), "{checks:?}");
+    }
+
+    #[test]
+    fn a_directory_of_fixture_repos_is_still_a_fixture_suite() {
+        let tmp = TempCorpus::new("fixture_dirs");
+        let one = tmp.dir("bug-1-off-by-one");
+        std::fs::write(one.join("prompt.md"), "fix it\n").unwrap();
+        std::fs::write(one.join("oracle.sh"), "#!/bin/sh\nexit 1\n").unwrap();
+        let two = tmp.dir("feat-1-greet");
+        std::fs::write(two.join("prompt.md"), "add it\n").unwrap();
+        let shape = corpus_shape(&tmp.0);
+        let CorpusShape::FixtureSuite { fixtures } = shape else {
+            panic!("fixture repos must be a suite: {shape:?}");
+        };
+        assert_eq!(
+            fixtures,
+            vec!["bug-1-off-by-one".to_owned(), "feat-1-greet".to_owned()]
+        );
+    }
+
+    /// A corpus that grows a fixture repo has become a suite: the suite gates
+    /// must apply, so the classification gates cannot quietly absorb it.
+    #[test]
+    fn mixed_shape_is_gated_as_a_fixture_suite_first() {
+        let tmp = TempCorpus::new("mixed");
+        tmp.file("task_route.jsonl", &case_line("tr-1", "feature", "tune"));
+        tmp.dir("real-fixture");
+        let shape = corpus_shape(&tmp.0);
+        assert!(
+            matches!(&shape, CorpusShape::FixtureSuite { fixtures } if fixtures == &vec!["real-fixture".to_owned()]),
+            "{shape:?}"
+        );
+    }
+
+    /// Nothing to check is a failure, not a silent skip.
+    #[test]
+    fn an_empty_corpus_is_unusable_rather_than_skipped() {
+        let tmp = TempCorpus::new("empty");
+        tmp.file("README.md", "notes only\n");
+        let shape = corpus_shape(&tmp.0);
+        assert!(
+            matches!(&shape, CorpusShape::Unusable { .. }),
+            "a corpus with neither fixture dirs nor case files must be unusable: {shape:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_root_is_unusable_rather_than_skipped() {
+        let shape = corpus_shape(&std::env::temp_dir().join("kodo_eval_shape_absent"));
+        assert!(
+            matches!(&shape, CorpusShape::Unusable { reason } if reason.contains("missing or unreadable")),
+            "{shape:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_case_line_or_missing_field_fails_the_corpus_gate() {
+        let tmp = TempCorpus::new("malformed");
+        tmp.file(
+            "cases.jsonl",
+            &format!(
+                "{}\nnot json at all\n{}\n",
+                case_line("tr-1", "feature", "tune"),
+                "{\"id\":\"tr-2\",\"label\":\"\",\"split\":\"holdout\"}"
+            ),
+        );
+        let shape = corpus_shape(&tmp.0);
+        let CorpusShape::ClassificationCorpus { case_files } = shape else {
+            panic!("{shape:?}");
+        };
+        let (checks, cases) = classification_corpus_checks("broken", &tmp.0, &case_files);
+        assert_eq!(cases, 3);
+        let failed: Vec<&str> = checks
+            .iter()
+            .filter(|(_, ok, _)| !*ok)
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        assert_eq!(
+            failed,
+            vec![
+                "corpus_broken_cases_parse",
+                "corpus_broken_cases_have_id_label_split"
+            ],
+            "{checks:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_split_corpus_fails_the_split_gate() {
+        let tmp = TempCorpus::new("one_split");
+        tmp.file(
+            "cases.jsonl",
+            &format!(
+                "{}{}",
+                case_line("tr-1", "feature", "tune"),
+                case_line("tr-2", "docs", "tune")
+            ),
+        );
+        let (checks, _) =
+            classification_corpus_checks("onesplit", &tmp.0, &["cases.jsonl".to_owned()]);
+        let splits = checks
+            .iter()
+            .find(|(name, _, _)| name.ends_with("corpus_onesplit_splits_defined"))
+            .expect("split gate present");
+        assert!(!splits.1, "{splits:?}");
+        assert!(splits.2.contains("holdout=0"), "{}", splits.2);
+    }
+
+    /// The real corpora on disk, asserted at their real shapes — this is what
+    /// `default`/`real`/`decision` gate discovery used to get wrong.
+    #[test]
+    fn the_real_programming_suites_are_still_discovered_as_suites() {
+        let corpora = discover_corpora();
+        let by_suite: BTreeMap<&str, &CorpusShape> = corpora
+            .iter()
+            .map(|c| (c.suite.as_str(), &c.shape))
+            .collect();
+        for suite in ["default", "real"] {
+            let shape = *by_suite
+                .get(suite)
+                .unwrap_or_else(|| panic!("{suite} not discovered"));
+            let CorpusShape::FixtureSuite { fixtures } = shape else {
+                panic!("{suite} must stay a fixture suite: {shape:?}");
+            };
+            assert!(
+                fixtures.len() >= if suite == "default" { 30 } else { 4 },
+                "{suite} fixture count regressed: {}",
+                fixtures.len()
+            );
+        }
+        let decision = *by_suite
+            .get("decision")
+            .expect("decision corpus must still be discovered");
+        assert!(
+            matches!(decision, CorpusShape::ClassificationCorpus { case_files } if case_files.len() == 2),
+            "{decision:?}"
+        );
+        assert!(
+            !by_suite
+                .values()
+                .any(|s| matches!(s, CorpusShape::Unusable { .. })),
+            "every corpus on disk must be usable: {by_suite:?}"
+        );
+    }
+
+    /// The misidentification this task fixes, stated as the invariant: no
+    /// classification corpus may ever be handed the fixture-suite gates again.
+    #[test]
+    fn fixture_gates_are_never_applied_to_a_classification_corpus() {
+        let gate = |suite: &str| format!("fixture_count_at_least_4_{suite}");
+        for corpus in discover_corpora() {
+            if let CorpusShape::ClassificationCorpus { case_files } = &corpus.shape {
+                let (checks, _) =
+                    classification_corpus_checks(&corpus.suite, &corpus.root, case_files);
+                let names: Vec<&str> = checks.iter().map(|(name, _, _)| name.as_str()).collect();
+                // Every gate on a classification corpus is a `corpus_*` gate.
+                // The fixture-suite family (`fixture_count_at_least_*`,
+                // `splits_cover_all_fixtures`, `splits_no_overlap`) must never
+                // reach it — that misapplication is the bug this task fixes.
+                for name in &names {
+                    let base = name
+                        .strip_prefix(&format!("corpus_{}_", corpus.suite))
+                        .unwrap_or(name);
+                    assert!(
+                        !base.starts_with("fixture_")
+                            && !base.contains("fixture_count")
+                            && !base.contains("splits_cover_all_fixtures")
+                            && !base.contains("splits_no_overlap"),
+                        "fixture gate reached a classification corpus: {names:?}"
+                    );
+                }
+                assert!(
+                    !names.contains(&gate(&corpus.suite).as_str()),
+                    "obsolete gate name still emitted: {names:?}"
+                );
+            }
+        }
+    }
 }

@@ -17,7 +17,8 @@ use kodo_agent::classify_verify_failure;
 use kodo_agent::decision::{
     build_request, plan_failure_triage, plan_task_route, FailureTriageInput, TaskRouteInput,
 };
-use kodo_agent::TurnFailureClass;
+use kodo_agent::triage_verify_failure;
+use kodo_agent::{TurnFailureClass, TurnFailureTriage as FailureTriage, ROUTE_LABELS};
 
 /// One corpus line.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -43,12 +44,20 @@ struct Sample {
 /// The measured result of one corpus.
 #[derive(Debug, Default, Clone)]
 pub struct CorpusResult {
+    /// Samples that carry a label inside the vocabulary — the denominator
+    /// every rate below uses.
     pub total: usize,
     pub correct: usize,
     /// The label set the macro F1 is averaged over.
     pub labels: Vec<String>,
     /// Per-label true positives / false positives / false negatives.
     pub per_label: BTreeMap<String, (usize, usize, usize)>,
+    /// Per-label `(truth count, count the rule got right)`: the denominator
+    /// a per-category number needs, because the total hides a class the rule
+    /// never reaches.
+    pub per_label_support: BTreeMap<String, (usize, usize)>,
+    /// Per split (`tune` / `holdout`) `(total, correct)`.
+    pub per_split: BTreeMap<String, (usize, usize)>,
     /// How many samples the local rule was unsure about.
     pub ambiguous: usize,
     /// How many of the unsure samples the local rule still got right.
@@ -57,6 +66,10 @@ pub struct CorpusResult {
     /// while the label says the product is at fault. This is the rate that
     /// would *block* work that could have been finished.
     pub product_blocked: usize,
+    /// Samples whose label is not in the vocabulary. They are reported, not
+    /// silently counted as rule misses: a label the rule cannot name is an
+    /// evaluation defect, not a measurement.
+    pub off_vocabulary: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -106,19 +119,43 @@ impl CorpusResult {
     }
 }
 
-/// The task-route labels the corpus uses.
-const TASK_LABELS: [&str; 7] = [
-    "bug-fix",
-    "feature",
-    "test",
-    "refactor",
-    "code-review",
-    "docs",
-    "unknown",
-];
+/// The task-route label vocabulary. Not a local copy: this is the same list
+/// the runtime's own `route_label` can produce and the decision assistant
+/// offers, so a class the rule cannot name is impossible here.
+fn route_labels() -> Vec<String> {
+    ROUTE_LABELS
+        .iter()
+        .map(|label| (*label).to_owned())
+        .collect()
+}
 
-/// The failure-triage labels the corpus uses.
-const FAILURE_LABELS: [&str; 4] = ["product", "infrastructure", "transient", "unknown"];
+/// The failure-triage label vocabulary, taken from the enum that produces the
+/// predictions rather than restated here.
+fn failure_labels() -> Vec<String> {
+    FailureTriage::ALL
+        .iter()
+        .map(|triage| triage.label().to_owned())
+        .collect()
+}
+
+/// The corpus shape: what the file holds and whether all of it could be read.
+#[derive(Debug, Default, Clone)]
+struct Corpus {
+    samples: Vec<Sample>,
+    /// Non-empty lines in the file.
+    raw_lines: usize,
+    /// Lines that are not a sample object at all.
+    malformed: usize,
+    /// Labels outside the vocabulary.
+    unknown_labels: Vec<String>,
+    duplicate_ids: Vec<String>,
+}
+
+impl Corpus {
+    fn loaded(&self) -> usize {
+        self.samples.len()
+    }
+}
 
 fn corpus_dir() -> Option<PathBuf> {
     // The corpus lives next to the crate, in its own directory: the
@@ -129,96 +166,74 @@ fn corpus_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-fn load(name: &str) -> Vec<Sample> {
+fn load(name: &str, labels: &[String]) -> Corpus {
     let Some(dir) = corpus_dir() else {
-        return Vec::new();
+        return Corpus::default();
     };
-    let path = dir.join(name);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+    let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
+        return Corpus::default();
     };
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Sample>(line).ok())
-        .collect()
+    parse_corpus(&text, labels)
 }
 
-/// Measure the local rule on the task-route corpus.
-fn measure_task_route(samples: &[Sample]) -> CorpusResult {
-    let mut result = CorpusResult {
-        total: samples.len(),
-        labels: TASK_LABELS
-            .iter()
-            .map(|label| (*label).to_owned())
-            .collect(),
-        ..CorpusResult::default()
-    };
-    for sample in samples {
-        let evidence = classify_task_with_evidence(&sample.message);
-        let predicted = evidence.baseline.label();
-        let truth = sample.label.as_str();
-        if evidence.ambiguous {
-            result.ambiguous += 1;
-            if predicted == truth {
-                result.ambiguous_correct += 1;
-            }
-        }
-        if predicted == truth {
-            result.correct += 1;
-        }
-        if predicted == truth {
-            result
-                .per_label
-                .entry(truth.to_owned())
-                .or_insert((0, 0, 0))
-                .0 += 1;
-        } else {
-            result
-                .per_label
-                .entry(predicted.to_owned())
-                .or_insert((0, 0, 0))
-                .1 += 1;
-            result
-                .per_label
-                .entry(truth.to_owned())
-                .or_insert((0, 0, 0))
-                .2 += 1;
-        }
-    }
-    if result.total == 0 {
-        result
-            .notes
-            .push("the task-route corpus is missing".to_owned());
-    }
-    result
-}
-
-/// Measure the local rule on the failure-triage corpus.
-fn measure_failure_triage(samples: &[Sample]) -> CorpusResult {
-    let mut result = CorpusResult {
-        total: samples.len(),
-        labels: FAILURE_LABELS
-            .iter()
-            .map(|label| (*label).to_owned())
-            .collect(),
-        ..CorpusResult::default()
-    };
-    for sample in samples {
-        // The local rule looks at the command and the output, exactly as the
-        // runtime does. The raw command line is never sent anywhere; here
-        // it is only the locally derived category plus the excerpt.
-        let command = sample.command_category.clone();
-        let predicted = match classify_verify_failure(&command, &sample.error_excerpt) {
-            TurnFailureClass::Infrastructure => "infrastructure",
-            TurnFailureClass::Timeout => "transient",
-            _ => "product",
+/// Read a corpus, counting what could not be read.
+///
+/// A dropped line used to be invisible: the metrics were then computed over
+/// an unknown denominator. Every line is accounted for here, and a label
+/// outside the vocabulary is named instead of scored as a rule miss.
+fn parse_corpus(text: &str, labels: &[String]) -> Corpus {
+    let mut corpus = Corpus::default();
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        corpus.raw_lines += 1;
+        let Ok(sample) = serde_json::from_str::<Sample>(line) else {
+            corpus.malformed += 1;
+            continue;
         };
+        *seen.entry(sample.id.clone()).or_default() += 1;
+        if !labels.iter().any(|label| *label == sample.label) {
+            corpus
+                .unknown_labels
+                .push(format!("{}:{}", sample.id, sample.label));
+        }
+        corpus.samples.push(sample);
+    }
+    corpus.duplicate_ids = seen
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(id, count)| format!("{id}×{count}"))
+        .collect();
+    corpus
+}
+
+/// Score one corpus with one prediction rule.
+///
+/// `unsure` decides what counts as the local rule declining to attribute
+/// anything — that is corpus-specific, so it is a parameter instead of a
+/// hard-coded label check. A label outside `labels` is excluded from the
+/// denominator and reported: measuring a class the rule cannot name would
+/// blame the rule for the evaluation's own gap.
+fn score_corpus(
+    samples: &[Sample],
+    labels: &[String],
+    predict: &dyn Fn(&Sample) -> String,
+    unsure: &dyn Fn(&Sample, &str) -> bool,
+) -> CorpusResult {
+    let mut result = CorpusResult {
+        labels: labels.to_vec(),
+        ..CorpusResult::default()
+    };
+    for sample in samples {
+        let predicted = predict(sample);
         let truth = sample.label.as_str();
-        // The rule has no "unknown" and no "transient" bucket of its own:
-        // a failure it cannot place is a *default product* guess, which is
-        // exactly the case that may be asked about.
-        let ambiguous = predicted == "product" && truth != "product";
-        if ambiguous {
+        if !labels.iter().any(|label| label == truth) {
+            result
+                .off_vocabulary
+                .push(format!("{}: {truth}", sample.id));
+            continue;
+        }
+        result.total += 1;
+        if unsure(sample, &predicted) {
             result.ambiguous += 1;
             if predicted == truth {
                 result.ambiguous_correct += 1;
@@ -226,8 +241,6 @@ fn measure_failure_triage(samples: &[Sample]) -> CorpusResult {
         }
         if predicted == truth {
             result.correct += 1;
-        }
-        if predicted == truth {
             result
                 .per_label
                 .entry(truth.to_owned())
@@ -236,7 +249,7 @@ fn measure_failure_triage(samples: &[Sample]) -> CorpusResult {
         } else {
             result
                 .per_label
-                .entry(predicted.to_owned())
+                .entry(predicted.clone())
                 .or_insert((0, 0, 0))
                 .1 += 1;
             result
@@ -245,8 +258,28 @@ fn measure_failure_triage(samples: &[Sample]) -> CorpusResult {
                 .or_insert((0, 0, 0))
                 .2 += 1;
         }
-        // The dangerous direction: the rule says the environment is at
-        // fault while the label says the product is.
+        let support = result
+            .per_label_support
+            .entry(truth.to_owned())
+            .or_insert((0, 0));
+        support.0 += 1;
+        if predicted == truth {
+            support.1 += 1;
+        }
+        let split = result
+            .per_split
+            .entry(if sample.split.is_empty() {
+                "(no split)".to_owned()
+            } else {
+                sample.split.clone()
+            })
+            .or_insert((0, 0));
+        split.0 += 1;
+        if predicted == truth {
+            split.1 += 1;
+        }
+        // The dangerous direction: the rule says the environment is at fault
+        // while the label says the product is.
         if predicted == "infrastructure" && truth == "product" {
             result.product_blocked += 1;
         }
@@ -254,9 +287,98 @@ fn measure_failure_triage(samples: &[Sample]) -> CorpusResult {
     if result.total == 0 {
         result
             .notes
-            .push("the failure-triage corpus is missing".to_owned());
+            .push("no sample in this corpus could be scored".to_owned());
     }
     result
+}
+
+/// The local rule's route, in the vocabulary the decision assistant uses: a
+/// request no keyword reaches is `unknown`, not a guess at `feature`.
+fn measure_task_route(samples: &[Sample]) -> CorpusResult {
+    score_corpus(
+        samples,
+        &route_labels(),
+        &|sample| {
+            classify_task_with_evidence(&sample.message)
+                .route_label()
+                .to_owned()
+        },
+        &|sample, _| classify_task_with_evidence(&sample.message).ambiguous,
+    )
+}
+
+/// The previous 口径, kept so the number before this change stays comparable:
+/// the rule always named a category, so `unknown` was unreachable by
+/// construction and every vague request was counted as a `feature` guess.
+fn measure_task_route_legacy(samples: &[Sample]) -> CorpusResult {
+    score_corpus(
+        samples,
+        &route_labels(),
+        &|sample| {
+            classify_task_with_evidence(&sample.message)
+                .baseline
+                .label()
+                .to_owned()
+        },
+        &|sample, _| classify_task_with_evidence(&sample.message).ambiguous,
+    )
+}
+
+/// The command line a corpus category stands for.
+///
+/// The corpus records a category, not a command; the runtime always has the
+/// command line, so the scorer reconstructs the shape it would have seen.
+/// `generic` stays empty on purpose — inventing a command there would be a
+/// guess the runtime never made.
+fn command_line(category: &str) -> &'static str {
+    match category {
+        "rust_check" => "cargo check -p kodo-agent",
+        "rust_test" => "cargo test -p kodo-agent",
+        "frontend_typecheck" => "npm run typecheck",
+        "frontend_test" => "npm run test",
+        _ => "",
+    }
+}
+
+fn has_flag(flags: &[String], name: &str) -> bool {
+    flags.iter().any(|flag| flag == name)
+}
+
+/// The evidence-tiered triage: process state and exit code first, then the
+/// output's own diagnostic shapes.
+fn measure_failure_triage(samples: &[Sample]) -> CorpusResult {
+    score_corpus(
+        samples,
+        &failure_labels(),
+        &|sample| {
+            triage_verify_failure(
+                command_line(&sample.command_category),
+                sample.exit_code,
+                has_flag(&sample.known_flags, "timed_out"),
+                has_flag(&sample.known_flags, "cancelled"),
+                &sample.error_excerpt,
+            )
+            .label()
+            .to_owned()
+        },
+        &|_, predicted| predicted == "unknown",
+    )
+}
+
+/// The previous 口径: the persisted marker, with `Timeout` renamed to
+/// `transient` and everything else — including a bare non-zero exit — called
+/// `product`. It has no `unknown` bucket at all.
+fn measure_failure_triage_legacy(samples: &[Sample]) -> CorpusResult {
+    score_corpus(
+        samples,
+        &failure_labels(),
+        &|sample| match classify_verify_failure(&sample.command_category, &sample.error_excerpt) {
+            TurnFailureClass::Infrastructure => "infrastructure".to_owned(),
+            TurnFailureClass::Timeout => "transient".to_owned(),
+            _ => "product".to_owned(),
+        },
+        &|sample, predicted| predicted == "product" && sample.label != "product",
+    )
 }
 
 /// How many samples the local rule would call unsure at a given margin.
@@ -333,35 +455,31 @@ fn check_state_contract(samples: &[Sample]) -> (usize, usize) {
 
 /// The samples the local rule got wrong, with their corpus ids. The ids
 /// are what a corpus curator needs to find the sample again.
-fn print_misses(samples: &[Sample], label: &str, limit: usize) {
+fn print_misses(
+    samples: &[Sample],
+    title: &str,
+    limit: usize,
+    predict: &dyn Fn(&Sample) -> String,
+) {
     let mut shown = 0usize;
     for sample in samples {
         if shown >= limit {
             break;
         }
-        let predicted = if label == "task" {
-            classify_task_with_evidence(&sample.message)
-                .baseline
-                .label()
-        } else {
-            match classify_verify_failure(&sample.command_category, &sample.error_excerpt) {
-                TurnFailureClass::Infrastructure => "infrastructure",
-                TurnFailureClass::Timeout => "transient",
-                _ => "product",
-            }
-        };
+        let predicted = predict(sample);
         if predicted == sample.label {
             continue;
         }
         shown += 1;
-        let text: String = if label == "task" {
-            sample.message.chars().take(40).collect()
+        let text: String = if sample.message.is_empty() {
+            sample.error_excerpt.chars().take(48).collect()
         } else {
-            sample.error_excerpt.chars().take(40).collect()
+            sample.message.chars().take(48).collect()
         };
         println!(
-            "  {label} miss {}: predicted={predicted} truth={} \"{text}\"{}",
+            "  {title} miss {} [{}]: predicted={predicted} truth={} \"{text}\"{}",
             sample.id,
+            sample.split,
             sample.label,
             if sample.note.is_empty() {
                 String::new()
@@ -372,44 +490,132 @@ fn print_misses(samples: &[Sample], label: &str, limit: usize) {
     }
 }
 
-/// Run the offline decision evaluation and print its report.
-pub fn run() {
-    println!("\nkodo-evals decision layer (offline, local rules only)");
-    let task_samples = load("task_route.jsonl");
-    let failure_samples = load("failure_triage.jsonl");
-    let task = measure_task_route(&task_samples);
-    let failure = measure_failure_triage(&failure_samples);
-
-    println!("\n--- decision · task route (local rule baseline) ---");
+/// One corpus, reported by category and by split — not as one total.
+fn print_metrics(prefix: &str, result: &CorpusResult) {
     println!(
-        "task_route_samples: {} ({} tune / {} holdout)",
-        task.total,
-        task_samples.iter().filter(|s| s.split == "tune").count(),
-        task_samples.iter().filter(|s| s.split == "holdout").count(),
+        "{prefix}_accuracy: {:.3} ({}/{})",
+        result.accuracy(),
+        result.correct,
+        result.total
     );
-    println!("task_route_accuracy: {:.3}", task.accuracy());
-    println!("task_route_macro_f1: {:.3}", task.macro_f1());
-    println!(
-        "task_route_ambiguous: {} ({:.1}% of the corpus)",
-        task.ambiguous,
-        task.ambiguous_rate() * 100.0
-    );
-    println!(
-        "task_route_ambiguous_correct: {} ({:.1}% of the unsure cases)",
-        task.ambiguous_correct,
-        if task.ambiguous == 0 {
+    println!("{prefix}_macro_f1: {:.3}", result.macro_f1());
+    for (split, (total, correct)) in &result.per_split {
+        let rate = if *total == 0 {
             0.0
         } else {
-            task.ambiguous_correct as f64 / task.ambiguous as f64 * 100.0
-        }
-    );
-    for label in &task.labels {
-        let (tp, fp, fn_) = task.per_label.get(label).copied().unwrap_or((0, 0, 0));
-        println!("  task_route[{label}]: tp={tp} fp={fp} fn={fn_}");
+            *correct as f64 / *total as f64
+        };
+        println!("  {prefix}[split {split}]: accuracy={rate:.3} ({correct}/{total})");
     }
+    for label in &result.labels {
+        let (tp, fp, fn_) = result.per_label.get(label).copied().unwrap_or((0, 0, 0));
+        let (support, right) = result
+            .per_label_support
+            .get(label)
+            .copied()
+            .unwrap_or((0, 0));
+        println!(
+            "  {prefix}[{label}]: tp={tp} fp={fp} fn={fn_} — category accuracy={right}/{support}"
+        );
+    }
+    println!(
+        "  {prefix}_ambiguous: {} ({:.1}% of the corpus, {} of them right)",
+        result.ambiguous,
+        result.ambiguous_rate() * 100.0,
+        result.ambiguous_correct
+    );
+    println!(
+        "  {prefix}_product_blocked: {} ({}/{}) — a product failure the rule would call an environment failure",
+        result.product_blocked,
+        result.product_blocked,
+        result.total
+    );
+    if !result.off_vocabulary.is_empty() {
+        println!(
+            "  {prefix}_off_vocabulary: {} sample(s) carry a label the rule cannot name: {}",
+            result.off_vocabulary.len(),
+            result.off_vocabulary.join(", ")
+        );
+    }
+    for note in &result.notes {
+        println!("  {prefix}_note: {note}");
+    }
+}
+
+/// Run the offline decision evaluation and print its report.
+/// Report what was actually read. A corpus that silently loses a line is a
+/// corpus whose metrics mean nothing.
+fn print_corpus(name: &str, corpus: &Corpus) {
+    println!(
+        "  {name}: {} line(s) read, {} sample(s) parsed, {} malformed, {} duplicated id(s)",
+        corpus.raw_lines,
+        corpus.loaded(),
+        corpus.malformed,
+        corpus.duplicate_ids.len()
+    );
+    if !corpus.duplicate_ids.is_empty() {
+        println!(
+            "    {name} duplicate ids: {}",
+            corpus.duplicate_ids.join(", ")
+        );
+    }
+    if !corpus.unknown_labels.is_empty() {
+        println!(
+            "    {name} labels outside the vocabulary: {}",
+            corpus.unknown_labels.join(", ")
+        );
+    }
+}
+
+pub fn run() {
+    println!("\nkodo-evals decision layer (offline, local rules only)");
+    let task = load("task_route.jsonl", &route_labels());
+    let failure = load("failure_triage.jsonl", &failure_labels());
+    let task_samples = &task.samples;
+    let failure_samples = &failure.samples;
+    let predict_task = |sample: &Sample| {
+        classify_task_with_evidence(&sample.message)
+            .route_label()
+            .to_owned()
+    };
+    let predict_failure = |sample: &Sample| {
+        triage_verify_failure(
+            command_line(&sample.command_category),
+            sample.exit_code,
+            has_flag(&sample.known_flags, "timed_out"),
+            has_flag(&sample.known_flags, "cancelled"),
+            &sample.error_excerpt,
+        )
+        .label()
+        .to_owned()
+    };
+
+    println!("\n--- decision · corpus integrity (frozen: nothing here is rewritten) ---");
+    print_corpus("task_route", &task);
+    print_corpus("failure_triage", &failure);
+
+    println!("\n--- decision · task route (local rule baseline) ---");
+    let task_splits: BTreeMap<String, usize> =
+        task_samples
+            .iter()
+            .fold(BTreeMap::new(), |mut map, sample| {
+                *map.entry(sample.split.clone()).or_default() += 1;
+                map
+            });
+    let task_splits = task_splits
+        .iter()
+        .map(|(split, count)| format!("{split}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!("task_route_samples: {} ({task_splits})", task_samples.len());
+    let task = measure_task_route(task_samples);
+    print_metrics("task_route", &task);
+    let task_legacy = measure_task_route_legacy(task_samples);
+    println!("task_route_legacy (previous 口径, `unknown` unreachable by construction):");
+    print_metrics("task_route_legacy", &task_legacy);
     println!("task_route_margin_sweep (ambiguous samples per margin):");
     for margin in [0u32, 2, 4, 8, 12] {
-        let count = ambiguous_by_margin(&task_samples, margin);
+        let count = ambiguous_by_margin(task_samples, margin);
         println!(
             "  margin={margin}: {count} ({:.1}%)",
             if task.total == 0 {
@@ -421,36 +627,36 @@ pub fn run() {
     }
 
     println!("\n--- decision · failure triage (local rule baseline) ---");
-    println!("failure_triage_samples: {}", failure.total);
-    println!("failure_triage_accuracy: {:.3}", failure.accuracy());
-    println!("failure_triage_macro_f1: {:.3}", failure.macro_f1());
+    let failure_splits: BTreeMap<String, usize> =
+        failure_samples
+            .iter()
+            .fold(BTreeMap::new(), |mut map, sample| {
+                *map.entry(sample.split.clone()).or_default() += 1;
+                map
+            });
+    let failure_splits = failure_splits
+        .iter()
+        .map(|(split, count)| format!("{split}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     println!(
-        "failure_triage_ambiguous: {} ({:.1}% of the corpus)",
-        failure.ambiguous,
-        failure.ambiguous_rate() * 100.0
+        "failure_triage_samples: {} ({failure_splits})",
+        failure_samples.len()
     );
-    println!(
-        "failure_triage_product_blocked: {} ({:.1}% — a product failure the local rule would treat as an environment failure)",
-        failure.product_blocked,
-        if failure.total == 0 {
-            0.0
-        } else {
-            failure.product_blocked as f64 / failure.total as f64 * 100.0
-        }
-    );
-    for label in &failure.labels {
-        let (tp, fp, fn_) = failure.per_label.get(label).copied().unwrap_or((0, 0, 0));
-        println!("  failure_triage[{label}]: tp={tp} fp={fp} fn={fn_}");
-    }
+    let failure = measure_failure_triage(failure_samples);
+    print_metrics("failure_triage", &failure);
+    let failure_legacy = measure_failure_triage_legacy(failure_samples);
+    println!("failure_triage_legacy (previous 口径, no `unknown` bucket at all):");
+    print_metrics("failure_triage_legacy", &failure_legacy);
 
     println!("task_route_misses (first 10):");
-    print_misses(&task_samples, "task", 10);
+    print_misses(task_samples, "task", 10, &predict_task);
     println!("failure_triage_misses (first 10):");
-    print_misses(&failure_samples, "failure", 10);
+    print_misses(failure_samples, "failure", 10, &predict_failure);
 
     println!("\n--- decision · offline contract check ---");
-    let (mut contract_ok, mut contract_total) = check_state_contract(&task_samples);
-    let (failure_ok, failure_total) = check_state_contract(&failure_samples);
+    let (mut contract_ok, mut contract_total) = check_state_contract(task_samples);
+    let (failure_ok, failure_total) = check_state_contract(failure_samples);
     contract_ok += failure_ok;
     contract_total += failure_total;
     println!(
@@ -490,23 +696,92 @@ mod tests {
     }
 
     #[test]
-    fn a_guessing_rule_scores_low() {
-        // The local rule has no "unknown" bucket: a request it cannot place
-        // falls back to `feature`, so an "unknown" sample is always a miss.
+    fn a_request_the_rules_cannot_place_is_named_unknown() {
+        // Before, the scorer used `baseline.label()`, which can only name the
+        // six keyword categories, so every `unknown` sample was a structural
+        // miss no matter what the message said.
         let samples = vec![
             sample("新增导出", "feature"),
             sample("把那个东西弄好", "unknown"),
         ];
         let result = measure_task_route(&samples);
-        assert_eq!(result.correct, 1);
-        assert_eq!(result.accuracy(), 0.5);
+        assert_eq!(result.correct, 2, "{:?}", result.per_label);
+        assert_eq!(result.per_label.get("unknown").copied().unwrap().0, 1);
+        // And it is still reported as an unsure case, not as a confident hit.
+        assert_eq!(result.ambiguous, 2);
     }
 
     #[test]
-    fn the_ambiguous_subset_is_counted() {
+    fn the_legacy_number_is_still_measurable() {
+        // The comparability record: the old 口径 could never reach `unknown`.
         let samples = vec![sample("把那个东西弄好", "unknown")];
+        assert_eq!(measure_task_route_legacy(&samples).correct, 0);
+        assert_eq!(measure_task_route(&samples).correct, 1);
+    }
+
+    #[test]
+    fn the_route_vocabulary_covers_every_label_the_rule_can_name() {
+        let labels = route_labels();
+        for message in [
+            "修复崩溃",
+            "新增导出",
+            "给 plan 模块补测试用例",
+            "重构上下文扫描逻辑",
+            "审查一下这个 PR",
+            "补充 API 使用文档",
+            "把那个东西弄好",
+            "",
+            "保存到 docs/架构.md",
+        ] {
+            let predicted = classify_task_with_evidence(message).route_label();
+            assert!(labels.iter().any(|label| label == predicted), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_label_outside_the_vocabulary_is_reported_not_scored() {
+        // `work` is a mode tag, never a classification result — a corpus that
+        // carried it must not be blamed on the rule.
+        let samples = vec![
+            sample("修复崩溃", "bug-fix"),
+            sample("总结这次改动", "work"),
+        ];
         let result = measure_task_route(&samples);
-        assert_eq!(result.ambiguous, 1);
+        assert_eq!(result.total, 1, "only the scoreable samples count");
+        assert_eq!(result.off_vocabulary.len(), 1);
+        assert!(result.off_vocabulary[0].contains("work"));
+    }
+
+    #[test]
+    fn metrics_are_kept_per_split_and_per_category() {
+        let mut vague = sample("把那个东西弄好", "unknown");
+        vague.split = "holdout".to_owned();
+        let result = measure_task_route(&[sample("修复崩溃", "bug-fix"), vague]);
+        assert_eq!(result.per_split.get("tune"), Some(&(1, 1)));
+        assert_eq!(result.per_split.get("holdout"), Some(&(1, 1)));
+        assert_eq!(result.per_label_support.get("bug-fix"), Some(&(1, 1)));
+        assert_eq!(result.per_label_support.get("unknown"), Some(&(1, 1)));
+    }
+
+    #[test]
+    fn a_dropped_corpus_line_is_counted() {
+        let text = r#"{"id":"t-1","message":"修复崩溃","label":"bug-fix","split":"tune"}
+{"id":"t-1","message":"新增导出","label":"feature","split":"tune"}
+this line is not a sample at all
+{"id":"t-2","message":"总结","label":"work","split":"holdout"}"#;
+        let corpus = parse_corpus(text, &route_labels());
+        assert_eq!(corpus.raw_lines, 4);
+        assert_eq!(corpus.loaded(), 3);
+        assert_eq!(corpus.malformed, 1);
+        assert_eq!(corpus.duplicate_ids, vec!["t-1×2".to_owned()]);
+        assert_eq!(corpus.unknown_labels, vec!["t-2:work".to_owned()]);
+    }
+
+    #[test]
+    fn a_generic_sample_does_not_invent_a_command_line() {
+        assert_eq!(command_line("generic"), "");
+        assert!(command_line("rust_test").starts_with("cargo test"));
+        assert!(command_line("frontend_typecheck").starts_with("npm run"));
     }
 
     #[test]
@@ -524,5 +799,66 @@ mod tests {
         }];
         let result = measure_failure_triage(&samples);
         assert_eq!(result.product_blocked, 1);
+    }
+
+    #[test]
+    fn a_transient_process_state_is_not_called_product() {
+        let failure = |flags: Vec<String>, label: &str| Sample {
+            id: "f".to_owned(),
+            message: String::new(),
+            command_category: "rust_test".to_owned(),
+            exit_code: Some(101),
+            known_flags: flags,
+            error_excerpt: String::new(),
+            label: label.to_owned(),
+            split: "tune".to_owned(),
+            note: String::new(),
+        };
+        for flags in [vec!["timed_out".to_owned()], vec!["cancelled".to_owned()]] {
+            let result = measure_failure_triage(&[failure(flags.clone(), "transient")]);
+            assert_eq!(result.correct, 1, "{flags:?} must be transient");
+        }
+    }
+
+    #[test]
+    fn the_frozen_triage_corpus_reaches_every_class_it_claims() {
+        let corpus = load("failure_triage.jsonl", &failure_labels());
+        let result = measure_failure_triage(&corpus.samples);
+        assert_eq!(corpus.malformed, 0, "the frozen corpus must still parse");
+        assert_eq!(result.total, corpus.loaded(), "every line is scored");
+        assert_eq!(result.off_vocabulary, Vec::<String>::new());
+        // The direction that strands work: never call a product failure an
+        // environment failure.
+        assert_eq!(result.product_blocked, 0);
+        for label in failure_labels() {
+            let (tp, _, _) = result.per_label.get(&label).copied().unwrap_or((0, 0, 0));
+            assert!(tp > 0, "{label} is unreachable for the rule");
+        }
+    }
+
+    #[test]
+    fn the_frozen_route_corpus_can_reach_unknown() {
+        let corpus = load("task_route.jsonl", &route_labels());
+        let result = measure_task_route(&corpus.samples);
+        assert_eq!(result.total, corpus.loaded());
+        assert_eq!(result.off_vocabulary, Vec::<String>::new());
+        let (tp, _, _) = result
+            .per_label
+            .get("unknown")
+            .copied()
+            .unwrap_or((0, 0, 0));
+        assert!(tp > 0, "the 20 `unknown` samples must be reachable");
+        // The old 口径 could not reach this class at all.
+        let legacy = measure_task_route_legacy(&corpus.samples);
+        assert_eq!(
+            legacy
+                .per_label
+                .get("unknown")
+                .copied()
+                .unwrap_or((0, 0, 0))
+                .0,
+            0
+        );
+        assert!(result.accuracy() >= legacy.accuracy());
     }
 }
