@@ -1,5 +1,6 @@
 /* The decision-assistance surfaces: the settings section and the Inspector
-   record. */
+   record. Imported from main.tsx because no single component owns both
+   surfaces; deleting the last owning component must not drop these styles. */
 
 .decision-settings {
   display: grid;

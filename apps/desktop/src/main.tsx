@@ -5,6 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import "./styles/tokens.css";
 import "./styles/app.css";
 import "./styles/conversation.css";
+import "./conversation/decision.css";
 import "./styles/inspector.css";
 import "./styles/pages.css";
 import "./styles/todo.css";
