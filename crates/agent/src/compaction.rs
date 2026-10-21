@@ -78,17 +78,21 @@ fn default_true() -> bool {
     true
 }
 
-/// Decide whether compaction is warranted for this turn. The caller feeds
-/// the budget's most recent token reading and the planned window.
+/// Decide whether compaction is warranted for this turn.
+///
+/// The figure is the one the *next request* will carry: the caller sizes the
+/// history before asking (`Budget::note_history_size`), so a provider that
+/// never reports usage still gets a trigger, and a stale reading from the
+/// previous call cannot keep a small history from compacting (FR-D2).
 pub fn should_compact(budget: &Budget, cfg: &CompactConfig, history_len: usize) -> bool {
-    if budget.window_tokens == 0 || budget.last_input_tokens == 0 {
+    if budget.window_tokens == 0 {
         return false;
     }
     // Don't bother on tiny turns — there's nothing meaningful to compress.
     if history_len <= cfg.keep_tail + 1 {
         return false;
     }
-    budget.percent_used() >= cfg.trigger_percent
+    budget.planned_percent_used() >= cfg.trigger_percent
 }
 
 /// Move a cut before every assistant call whose results remain in the tail.
@@ -268,6 +272,103 @@ pub fn verify_anchors(
     history.len() >= system_end + 1 + pre_kept_tail
 }
 
+/// Outcome of a pre-send fit pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FitReport {
+    /// How many older observations were dropped to make the request fit.
+    pub dropped: usize,
+    /// How many trailing messages were kept verbatim.
+    pub kept_tail: usize,
+    /// Share of the request's char volume that was reclaimed (0..=100).
+    pub freed_pct: u8,
+    /// Even the smallest legal history does not fit. The caller must not
+    /// send it and must not retry: the provider would reject it again.
+    pub still_over: bool,
+}
+
+/// Shrink `history` deterministically so the request about to be built fits
+/// `usable_window` (the model window less the output reserve).
+///
+/// Unlike [`compact_history`] this makes no model call — a summarizer request
+/// would have to carry the oversized history it is fixing, so it fails the
+/// same way the real request would. What it keeps, in order:
+///
+/// - the leading system block, which holds both the operating rules and the
+///   task-checkpoint message the run loop writes there, so current task
+///   constraints survive the cut;
+/// - a trailing run of messages cut on a tool-group boundary, so no
+///   `tool_use` is ever separated from its `tool_result` in either direction;
+/// - a breadcrumb naming what was dropped, so the model knows to re-read.
+///
+/// `None` means there is nothing to do: the history already fits, or there is
+/// no middle block to drop.
+pub fn fit_history_to_window(
+    history: &mut Vec<ProviderMessage>,
+    usable_window: u32,
+    cfg: &CompactConfig,
+) -> Option<FitReport> {
+    let system_end = history
+        .iter()
+        .take_while(|m| m.role == provider::MessageRole::System)
+        .count();
+    // The tail is at least one message (the current turn's last request) and
+    // at most the whole non-system history.
+    let max_keep = history.len().saturating_sub(system_end);
+    if max_keep < 2 {
+        return None;
+    }
+    let chars_before = crate::history_estimate_chars(history);
+    if crate::state::estimate_input_tokens(chars_before, history.len()) <= usable_window {
+        return None;
+    }
+    let mut keep = cfg.keep_tail.min(max_keep - 1).max(1);
+    loop {
+        let desired = history.len() - keep;
+        let cut = tool_group_boundary(history, desired, system_end);
+        if cut > system_end {
+            let marker = ProviderMessage::user(format!(
+                "[context budget: dropped {} older observations before sending to fit the \
+                 window; re-read files if needed]",
+                cut - system_end
+            ));
+            let kept_chars = crate::history_estimate_chars(&history[..system_end])
+                .saturating_add(crate::history_estimate_chars(&history[cut..]))
+                .saturating_add(crate::history_estimate_chars(&[marker.clone()]));
+            let planned = crate::state::estimate_input_tokens(kept_chars, system_end + keep + 1);
+            if planned <= usable_window {
+                let dropped = cut - system_end;
+                let mut rebuilt: Vec<ProviderMessage> = history.drain(..system_end).collect();
+                let _: Vec<ProviderMessage> = history.drain(..dropped).collect();
+                rebuilt.push(marker);
+                rebuilt.append(history);
+                *history = rebuilt;
+                let chars_after = crate::history_estimate_chars(history);
+                let freed_pct = if chars_before == 0 {
+                    0
+                } else {
+                    let saved = chars_before.saturating_sub(chars_after);
+                    ((saved * 100) / chars_before).min(100) as u8
+                };
+                return Some(FitReport {
+                    dropped,
+                    kept_tail: keep,
+                    freed_pct,
+                    still_over: false,
+                });
+            }
+        }
+        if keep == 1 {
+            return Some(FitReport {
+                dropped: 0,
+                kept_tail: keep,
+                freed_pct: 0,
+                still_over: true,
+            });
+        }
+        keep -= 1;
+    }
+}
+
 /// Render the middle history block as plain text for the summary prompt.
 fn render_middle(messages: &[ProviderMessage]) -> String {
     let mut out = String::new();
@@ -388,6 +489,283 @@ mod tests {
             history.push(msg(provider::MessageRole::User, &format!("u{i}")));
         }
         assert!(!should_compact(&b, &cfg, history.len()));
+    }
+
+    /// FR-D2: a provider that never reports usage still gets a trigger. The
+    /// old rule demanded `last_input_tokens > 0`, so these turns compacted
+    /// never and died on the provider's own rejection.
+    #[test]
+    fn should_compact_triggers_from_an_estimate_without_any_usage() {
+        let mut b = Budget::default();
+        b.set_window(8_000);
+        let cfg = CompactConfig::default();
+        let history = history_with_middle(12, 3_000);
+        assert_eq!(b.last_input_tokens, 0, "no usage has arrived");
+        b.note_history_size(crate::history_chars(&history), history.len());
+        assert!(
+            should_compact(&b, &cfg, history.len()),
+            "planned {} tokens in an {} window",
+            b.planned_input_tokens(),
+            b.window_tokens
+        );
+    }
+
+    /// The estimate describes the request about to be sent, so a reading from
+    /// an earlier, larger call cannot keep triggering compaction on a history
+    /// that has already been rewritten.
+    #[test]
+    fn should_compact_follows_the_history_not_a_stale_measurement() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        b.charge_tokens(170_000); // the previous call really was 85%
+        let cfg = CompactConfig::default();
+        let history = vec![
+            msg(provider::MessageRole::System, "s"),
+            msg(provider::MessageRole::User, "tiny"),
+            msg(provider::MessageRole::User, "tiny"),
+            msg(provider::MessageRole::User, "tiny"),
+            msg(provider::MessageRole::User, "tiny"),
+            msg(provider::MessageRole::User, "tiny"),
+            msg(provider::MessageRole::User, "tiny"),
+            msg(provider::MessageRole::User, "tiny"),
+        ];
+        b.note_history_size(crate::history_chars(&history), history.len());
+        assert_eq!(b.percent_used(), 85, "the measurement is still on record");
+        assert!(
+            !should_compact(&b, &cfg, history.len()),
+            "planned {} of {}",
+            b.planned_input_tokens(),
+            b.window_tokens
+        );
+    }
+
+    /// History used by the fit tests: two system messages (rules plus the
+    /// task-checkpoint block the run loop rewrites each round), a filler
+    /// middle, one tool call/result pair, then the current request.
+    fn history_with_middle(middle: usize, filler_chars: usize) -> Vec<ProviderMessage> {
+        let filler = "x".repeat(filler_chars);
+        let mut history = vec![
+            msg(provider::MessageRole::System, "operating rules"),
+            msg(
+                provider::MessageRole::System,
+                "## Task checkpoint\n- 不得改动公开 API",
+            ),
+        ];
+        for i in 0..middle {
+            history.push(msg(provider::MessageRole::User, &format!("{i}: {filler}")));
+        }
+        history.push(ProviderMessage::assistant(
+            "",
+            vec![provider::NativeToolCall {
+                id: "c-last".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "src/lib.rs"}),
+            }],
+        ));
+        history.push(ProviderMessage::tool_result(
+            "c-last",
+            "pub fn run() {}",
+            false,
+        ));
+        history.push(msg(provider::MessageRole::User, "现在把导出补上"));
+        history
+    }
+
+    fn count_blocks(history: &[ProviderMessage], wants_call: bool) -> usize {
+        history
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter(|b| {
+                matches!(
+                    (wants_call, b),
+                    (true, provider::ContentBlock::ToolCall { .. })
+                        | (false, provider::ContentBlock::ToolResult { .. })
+                )
+            })
+            .count()
+    }
+
+    fn assert_pairs_intact(history: &[ProviderMessage]) {
+        for (index, message) in history.iter().enumerate() {
+            for block in &message.content {
+                if let provider::ContentBlock::ToolResult { call_id, .. } = block {
+                    assert!(
+                        history[..index]
+                            .iter()
+                            .any(|prior| prior.content.iter().any(|b| matches!(
+                                b,
+                                provider::ContentBlock::ToolCall { id, .. } if id == call_id
+                            ))),
+                        "kept tool_result {call_id} without its tool_use"
+                    );
+                }
+            }
+        }
+    }
+
+    /// AC-D1 / AC-D4: the trim is mechanical, but the anchors — system rules,
+    /// the task constraints carried with them, the current request, and every
+    /// kept tool pairing — must survive it.
+    #[test]
+    fn fit_keeps_system_block_task_constraints_and_tool_pairs() {
+        let cfg = CompactConfig::default();
+        let history = history_with_middle(12, 400);
+        // Only room for the system block, the marker and the recent group.
+        let usable = crate::state::estimate_input_tokens(
+            crate::history_chars(&history[..2]) + crate::history_chars(&history[14..]) + 160,
+            7,
+        );
+        let mut history = history.clone();
+        let report = fit_history_to_window(&mut history, usable, &cfg).expect("a fit happens");
+        assert!(!report.still_over);
+        assert!(report.dropped > 0, "{report:?}");
+        assert_eq!(history[0].text_of(), "operating rules");
+        assert!(history[1].text_of().contains("不得改动公开 API"));
+        assert!(history[2].text_of().contains("dropped"));
+        assert!(
+            history.last().unwrap().text_of().contains("把导出补上"),
+            "the current request must survive"
+        );
+        assert_eq!(count_blocks(&history, true), 1);
+        assert_eq!(count_blocks(&history, false), 1);
+        assert_pairs_intact(&history);
+        assert!(
+            crate::state::estimate_input_tokens(crate::history_chars(&history), history.len())
+                <= usable,
+            "the trimmed request must actually fit"
+        );
+    }
+
+    #[test]
+    fn fit_drops_nothing_when_the_request_already_fits() {
+        let cfg = CompactConfig::default();
+        let mut history = history_with_middle(4, 400);
+        let before = history.len();
+        assert!(
+            fit_history_to_window(&mut history, 200_000, &cfg).is_none(),
+            "a request with room left must not lose observations"
+        );
+        assert_eq!(history.len(), before);
+    }
+
+    /// FR-D4: when no legal shape fits, say so instead of returning a history
+    /// the provider will reject again — the caller needs the "stop" signal.
+    #[test]
+    fn fit_reports_still_over_without_touching_the_history() {
+        let cfg = CompactConfig::default();
+        let mut history = history_with_middle(6, 4_000);
+        let before = history.len();
+        let report = fit_history_to_window(&mut history, 1, &cfg).expect("a verdict");
+        assert!(report.still_over, "{report:?}");
+        assert_eq!(report.dropped, 0);
+        assert_eq!(
+            history.len(),
+            before,
+            "an unusable plan must not rewrite history"
+        );
+    }
+
+    /// AC-D5: output space is held back before the input is judged, so a
+    /// request that fits the raw window can still be trimmed.
+    #[test]
+    fn output_reserve_trims_a_request_the_bare_window_would_accept() {
+        let cfg = CompactConfig::default();
+        let history = history_with_middle(10, 1_200);
+        let chars = crate::history_chars(&history);
+        let planned = crate::state::estimate_input_tokens(chars, history.len());
+
+        let mut plain = Budget::default();
+        plain.set_window(4_000);
+        plain.note_history_size(chars, history.len());
+        assert!(
+            planned as u32 <= plain.window_tokens,
+            "precondition: {} fits {}",
+            planned,
+            plain.window_tokens
+        );
+        assert!(!plain.overfits_window());
+        assert!(fit_history_to_window(&mut history.clone(), plain.usable_window(), &cfg).is_none());
+
+        plain.set_output_reserve(1_000);
+        assert!(
+            plain.overfits_window(),
+            "the same history plus 1k of output does not fit"
+        );
+        let mut trimmed = history.clone();
+        let report =
+            fit_history_to_window(&mut trimmed, plain.usable_window(), &cfg).expect("a fit");
+        assert!(!report.still_over);
+        assert!(report.dropped > 0, "{report:?}");
+        assert_pairs_intact(&trimmed);
+    }
+
+    /// A screenshot is not a context overflow. The token estimate charges an
+    /// image a fixed allowance instead of its base64 length, so a media-heavy
+    /// request is not trimmed (or refused) for bytes the model never counts.
+    #[test]
+    fn fit_charges_an_image_by_allowance_not_by_payload() {
+        let base64 = "A".repeat(400_000);
+        let history = vec![
+            msg(provider::MessageRole::System, "rules"),
+            msg(provider::MessageRole::User, "看一下这张图"),
+            ProviderMessage {
+                role: provider::MessageRole::User,
+                content: vec![provider::ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data_base64: base64,
+                }],
+            },
+        ];
+        let wire = crate::history_chars(&history);
+        let planned = crate::state::estimate_input_tokens(
+            crate::history_estimate_chars(&history),
+            history.len(),
+        );
+        assert!(wire > 400_000, "the bar shows the wire volume: {wire}");
+        assert!(planned < 3_000, "one image, one allowance: {planned}");
+
+        let cfg = CompactConfig::default();
+        let mut history = history.clone();
+        assert!(
+            fit_history_to_window(&mut history, 4_000, &cfg).is_none(),
+            "a pasted screenshot must not trigger a trim"
+        );
+        assert_eq!(history.len(), 3);
+    }
+
+    /// A whole tool group that does not fit is never split to make it fit.
+    #[test]
+    fn fit_never_separates_a_call_from_the_result_it_keeps() {
+        let cfg = CompactConfig::default();
+        let mut history = vec![msg(provider::MessageRole::System, "rules")];
+        for i in 0..4 {
+            history.push(ProviderMessage::assistant(
+                "",
+                vec![provider::NativeToolCall {
+                    id: format!("c{i}"),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": format!("{i}.rs")}),
+                }],
+            ));
+            history.push(ProviderMessage::tool_result(
+                &format!("c{i}"),
+                &"y".repeat(2_000),
+                false,
+            ));
+        }
+        history.push(msg(provider::MessageRole::User, "接着改"));
+        // Keep-tail of 6 lands inside the last three groups; the boundary must
+        // pull the cut back so no kept result loses its call.
+        let target = crate::state::estimate_input_tokens(
+            crate::history_chars(&history[..1]) + 2_100 * 3 + 200,
+            8,
+        );
+        let before = history.len();
+        let report = fit_history_to_window(&mut history, target, &cfg);
+        assert!(report.is_some(), "the request is larger than the target");
+        assert!(before > history.len());
+        assert_pairs_intact(&history);
+        assert_eq!(count_blocks(&history, true), count_blocks(&history, false));
     }
 
     #[test]

@@ -974,6 +974,20 @@ fn fake_text(provider: &Provider, model_id: &str) -> Result<ChatResponse, Provid
         class: ProviderFailureClass::MalformedResponse,
         message: format!("fake provider response is not JSON: {error}"),
     })?;
+    // Offline scripts can drive a real failure class: `{"error": "...",
+    // "status": 400}` runs the same classifier the network path uses, so a
+    // recovery test exercises the class the provider would actually return
+    // instead of a string the loop would never recognise.
+    if let Some(error) = payload.get("error").and_then(Value::as_str) {
+        let status = payload
+            .get("status")
+            .and_then(Value::as_u64)
+            .map(|s| s as u16);
+        return Err(ProviderError {
+            class: classify_failure(error, status),
+            message: error.to_owned(),
+        });
+    }
     let text = payload
         .get("text")
         .and_then(Value::as_str)

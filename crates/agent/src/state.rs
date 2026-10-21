@@ -81,6 +81,39 @@ pub struct Budget {
     /// How many history-compaction passes have succeeded. Surfaced in the
     /// `Prompt` so the UI can show "已压缩 N 条".
     pub compacted_count: u32,
+    /// Input tokens estimated for the history that is about to be sent.
+    /// `0` means nothing has been measured or estimated this turn yet.
+    pub estimated_input_tokens: u32,
+    /// Output space held back out of the window before input is planned.
+    /// Set from the request's own output cap; an answer with nowhere to go is
+    /// a wasted call.
+    pub output_reserve_tokens: u32,
+}
+
+/// Where the number a context decision used came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextSource {
+    /// The provider reported input tokens for a call it actually made.
+    Measured,
+    /// No report was available, so the size was estimated from the history.
+    Estimated,
+    /// Neither: nothing has been sent or sized yet.
+    Unknown,
+}
+
+/// Chars per token assumed when a provider reports no usage. The same ratio
+/// the memory and knowledge budgets use, so no new tokenizer dependency.
+pub const ESTIMATED_CHARS_PER_TOKEN: u64 = 4;
+
+/// Per-message framing a char count cannot see (role, separators). Added on
+/// top of the char ratio so an estimate errs toward "more tokens", never fewer.
+pub const ESTIMATED_TOKENS_PER_MESSAGE: u32 = 8;
+
+/// Estimate the input size of a history from its character count.
+pub fn estimate_input_tokens(chars: u64, messages: usize) -> u32 {
+    let from_chars = chars.saturating_div(ESTIMATED_CHARS_PER_TOKEN);
+    let framing = (messages as u64).saturating_mul(ESTIMATED_TOKENS_PER_MESSAGE as u64);
+    from_chars.saturating_add(framing).min(u32::MAX as u64) as u32
 }
 
 impl Default for Budget {
@@ -100,6 +133,8 @@ impl Default for Budget {
             cumulative_input_tokens: 0,
             window_tokens: 32_000,
             compacted_count: 0,
+            estimated_input_tokens: 0,
+            output_reserve_tokens: 0,
         }
     }
 }
@@ -155,6 +190,68 @@ impl Budget {
         self.compacted_count = self.compacted_count.saturating_add(1);
     }
 
+    /// Size the history that is about to be sent, so a turn can plan its
+    /// context before any provider has reported anything.
+    pub fn note_history_size(&mut self, chars: u64, messages: usize) {
+        self.estimated_input_tokens = estimate_input_tokens(chars, messages);
+    }
+
+    /// Hold output space back for one request's own output cap.
+    pub fn set_output_reserve(&mut self, max_output_tokens: u32) {
+        self.output_reserve_tokens = crate::provider::effective_max_tokens(max_output_tokens)
+            .min(self.window_tokens.saturating_sub(1));
+    }
+
+    /// The input figure the context decisions plan against.
+    ///
+    /// The estimate is recomputed from the history about to be sent, so it is
+    /// always current. A measured reading describes the *previous* call and
+    /// goes stale the moment the history shrinks, so it is the fallback, not
+    /// the override.
+    pub fn planned_input_tokens(&self) -> u32 {
+        if self.estimated_input_tokens > 0 {
+            self.estimated_input_tokens
+        } else {
+            self.last_input_tokens
+        }
+    }
+
+    /// Whether `planned_input_tokens` was measured or estimated. Reported
+    /// wherever the figure is shown: an estimate is not a measurement.
+    pub fn context_source(&self) -> ContextSource {
+        if self.estimated_input_tokens > 0 {
+            ContextSource::Estimated
+        } else if self.last_input_tokens > 0 {
+            ContextSource::Measured
+        } else {
+            ContextSource::Unknown
+        }
+    }
+
+    /// The window left for input once the output reserve is held back.
+    pub fn usable_window(&self) -> u32 {
+        self.window_tokens
+            .saturating_sub(self.output_reserve_tokens)
+            .max(1)
+    }
+
+    /// Percent (0..=100) of the *usable* window the planned input consumes.
+    /// Unlike `percent_used`, this works on the first request, before any
+    /// provider has reported usage.
+    pub fn planned_percent_used(&self) -> u8 {
+        let window = self.usable_window();
+        let raw = self.planned_input_tokens() as u64 * 100 / window as u64;
+        raw.min(100) as u8
+    }
+
+    /// True when the planned input plus the output reserve does not fit the
+    /// window the provider will actually accept.
+    pub fn overfits_window(&self) -> bool {
+        self.planned_input_tokens()
+            .saturating_add(self.output_reserve_tokens)
+            > self.window_tokens
+    }
+
     /// Lift to bounded extended-work caps without discarding repair capacity.
     /// Repeated calls are idempotent; an already larger configured cap stays.
     /// Returns old/new caps for the progress event.
@@ -187,16 +284,25 @@ impl Budget {
 
     /// Short summary used in the final agent message when the turn ends with
     /// budget pressure. Format mirrors the desktop UI: "12.4k / 200k · 6%".
+    /// An estimate is labelled as one — it is not a measurement.
     pub fn context_summary(&self) -> String {
         if self.window_tokens == 0 {
             return String::new();
         }
-        format!(
-            "{} / {} · {}%",
-            shrink_tokens(self.last_input_tokens as u64),
-            shrink_tokens(self.window_tokens as u64),
-            self.percent_used()
-        )
+        match self.context_source() {
+            ContextSource::Estimated => format!(
+                "~{} / {} · {}%（估算，服务商未回报 usage）",
+                shrink_tokens(self.planned_input_tokens() as u64),
+                shrink_tokens(self.usable_window() as u64),
+                self.planned_percent_used()
+            ),
+            _ => format!(
+                "{} / {} · {}%",
+                shrink_tokens(self.last_input_tokens as u64),
+                shrink_tokens(self.window_tokens as u64),
+                self.percent_used()
+            ),
+        }
     }
 
     /// Auto-trip Failed only for rounds/tools; repair caps are checked on the
@@ -563,12 +669,12 @@ impl AgentMachine {
             (S::Execute, VerifyFinished { ok }) => {
                 // Direct verify without explicit Verify state (loop shortcut).
                 if !ok && self.evidence.verify_infra_failure {
-                    self.evidence.verify_ok = Some(false);
+                    self.record_verify(false);
                     return Ok(S::Failed {
                         reason: FailReason::Unrecoverable,
                     });
                 }
-                self.evidence.verify_ok = Some(ok);
+                self.record_verify(ok);
                 if ok {
                     self.plan.mark_verify_done();
                     self.try_finish(S::Execute)
@@ -581,12 +687,12 @@ impl AgentMachine {
             (S::Verify, VerifyFinished { ok }) => {
                 // Infrastructure failure is not a product regression — Block.
                 if !ok && self.evidence.verify_infra_failure {
-                    self.evidence.verify_ok = Some(false);
+                    self.record_verify(false);
                     return Ok(S::Failed {
                         reason: FailReason::Unrecoverable,
                     });
                 }
-                self.evidence.verify_ok = Some(ok);
+                self.record_verify(ok);
                 if ok {
                     self.plan.mark_verify_done();
                     self.try_finish(S::Verify)
@@ -616,12 +722,12 @@ impl AgentMachine {
             }
             (S::Repair, VerifyFinished { ok }) => {
                 if !ok && self.evidence.verify_infra_failure {
-                    self.evidence.verify_ok = Some(false);
+                    self.record_verify(false);
                     return Ok(S::Failed {
                         reason: FailReason::Unrecoverable,
                     });
                 }
-                self.evidence.verify_ok = Some(ok);
+                self.record_verify(ok);
                 if ok {
                     self.plan.mark_verify_done();
                     self.try_finish(S::Repair)
@@ -646,6 +752,13 @@ impl AgentMachine {
                 event
             )),
         }
+    }
+
+    /// A verification outcome just ran, so whatever was concluded before —
+    /// including a pass superseded by later writes — is replaced by it.
+    fn record_verify(&mut self, ok: bool) {
+        self.evidence.verify_ok = Some(ok);
+        self.evidence.verify_stale = false;
     }
 
     fn absorb(&mut self, results: Vec<ToolResult>) {
@@ -690,6 +803,20 @@ impl AgentMachine {
             {
                 self.recent_batch_denied = true;
             }
+        }
+        // A passing run that predates these writes is history, not evidence
+        // about the files on disk now. Drop the conclusion so the acceptance
+        // gate demands a fresh run, and keep the reason so the model is told
+        // why an earlier green result no longer counts.
+        let wrote_something = results.iter().any(|r| {
+            r.ok && (!r.changed_files.is_empty()
+                || crate::ToolName::parse(&r.name)
+                    .map(|n| n.is_mutation())
+                    .unwrap_or(false))
+        });
+        if wrote_something && self.evidence.verify_ok == Some(true) {
+            self.evidence.verify_ok = None;
+            self.evidence.verify_stale = true;
         }
         self.pending_tool_count = 0;
     }
@@ -771,6 +898,7 @@ fn evidence_summary(e: &AcceptanceEvidence) -> String {
         match e.verify_ok {
             Some(true) => "pass",
             Some(false) => "fail",
+            None if e.verify_stale => "outdated",
             None => "—",
         },
         e.denied_tools.len()
@@ -1010,6 +1138,59 @@ mod tests {
         // Repair → Execute
         m.handle(AgentEvent::RepairApplied);
         assert_eq!(m.state(), &AgentState::Execute);
+    }
+
+    /// FR-E4 / AC-E4: a write that lands after a passing run must not be
+    /// finished on that run's authority. The pass becomes "needs re-verification"
+    /// and the machine goes back through Verify.
+    #[test]
+    fn a_write_after_a_passing_run_must_be_verified_again() {
+        let mut m = AgentMachine::new("Please fix the failing unit tests", Budget::default());
+        m.handle(AgentEvent::TaskReceived);
+        m.handle(AgentEvent::PlanReady);
+        m.handle(AgentEvent::ContextGathered);
+        m.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w"),
+                ToolName::WriteFile.label(),
+                "src/lib.rs",
+                "wrote",
+            )],
+        });
+        m.handle(AgentEvent::VerifyFinished { ok: false });
+        assert_eq!(m.state(), &AgentState::Repair);
+
+        // A run that passes but cannot yet accept the task leaves the machine
+        // holding a green conclusion — the state the old code trusted.
+        m.handle(AgentEvent::VerifyFinished { ok: true });
+        assert_eq!(m.evidence().verify_ok, Some(true));
+        m.handle(AgentEvent::RepairApplied);
+        assert_eq!(m.state(), &AgentState::Execute);
+
+        m.handle(AgentEvent::ToolsFinished {
+            results: vec![ToolResult::success(
+                ToolCallId::new("w2"),
+                ToolName::WriteFile.label(),
+                "src/more.rs",
+                "wrote again",
+            )],
+        });
+        assert_eq!(
+            m.evidence().verify_ok,
+            None,
+            "the earlier pass no longer stands as a conclusion"
+        );
+        assert!(m.evidence().verify_stale, "and the reason is on record");
+        assert_eq!(
+            m.state(),
+            &AgentState::Verify,
+            "the write sends the task back through verification"
+        );
+
+        // The fresh run replaces the stale conclusion instead of stacking on it.
+        m.handle(AgentEvent::VerifyFinished { ok: true });
+        assert!(!m.evidence().verify_stale, "a new run clears the marker");
     }
 
     #[test]
@@ -1732,6 +1913,144 @@ mod tests {
         };
         b.charge_tokens(12_400);
         assert_eq!(b.context_summary(), "");
+    }
+
+    /// FR-D1: the char/token ratio is the one the rest of the crate already
+    /// uses, plus a fixed per-message framing cost, so the figure is
+    /// reproducible instead of provider-dependent.
+    #[test]
+    fn estimate_input_tokens_charges_chars_plus_framing() {
+        assert_eq!(estimate_input_tokens(0, 0), 0);
+        assert_eq!(estimate_input_tokens(4_000, 1), 1_000 + 8);
+        assert_eq!(estimate_input_tokens(4_000, 10), 1_000 + 80);
+        // Sub-4-char fragments round down; the framing still counts the message.
+        assert_eq!(estimate_input_tokens(3, 1), 8);
+        // Saturating, never wrapping.
+        assert_eq!(estimate_input_tokens(u64::MAX, usize::MAX), u32::MAX);
+    }
+
+    /// FR-D2: the first request of a turn has no usage to read, and the
+    /// measured path returns 0 for it. The planned path must not.
+    #[test]
+    fn planned_context_sizes_the_first_request_without_usage() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        assert_eq!(b.percent_used(), 0);
+        assert_eq!(b.context_source(), ContextSource::Unknown);
+        assert_eq!(b.planned_input_tokens(), 0);
+
+        b.note_history_size(96_000, 12);
+        assert_eq!(b.percent_used(), 0, "no provider has measured anything");
+        assert_eq!(b.context_source(), ContextSource::Estimated);
+        assert_eq!(b.planned_input_tokens(), 24_000 + 96);
+        assert_eq!(b.planned_percent_used(), 12);
+    }
+
+    /// FR-D2: once usage arrives it stays available, but the estimate still
+    /// leads — a reading from the previous call describes a history that may
+    /// since have been compacted.
+    #[test]
+    fn estimate_leads_and_measurement_is_the_fallback() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        b.charge_tokens(150_000);
+        assert_eq!(b.context_source(), ContextSource::Measured);
+        assert_eq!(b.planned_input_tokens(), 150_000);
+
+        b.note_history_size(20_000, 4);
+        assert_eq!(b.context_source(), ContextSource::Estimated);
+        assert_eq!(
+            b.planned_input_tokens(),
+            5_032,
+            "a stale 150k reading must not keep the turn planning as if it were full"
+        );
+        assert_eq!(
+            b.last_input_tokens, 150_000,
+            "the measurement is not overwritten"
+        );
+    }
+
+    /// FR-D1: output space is held back before the input is judged.
+    #[test]
+    fn output_reserve_shrinks_the_usable_window() {
+        let mut b = Budget::default();
+        b.set_window(32_000);
+        b.set_output_reserve(8_000);
+        assert_eq!(b.usable_window(), 24_000);
+
+        b.note_history_size(96_000, 4); // 24,032 planned
+        assert_eq!(b.planned_percent_used(), 100);
+        assert!(
+            b.overfits_window(),
+            "24k input + 8k output does not fit a 32k window"
+        );
+    }
+
+    /// The reserve is clamped inside the window so usable space never hits
+    /// zero, and a cap below the provider floor still reserves the floor.
+    #[test]
+    fn output_reserve_stays_inside_the_window_and_above_the_floor() {
+        let mut b = Budget::default();
+        b.set_window(4_000);
+        b.set_output_reserve(999_999);
+        assert_eq!(b.output_reserve_tokens, 3_999);
+        assert_eq!(b.usable_window(), 1);
+
+        b.set_output_reserve(10);
+        assert_eq!(
+            b.output_reserve_tokens, 256,
+            "the provider raises a tiny cap to its own floor"
+        );
+
+        let mut zero_window = Budget {
+            window_tokens: 0,
+            ..Budget::default()
+        };
+        zero_window.set_output_reserve(8_000);
+        assert_eq!(zero_window.output_reserve_tokens, 0);
+        assert_eq!(zero_window.usable_window(), 1);
+    }
+
+    /// FR-D2 + the "明确区分估算与实测" requirement: the summary string says
+    /// which kind of figure the user is looking at.
+    #[test]
+    fn context_summary_labels_an_estimate_and_a_measurement_differently() {
+        let mut b = Budget::default();
+        b.set_window(200_000);
+        b.set_output_reserve(4_096);
+        b.note_history_size(49_344, 8); // 12,336 + 64 framing = 12,400
+        let estimated = b.context_summary();
+        assert!(
+            estimated.contains("估算"),
+            "an estimate must be labelled: {estimated}"
+        );
+        assert!(estimated.starts_with("~12.4k"), "{estimated}");
+        assert!(
+            estimated.contains("195.9k"),
+            "the estimate is measured against the usable window: {estimated}"
+        );
+
+        b.charge_tokens(12_400);
+        let measured = Budget {
+            estimated_input_tokens: 0,
+            ..b.clone()
+        }
+        .context_summary();
+        assert_eq!(measured, "12.4k / 200.0k · 6%");
+        assert!(!measured.contains("估算"), "{measured}");
+    }
+
+    /// A request that already carries the estimate must fail the fit check
+    /// only on the boundary, so the caller gets one clean signal.
+    #[test]
+    fn overfits_window_only_when_input_plus_reserve_exceeds_the_window() {
+        let mut b = Budget::default();
+        b.set_window(32_000);
+        b.set_output_reserve(2_000);
+        b.note_history_size(119_968, 1); // 29,992 + 8 framing = exactly 30,000
+        assert!(!b.overfits_window(), "30k input + 2k output = 32k");
+        b.note_history_size(120_004, 1); // 30,009
+        assert!(b.overfits_window());
     }
 
     /// Phase 0 second-pass — summary budget lifts tool/round caps and zeroes

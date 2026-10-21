@@ -220,6 +220,102 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
+    /// FR-E6 / AC-E1: a checkpoint written before `output_operation`,
+    /// `output_sources`, `output_notes` and `triage` existed must still load.
+    /// It is the only way back into an interrupted task, so a strict schema
+    /// would turn every upgrade into lost work.
+    #[test]
+    fn a_checkpoint_from_before_the_new_fields_still_loads() {
+        fn strip(node: &mut serde_json::Value, keys: &[&str]) -> usize {
+            match node {
+                serde_json::Value::Object(map) => {
+                    let mut removed = keys
+                        .iter()
+                        .filter(|key| map.remove(&key.to_string()).is_some())
+                        .count();
+                    for child in map.values_mut() {
+                        removed += strip(child, keys);
+                    }
+                    removed
+                }
+                serde_json::Value::Array(items) => items
+                    .iter_mut()
+                    .map(|item| strip(item, keys))
+                    .sum::<usize>(),
+                _ => 0,
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("kodo-recovery-legacy-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("report.md"), "old").unwrap();
+        let mut plan = TaskPlan::from_task("write report.md");
+        plan.output_operation = crate::plan::OutputOperation::Create;
+        plan.output_sources = vec!["notes.md".into()];
+        plan.output_notes = vec!["DOCX is rewritten whole".into()];
+        plan.constraints.push("preserve user edits".into());
+        let mut evidence = AcceptanceEvidence::default();
+        evidence
+            .verify_evidence
+            .push(crate::verify::VerificationEvidence {
+                command: "cargo test -p kodo-agent".into(),
+                cwd: root.display().to_string(),
+                exit_code: Some(101),
+                duration_ms: 10,
+                criterion_ids: vec!["c1".into()],
+                output_summary: "1 failed".into(),
+                truncated: false,
+                ok: false,
+                failure_class: None,
+                triage: Some(crate::verify::FailureTriage::Product),
+            });
+        let mut changes = TurnChangeSet::default();
+        changes.kodo_touched.insert("report.md".into());
+        RecoveryCheckpoint::save(&root, Some("s-old"), &plan, &evidence, "Execute", &changes)
+            .unwrap();
+
+        let path = state_path(&root, "checkpoint-s-old.json").unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let removed = strip(
+            &mut value,
+            &[
+                "output_operation",
+                "output_sources",
+                "output_notes",
+                "triage",
+            ],
+        );
+        assert_eq!(removed, 4, "the record really carried the new fields");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let loaded = RecoveryCheckpoint::load(&root, "s-old")
+            .unwrap()
+            .expect("a legacy checkpoint is not a corrupt file");
+        assert_eq!(loaded.plan.goal, plan.goal);
+        assert_eq!(loaded.plan.constraints, plan.constraints);
+        assert_eq!(
+            loaded.plan.output_operation,
+            crate::plan::OutputOperation::None,
+            "no operation on record reads as the legacy behaviour"
+        );
+        assert!(loaded.plan.output_sources.is_empty());
+        assert!(loaded.plan.output_notes.is_empty());
+        assert_eq!(
+            loaded.evidence.verify_evidence[0].triage, None,
+            "a run from before triage carries no attribution"
+        );
+
+        let (recovered, anchor) = loaded.revalidate(&root);
+        assert_eq!(recovered.constraints, plan.constraints);
+        assert!(
+            anchor.contains("Re-read targets"),
+            "the renewal instruction is still given: {anchor}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn state_directory_cannot_redirect_to_another_directory() {

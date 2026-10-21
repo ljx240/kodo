@@ -88,6 +88,24 @@ fn score(task: &str, patterns: &[&str]) -> u32 {
 /// decision component is ever allowed to act on the result.
 pub const AMBIGUITY_MARGIN: u32 = 4;
 
+/// The route label vocabulary shared by the frozen corpus, the decision
+/// assistant's choices and the trace UI.
+///
+/// **Why this exists:** the runtime category ([`TaskType`]) and the route label
+/// are not the same set. `work` is only ever selected explicitly for Work-mode
+/// runs and never by [`classify`], while a request the local rules have no
+/// evidence about needs a label that does not pretend to be a category. The
+/// scorer, the assistant and the UI must read one vocabulary, not three.
+pub const ROUTE_LABELS: [&str; 7] = [
+    "bug-fix",
+    "feature",
+    "test",
+    "refactor",
+    "code-review",
+    "docs",
+    "unknown",
+];
+
 /// Where a classification came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassificationSource {
@@ -124,6 +142,23 @@ pub struct ClassificationEvidence {
     pub ambiguous: bool,
 }
 
+impl ClassificationEvidence {
+    /// The route label for this reading.
+    ///
+    /// `unknown` is emitted only in the one state that has no evidence behind
+    /// it: the keyword rules matched nothing and the message is not a plain
+    /// "save this answer as a document" instruction. It is never invented to
+    /// fill a gap. [`classify`] keeps returning the additive `feature` default
+    /// in that state, so skill selection and the budget family are unchanged —
+    /// the label reports the uncertainty instead of hiding it.
+    pub fn route_label(&self) -> &'static str {
+        if self.default_fallback && self.source != ClassificationSource::DocumentOutput {
+            return "unknown";
+        }
+        self.baseline.label()
+    }
+}
+
 /// Classify a natural-language task into one of the six task types.
 ///
 /// Deterministic heuristic: the highest-scoring category wins; ties fall back
@@ -151,7 +186,12 @@ pub fn classify_with_evidence(message: &str) -> ClassificationEvidence {
             ambiguous: true,
         };
     }
-    if is_document_output(m) {
+    let scores = score_all(m);
+    // "把这份结论保存到 docs/x.md" is a file task; "新增导出为 Markdown 的入口"
+    // is a code task that happens to name its output format. The document rule
+    // may only decide when nothing in the message asks for the repository to
+    // change — otherwise a format word outranks the action the user asked for.
+    if is_document_output(m) && !asks_for_code_change(&scores) {
         return ClassificationEvidence {
             baseline: TaskType::Docs,
             source: ClassificationSource::DocumentOutput,
@@ -163,8 +203,6 @@ pub fn classify_with_evidence(message: &str) -> ClassificationEvidence {
             ambiguous: false,
         };
     }
-
-    let scores = score_all(m);
     // Same traversal as the original implementation: strictly greater wins,
     // so a tie keeps the category that comes first in the rule order.
     let mut best = TaskType::Feature;
@@ -205,6 +243,25 @@ pub fn classify_with_evidence(message: &str) -> ClassificationEvidence {
         default_fallback,
         ambiguous,
     }
+}
+
+/// Categories whose deliverable is a change to the repository.
+///
+/// `CodeReview` and `Docs` are deliberately excluded: their deliverable is a
+/// report or a document, so they must not veto the document-output rule.
+fn produces_code_change(kind: TaskType) -> bool {
+    matches!(
+        kind,
+        TaskType::Feature | TaskType::BugFix | TaskType::Refactor | TaskType::Test
+    )
+}
+
+/// Does the message ask for the repository to change? Used only to decide
+/// whether the document-output rule may short-circuit the keyword scores.
+fn asks_for_code_change(scores: &[(TaskType, u32)]) -> bool {
+    scores
+        .iter()
+        .any(|(kind, score)| *score > 0 && produces_code_change(*kind))
 }
 
 /// The rule scores for every keyword-driven category, in rule order.
@@ -516,6 +573,41 @@ mod tests {
         assert_eq!(evidence.baseline, TaskType::Docs);
         assert_eq!(evidence.source, ClassificationSource::DocumentOutput);
         assert!(!evidence.ambiguous, "{evidence:?}");
+    }
+
+    #[test]
+    fn a_feature_that_names_its_output_format_is_not_a_document_task() {
+        // FR-B3 / FR-B4 / AC-B1: "导出为 Markdown" names the format of what the
+        // code must produce; the user asked for an entry point in the
+        // repository. The document rule may only decide when nothing in the
+        // message asks the project to change.
+        let evidence = classify_with_evidence("新增导出为 Markdown 的入口");
+        assert_eq!(evidence.baseline, TaskType::Feature, "{evidence:?}");
+        assert_eq!(evidence.route_label(), "feature");
+        assert_ne!(evidence.source, ClassificationSource::DocumentOutput);
+        // The veto is one-directional: a plain save is still a document task.
+        assert_eq!(
+            classify_with_evidence("保存到 docs/架构.md").route_label(),
+            "docs"
+        );
+    }
+
+    #[test]
+    fn route_label_names_uncertainty_instead_of_borrowing_the_default() {
+        // FR-B2 / AC-B2: `unknown` comes only from the no-evidence state, and
+        // only in the label. `classify` keeps its additive default, so skill
+        // selection and the budget family do not move.
+        for message in ["把那个东西弄好", "do the usual thing"] {
+            let evidence = classify_with_evidence(message);
+            assert_eq!(evidence.route_label(), "unknown", "{message}");
+            assert!(evidence.ambiguous, "{message}");
+            assert_eq!(classify(message), TaskType::Feature, "{message}");
+        }
+        // A reading with evidence is never labelled unknown.
+        assert_eq!(
+            classify_with_evidence("修复登录接口 500 报错").route_label(),
+            "bug-fix"
+        );
     }
 
     #[test]

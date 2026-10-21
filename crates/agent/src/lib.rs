@@ -78,7 +78,7 @@ pub use checkpoint::{
 };
 pub use classify::{
     classify as classify_task, classify_with_evidence as classify_task_with_evidence,
-    ClassificationEvidence, ClassificationSource, TaskType,
+    ClassificationEvidence, ClassificationSource, TaskType, ROUTE_LABELS,
 };
 pub use context::{
     ContextBudget as TurnContextBudget, ContextManager, ContextSpan,
@@ -116,8 +116,9 @@ pub use skill::{
 pub use state::{AgentState as TurnState, Budget as TurnBudget, FailReason as TurnFailReason};
 pub use tools::{dangerous_reason, CommandOutcome, CommandRisk};
 pub use verify::{
-    classify_verify_failure, failure_evidence_origin, CommandFailureKind as TurnFailureKind,
-    FailureClass as TurnFailureClass, FailureOrigin as TurnFailureOrigin,
+    classify_verify_failure, failure_evidence_origin, triage_verify_failure,
+    CommandFailureKind as TurnFailureKind, FailureClass as TurnFailureClass,
+    FailureOrigin as TurnFailureOrigin, FailureTriage as TurnFailureTriage,
     FinalStatus as TurnFinalStatus, PlannedVerifyCommand, RepairDecision as TurnRepairDecision,
     VerificationEvidence as TurnVerificationEvidence, VerificationPlan as TurnVerificationPlan,
     VerificationRunner as TurnVerifier, VerifyTier,
@@ -2326,6 +2327,22 @@ struct ModelAttempt {
     input_tokens: u32,
 }
 
+/// Why one model call failed. The class matters: an oversized request is the
+/// only provider failure a smaller history can answer, so the loop needs to
+/// tell it apart from the terminal ones.
+#[derive(Debug)]
+struct ModelCallError {
+    /// Text the notes and the offline answer render verbatim.
+    message: String,
+    context_too_long: bool,
+}
+
+impl std::fmt::Display for ModelCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn call_model(
     provider: &Provider,
@@ -2334,7 +2351,7 @@ fn call_model(
     request: &RunRequest,
     alive: &Alive,
     emit: &mut Emit,
-) -> Result<Option<ModelAttempt>, String> {
+) -> Result<Option<ModelAttempt>, ModelCallError> {
     let guarded_alive = || {
         alive()
             && request
@@ -2595,10 +2612,17 @@ fn call_model(
             );
             // Failover already ran inside chat_stream_with_failover (same path).
             // Remaining error is terminal for this attempt chain.
+            let context_too_long = error.class == ProviderFailureClass::ContextTooLong;
             if !request.fallback_to_local {
-                return Err(format!("model call failed: {error}"));
+                return Err(ModelCallError {
+                    message: format!("model call failed: {error}"),
+                    context_too_long,
+                });
             }
-            Err(error.to_string())
+            Err(ModelCallError {
+                message: error.to_string(),
+                context_too_long,
+            })
         }
     }
 }
@@ -2830,6 +2854,34 @@ fn history_chars(history: &[ProviderMessage]) -> u64 {
     total
 }
 
+/// Char volume used to *estimate* the tokens of a request.
+///
+/// [`history_chars`] reports the wire volume, which is what the context bar
+/// shows. An image is not charged that way by a provider: it costs a fixed
+/// allowance regardless of how many base64 chars it carries. Charging the
+/// payload would make every screenshot look like a context overflow, so the
+/// estimate swaps image bytes for that allowance and reuses the text count
+/// verbatim — the two figures cannot drift apart for everything else.
+fn history_estimate_chars(history: &[ProviderMessage]) -> u64 {
+    /// Tokens a provider charges for one image, times the chars-per-token
+    /// ratio the estimate uses.
+    const IMAGE_ESTIMATED_CHARS: u64 = 1_600 * crate::state::ESTIMATED_CHARS_PER_TOKEN;
+    let mut image_payload = 0u64;
+    let mut image_count = 0u64;
+    for message in history {
+        for block in &message.content {
+            if let provider::ContentBlock::Image { data_base64, .. } = block {
+                image_payload =
+                    image_payload.saturating_add(data_base64.chars().count() as u64 + 16);
+                image_count += 1;
+            }
+        }
+    }
+    history_chars(history)
+        .saturating_sub(image_payload)
+        .saturating_add(image_count.saturating_mul(IMAGE_ESTIMATED_CHARS))
+}
+
 /// Build a `MemoryQuery` from a `RunRequest` + project root. Scope is
 /// derived from disk; budget defaults to 2000 tokens; require_current
 /// is off by default (the agent can opt in later). An empty path is
@@ -2892,25 +2944,40 @@ fn trim_history(history: &mut Vec<ProviderMessage>) {
     *history = rebuilt;
 }
 
+/// How many times one turn may shrink its history after the provider says the
+/// request is too long. Bounded: a window we misread is not fixed by measuring
+/// it again forever.
+const MAX_CONTEXT_RECOVERY_ATTEMPTS: u32 = 2;
+
+/// What one compaction attempt produced, so the caller can say out loud when
+/// nothing was summarized instead of failing quietly.
+enum CompactionOutcome {
+    /// Below the trigger, or too small to bother.
+    NotNeeded,
+    /// The middle was replaced by a summary.
+    Done { anchors_ok: bool },
+    /// The trigger fired but the summarizer produced nothing usable.
+    Failed,
+}
+
 /// Trigger one compaction pass when the budget is over the configured
-/// percent-of-window threshold. No-op on small histories or when the
-/// provider returned no token telemetry yet.
+/// percent-of-window threshold. No-op on small histories.
 ///
 /// On success, increments `compacted_count` and emits `SinkEvent::Compacted`
 /// with the dropped/summarized/freed metrics. On failure (provider error,
-/// empty summary), `history` is not mutated — the next turn will still try
-/// again, and if the budget eventually exhausts the legacy `trim_history`
-/// path takes over. Compaction never raises; the run loop must continue.
+/// empty summary), `history` is not mutated — the caller answers with the
+/// deterministic pre-send trim instead, which is visible to the user rather
+/// than a silent no-op. Compaction never raises; the run loop must continue.
 fn compact_if_needed(
     history: &mut Vec<ProviderMessage>,
     budget: &mut Budget,
     provider: &Provider,
     alive: &dyn Fn() -> bool,
     emit: &mut Emit,
-) {
+) -> CompactionOutcome {
     let cfg = compaction::CompactConfig::default();
     if !compaction::should_compact(budget, &cfg, history.len()) {
-        return;
+        return CompactionOutcome::NotNeeded;
     }
     // Snapshot the leading system block size and the keep_tail count so the
     // post-check (verify_anchors) can confirm both survived the rewrite.
@@ -2922,30 +2989,64 @@ fn compact_if_needed(
         .take_while(|m| m.role == provider::MessageRole::System)
         .count();
     let pre_keep_tail = cfg.keep_tail;
-    if let Some(mut report) = compaction::compact_history(history, &cfg, provider, alive) {
-        report.anchors_ok = compaction::verify_anchors(history, pre_system_end, pre_keep_tail);
-        budget.record_compaction();
-        let _ = emit(SinkEvent::Compacted {
+    let Some(mut report) = compaction::compact_history(history, &cfg, provider, alive) else {
+        return CompactionOutcome::Failed;
+    };
+    report.anchors_ok = compaction::verify_anchors(history, pre_system_end, pre_keep_tail);
+    budget.record_compaction();
+    // The rewrite changed the shape of the history, so the plan for the next
+    // request must be re-sized — a stale estimate would trigger a second
+    // compaction of an already-small history.
+    budget.note_history_size(history_estimate_chars(history), history.len());
+    let _ = emit(SinkEvent::Compacted {
+        dropped: report.dropped,
+        summarized_into: report.summarized_into,
+        freed_pct: report.freed_pct,
+    });
+    // Persist a `Compaction` step alongside the chalk toast so the trace
+    // carries the source content that was compressed away — without it
+    // the user only sees "compaction happened", never what got lost.
+    let _ = finish_step(
+        Step::Compaction {
             dropped: report.dropped,
             summarized_into: report.summarized_into,
             freed_pct: report.freed_pct,
-        });
-        // Persist a `Compaction` step alongside the chalk toast so the trace
-        // carries the source content that was compressed away — without it
-        // the user only sees "compaction happened", never what got lost.
-        let _ = finish_step(
-            Step::Compaction {
-                dropped: report.dropped,
-                summarized_into: report.summarized_into,
-                freed_pct: report.freed_pct,
-                source_summary: report.source_summary.clone(),
-                covered_messages: report.covered_messages,
-            },
-            0,
-            false,
-            emit,
-        );
+            source_summary: report.source_summary.clone(),
+            covered_messages: report.covered_messages,
+        },
+        0,
+        false,
+        emit,
+    );
+    CompactionOutcome::Done {
+        anchors_ok: report.anchors_ok,
     }
+}
+
+/// Deterministic pre-send shrink of the history so the request fits the
+/// window. Returns the report when a rewrite happened; a `still_over` report
+/// means no legal shape fits and the caller must not send.
+fn shrink_history_to_fit(
+    history: &mut Vec<ProviderMessage>,
+    budget: &mut Budget,
+    emit: &mut Emit,
+) -> Option<compaction::FitReport> {
+    let cfg = compaction::CompactConfig::default();
+    let report = compaction::fit_history_to_window(history, budget.usable_window(), &cfg)?;
+    budget.note_history_size(history_estimate_chars(history), history.len());
+    if report.still_over {
+        return Some(report);
+    }
+    let _ = emit(SinkEvent::Progress {
+        phase: "context".to_owned(),
+        detail: format!(
+            "发送前裁剪上下文：丢弃 {} 条较早观测，保留最近 {} 条（{}）",
+            report.dropped,
+            report.kept_tail,
+            budget.context_summary()
+        ),
+    });
+    Some(report)
 }
 
 fn emit_knowledge_terminal(
@@ -3762,6 +3863,8 @@ pub fn run(
     let mut wrote_files = false;
     let mut verified = false;
     let mut provider_error_seen = false;
+    // Bounded oversized-request retries for this turn (FR-D4).
+    let mut context_recoveries: u32 = 0;
     // Per-turn tool-call dedup state. Live only for this `run()` invocation
     // — `AgentMachine` resets between turns, this struct follows the same
     // lifetime. See `dedup::TurnDedup` for the same-prefix / repeat logic.
@@ -3983,7 +4086,12 @@ pub fn run(
             ) {
                 notes.push(format!("checkpoint persist failed: {error}"));
             }
-            history[1] = ProviderMessage::system(format!("## Task checkpoint\n{}\nChanged files: {:?}\nVerification: {:?}; denied tools: {:?}", machine.plan().to_prompt_block(), changeset.kodo_touched, machine.evidence().verify_ok, machine.evidence().denied_tools));
+            let verification_note = if machine.evidence().verify_stale {
+                " — the last passing run predates these writes; verify again before finishing"
+            } else {
+                ""
+            };
+            history[1] = ProviderMessage::system(format!("## Task checkpoint\n{}\nChanged files: {:?}\nVerification: {:?}{}; denied tools: {:?}", machine.plan().to_prompt_block(), changeset.kodo_touched, machine.evidence().verify_ok, verification_note, machine.evidence().denied_tools));
             lift_before_batch(&mut machine, 0, &mut budget_lifted, emit);
 
             if machine.state() == &AgentState::Verify {
@@ -4355,11 +4463,35 @@ pub fn run(
                 break;
             }
 
+            // Plan the context of the request that is about to be built:
+            // estimate the history size and hold back this call's own output
+            // space. Providers that never report usage give the loop nothing
+            // else to plan against, and the first request of a turn has no
+            // measurement to read (FR-D1, FR-D2).
+            {
+                let planned_chars = history_estimate_chars(&history);
+                let planned_messages = history.len();
+                let max_output = request.max_output_tokens;
+                let budget = machine.budget_mut();
+                budget.note_history_size(planned_chars, planned_messages);
+                budget.set_output_reserve(max_output);
+            }
+
             // Mid-turn compaction: when the window is filling up, summarize
-            // the middle of history into one block. Failure falls through to
-            // the legacy `trim_history` path on a future budget-exhausted
-            // signal; this hook never blocks the turn.
-            compact_if_needed(&mut history, machine.budget_mut(), &provider, &alive, emit);
+            // the middle of history into one block. A failed pass is reported
+            // instead of silently skipped — the pre-send trim below then carries
+            // the request.
+            match compact_if_needed(&mut history, machine.budget_mut(), &provider, &alive, emit) {
+                CompactionOutcome::Failed => {
+                    notes.push("上下文压缩未取得摘要，本轮改用发送前确定性裁剪".to_owned());
+                }
+                CompactionOutcome::Done { anchors_ok: false } => {
+                    notes.push(
+                        "上下文压缩后的系统块与最近工具配对校验未通过，较早观测可能缺失".to_owned(),
+                    );
+                }
+                CompactionOutcome::Done { .. } | CompactionOutcome::NotNeeded => {}
+            }
 
             // Read-only answers reserve the last decision round for prose.
             // Keep the hard cap; stop gathering before there is no room to answer.
@@ -4428,6 +4560,29 @@ pub fn run(
             };
             // Each bounded recovery must explicitly request another prose-only call.
             final_only_requested = false;
+
+            // Send-time fit, decided from the estimate rather than from a
+            // rejection: a request the provider will refuse costs the call and
+            // the turn. Tool pairing and the system block are held inviolate by
+            // the trim itself (FR-D3).
+            if machine.budget().overfits_window() {
+                let fitted = shrink_history_to_fit(&mut history, machine.budget_mut(), emit);
+                if matches!(
+                    fitted,
+                    Some(crate::compaction::FitReport {
+                        still_over: true,
+                        ..
+                    })
+                ) {
+                    let summary = machine.budget().context_summary();
+                    notes.push(format!(
+                        "model call failed: 上下文无法放入模型窗口（{summary}），已停止发送"
+                    ));
+                    provider_error_seen = true;
+                    break;
+                }
+            }
+
             match call_model(&provider, &history, call_schemas, request, alive, emit) {
                 Ok(Some(attempt)) => {
                     // Charge the budget with the reported input tokens and
@@ -4579,6 +4734,7 @@ pub fn run(
                                 None => plan,
                             };
                             plan.set_output_contract(&request.message);
+                            plan.with_user_constraints(&request.message);
                             *machine.plan_mut() = plan;
                         }
                     }
@@ -5058,6 +5214,34 @@ pub fn run(
                     return Ok(());
                 }
                 Err(error) => {
+                    // An oversized request is the one failure a smaller
+                    // history answers. The estimate said this one fit and the
+                    // provider disagreed, so shrink against a target below the
+                    // current estimate — and stop after a bounded number of
+                    // tries rather than re-measuring a window we clearly misread.
+                    if error.context_too_long && context_recoveries < MAX_CONTEXT_RECOVERY_ATTEMPTS
+                    {
+                        context_recoveries += 1;
+                        let target =
+                            (machine.budget().planned_input_tokens().saturating_mul(3) / 4).max(1);
+                        let cfg = compaction::CompactConfig::default();
+                        let report = compaction::fit_history_to_window(&mut history, target, &cfg);
+                        let planned_chars = history_estimate_chars(&history);
+                        let planned_messages = history.len();
+                        machine
+                            .budget_mut()
+                            .note_history_size(planned_chars, planned_messages);
+                        let _ = emit(SinkEvent::Progress {
+                            phase: "context".to_owned(),
+                            detail: format!(
+                                "服务商判定上下文超限，第 {}/{} 次收缩后重试（保留最近观测与工具配对）",
+                                context_recoveries, MAX_CONTEXT_RECOVERY_ATTEMPTS
+                            ),
+                        });
+                        if matches!(&report, Some(r) if !r.still_over) {
+                            continue;
+                        }
+                    }
                     // Failover already ran on the streaming path inside
                     // call_model; a residual error is terminal (no blocking
                     // non-stream fallback, no silent offline).
@@ -11061,6 +11245,159 @@ mod tests {
         );
     }
 
+    /// FR-B6: the user's own choices outrank the local rule. The same
+    /// knowledge-shaped message with a pinned skill chip stays on the task
+    /// channel and carries the pinned skill's rules, even though the rule
+    /// itself has no evidence for any category.
+    #[test]
+    fn a_pinned_chip_outranks_the_classification() {
+        let dir = std::env::temp_dir().join(format!("kodo-chip-priority-{}", std::process::id()));
+        let project = dir.join("repo");
+        std::fs::create_dir_all(&project).expect("temp project");
+        std::fs::write(project.join("README.md"), "# Demo\n").expect("readme");
+        let script = dir.join("script.jsonl");
+        std::fs::write(
+            &script,
+            "{\"text\":\"数据仓库集中存储分析数据。\"}\n{\"text\":\"补充说明。\"}\n",
+        )
+        .expect("script");
+        let provider = Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
+        let mut request = RunRequest {
+            project: Some(project.clone()),
+            message: "【技能：code-review】\n介绍下什么是数据仓库".to_owned(),
+            conversation_history: Vec::new(),
+            pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
+            provider: Some(provider),
+            permission: Permission::Ask,
+            mode: AgentMode::Code,
+            fallback_to_local: true,
+            max_output_tokens: 512,
+            extended_thinking: false,
+            local_trace: true,
+            session_id: None,
+            user_skills_dir: None,
+            mcp_servers: Vec::new(),
+            agent_instructions: None,
+            personas: vec![],
+            budget_family: None,
+            memory: None,
+            knowledge_context: None,
+            allow_verify_commands: false,
+            decision: None,
+        };
+        // The same text without the chip is a question, and the rule cannot
+        // place it in any category.
+        let chip_message = "【技能：code-review】\n介绍下什么是数据仓库".to_owned();
+        let (chip_ids, classify_text) = split_skill_chip(&chip_message);
+        assert_eq!(chip_ids.len(), 1, "the chip is the user's choice");
+        assert!(is_conversational_question(classify_text), "{classify_text}");
+        assert_ne!(
+            classify_with_evidence(classify_text).route_label(),
+            "code-review",
+            "the rule alone would not have picked this skill"
+        );
+        request.message = classify_text.to_owned();
+        let plain_answer = {
+            let mut answers: Vec<(String, bool)> = Vec::new();
+            let mut emit = |event: SinkEvent| {
+                if let SinkEvent::Started {
+                    step: Step::AgentMessage { text, plain, .. },
+                } = event
+                {
+                    answers.push((text, plain));
+                }
+                true
+            };
+            run(&request, &|| true, &|_, _| true, &mut emit).expect("conversational twin");
+            answers
+        };
+        assert_eq!(plain_answer.len(), 1);
+        assert!(plain_answer[0].1, "without a chip the Q&A renders plain");
+
+        request.message = chip_message.clone();
+        request.provider = Some(Provider::new(
+            "fake",
+            "fake-key",
+            script.to_string_lossy(),
+            "fake-model",
+        ));
+        std::fs::write(
+            &script,
+            "{\"text\":\"数据仓库集中存储分析数据。\"}\n{\"text\":\"补充说明。\"}\n",
+        )
+        .expect("fresh script");
+        let mut answers: Vec<(String, String, bool)> = Vec::new();
+        let mut wire = String::new();
+        let mut emit = |event: SinkEvent| {
+            match event {
+                SinkEvent::Started {
+                    step:
+                        Step::AgentMessage {
+                            text,
+                            delivery,
+                            plain,
+                            ..
+                        },
+                } => answers.push((text, delivery, plain)),
+                SinkEvent::LocalTrace {
+                    kind: "llm_io",
+                    capture,
+                } => wire.push_str(&capture.to_string()),
+                _ => {}
+            }
+            true
+        };
+        run(&request, &|| true, &|_, _| true, &mut emit).expect("pinned chip run");
+        assert_eq!(answers.len(), 1, "one answer lands: {answers:?}");
+        assert!(
+            !answers[0].2,
+            "a pinned chip keeps the task channel: {:?}",
+            answers[0]
+        );
+        assert!(
+            wire.contains("Skill `code-review` rules apply"),
+            "the pinned skill's rules reach the model: {wire}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// FR-B6 / FR-B3: a file the user asked to produce is decided before the
+    /// route label, so a document-shaped request never degrades into Q&A.
+    #[test]
+    fn a_requested_file_output_outranks_the_route_label() {
+        let message = "把这份结论保存到 docs/结论.md";
+        assert_eq!(
+            classify_with_evidence(message).route_label(),
+            "docs",
+            "the label is only a report of the rule's reading"
+        );
+        assert!(
+            !is_conversational_question(message),
+            "the deliverable veto keeps this off the Q&A channel"
+        );
+        let mut contract = TaskPlan::from_task(message);
+        contract.set_output_contract(message);
+        assert_eq!(contract.expected_outputs, vec!["docs/结论.md".to_owned()]);
+        assert!(
+            contract.output_operation.is_file_task(),
+            "the file the user asked for stands: {contract:?}"
+        );
+
+        // Work mode decides its own deliverable bar; the rule cannot lower it.
+        let mut work = TaskPlan::from_task(message);
+        work.deliverable_bar = true;
+        work.set_output_contract(message);
+        assert!(work.requires_file_output, "Work mode keeps the file gate");
+        // In Code mode the same request has no file gate to carry it, so the
+        // channel is decided by the document rule above — which is why that
+        // veto must stay ahead of the Q&A shortcut.
+        assert!(
+            !contract.requires_file_output,
+            "the file gate is a Work-mode decision, not a classification output"
+        );
+    }
+
     #[test]
     fn projectless_xlsx_attachment_inlines_extracted_cells() {
         // Layer 2 × Layer 3 together: on the conversational arm a pinned
@@ -11801,6 +12138,474 @@ mod tests {
                 .unwrap()
                 .contains("MUST_NOT_CALL_AGAIN"));
         }
+    }
+
+    /// The prompt the conversational channel answers in a single prose turn.
+    const PROBE_PROMPT: &str = "介绍下什么是数据仓库";
+
+    /// One offline turn against a fake provider with a chosen window, driven
+    /// by `replies` — one scripted reply per provider call, in call order.
+    /// Returns the requests that actually went out, how the run reported the
+    /// context reduction, and the delivered answers. The fake always reports
+    /// zero usage, so this is exactly the shape that used to be sent blind.
+    ///
+    /// A knowledge question ends the conversational channel on its first prose
+    /// answer, so any reply the run does not earn stays in the script.
+    /// `MUST_NOT_CALL_AGAIN` is appended for that check.
+    fn context_probe_run(
+        project: &Path,
+        script: &Path,
+        conversation: &[(String, String)],
+        window_tokens: u32,
+        replies: &[serde_json::Value],
+        message: &str,
+    ) -> (Vec<serde_json::Value>, Vec<String>, Vec<(String, String)>) {
+        let mut lines: Vec<String> = replies.iter().map(|line| line.to_string()).collect();
+        lines.push(serde_json::json!({"text": "MUST_NOT_CALL_AGAIN"}).to_string());
+        std::fs::write(script, lines.join("\n") + "\n").unwrap();
+        let mut provider =
+            Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
+        let mut caps = provider.capabilities();
+        caps.context_window_tokens = window_tokens;
+        provider.capabilities_override = Some(caps);
+        let mut request = temp_request(project, Permission::Ask);
+        request.message = message.to_owned();
+        request.local_trace = true;
+        request.provider = Some(provider);
+        request.conversation_history = conversation.to_vec();
+        let mut requests: Vec<serde_json::Value> = Vec::new();
+        let mut reports: Vec<String> = Vec::new();
+        let mut answers: Vec<(String, String)> = Vec::new();
+        run(&request, &|| true, &|_, _| true, &mut |event| {
+            match event {
+                SinkEvent::LocalTrace {
+                    kind: "llm_io",
+                    capture,
+                } => requests.push(capture["request"].clone()),
+                SinkEvent::Compacted {
+                    dropped,
+                    summarized_into,
+                    freed_pct,
+                } => reports.push(format!(
+                    "摘要压缩：丢弃 {dropped} 条，合并为 {summarized_into} 条（-{freed_pct}%）"
+                )),
+                SinkEvent::Progress { phase, detail } => {
+                    if phase == "context" {
+                        reports.push(detail)
+                    }
+                }
+                SinkEvent::Started {
+                    step: Step::AgentMessage { text, delivery, .. },
+                } => answers.push((text, delivery)),
+                _ => {}
+            }
+            true
+        })
+        .expect("probe run");
+        (requests, reports, answers)
+    }
+
+    /// The reply that ends a conversational turn.
+    fn probe_answer() -> serde_json::Value {
+        serde_json::json!({"text": "已按现有资料回答"})
+    }
+
+    /// The rejection a provider gives when the estimate under-counts.
+    fn probe_context_too_long() -> serde_json::Value {
+        serde_json::json!({"error": "This model's maximum context length is 8192 tokens. Please reduce the size of the input."})
+    }
+
+    fn long_public_history() -> Vec<(String, String)> {
+        (0..16)
+            .map(|index| {
+                (
+                    if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
+                    format!("{index}: {}", "上下文体积测试".repeat(400)),
+                )
+            })
+            .collect()
+    }
+
+    /// The unsqueezed first request of a long-history turn, plus a window that
+    /// holds the anchors but not the whole public history. The system block is
+    /// never droppable, so the window is derived from the measured shape
+    /// instead of a guessed constant.
+    fn oversized_context_shape(
+        project: &Path,
+        script: &Path,
+        conversation: &[(String, String)],
+        message: &str,
+    ) -> (serde_json::Value, usize) {
+        let (probe, reports, answers) = context_probe_run(
+            project,
+            script,
+            conversation,
+            20_000_000,
+            &[probe_answer()],
+            message,
+        );
+        assert_eq!(probe.len(), 1, "a window with room sends once");
+        assert!(reports.is_empty(), "nothing to fit: {reports:?}");
+        assert_eq!(answers[0].1, "ready", "{}", answers[0].0);
+        let full_chars = probe[0]["messages"].to_string().chars().count();
+        assert!(
+            full_chars > 30_000,
+            "precondition: a large public history, got {full_chars}"
+        );
+        // Three quarters of the wire volume, in estimated tokens, plus this
+        // call's own output reserve.
+        let window =
+            (full_chars as u32) * 3 / 4 / crate::state::ESTIMATED_CHARS_PER_TOKEN as u32 + 512;
+        (probe[0].clone(), window as usize)
+    }
+
+    /// FR-D1 / FR-D2 / AC-D1: a long public history against a window that
+    /// holds the anchors but not the whole request. The provider reports no
+    /// usage, so before this fix nothing sized the first request and the
+    /// oversized call went out as-is.
+    #[test]
+    fn oversized_first_request_is_reduced_before_sending_without_any_usage() {
+        let root = std::env::temp_dir().join(format!("kodo-context-fit-{}", std::process::id()));
+        let project = root.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+        let script = root.join("script.jsonl");
+        let conversation = long_public_history();
+        let (probe, window) =
+            oversized_context_shape(&project, &script, &conversation, PROBE_PROMPT);
+        let full_chars = probe["messages"].to_string().chars().count();
+
+        // One reply for the summarizer, one for the turn itself.
+        let (requests, reports, answers) = context_probe_run(
+            &project,
+            &script,
+            &conversation,
+            window as u32,
+            &[probe_answer(), probe_answer()],
+            PROBE_PROMPT,
+        );
+
+        assert_eq!(requests.len(), 1, "the turn still reached the model");
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].1, "ready", "{}", answers[0].0);
+        assert_eq!(reports.len(), 1, "the reduction is reported: {reports:?}");
+        let sent = requests[0]["messages"].to_string();
+        assert!(
+            sent.contains("[compacted summary from earlier rounds]"),
+            "the middle is replaced by a summary the model can see"
+        );
+        assert!(
+            sent.chars().count() < full_chars,
+            "the sent history shrank: {full_chars} -> {}",
+            sent.chars().count()
+        );
+        assert!(
+            sent.contains("上下文体积测试"),
+            "the recent tail survives the reduction"
+        );
+        assert!(
+            sent.contains("介绍下什么是数据仓库"),
+            "the current request survives"
+        );
+        assert!(
+            sent.contains(probe["messages"][0].to_string().trim_matches('"')),
+            "the operating rules survive"
+        );
+        assert!(
+            std::fs::read_to_string(&script)
+                .unwrap()
+                .contains("MUST_NOT_CALL_AGAIN"),
+            "the turn ended on the scripted answer"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// FR-D5 / AC-D1: a compaction pass that cannot produce a summary is not
+    /// allowed to end as a silent no-op. The deterministic pre-send trim carries
+    /// the request instead, and states the figure it planned against as an
+    /// estimate — the provider never reported usage, so nothing measured it.
+    #[test]
+    fn compaction_failure_falls_back_to_the_deterministic_pre_send_trim() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-context-fit-fallback-{}", std::process::id()));
+        let project = root.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+        let script = root.join("script.jsonl");
+        let conversation = long_public_history();
+        let (probe, window) =
+            oversized_context_shape(&project, &script, &conversation, PROBE_PROMPT);
+        let full_chars = probe["messages"].to_string().chars().count();
+
+        let (requests, reports, answers) = context_probe_run(
+            &project,
+            &script,
+            &conversation,
+            window as u32,
+            &[
+                serde_json::json!({"error": "summarizer unavailable"}),
+                probe_answer(),
+            ],
+            PROBE_PROMPT,
+        );
+
+        assert_eq!(requests.len(), 1, "the turn still reached the model");
+        assert_eq!(answers[0].1, "ready", "{}", answers[0].0);
+        assert_eq!(reports.len(), 1, "the trim is reported: {reports:?}");
+        assert!(
+            reports[0].contains("发送前裁剪"),
+            "the deterministic trim, not a summary: {}",
+            reports[0]
+        );
+        assert!(
+            reports[0].contains("估算"),
+            "an estimate is labelled as one: {}",
+            reports[0]
+        );
+        let sent = requests[0]["messages"].to_string();
+        assert!(
+            sent.chars().count() < full_chars,
+            "the sent history shrank: {full_chars} -> {}",
+            sent.chars().count()
+        );
+        assert!(
+            sent.contains("[context budget: dropped"),
+            "the model is told which observations went away"
+        );
+        assert!(
+            sent.contains("介绍下什么是数据仓库"),
+            "the current request survives"
+        );
+        assert!(
+            sent.contains(probe["messages"][0].to_string().trim_matches('"')),
+            "the operating rules survive"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// FR-E1 / FR-E2 / AC-E1: a rule the user stated in their own words must
+    /// still reach the model after the observations around it are trimmed away.
+    /// The task checkpoint block carries it, and the pre-send trim never drops
+    /// a system block.
+    #[test]
+    fn an_early_user_constraint_survives_the_context_trim() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-context-constraint-{}", std::process::id()));
+        let project = root.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+        let script = root.join("script.jsonl");
+        let conversation = long_public_history();
+        let prompt = "介绍下什么是数据仓库。不要改动公开 API。";
+        let (probe, window) = oversized_context_shape(&project, &script, &conversation, prompt);
+        assert!(
+            probe["messages"]
+                .to_string()
+                .contains("用户原话要求：不要改动公开 API"),
+            "the stated rule rides the checkpoint"
+        );
+
+        let (requests, reports, answers) = context_probe_run(
+            &project,
+            &script,
+            &conversation,
+            window as u32,
+            &[
+                serde_json::json!({"error": "summarizer unavailable"}),
+                probe_answer(),
+            ],
+            prompt,
+        );
+
+        assert_eq!(reports.len(), 1, "the request was trimmed: {reports:?}");
+        assert_eq!(answers[0].1, "ready", "{}", answers[0].0);
+        let sent = requests[0]["messages"].clone();
+        let system_blocks: Vec<String> = sent
+            .as_array()
+            .expect("a message array")
+            .iter()
+            .filter(|message| {
+                message["role"]
+                    .as_str()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("system"))
+            })
+            .map(|message| message.to_string())
+            .collect();
+        assert!(
+            system_blocks
+                .iter()
+                .any(|block| block.contains("用户原话要求：不要改动公开 API")),
+            "the trim kept the rule inside the checkpoint, not only in the prose: {system_blocks:?}"
+        );
+        assert!(
+            system_blocks
+                .iter()
+                .any(|block| block.contains("## Task checkpoint")),
+            "the checkpoint block itself is still on the wire: {system_blocks:?}"
+        );
+        assert!(
+            sent.to_string().contains("介绍下什么是数据仓库"),
+            "the current request survives"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// FR-D4 / AC-D2: the char ratio can under-count (CJK is closer to one
+    /// token per char), so a rejection is still possible. Shrinking and
+    /// retrying is allowed a bounded number of times, then the turn fails
+    /// explicitly instead of draining the provider forever.
+    #[test]
+    fn context_too_long_recovery_is_bounded_and_reported() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-context-recovery-stop-{}", std::process::id()));
+        let project = root.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+        let script = root.join("script.jsonl");
+        let too_long = "This model's maximum context length is 8192 tokens. \
+             Please reduce the size of the input."
+            .to_owned();
+        std::fs::write(
+            &script,
+            (0..MAX_CONTEXT_RECOVERY_ATTEMPTS as usize + 2)
+                .map(|_| format!("{}\n", serde_json::json!({"error": too_long})))
+                .collect::<String>(),
+        )
+        .unwrap();
+
+        let mut request = temp_request(&project, Permission::Ask);
+        request.message = "接着上面的内容继续说明".to_owned();
+        request.provider = Some(Provider::new(
+            "fake",
+            "fake-key",
+            script.to_string_lossy(),
+            "fake-model",
+        ));
+        request.conversation_history = (0..16)
+            .map(|index| {
+                (
+                    if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
+                    format!("{index}: {}", "上下文体积测试".repeat(400)),
+                )
+            })
+            .collect();
+
+        let mut calls = 0usize;
+        let mut shrinks = 0usize;
+        let mut answers: Vec<(String, String)> = Vec::new();
+        run(&request, &|| true, &|_, _| true, &mut |event| {
+            match event {
+                SinkEvent::Started {
+                    step: Step::ModelCall { .. },
+                } => calls += 1,
+                SinkEvent::Progress { phase, detail } => {
+                    if phase == "context" {
+                        shrinks += 1;
+                        let _ = detail;
+                    }
+                }
+                SinkEvent::Started {
+                    step: Step::AgentMessage { text, delivery, .. },
+                } => answers.push((text, delivery)),
+                _ => {}
+            }
+            true
+        })
+        .expect("bounded recovery still delivers an answer");
+
+        assert_eq!(
+            calls,
+            MAX_CONTEXT_RECOVERY_ATTEMPTS as usize + 1,
+            "one call plus the bounded retries, never more"
+        );
+        assert!(shrinks >= 1, "each retry shrinks first: {shrinks}");
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].1, "failed", "an exhausted turn is a failure");
+        assert!(
+            answers[0].0.contains("maximum context length"),
+            "the provider's own reason reaches the user: {}",
+            answers[0].0
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC-D2: the recovery must actually make the request smaller — a retry
+    /// with the same oversized history would fail the same way twice. Message
+    /// count is not the invariant (the loop re-adds its own instructions each
+    /// round), so the test measures how much of the user's public history the
+    /// retry still carries.
+    #[test]
+    fn context_too_long_recovery_retries_with_a_smaller_history() {
+        let root = std::env::temp_dir().join(format!(
+            "kodo-context-recovery-shrink-{}",
+            std::process::id()
+        ));
+        let project = root.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("README.md"), "# fixture\n").unwrap();
+        let script = root.join("script.jsonl");
+        let conversation = long_public_history();
+
+        let (probe, _, _) = context_probe_run(
+            &project,
+            &script,
+            &conversation,
+            20_000_000,
+            &[probe_answer()],
+            PROBE_PROMPT,
+        );
+        let before = probe[0]["messages"]
+            .to_string()
+            .matches("上下文体积测试")
+            .count();
+        assert!(
+            before > 1_000,
+            "precondition: the unsqueezed request carried the public history ({before})"
+        );
+
+        let (requests, reports, answers) = context_probe_run(
+            &project,
+            &script,
+            &conversation,
+            200_000,
+            &[probe_context_too_long(), probe_answer()],
+            PROBE_PROMPT,
+        );
+
+        assert_eq!(reports.len(), 1, "one bounded retry: {reports:?}");
+        assert!(reports[0].contains("收缩"), "{}", reports[0]);
+        assert_eq!(
+            requests.len(),
+            1,
+            "a rejected call is not traced, so the only request on the wire is the retry"
+        );
+        let after = requests[0]["messages"]
+            .to_string()
+            .matches("上下文体积测试")
+            .count();
+        assert!(
+            after < before,
+            "the retry carried less history: {before} -> {after}"
+        );
+        let sent = requests[0]["messages"].to_string();
+        assert!(
+            sent.contains("[context budget: dropped"),
+            "the model is told which observations went away"
+        );
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].1, "ready", "{}", answers[0].0);
+        assert!(
+            answers[0].0.contains("已按现有资料回答"),
+            "{}",
+            answers[0].0
+        );
+        assert!(
+            std::fs::read_to_string(&script)
+                .unwrap()
+                .contains("MUST_NOT_CALL_AGAIN"),
+            "the turn ended on the scripted answer"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
