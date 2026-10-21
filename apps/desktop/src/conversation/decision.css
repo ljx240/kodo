@@ -46,6 +46,20 @@
   gap: 6px;
 }
 
+/* Three provider names need a whole row. Equal tracks keep them the same width
+   and the cap stops two short names from stretching into oversized buttons. */
+.decision-mode--providers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  width: 100%;
+  max-width: 520px;
+  margin-top: 8px;
+}
+
+.decision-settings .setting-row--stacked > .setting-hint {
+  margin-top: 6px;
+}
+
 .decision-mode-option {
   padding: 5px 11px;
   border: 1px solid var(--kodo-border);
@@ -53,6 +67,8 @@
   background: var(--kodo-surface, #fff);
   color: var(--kodo-text-secondary);
   font-size: var(--kodo-font-sm);
+  text-align: center;
+  white-space: nowrap;
   cursor: pointer;
 }
 

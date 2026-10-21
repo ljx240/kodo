@@ -190,8 +190,12 @@ export function DecisionSettingsBody() {
         </p>
       )}
 
-      <Field label={T.decision.providerLabel} hint={T.decision.providerHint} wide>
-        <div className="decision-mode" role="radiogroup" aria-label={T.decision.providerLabel}>
+      <Field label={T.decision.providerLabel} hint={T.decision.providerHint} block>
+        <div
+          className="decision-mode decision-mode--providers"
+          role="radiogroup"
+          aria-label={T.decision.providerLabel}
+        >
           {PROVIDERS.map((provider) => (
             <button
               key={provider}
