@@ -356,6 +356,44 @@ fn openrouter_service(
     )
 }
 
+/// The configuration for the Tencent EdgeOne path.
+fn tencent_config(mode: DecisionMode, timeout_ms: u64) -> DecisionConfig {
+    DecisionConfig {
+        settings: DecisionSettings {
+            provider: DecisionProvider::Tencent,
+            mode,
+            model: "@makers/jev".to_owned(),
+            task_route_enabled: true,
+            failure_triage_enabled: true,
+            request_timeout_ms: timeout_ms,
+            ..DecisionSettings::default()
+        },
+        credential: Some("synthetic-tencent-key".to_owned()),
+        config_generation: kodo_shell::decision::current_config_generation(),
+        config_error: None,
+        recovered: false,
+    }
+}
+
+/// The service on the Tencent path, pointed at the loopback mock.
+fn tencent_service(
+    origin: &str,
+    mode: DecisionMode,
+    timeout_ms: u64,
+    consent: Arc<dyn DecisionConsent>,
+) -> Arc<DecisionService> {
+    Arc::new(
+        DecisionService::new(
+            tencent_config(mode, timeout_ms),
+            DecisionClient::for_local_endpoint(DecisionProvider::Tencent, origin),
+            consent,
+            "session-1",
+            1,
+        )
+        .with_runtime(Arc::new(DecisionRuntime::default())),
+    )
+}
+
 fn task_route_input() -> DecisionInput {
     DecisionInput::TaskRoute(TaskRouteInput {
         message: "把重复的校验逻辑合并一下".to_owned(),
@@ -487,6 +525,68 @@ fn an_openrouter_answer_without_logprobs_is_never_adoptable() {
         DecisionResult::Uncalibrated { choice } => assert_eq!(choice, "refactor"),
         other => panic!("expected an uncalibrated answer, got {other:?}"),
     }
+}
+
+#[test]
+fn the_tencent_path_sends_the_native_shape_to_its_own_path() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mock = MockService::start(Reply::Ok);
+    let service = tencent_service(
+        &mock.origin(),
+        DecisionMode::Observe,
+        1500,
+        Arc::new(AllowAll),
+    );
+    let outcome = service.evaluate(&task_route_input(), &|| true);
+    let decision = match outcome.result {
+        DecisionResult::Suggested(decision) => decision,
+        other => panic!("expected a suggestion, got {other:?}"),
+    };
+    assert_eq!(decision.choice, "refactor");
+    // The alias resolved to a build; the record names the build.
+    assert_eq!(decision.model, "jev-1.13.0");
+    assert_eq!(outcome.receipt.model, "jev-1.13.0");
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.path, "/v1/systemone");
+    assert_eq!(
+        request.header("authorization"),
+        Some("Bearer synthetic-tencent-key"),
+        "the Tencent key must be used for the Tencent request"
+    );
+    let body = String::from_utf8(request.body.clone()).expect("utf-8 body");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(value["model"], "@makers/jev");
+    assert!(value["questions"]["task_type"].is_object(), "{value}");
+    // The native shape, not a chat completion.
+    assert!(value.get("messages").is_none(), "{value}");
+    let state = value["state"].as_object().expect("state object");
+    let mut keys: Vec<&String> = state.keys().collect();
+    keys.sort();
+    assert_eq!(keys, vec!["message", "mode"], "{value}");
+}
+
+#[test]
+fn a_tencent_answer_for_another_model_is_refused() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let body = "{\"model\":\"jev-1.13.0-experimental\",\"answers\":{\"task_type\":{\"type\":\"choice\",\"choice\":\"refactor\",\"probabilities\":{\"bug-fix\":0.02,\"feature\":0.02,\"test\":0.02,\"refactor\":0.93,\"code-review\":0.0,\"docs\":0.0,\"unknown\":0.01},\"confidence\":0.9}}}";
+    let mock = MockService::start(Reply::Raw(200, body.to_owned()));
+    let service = tencent_service(
+        &mock.origin(),
+        DecisionMode::Observe,
+        1500,
+        Arc::new(AllowAll),
+    );
+    let outcome = service.evaluate(&task_route_input(), &|| true);
+    match outcome.result {
+        DecisionResult::Fallback(failure) => {
+            assert_eq!(failure.code, "invalid_response");
+            assert!(failure.detail.contains("model mismatch"), "{failure:?}");
+        }
+        other => panic!("expected a fallback, got {other:?}"),
+    }
+    assert_eq!(mock.requests().len(), 1, "there must be no automatic retry");
 }
 
 #[test]

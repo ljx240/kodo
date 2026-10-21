@@ -33,6 +33,11 @@ pub const JEV_PATH: &str = "/v1/systemone";
 pub const OPENROUTER_ORIGIN: &str = "https://openrouter.ai";
 /// The OpenRouter path.
 pub const OPENROUTER_PATH: &str = "/api/v1/chat/completions";
+/// The Tencent Cloud EdgeOne origin. EdgeOne Makers serves the same native
+/// System One protocol; only the gateway in front of it differs.
+pub const TENCENT_ORIGIN: &str = "https://ai-gateway.edgeone.link";
+/// The Tencent path.
+pub const TENCENT_PATH: &str = "/v1/systemone";
 /// The model version this component is pinned to on TypeSafe. Upgrading
 /// means re-running the frozen evaluation, not editing a setting.
 pub const DEFAULT_MODEL: &str = "jev-1.13.0";
@@ -43,6 +48,9 @@ pub const DEFAULT_MODEL: &str = "jev-1.13.0";
 /// router is the transport, the model is still the one the evaluation was
 /// written against.
 pub const DEFAULT_OPENROUTER_MODEL: &str = "typesafe/jev-1.14";
+/// The only model alias EdgeOne Makers accepts. The response reports the
+/// build the alias resolved to (for example `jev-1.13.0`).
+pub const DEFAULT_TENCENT_MODEL: &str = "@makers/jev";
 /// The policy version recorded with every request and every decision record.
 pub const DEFAULT_POLICY_VERSION: &str = "kodo-jev-v1";
 /// No provider/model/scenario has passed the real quality evaluation yet.
@@ -57,6 +65,8 @@ pub const CREDENTIAL_NAMESPACE: &str = "decision";
 pub const CREDENTIAL_ID: &str = "jev";
 /// The OpenRouter credential id inside the `decision` namespace.
 pub const OPENROUTER_CREDENTIAL_ID: &str = "openrouter";
+/// The Tencent credential id inside the `decision` namespace.
+pub const TENCENT_CREDENTIAL_ID: &str = "tencent";
 
 /// The service that answers the decision request.
 ///
@@ -70,6 +80,9 @@ pub enum DecisionProvider {
     TypeSafe,
     /// OpenRouter — an OpenAI-compatible chat-completions router.
     OpenRouter,
+    /// Tencent Cloud EdgeOne Makers — the native System One protocol
+    /// behind Tencent's gateway, with a fixed model alias.
+    Tencent,
 }
 
 impl DecisionProvider {
@@ -77,6 +90,7 @@ impl DecisionProvider {
         match value.trim() {
             "typeSafe" | "typesafe" | "jev" => Some(Self::TypeSafe),
             "openRouter" | "openrouter" => Some(Self::OpenRouter),
+            "tencent" | "Tencent" | "edgeOne" | "edgeone" | "tencentEdgeOne" => Some(Self::Tencent),
             _ => None,
         }
     }
@@ -85,6 +99,7 @@ impl DecisionProvider {
         match self {
             Self::TypeSafe => "typeSafe",
             Self::OpenRouter => "openRouter",
+            Self::Tencent => "tencent",
         }
     }
 
@@ -94,6 +109,7 @@ impl DecisionProvider {
         match self {
             Self::TypeSafe => JEV_ORIGIN,
             Self::OpenRouter => OPENROUTER_ORIGIN,
+            Self::Tencent => TENCENT_ORIGIN,
         }
     }
 
@@ -102,6 +118,7 @@ impl DecisionProvider {
         match self {
             Self::TypeSafe => JEV_PATH,
             Self::OpenRouter => OPENROUTER_PATH,
+            Self::Tencent => TENCENT_PATH,
         }
     }
 
@@ -110,6 +127,7 @@ impl DecisionProvider {
         match self {
             Self::TypeSafe => CREDENTIAL_ID,
             Self::OpenRouter => OPENROUTER_CREDENTIAL_ID,
+            Self::Tencent => TENCENT_CREDENTIAL_ID,
         }
     }
 
@@ -118,11 +136,18 @@ impl DecisionProvider {
         match self {
             Self::TypeSafe => DEFAULT_MODEL,
             Self::OpenRouter => DEFAULT_OPENROUTER_MODEL,
+            Self::Tencent => DEFAULT_TENCENT_MODEL,
         }
     }
 
+    /// True when the provider speaks the native System One protocol
+    /// (`{model, state, questions}` in, `answers` with probabilities out).
+    pub fn uses_systemone(self) -> bool {
+        matches!(self, Self::TypeSafe | Self::Tencent)
+    }
+
     /// Every provider, in a stable order. The settings screen lists them.
-    pub const ALL: [DecisionProvider; 2] = [Self::TypeSafe, Self::OpenRouter];
+    pub const ALL: [DecisionProvider; 3] = [Self::TypeSafe, Self::OpenRouter, Self::Tencent];
 }
 
 /// How much Jev may influence the run.
@@ -377,6 +402,14 @@ impl DecisionSettings {
             100,
             60_000,
         )?;
+        // EdgeOne Makers refuses every model but its own alias, so a
+        // different value is a configuration error, not a request to try.
+        if self.provider == DecisionProvider::Tencent && self.model != DEFAULT_TENCENT_MODEL {
+            return Err(format!(
+                "jev-decision: tencent accepts only the model `{DEFAULT_TENCENT_MODEL}`, got `{}`",
+                self.model
+            ));
+        }
         Ok(())
     }
 
@@ -1380,7 +1413,7 @@ pub fn build_provider_request(
     plan: &DecisionPlan,
 ) -> Result<RequestBody, String> {
     match provider {
-        DecisionProvider::TypeSafe => {
+        DecisionProvider::TypeSafe | DecisionProvider::Tencent => {
             let request = build_request(model, plan);
             let bytes = serialize_request(&request)?;
             let text = String::from_utf8(bytes.clone())
@@ -1483,6 +1516,47 @@ pub fn openrouter_model_matches(requested: &str, reported: &str) -> bool {
     }
     // The router may have added the provider prefix to a bare model name.
     reported.ends_with(&format!("/{requested}"))
+}
+
+/// Check that the reported model is the one the consent preview named, for
+/// the provider that answered.
+pub fn response_model_matches(provider: DecisionProvider, requested: &str, reported: &str) -> bool {
+    match provider {
+        // The official endpoint is versioned by the model id itself: any
+        // difference is a different build.
+        DecisionProvider::TypeSafe => requested == reported,
+        DecisionProvider::OpenRouter => openrouter_model_matches(requested, reported),
+        DecisionProvider::Tencent => tencent_model_matches(requested, reported),
+    }
+}
+
+/// Check that a Tencent answer resolved from the alias that was requested.
+///
+/// EdgeOne Makers accepts only the fixed alias `@makers/jev` and reports
+/// the build it resolved to (`jev-1.13.0`). The alias may also come back
+/// unchanged. Anything else — a different model, a different family, or a
+/// suffix that is not a version number — is refused.
+pub fn tencent_model_matches(requested: &str, reported: &str) -> bool {
+    if requested == reported {
+        return true;
+    }
+    let Some(alias) = requested.strip_prefix("@makers/") else {
+        return false;
+    };
+    if alias.is_empty() {
+        return false;
+    }
+    let Some(version) = reported
+        .strip_prefix(alias)
+        .and_then(|rest| rest.strip_prefix('-'))
+    else {
+        return false;
+    };
+    !version.is_empty()
+        && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && !version.starts_with('.')
+        && !version.ends_with('.')
+        && !version.contains("..")
 }
 
 /// Turn an OpenRouter answer into the internal response shape.
@@ -1632,14 +1706,30 @@ const PROBABILITY_TIE_TOLERANCE: f64 = 1e-9;
 /// Validate a response against the request that produced it, in a fixed
 /// order. Every rejection is a hard rejection: a partially valid response
 /// is not used.
+///
+/// This is the TypeSafe entry point, where the requested model id and the
+/// reported one must be identical.
 pub fn validate_response(
     request: &DecisionRequest,
     response: &DecisionResponse,
     scenario: DecisionScenario,
 ) -> Result<ValidatedDecision, DecisionFailure> {
-    // 2. The model must be the pinned version. An alias that drifted to a
-    //    different build is not accepted silently.
-    if response.model != request.model {
+    validate_response_for(DecisionProvider::TypeSafe, request, response, scenario)
+}
+
+/// Validate a response for the provider that produced it.
+///
+/// Everything except the model identity check is shared: the provider is a
+/// transport detail, never a second policy.
+pub fn validate_response_for(
+    provider: DecisionProvider,
+    request: &DecisionRequest,
+    response: &DecisionResponse,
+    scenario: DecisionScenario,
+) -> Result<ValidatedDecision, DecisionFailure> {
+    // 2. The model must be the one that was asked for. An alias that
+    //    drifted to a different build is not accepted silently.
+    if !response_model_matches(provider, &request.model, &response.model) {
         return Err(DecisionFailure::new(
             "invalid_response",
             format!(
@@ -2561,6 +2651,120 @@ mod tests {
         assert_eq!(client.origin(), JEV_ORIGIN);
         assert_eq!(client.path(), JEV_PATH);
         assert_eq!(client.destination(), "https://api.typesafe.ai/v1/systemone");
+    }
+
+    // ---- Tencent EdgeOne -------------------------------------------------
+
+    #[test]
+    fn the_provider_table_is_complete_and_parses_its_own_labels() {
+        assert_eq!(DecisionProvider::ALL.len(), 3);
+        for provider in DecisionProvider::ALL {
+            assert_eq!(DecisionProvider::parse(provider.label()), Some(provider));
+            assert!(provider.origin().starts_with("https://"));
+            assert!(provider.path().starts_with('/'));
+        }
+        assert_eq!(
+            DecisionProvider::Tencent.origin(),
+            "https://ai-gateway.edgeone.link"
+        );
+        assert_eq!(DecisionProvider::Tencent.path(), "/v1/systemone");
+        assert_eq!(DecisionProvider::Tencent.credential_id(), "tencent");
+        assert_eq!(DecisionProvider::Tencent.default_model(), "@makers/jev");
+        assert!(DecisionProvider::Tencent.uses_systemone());
+        assert!(!DecisionProvider::OpenRouter.uses_systemone());
+    }
+
+    #[test]
+    fn a_stored_tencent_provider_is_read_back() {
+        let settings = DecisionSettings::from_json(
+            r#"{"provider":"tencent","mode":"observe","model":"@makers/jev"}"#,
+        )
+        .expect("tencent must be a known provider");
+        assert_eq!(settings.provider, DecisionProvider::Tencent);
+        assert_eq!(settings.model, "@makers/jev");
+    }
+
+    #[test]
+    fn tencent_rejects_a_different_model_on_save() {
+        let error = DecisionSettings::from_json(
+            r#"{"provider":"tencent","mode":"observe","model":"jev-1.13.0"}"#,
+        )
+        .unwrap_err();
+        assert!(error.contains("@makers/jev"), "{error}");
+    }
+
+    #[test]
+    fn the_tencent_request_is_the_native_shape_with_the_fixed_alias() {
+        let plan = openrouter_plan();
+        let body = build_provider_request(DecisionProvider::Tencent, DEFAULT_TENCENT_MODEL, &plan)
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body.bytes).expect("json");
+        assert_eq!(value["model"], "@makers/jev");
+        assert!(value["questions"]["task_type"].is_object(), "{value}");
+        // The native shape, not a chat completion.
+        assert!(value.get("messages").is_none(), "{value}");
+        let state = value["state"].as_object().expect("state object");
+        let mut keys: Vec<&String> = state.keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["message", "mode"], "{value}");
+    }
+
+    #[test]
+    fn the_tencent_model_check_accepts_only_the_resolved_alias() {
+        assert!(tencent_model_matches("@makers/jev", "@makers/jev"));
+        assert!(tencent_model_matches("@makers/jev", "jev-1.13.0"));
+        assert!(tencent_model_matches("@makers/jev", "jev-1.14"));
+        assert!(!tencent_model_matches("@makers/jev", "jev"));
+        assert!(!tencent_model_matches("@makers/jev", "jev-1.13.0-extra"));
+        assert!(!tencent_model_matches("@makers/jev", "anthropic/claude-3"));
+        assert!(!tencent_model_matches("@makers/other", "jev-1.13.0"));
+        // A bare model id is not the alias EdgeOne Makers was asked for.
+        assert!(!tencent_model_matches("jev-1.13.0", "jev-1.14.0"));
+    }
+
+    #[test]
+    fn a_tencent_answer_resolving_the_alias_is_accepted() {
+        let plan = openrouter_plan();
+        let request = build_request(DEFAULT_TENCENT_MODEL, &plan);
+        let (_, mut response) = request_and_response(
+            "refactor",
+            &[
+                ("bug-fix", 0.0),
+                ("feature", 0.0),
+                ("test", 0.0),
+                ("refactor", 0.93),
+                ("code-review", 0.0),
+                ("docs", 0.0),
+                ("unknown", 0.07),
+            ],
+        );
+        response.model = "jev-1.13.0".to_owned();
+        let validated = validate_response_for(
+            DecisionProvider::Tencent,
+            &request,
+            &response,
+            DecisionScenario::TaskRoute,
+        )
+        .expect("a resolved alias must pass");
+        assert_eq!(validated.choice, "refactor");
+        assert_eq!(validated.model, "jev-1.13.0");
+    }
+
+    #[test]
+    fn a_tencent_answer_for_another_model_is_refused() {
+        let plan = openrouter_plan();
+        let request = build_request(DEFAULT_TENCENT_MODEL, &plan);
+        let (_, mut response) = request_and_response("unknown", &full_probabilities());
+        response.model = "jev-1.13.0-experimental".to_owned();
+        let error = validate_response_for(
+            DecisionProvider::Tencent,
+            &request,
+            &response,
+            DecisionScenario::TaskRoute,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_response");
+        assert!(error.detail.contains("model mismatch"), "{error:?}");
     }
 
     #[test]

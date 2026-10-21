@@ -10,7 +10,8 @@ import { Field, Switch } from "../shell/controls";
 import { T } from "../i18n";
 
 type Mode = "off" | "observe" | "assist";
-type Provider = "typeSafe" | "openRouter";
+type Provider = "typeSafe" | "openRouter" | "tencent";
+const PROVIDERS = ["typeSafe", "openRouter", "tencent"] as const;
 
 /** The settings form's own state. It starts from the backend's defaults so
  *  the numeric limits live in exactly one place. */
@@ -38,13 +39,18 @@ function toForm(dto: DecisionSettingsDto): Form {
   const mode = (["off", "observe", "assist"] as const).includes(dto.mode as Mode)
     ? (dto.mode as Mode)
     : "off";
-  const provider = (["typeSafe", "openRouter"] as const).includes(dto.provider as Provider)
+  const provider = PROVIDERS.includes(dto.provider as Provider)
     ? (dto.provider as Provider)
     : "typeSafe";
   return {
     provider,
     mode,
-    model: dto.model || base.model || "jev-1.13.0",
+    // EdgeOne Makers accepts exactly one alias, so a saved value that
+    // differs from it is not carried into the form.
+    model:
+      provider === "tencent"
+        ? PROVIDER_DEFAULT_MODEL.tencent
+        : dto.model || base.model || "jev-1.13.0",
     taskRoute: dto.taskRouteEnabled,
     failureTriage: dto.failureTriageEnabled,
     requestTimeoutMs: base.requestTimeoutMs ?? 1500,
@@ -73,10 +79,12 @@ function toJson(form: Form): string {
   });
 }
 
-/** The model each provider starts from. */
+/** The model each provider starts from. EdgeOne Makers accepts only this
+ *  one alias; the response reports the build it resolved to. */
 const PROVIDER_DEFAULT_MODEL: Record<Provider, string> = {
   typeSafe: "jev-1.13.0",
   openRouter: "typesafe/jev-1.14",
+  tencent: "@makers/jev",
 };
 
 export function DecisionSettingsBody() {
@@ -151,10 +159,12 @@ export function DecisionSettingsBody() {
     return <p className="empty-note">{T.decision.loading}</p>;
   }
 
-  // The key belongs to the selected provider: TypeSafe and OpenRouter keys
-  // live under their own ids.
+  // The key belongs to the selected provider: each provider's key lives
+  // under its own id.
   const credentialState =
     dto?.credentials.find((entry) => entry.provider === form.provider) ?? null;
+
+  const modelLocked = form.provider === "tencent";
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) =>
     setForm((current) => (current ? { ...current, [key]: value } : current));
@@ -182,7 +192,7 @@ export function DecisionSettingsBody() {
 
       <Field label={T.decision.providerLabel} hint={T.decision.providerHint} wide>
         <div className="decision-mode" role="radiogroup" aria-label={T.decision.providerLabel}>
-          {(["typeSafe", "openRouter"] as const).map((provider) => (
+          {PROVIDERS.map((provider) => (
             <button
               key={provider}
               type="button"
@@ -223,12 +233,15 @@ export function DecisionSettingsBody() {
         </div>
       </Field>
 
-      <Field label={T.decision.modelLabel} hint={T.decision.modelHint}>
+      <Field
+        label={T.decision.modelLabel}
+        hint={modelLocked ? T.decision.modelTencentHint : T.decision.modelHint}
+      >
         <input
           className="input"
           value={form.model}
           data-testid="decision-model"
-          disabled={busy}
+          disabled={busy || modelLocked}
           onChange={(event) => set("model", event.target.value)}
         />
       </Field>

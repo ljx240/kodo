@@ -40,7 +40,10 @@ export function DecisionRecordsSection({ items }: { items: ItemDto[] | undefined
           <article className="decision-record" key={`${record.requestId}-${record.status}`}>
             <div className="decision-record-head">
               <strong>{statusLabel(record)}</strong>
-              <span>{T.decision.providers[record.provider as "typeSafe" | "openRouter"] ?? record.provider}</span>
+              <span>
+                {T.decision.providers[record.provider as "typeSafe" | "openRouter" | "tencent"] ??
+                  record.provider}
+              </span>
               <span>{record.model}</span>
               <span>
                 {T.decision.scenarioLabel} {record.suggestion ?? record.baseline ?? "—"}

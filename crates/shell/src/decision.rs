@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kodo_agent::decision::{
     build_provider_request, looks_sensitive, parse_openrouter_response, plan_failure_triage,
-    plan_task_route, validate_response, DecisionAccess, DecisionClient, DecisionFailure,
+    plan_task_route, validate_response_for, DecisionAccess, DecisionClient, DecisionFailure,
     DecisionInput, DecisionMode, DecisionOutcome, DecisionProvider, DecisionReceipt,
     DecisionResult, DecisionScenario, DecisionSettings, OpenRouterAnswer, TaskRouteInput,
     ASSIST_AVAILABLE, CREDENTIAL_NAMESPACE, SETTINGS_KEY,
@@ -48,11 +48,13 @@ const BREAKER_COOLDOWN: Duration = Duration::from_secs(60);
 static CONFIG_GENERATION: AtomicU64 = AtomicU64::new(1);
 static TYPESAFE_CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(1);
 static OPENROUTER_CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(1);
+static TENCENT_CREDENTIAL_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn credential_generation(provider: DecisionProvider) -> &'static AtomicU64 {
     match provider {
         DecisionProvider::TypeSafe => &TYPESAFE_CREDENTIAL_GENERATION,
         DecisionProvider::OpenRouter => &OPENROUTER_CREDENTIAL_GENERATION,
+        DecisionProvider::Tencent => &TENCENT_CREDENTIAL_GENERATION,
     }
 }
 
@@ -239,7 +241,7 @@ pub fn load_decision_config_from(
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DecisionSettingsView {
-    /// The configured provider: `typeSafe` or `openRouter`.
+    /// The configured provider: `typeSafe`, `openRouter` or `tencent`.
     pub provider: String,
     pub mode: String,
     pub assist_available: bool,
@@ -1105,7 +1107,7 @@ impl DecisionAccess for DecisionService {
         //     internal shape is the same, so the validation order below is
         //     identical for every provider.
         let decoded = match self.config.settings.provider {
-            DecisionProvider::TypeSafe => {
+            DecisionProvider::TypeSafe | DecisionProvider::Tencent => {
                 let parsed: Result<kodo_agent::decision::DecisionResponse, DecisionFailure> =
                     serde_json::from_value(response).map_err(|error| {
                         DecisionFailure::new("invalid_response", format!("{error}"))
@@ -1139,7 +1141,12 @@ impl DecisionAccess for DecisionService {
         }
 
         let request = kodo_agent::decision::build_request(&self.config.settings.model, &plan);
-        let validated = match validate_response(&request, &response, scenario) {
+        let validated = match validate_response_for(
+            self.config.settings.provider,
+            &request,
+            &response,
+            scenario,
+        ) {
             Ok(validated) => validated,
             Err(failure) => {
                 receipt.duration_ms = started.elapsed().as_millis() as u64;
@@ -1150,6 +1157,9 @@ impl DecisionAccess for DecisionService {
             }
         };
         receipt.input_tokens = validated.input_tokens;
+        // The answer carries the identity the service actually used: for an
+        // alias (`@makers/jev`) that is the resolved build, not the alias.
+        receipt.model = validated.model.clone();
         receipt.duration_ms = started.elapsed().as_millis() as u64;
         DecisionOutcome {
             receipt,
@@ -1802,20 +1812,26 @@ mod tests {
     }
 
     #[test]
-    fn the_openrouter_default_model_is_the_typesafe_one() {
+    fn each_provider_has_its_own_default_model() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(
             DecisionProvider::OpenRouter.default_model(),
             "typesafe/jev-1.14"
         );
         assert_eq!(DecisionProvider::TypeSafe.default_model(), "jev-1.13.0");
+        assert_eq!(DecisionProvider::Tencent.default_model(), "@makers/jev");
+        let ids: Vec<&str> = DecisionProvider::ALL
+            .iter()
+            .map(|provider| provider.credential_id())
+            .collect();
+        assert_eq!(ids, vec!["jev", "openrouter", "tencent"]);
     }
 
     #[test]
     fn clearing_one_providers_credential_keeps_the_other_one() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        // The two providers have separate keys; clearing one must not take
-        // the other with it.
+        // Every provider has its own key; clearing one must not take the
+        // others with it.
         let dir = std::env::temp_dir().join(format!("kodo-jev-providers-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("credentials.log");
@@ -1833,13 +1849,26 @@ mod tests {
             "openrouter-key",
         )
         .expect("openrouter credential");
+        kodo_core::settings::write_secret(
+            &path,
+            kodo_agent::decision::CREDENTIAL_NAMESPACE,
+            DecisionProvider::Tencent.credential_id(),
+            "tencent-key",
+        )
+        .expect("tencent credential");
 
         // `clear_decision_credential` reads the real store, so exercise the
         // namespace rebuild directly with the same keep-set shape.
-        let keep = vec![(
-            DecisionProvider::OpenRouter.credential_id().to_owned(),
-            "openrouter-key".to_owned(),
-        )];
+        let keep = vec![
+            (
+                DecisionProvider::OpenRouter.credential_id().to_owned(),
+                "openrouter-key".to_owned(),
+            ),
+            (
+                DecisionProvider::Tencent.credential_id().to_owned(),
+                "tencent-key".to_owned(),
+            ),
+        ];
         kodo_core::settings::clear_secrets(
             &path,
             kodo_agent::decision::CREDENTIAL_NAMESPACE,
@@ -1865,6 +1894,16 @@ mod tests {
             .as_deref(),
             Some("openrouter-key"),
             "the other provider's key must survive"
+        );
+        assert_eq!(
+            kodo_core::settings::read_secret(
+                &path,
+                kodo_agent::decision::CREDENTIAL_NAMESPACE,
+                DecisionProvider::Tencent.credential_id(),
+            )
+            .as_deref(),
+            Some("tencent-key"),
+            "the Tencent key must survive as well"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

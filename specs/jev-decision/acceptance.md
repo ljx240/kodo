@@ -181,7 +181,7 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 
 | 问题 | 原因 | 修正 | 证据 |
 | --- | --- | --- | --- |
-| OpenRouter 默认模型 | 按用户要求 | `typesafe/jev-1.14`（官方端点仍固定 `jev-1.13.0`） | `the_openrouter_default_model_is_the_typesafe_one`、前端「切换服务来源」用例 |
+| OpenRouter 默认模型 | 按用户要求 | `typesafe/jev-1.14`（官方端点仍固定 `jev-1.13.0`） | `each_provider_has_its_own_default_model`、前端「切换服务来源」用例 |
 | 保存配置报错 `jev-decision: EOF while parsing an object at line 1 column 1` | `settings.log` 是行式 `key=value`，而记录用 `to_string_pretty` 写成多行；读回时只剩第一行 `{` | 存盘前用 `DecisionSettings::to_json()` 归一化成**单行** JSON，并拒绝含换行的值 | `a_saved_record_can_be_read_back`、`a_pretty_printed_record_is_normalized_before_it_is_written`、`a_damaged_record_says_how_to_repair_it` |
 | 修复后仍报错 | 旧的截断记录仍在日志里，读出来还是 `{` | 增加**恢复读取**：值解析失败时，把日志里紧跟其后的行重新拼回去直到 JSON 复原；复原后按紧凑格式回写一份 | `a_truncated_record_is_recovered_and_written_back`；用本机 `settings.log` 副本实测：`config_error=None`、`mode=assist`、`provider=openRouter`、`model=typesafe/jev-1.14` |
 
@@ -189,13 +189,29 @@ quality_gate: NOT EVALUATED — the offline numbers above are the local rule's, 
 
 **接入 OpenRouter 带来的新风险（尚未评估）**：官方 Jev 给出的是服务自己标注的概率；OpenRouter 给出的是 chat 模型首 token 的 token 概率经选项字母归一化后的分布。两者都**不是**"准确率"，但后者对模型的服从度、分词器与提示词更敏感。因此 OpenRouter 路径在质量门评测里应当**单独统计**，不能与官方路径合并成一个指标。
 
+## 3.3 腾讯 EdgeOne 来源（FR-015 扩展，2026-10-21）
+
+用户提供 [腾讯云 EdgeOne Makers 文档](https://cloud.tencent.com/document/product/1552/138731)，要求把腾讯加入 Jev 的服务来源。文档描述的是 System One 原生协议，模型别名 `@makers/jev`，与 TypeSafe 的请求/响应形状一致。
+
+| 验收点 | 证据 | 结论 |
+| --- | --- | --- |
+| 来源可配置，目的地/凭据/请求形状随之切换 | `the_tencent_path_sends_the_native_shape_to_its_own_path`：请求打到 `/v1/systemone`，带 `Bearer synthetic-tencent-key`，body 的 `model` 是 `@makers/jev`，含 `questions`、不含 `messages` | **通过** |
+| 别名解析后的模型被接受 | `a_tencent_answer_resolving_the_alias_is_accepted`：请求 `@makers/jev`、响应 `jev-1.13.0`，采纳记录的模型是解析后的 `jev-1.13.0` | **通过** |
+| 其他模型被拒绝 | `a_tencent_answer_for_another_model_is_refused`（传输层，`model mismatch`，无重试）、`the_tencent_model_check_accepts_only_the_resolved_alias`（拒绝 `jev`、`jev-1.13.0-extra`、其他模型与裸模型 id） | **通过** |
+| 设置只接受固定别名 | `tencent_rejects_a_different_model_on_save`；前端 `腾讯来源固定使用 @makers/jev 并锁定模型输入`（模型框禁用，切换来源后恢复） | **通过** |
+| 凭据按来源隔离 | `clearing_one_providers_credential_keeps_the_other_one` 扩展为三条密钥：清 TypeSafe 后 OpenRouter 与腾讯的密钥都保留 | **通过** |
+| 设置页展示第三个来源 | 视觉用例断言 `decision-provider-tencent` 可见、外发说明包含「腾讯 EdgeOne」 | **通过** |
+| 失败不自动换源 | 服务按 `settings.provider` 选一个客户端；没有跨来源回退分支 | **通过（代码级）** |
+
+**未验证**：腾讯 EdgeOne 的真实连通性、`Authorization: Bearer $MAKERS_MODELS_KEY` 鉴权头是否与文档一致、实际解析出的版本号、限流与价格、以及 `@makers/jev` 指向的构建是否与评估所用版本相同 —— 都需要单独授权的真实请求。上述实现全部使用回环模拟服务与虚构凭据验证。
+
 ## 4. 尚未通过 / 未验证的项
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
 | 真实模型效果（质量门） | **未评估** | 需要一次单独授权的云端评测；模拟响应通过**不等于**模型效果达标 |
 | 真实 Jev 端点连通性、地区延迟、有效价格、额度 | **未验证** | 本次授权不含真实推理请求 |
-| 视觉回归基线（`toHaveScreenshot`） | **未补** | 新增了 2 项交互用例（`apps/desktop/tests/visual/decision.spec.ts`）并人工核对了 1586×992 与 900×900 两张截图；没有新增像素基线，避免在未确认基线的情况下锁定渲染 |
+| 视觉回归基线（`toHaveScreenshot`） | **未补** | 现有 4 项交互用例（`apps/desktop/tests/visual/decision.spec.ts`）已通过；没有新增像素基线，避免在未确认基线的情况下锁定渲染 |
 | Inspector 决策记录的实际渲染 | **未截屏核对** | 组件与数据接线完成，`typecheck`/`build` 通过；记录只在真实运行产生，本地没有产生该记录的界面状态 |
 | `local_trace` 打开时的落盘内容断言 | **未做端到端断言** | 代码级保证：记录只进 `Reasoning.diagnostics`，内容不含请求正文 |
 | CLI 无 TTY 的真实管道运行 | **未实测** | 代码级保证：`decision_handle` 在无 TTY 时返回 `None` |

@@ -53,8 +53,8 @@ pub fn decision_save_settings(settings: String) -> Result<u64, String> {
 
 /// Store a provider's decision credential.
 ///
-/// The provider names which key this is: TypeSafe and OpenRouter keys live
-/// under their own ids, so one service's key is never sent to the other.
+/// The provider names which key this is: every provider's key lives under
+/// its own id, so one service's key is never sent to another.
 #[tauri::command]
 pub fn decision_set_credential(provider: String, secret: String) -> Result<u64, String> {
     let provider = DecisionProvider::parse(&provider)
@@ -62,7 +62,7 @@ pub fn decision_set_credential(provider: String, secret: String) -> Result<u64, 
     save_decision_credential(provider, &secret)
 }
 
-/// Remove one provider's decision credential. The other provider's key and
+/// Remove one provider's decision credential. The other providers' keys and
 /// every other credential family are untouched.
 #[tauri::command]
 pub fn decision_clear_credential(provider: String) -> Result<u64, String> {

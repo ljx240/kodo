@@ -29,7 +29,7 @@
 
 ### 2.1 设置
 
-服务来源是配置的一部分：`provider` 字段（`typeSafe` / `openRouter`）决定目的地、凭据与请求格式。
+服务来源是配置的一部分：`provider` 字段（`typeSafe` / `openRouter` / `tencent`）决定目的地、凭据与请求格式。
 
 **存储格式**：记录以**单行** JSON 写入 `settings.log`。该日志是行式 `key=value`，多行值会在第一行被截断；存盘前统一用 `DecisionSettings::to_json()` 归一化，既保证单行，也保证存进去的形状和界面看到的形状一致。
 
@@ -60,7 +60,7 @@
 
 ### 2.2 凭据
 
-沿用 `credentials.log` 的命名空间机制：命名空间 `decision`，ID 按来源分（`jev` = 官方，`openrouter` = OpenRouter），见 `kodo_core::settings::{read_secret, write_secret, clear_secrets}`。与 `provider.*` / `mcp.*` 完全隔离；清除一个来源的密钥不触碰另一个来源，也不触碰其他命名空间（AC-016）。
+沿用 `credentials.log` 的命名空间机制：命名空间 `decision`，ID 按来源分（`jev` = 官方，`openrouter` = OpenRouter，`tencent` = 腾讯 EdgeOne），见 `kodo_core::settings::{read_secret, write_secret, clear_secrets}`。与 `provider.*` / `mcp.*` 完全隔离；清除一个来源的密钥不触碰其他来源，也不触碰其他命名空间（AC-016）。
 
 - 明文只存在于 Rust 壳层内存。普通设置、前端返回值、运行记录、错误消息都不含明文（FR-008）。
 - 前端只拿到 `hasCredential: bool` 与掩码；空值 / 掩码 / 替换 / 显式清除四态区分。
@@ -75,19 +75,20 @@
 
 `DecisionProvider` 决定目的地、凭据、请求格式与响应解码：
 
-| | `typeSafe` | `openRouter` |
-| --- | --- | --- |
-| 目的地 | `https://api.typesafe.ai/v1/systemone` | `https://openrouter.ai/api/v1/chat/completions` |
-| 凭据 id | `decision.jev` | `decision.openrouter` |
-| 请求 | `{model, state, questions}` | `{model, messages, temperature, logprobs, top_logprobs}` |
-| 概率来源 | 响应自带的 `probabilities` | 首 token 的 `top_logprobs` 在选项字母上归一化 |
-| 无概率时 | 校验失败 → 回退 | `Uncalibrated`：只记录，不采纳 |
+| | `typeSafe` | `openRouter` | `tencent` |
+| --- | --- | --- | --- |
+| 目的地 | `https://api.typesafe.ai/v1/systemone` | `https://openrouter.ai/api/v1/chat/completions` | `https://ai-gateway.edgeone.link/v1/systemone` |
+| 凭据 id | `decision.jev` | `decision.openrouter` | `decision.tencent` |
+| 模型 | 固定 `jev-1.13.0` | 用户指定，默认 `typesafe/jev-1.14` | 固定别名 `@makers/jev` |
+| 请求 | `{model, state, questions}` | `{model, messages, temperature, logprobs, top_logprobs}` | `{model, state, questions}` |
+| 概率来源 | 响应自带的 `probabilities` | 首 token 的 `top_logprobs` 在选项字母上归一化 | 响应自带的 `probabilities` |
+| 无概率时 | 校验失败 → 回退 | `Uncalibrated`：只记录，不采纳 | 校验失败 → 回退 |
 
-关键取舍：**OpenRouter 走单字母作答**。选项名是多词标签（`code-review`），会被切成多个 token，逐选项概率就取不到了；单字母在几乎所有分词器里都是一个 token，首 token 的候选概率才干净可用。
+关键取舍：**OpenRouter 走单字母作答**。选项名是多词标签（`code-review`），会被切成多个 token，逐选项概率就取不到了；单字母在几乎所有分词器里都是一个 token，首 token 的候选概率才干净可用。**腾讯 EdgeOne 不需要这一步**：它返回的就是 System One 原生 `answers`，因此复用 TypeSafe 的请求体与解码，只换目的地、凭据与模型别名校验。
 
-**内部形状不变**：OpenRouter 的响应被翻译成 TypeSafe 的内部 `DecisionResponse`，所以校验顺序、采纳门槛、轨迹记录、授权流程对两种来源完全一致 —— 来源是传输细节，不是第二套策略。
+**内部形状不变**：OpenRouter 的响应被翻译成 TypeSafe 的内部 `DecisionResponse`；腾讯的响应本来就是该形状。所以校验顺序、采纳门槛、轨迹记录、授权流程对三种来源完全一致 —— 来源是传输细节，不是第二套策略。
 
-**模型一致性**：请求的模型与响应的模型必须一致，允许路由解析出的 `日期后缀`（`-2024-07-18`）与 `provider 前缀`，其余一律拒绝。`gpt-4o` 不接受 `gpt-4o-mini`。
+**模型一致性**：TypeSafe 要求请求与响应逐字一致；OpenRouter 允许路由解析出的 `日期后缀`（`-2024-07-18`）与 `provider 前缀`，`gpt-4o` 不接受 `gpt-4o-mini`；腾讯接受 `@makers/jev` 本身，或按别名解析出的 `jev-<版本>`（版本只允许数字与点），`jev-1.13.0-experimental` 与其他模型一律拒绝。腾讯的设置值也必须是 `@makers/jev`，其他值在保存时即被拒绝，不会发出请求。
 
 **不自动换源**：一次只配置一个来源。换源等于把同一份内容发给用户没有批准过的第二个接收方。
 
@@ -301,10 +302,11 @@ Jev 接入点在 **`conversational` 判定之后、`skill` 选择之前**（即 
 | 8 | 请求 ID 由 uuid 生成 | `jev-<pid>-<nanos>-<seq>` | `kodo-shell` 没有 uuid 依赖；令牌是一次性内存态，且消费时还要校验会话与运行代次，可猜测的 ID 不构成越权路径。 |
 | 9 | 失败分流 Assist 的 `transient` 建议 | 只记录建议，沿用既有路径（不进入基础设施阻塞分支） | 设计只对 `infrastructure` 规定"转为阻塞报告"，对 `transient` 只要求"不自动重试"。把 `transient` 也变成阻塞会放大"产品问题误阻塞率"，与设计的 1% 上限相悖。 |
 | 10 | 语料放在 `evals/fixtures/` 下的独立目录 | 放在 `evals/fixtures-decision/` | `evals/fixtures/` 的每个目录都被 fixture 层当作"带 oracle 的任务仓库"扫描；把语料放进去会破坏 `splits_cover_all_fixtures` 门。 |
-| 11 | 首期固定一个官方接收方 | 支持两个来源（官方 Jev / OpenRouter），一次只启用一个 | 用户明确要求接入 OpenRouter。仍然固定目的地、固定凭据、失败不换源；新增的是"用户选哪一个"，不是"系统替用户选"。 |
-| 12 | 概率由服务直接给出 | OpenRouter 的概率由首 token 候选归一化得到；没有概率时只记录不采纳 | 单字母作答让逐选项概率可取；没有分布就意味着"不知道"，而不是"很确定"。门槛假设的是真实概率，不能拿模型自评冒充。 |
+| 11 | 首期固定一个官方接收方 | 支持三个来源（官方 Jev / OpenRouter / 腾讯 EdgeOne），一次只启用一个 | 用户先后要求接入 OpenRouter 与腾讯 EdgeOne。仍然固定目的地、固定凭据、失败不换源；新增的是"用户选哪一个"，不是"系统替用户选"。 |
+| 12 | 概率由服务直接给出 | OpenRouter 的概率由首 token 候选归一化得到；没有概率时只记录不采纳；TypeSafe / 腾讯直接使用响应的 `probabilities` | 单字母作答让 OpenRouter 的逐选项概率可取；没有分布就意味着"不知道"，而不是"很确定"。门槛假设的是真实概率，不能拿模型自评冒充。 |
 | 13 | 设置记录按可读 JSON 存盘 | 存盘前统一归一化成**单行** JSON | `settings.log` 是行式 `key=value` 日志：多行记录会在第一行被截断，读回来是 `{`，于是报 `EOF while parsing an object`。归一化同时兜住了用户直接提交多行 JSON 的情况。 |
-| 14 | 官方端点固定 `jev-1.13.0` | OpenRouter 端点默认 `typesafe/jev-1.14` | 用户指定。两者是不同传输上的不同版本；官方路径的版本仍受冻结评测约束，OpenRouter 路径的版本在质量门里单独统计。 |
+| 14 | 官方端点固定 `jev-1.13.0` | OpenRouter 端点默认 `typesafe/jev-1.14`；腾讯固定别名 `@makers/jev`，响应解析为 `jev-<版本>` | 用户指定。三者是不同传输上的不同版本；官方与腾讯路径的版本仍受冻结评测约束，OpenRouter 路径的版本在质量门里单独统计。 |
+| 15 | 模型名由请求方自由指定 | 腾讯只接受 `@makers/jev`，保存其他值即配置错误 | EdgeOne Makers 对非该别名的模型返回 400。在保存时拒绝比发出一个必然失败的请求更清楚；前端同时锁定输入框。 |
 
 **无新增依赖**：`kodo-agent` 已有 `ureq 2.12` / `serde` / `serde_json`；`kodo-shell` 已有 `serde` / `serde_json`；凭据与设置复用 `kodo-core::settings`；脱敏复用 `kodo-core::redact`；轨迹复用 `kodo-shell::turn` 的 Reasoning 映射。
 
