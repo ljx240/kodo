@@ -349,6 +349,10 @@ pub struct StartArgs {
     pub force_inline: Vec<String>,
     pub provider: Option<agent::Provider>,
     pub permission: Permission,
+    /// How long to wait for a human approval decision. `None` = wait until
+    /// the user answers or the run is cancelled. Only headless callers, which
+    /// have no UI to answer the card, pass a bound.
+    pub approval_timeout: Option<Duration>,
     pub mode: agent::AgentMode,
     pub fallback_to_local: bool,
     pub max_output_tokens: u32,
@@ -448,6 +452,7 @@ pub fn start(
         let approve_project = args.project.clone().unwrap_or_default();
         let approve_token = token.clone();
         let permission = args.permission;
+        let approval_timeout = args.approval_timeout;
         let approve_seq = Arc::new(Mutex::new(0u32));
         let approve = {
             let approve_seq = approve_seq.clone();
@@ -524,24 +529,12 @@ pub fn start(
                         reason: reason.to_owned(),
                     },
                 );
-                // Approval wait must respond to run cancellation — poll in
-                // short slices instead of one 300s blocking recv.
-                let deadline = std::time::Instant::now() + Duration::from_secs(300);
-                let mut choice = ApprovalChoice::Deny;
-                while std::time::Instant::now() < deadline {
-                    if !approve_token.is_live() {
-                        // Cancelled during approval → deny, do not run the step.
-                        break;
-                    }
-                    match rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(value) => {
-                            choice = value;
-                            break;
-                        }
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                    }
-                }
+                // Approval waits on the human, not on a clock: a card left
+                // unanswered for five minutes is not a denial. Cancellation
+                // (or a headless deadline) is the only way out without an
+                // answer.
+                let deadline = approval_timeout.map(|timeout| std::time::Instant::now() + timeout);
+                let choice = wait_for_approval(&rx, deadline, &approve_token);
                 drop(ticket);
                 if choice == ApprovalChoice::AllowSession {
                     approve_approvals.remember_session_allow(&approve_id, &fingerprint);
@@ -888,6 +881,31 @@ pub fn start(
     Ok(())
 }
 
+/// Wait for an approval answer or a reason to stop waiting. `deadline` is
+/// only set for headless runs; interactive runs stay pending until the user
+/// answers or cancels the run.
+fn wait_for_approval(
+    rx: &Receiver<ApprovalChoice>,
+    deadline: Option<std::time::Instant>,
+    token: &RunToken,
+) -> ApprovalChoice {
+    loop {
+        if !token.is_live() {
+            return ApprovalChoice::Deny;
+        }
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            return ApprovalChoice::Deny;
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(choice) => return choice,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return ApprovalChoice::Deny;
+            }
+        }
+    }
+}
+
 /// Build a short, honest fallback answer when the agent loop exits
 /// without producing a terminal `AgentMessage`. The text is generic
 /// (not a fabricated review) — the user reads it as "I ran out of
@@ -1044,6 +1062,60 @@ mod tests {
         assert_eq!(approvals.pending("s").unwrap().run_id, 2);
         approvals.clear_session("s");
         assert!(approvals.pending("s").is_none());
+    }
+
+    fn test_token(live: bool) -> RunToken {
+        RunToken {
+            generation: 1,
+            alive: Arc::new(AtomicBool::new(live)),
+            started_at: 0,
+            progress: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn interactive_approval_waits_for_the_user_without_a_deadline() {
+        let (tx, rx) = mpsc::channel();
+        let token = test_token(true);
+        let answer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            tx.send(ApprovalChoice::AllowOnce)
+                .expect("wait point still open");
+        });
+        assert_eq!(
+            wait_for_approval(&rx, None, &token),
+            ApprovalChoice::AllowOnce
+        );
+        answer.join().unwrap();
+    }
+
+    #[test]
+    fn approval_wait_denies_when_the_run_is_cancelled() {
+        let (_tx, rx) = mpsc::channel();
+        assert_eq!(
+            wait_for_approval(&rx, None, &test_token(false)),
+            ApprovalChoice::Deny
+        );
+    }
+
+    #[test]
+    fn approval_wait_denies_when_the_channel_is_gone() {
+        let (tx, rx) = mpsc::channel::<ApprovalChoice>();
+        drop(tx);
+        assert_eq!(
+            wait_for_approval(&rx, None, &test_token(true)),
+            ApprovalChoice::Deny
+        );
+    }
+
+    #[test]
+    fn headless_approval_still_has_a_deadline() {
+        let (_tx, rx) = mpsc::channel();
+        let deadline = std::time::Instant::now() + Duration::from_millis(30);
+        assert_eq!(
+            wait_for_approval(&rx, Some(deadline), &test_token(true)),
+            ApprovalChoice::Deny
+        );
     }
 
     #[test]

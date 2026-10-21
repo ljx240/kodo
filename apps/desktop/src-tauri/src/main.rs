@@ -1277,6 +1277,8 @@ fn send_message(
             force_inline: force_inline.unwrap_or_default(),
             provider,
             permission: config.permission,
+            // Interactive runs wait for the user; cancellation is the bound.
+            approval_timeout: None,
             mode: agent_mode(found.mode),
             fallback_to_local: config.fallback_to_local,
             max_output_tokens: config.max_output_tokens,

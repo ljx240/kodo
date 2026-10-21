@@ -39,6 +39,9 @@ use crate::run::{self, Approvals, Runs, StartArgs};
 
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 const AGENT_RUN_PERMISSION: Permission = Permission::Ask;
+/// Scheduled runs have no UI to answer an approval card; they still need a
+/// bound so a background job cannot wait forever on an unanswerable prompt.
+const SCHEDULED_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 type JobCancelMap = Arc<Mutex<HashMap<String, JobCancellation>>>;
 
@@ -654,6 +657,7 @@ fn execute_agent_run(
         // Scheduled triggers never expand permissions: Ask stays the default
         // regardless of mode, persona or trigger source.
         permission: AGENT_RUN_PERMISSION,
+        approval_timeout: Some(SCHEDULED_APPROVAL_TIMEOUT),
         mode: agent_mode,
         fallback_to_local: config.fallback_to_local,
         max_output_tokens: config.max_output_tokens,
