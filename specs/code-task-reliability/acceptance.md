@@ -8,7 +8,7 @@
 - 规格书写的基线：本地 `main` = `origin/main` = `a7133b2`，任务分支 `fix/code-task-reliability`。
 - 会话中途该现场发生变化（非本任务操作）：`fix/jev-decision-review` 已合入 `main`，`main` 连续推进到 `9fd1538`（`59afb97`、`9fd1538` 属 `jev-decision` 任务），工作树切回 `main`。本任务的未提交改动因此落在 `main` 工作树上，`fix/code-task-reliability`（`e5b8fa6`）无独有提交、已被 `main` 包含。
 - 归属核对：那两个新提交只包含 `jev-decision` 的 8 个文件，未把本任务在制品扫入；本任务改动的 10 个文件（`crates/agent/src/{classify,compaction,lib,plan,provider,recovery,state,verify}.rs`、`evals/src/{decision,main}.rs`）+ `specs/code-task-reliability/` 仍未提交。
-- 现场复核（收敛时再取一次）：`git rev-parse HEAD main origin/main` 三者同为 `9fd1538`，`git branch --no-merged main` 为空（`fix/code-task-reliability` = `e5b8fa6` 已被 `main` 包含、无独有提交），`git worktree list` 只有主工作目录，`git stash list` 仍为 7 条未变。**`origin/main` 是上次 fetch 的本地缓存，本会话未获联网授权、未执行 fetch，因此远程新鲜度未核验**，不得据该缓存宣称远程已同步。
+- 现场复核（交付时）：提交/合并前执行 `git fetch origin --prune`，`origin/main` = `9fd1538`、`HEAD..origin/main` 为空，确认共享基线未前进；合并后 `main` = `c8d4536`，`git branch --no-merged main` 为空，`git worktree list` 只有主工作目录，`git stash list` 仍为 7 条未变、未 pop 未 drop。
 - 冻结语料未动：`git diff --stat` 与 `git status` 中没有任何 `evals/fixtures*/` 文件；`crates/agent/src/decision.rs`、`crates/shell/src/decision.rs`、`specs/jev-decision/` 亦未被本任务修改。
 
 ## 1. P0 评测套件目录误识别（FR-A1–A6 / AC-A1–A2）
@@ -147,7 +147,7 @@ cargo check --offline -p kodo-desktop         # exit 0（依赖 crate 编译；�
                                               #   故未跑 npm typecheck/build/visual）
 ```
 
-以上每条命令在收敛阶段（代码定稿后）重跑过一次，结果与首次记录一致；原始输出留在 `/tmp/kodo-agent-test-final.txt`、`/tmp/kodo-evals-test-final.txt`、`/tmp/kodo-eval-final.txt`、`/tmp/kodo-fmt-final.txt`、`/tmp/kodo-diffcheck-final.txt`、`/tmp/kodo-desktop-check-final.txt`。
+以上每条命令在收敛阶段（代码定稿后）重跑过一次，结果与首次记录一致；合并到 `main` 后又整套重跑一次，仍全部 exit 0。原始输出留在 `/tmp/kodo-agent-test-final.txt`、`/tmp/kodo-evals-test-final.txt`、`/tmp/kodo-eval-final.txt`、`/tmp/kodo-fmt-final.txt`、`/tmp/kodo-diffcheck-final.txt`、`/tmp/kodo-desktop-check-final.txt`，合并后一次在 `/tmp/kodo-postmerge-{agent,evals,eval,fmt}.txt`。
 
 明确未验证（不得当作通过）：
 - `live` 评测、`G_holdout_success_ge_90`、`G_live_false_completion_le_5`、`G_no_destructive_false_completion`、`G_known_regression_false_completion_0`：`NOT RUN — --live not requested`（需真实模型授权）。
@@ -160,4 +160,4 @@ cargo check --offline -p kodo-desktop         # exit 0（依赖 crate 编译；�
 1. `AMBIGUITY_MARGIN = 4` 使 112/120（93.3%）路由样本被判为不确定，而 `evidence.ambiguous` 正是 Jev 咨询调用的前置门。收紧或放宽该门槛会改变是否发起云调用，属用户决定，本轮不动。
 2. 归因 1.000 是拟合值（见第 3 节），需要新语料或已授权的模型对比才能给出泛化结论。
 3. 检查点仍写入工具输出片段（既有设计），未新增密钥类字段；`FR-E6` 的"不含密钥"依赖 engine-state 的字段集合与既有 0600/符号链接防护，无专门测试断言"内容里没有凭据"。
-4. 代码未提交、未合并、未推送：见交付报告"待授权步骤"。工作树当前位于 `main`，本任务改动为 10 个已跟踪文件的未提交修改加 `specs/code-task-reliability/`。
+4. 交付状态（2026-10-21 收尾）：任务分支 `fix/code-task-reliability` 提交 `3078dd5`，以 `--no-ff` 合入 `main` 得 `c8d4536`（父提交 `9fd1538` + `3078dd5`），推送后 `origin/main` = `c8d4536`。合并后在 `main` 上重跑：agent 696+9+1+13 passed（2 ignored）、evals 21 passed、默认评测 exit 0（204/204、73/73、三套件 0 fail）、fmt 与 diff check 通过。`fix/code-task-reliability` 保留未删除。
