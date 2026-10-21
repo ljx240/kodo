@@ -234,6 +234,7 @@ fn run_scenario(
         local_trace: false,
         session_id: None,
         user_skills_dir: None,
+        skill_roots: Vec::new(),
         mcp_servers: Vec::new(),
         agent_instructions: None,
         personas: Vec::new(),

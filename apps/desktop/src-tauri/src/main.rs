@@ -1,5 +1,6 @@
 //! Tauri shell. Its only job is to expose the core to the GUI.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -70,8 +71,8 @@ use scheduler_cmds::{
 };
 
 use view::{
-    agent_view, skill_view, AgentView, ArchivedItemView, ModelOptionView, ProjectView,
-    ProviderView, SessionRefView, SessionView, SkillView, Workspace,
+    agent_view, skill_record_view, skill_view, AgentView, ArchivedItemView, ModelOptionView,
+    ProjectView, ProviderView, SessionRefView, SessionView, SkillView, Workspace,
 };
 
 /// The agent's mode, mapped onto the core's per-session tag.
@@ -839,24 +840,92 @@ fn skill_store(
     }
 }
 
-/// Load one store's skills with their raw markdown (same loader rules the
-/// agent crate applies on run).
+/// Load one Kodo store (user or project) through the same discovery the
+/// runtime uses, so directory-layout `<name>/SKILL.md` files preview their
+/// real source instead of an empty body.
 fn load_store_skills(dir: &Path, source: &str) -> Vec<SkillView> {
-    kodo_agent::load_user_skills(dir)
-        .into_iter()
-        .map(|spec| {
-            let markdown =
-                std::fs::read_to_string(dir.join(format!("{}.md", spec.name))).unwrap_or_default();
-            skill_view(&spec, source, markdown)
-        })
+    let scope = if source == "project" {
+        kodo_core::skill_paths::SkillScope::Project
+    } else {
+        kodo_core::skill_paths::SkillScope::Global
+    };
+    let root = kodo_core::skill_paths::SkillRoot::new(source, scope, dir, 0, false);
+    kodo_agent::discover_skills(&root)
+        .iter()
+        .map(skill_record_view)
         .collect()
 }
 
-/// All skills for the Skills page: builtins first (read-only), then project
-/// skills (when a project is selected), then the user's own files. Missing
-/// directories are just empty tails. A name in both project and user stores
-/// lists as two rows — the cards manage their own files, while `run()`'s
-/// registry shadows the user copy with the project one.
+/// Skills installed outside Kodo (Claude / Codex / Qoder / plugin caches /
+/// `~/.kodo/skills`), one row per name. Higher-priority roots win a
+/// collision. Builtin and Kodo-project names are always dropped (they outrank
+/// every external root); external *global* names are also dropped when the
+/// Kodo user store has the name (priority 20 > every global external root).
+/// An external *project* skill outranks a Kodo user skill (30–34 > 20), so it
+/// stays visible — hiding it would make the run resolve a name the page never
+/// showed.
+fn external_skill_views(
+    project: Option<&str>,
+    protected: &HashSet<String>,
+    user_names: &HashSet<String>,
+) -> Vec<SkillView> {
+    let project_path = project.map(PathBuf::from);
+    let roots = kodo_core::skill_paths::local_skill_roots(project_path.as_deref());
+    let mut by_name: BTreeMap<String, (u8, SkillView)> = BTreeMap::new();
+    for root in roots {
+        for record in kodo_agent::discover_skills(&root) {
+            let view = skill_record_view(&record);
+            match by_name.get(&view.name) {
+                // Roots arrive in ascending priority; an existing higher
+                // priority row must not be replaced by a lower one.
+                Some((priority, _)) if *priority > root.priority => {}
+                _ => {
+                    by_name.insert(view.name.clone(), (root.priority, view));
+                }
+            }
+        }
+    }
+    by_name
+        .into_values()
+        .map(|(_, view)| view)
+        .filter(|view| !protected.contains(&view.name))
+        .filter(|view| view.scope != "global" || !user_names.contains(&view.name))
+        .collect()
+}
+
+fn builtin_skill_view(name: &str) -> Option<SkillView> {
+    let builtin = kodo_agent::AgentSkillRegistry::builtin();
+    let spec = builtin.get(name)?;
+    let markdown = kodo_agent::builtin_markdown(name)
+        .unwrap_or_default()
+        .to_owned();
+    Some(skill_view(spec, "builtin", markdown))
+}
+
+fn external_skill_view(
+    name: &str,
+    project: Option<&str>,
+    scope: Option<kodo_core::skill_paths::SkillScope>,
+) -> Option<SkillView> {
+    let project_path = project.map(PathBuf::from);
+    let mut roots = kodo_core::skill_paths::local_skill_roots(project_path.as_deref());
+    roots.sort_by(|a, b| b.priority.cmp(&a.priority));
+    roots
+        .into_iter()
+        .filter(|root| scope.is_none_or(|scope| root.scope == scope))
+        .find_map(|root| {
+            kodo_agent::discover_skills(&root)
+                .into_iter()
+                .find(|record| record.spec.name == name)
+                .map(|record| skill_record_view(&record))
+        })
+}
+
+/// All skills for the Skills page, ordered by run-time precedence: builtins,
+/// Kodo project store, external project roots, Kodo user store, external
+/// global roots. Missing directories are just empty tails. A name in both
+/// project and user Kodo stores lists as two rows — the cards manage their own
+/// files, while `run()`'s registry shadows the user copy with the project one.
 #[tauri::command]
 fn list_skills(project: Option<String>) -> Result<Vec<SkillView>, String> {
     let builtin = kodo_agent::AgentSkillRegistry::builtin();
@@ -870,24 +939,73 @@ fn list_skills(project: Option<String>) -> Result<Vec<SkillView>, String> {
             skill_view(spec, "builtin", markdown)
         })
         .collect();
+    let mut protected: HashSet<String> = builtin
+        .skills()
+        .iter()
+        .map(|spec| spec.name.clone())
+        .collect();
     if let Some(root) = project.as_deref().filter(|p| !p.trim().is_empty()) {
         let dir = project_skills_dir(root)?;
-        out.extend(load_store_skills(&dir, "project"));
+        let project_views = load_store_skills(&dir, "project");
+        protected.extend(project_views.iter().map(|view| view.name.clone()));
+        out.extend(project_views);
     }
-    let dir = skills_dir()?;
-    out.extend(load_store_skills(&dir, "user"));
+    let user_views = load_store_skills(&skills_dir()?, "user");
+    let user_names: HashSet<String> = user_views.iter().map(|view| view.name.clone()).collect();
+    let externals = external_skill_views(project.as_deref(), &protected, &user_names);
+    let mut project_externals = Vec::new();
+    let mut global_externals = Vec::new();
+    for view in externals {
+        if view.scope == "project" {
+            project_externals.push(view);
+        } else {
+            global_externals.push(view);
+        }
+    }
+    // Composer de-dupes by first appearance, so project externals must come
+    // before user skills for the chip to name the skill the run resolves.
+    out.extend(project_externals);
+    out.extend(user_views);
+    out.extend(global_externals);
     Ok(out)
 }
 
-/// One skill's full detail for the preview modal. With an explicit `scope`
-/// only that store is searched; without one the lookup mirrors the run-time
-/// shadowing order: builtin → project → user.
+/// One skill's full detail for the preview modal. An explicit `source` pins
+/// the row the user clicked (external rows carry `claude`, `plugin:codex`,
+/// …). Without one, the lookup mirrors the run-time shadowing order:
+/// builtin → project Kodo store → external project roots → user Kodo store →
+/// external global roots.
 #[tauri::command]
 fn read_skill(
     name: String,
     scope: Option<String>,
     project: Option<String>,
+    source: Option<String>,
 ) -> Result<SkillView, String> {
+    if let Some(source) = source.as_deref() {
+        if source == "builtin" {
+            return builtin_skill_view(&name).ok_or_else(|| "技能不存在".to_owned());
+        }
+        if matches!(source, "user" | "project") {
+            let (dir, store_source) = skill_store(Some(source), project.as_deref())?;
+            return load_store_skills(&dir, store_source)
+                .into_iter()
+                .find(|skill| skill.name == name)
+                .ok_or_else(|| "技能不存在".to_owned());
+        }
+        let project_path = project.as_deref().filter(|p| !p.trim().is_empty());
+        let mut roots = kodo_core::skill_paths::local_skill_roots(project_path.map(Path::new));
+        roots.sort_by(|a, b| b.priority.cmp(&a.priority));
+        for root in roots.iter().filter(|root| root.source == source) {
+            if let Some(record) = kodo_agent::discover_skills(root)
+                .into_iter()
+                .find(|record| record.spec.name == name)
+            {
+                return Ok(skill_record_view(&record));
+            }
+        }
+        return Err("技能不存在".to_owned());
+    }
     if scope.is_some() {
         let (dir, source) = skill_store(scope.as_deref(), project.as_deref())?;
         return load_store_skills(&dir, source)
@@ -895,27 +1013,37 @@ fn read_skill(
             .find(|s| s.name == name)
             .ok_or_else(|| "技能不存在".to_owned());
     }
-    let builtin = kodo_agent::AgentSkillRegistry::builtin();
-    if let Some(spec) = builtin.get(&name) {
-        let markdown = kodo_agent::builtin_markdown(&name)
-            .unwrap_or_default()
-            .to_owned();
-        return Ok(skill_view(spec, "builtin", markdown));
+    if let Some(view) = builtin_skill_view(&name) {
+        return Ok(view);
     }
-    let mut stores: Vec<(PathBuf, &str)> = Vec::new();
-    if let Some(root) = project.as_deref().filter(|p| !p.trim().is_empty()) {
-        stores.push((project_skills_dir(root)?, "project"));
-    }
-    stores.push((skills_dir()?, "user"));
-    for (dir, source) in stores {
-        if let Some(view) = load_store_skills(&dir, source)
+    let project_path = project.as_deref().filter(|p| !p.trim().is_empty());
+    if let Some(root) = project_path {
+        if let Some(view) = load_store_skills(&project_skills_dir(root)?, "project")
             .into_iter()
-            .find(|s| s.name == name)
+            .find(|skill| skill.name == name)
         {
             return Ok(view);
         }
     }
-    Err("技能不存在".to_owned())
+    if let Some(view) = external_skill_view(
+        &name,
+        project_path,
+        Some(kodo_core::skill_paths::SkillScope::Project),
+    ) {
+        return Ok(view);
+    }
+    if let Some(view) = load_store_skills(&skills_dir()?, "user")
+        .into_iter()
+        .find(|skill| skill.name == name)
+    {
+        return Ok(view);
+    }
+    external_skill_view(
+        &name,
+        project_path,
+        Some(kodo_core::skill_paths::SkillScope::Global),
+    )
+    .ok_or_else(|| "技能不存在".to_owned())
 }
 
 /// Validate and persist one skill — `parse_skill` inside `save_user_skill` is

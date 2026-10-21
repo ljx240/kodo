@@ -53,6 +53,11 @@ export const DEMO_USER_SKILLS: SkillView[] = [
   {
     name: "changelog",
     source: "user",
+    scope: "global",
+    readOnly: false,
+    format: "kodo",
+    path: "",
+    guidanceOnly: false,
     description: "Group the changes by audience into dated changelog entries",
     taskTypes: ["docs"],
     strategy: "docs-focused",
@@ -83,6 +88,11 @@ export const DEMO_PROJECT_SKILLS: SkillView[] = [
   {
     name: "release-check",
     source: "project",
+    scope: "project",
+    readOnly: false,
+    format: "kodo",
+    path: "",
+    guidanceOnly: false,
     description: "Run the project's release checklist before tagging",
     taskTypes: ["docs"],
     strategy: "docs-focused",
@@ -97,5 +107,32 @@ export const DEMO_PROJECT_SKILLS: SkillView[] = [
     guidance: "Never skip an item; record skips with a reason.",
     markdown:
       "# Skill: release-check\n\n## description\nRun the project's release checklist before tagging\n\n## applicable_task_types\n- docs\n\n## context_strategy\ndocs-focused\n\n## allowed_tools\n- search\n- read_file\n- list_files\n- run_command\n\n## verification_policy\nnone\n\n## workflow\n- s1 | read | Read the release checklist\n- s2 | command | Run the checklist commands\n- s3 | read | Record the outcomes\n\n## completion_criteria\n- Every checklist item has a recorded outcome\n\n## guidance\nNever skip an item; record skips with a reason.\n",
+  },
+];
+
+/**
+ * Demo fixture for the 本地已安装 card under `/ui-demo/skills`: one skill found
+ * in another agent's global directory. External rows are read-only and use
+ * the Agent Skills frontmatter format.
+ */
+export const DEMO_EXTERNAL_SKILLS: SkillView[] = [
+  {
+    name: "pdf-tools",
+    source: "claude",
+    scope: "global",
+    readOnly: true,
+    format: "agent",
+    path: "/Users/demo/.claude/skills/pdf-tools/SKILL.md",
+    guidanceOnly: true,
+    description: "Extract text and fill forms in PDF files",
+    taskTypes: ["feature"],
+    strategy: "minimal-change",
+    policy: "full",
+    workflow: [],
+    allowedTools: ["read_file", "run_command"],
+    completionCriteria: ["Follow the `pdf-tools` skill guidance"],
+    guidance: "Use pdfplumber for extraction and pdf-lib for form filling.",
+    markdown:
+      "---\nname: pdf-tools\ndescription: Extract text and fill forms in PDF files\nallowed-tools:\n  - Read\n  - Bash\n---\n\n# PDF tools\n\nUse pdfplumber for extraction and pdf-lib for form filling.\n",
   },
 ];

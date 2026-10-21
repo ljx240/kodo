@@ -266,18 +266,18 @@ export function Composer({
   const [agentQuery, setAgentQuery] = useState("");
 
   const slashQuery = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
-  // The skill list follows the agent space (work vs code); project and user
-  // skills join after their own space filter. Selection itself happens in the
-  // backend (`run()` shadows a user skill with the project one on a name
-  // collision), so the picker shows each name once — project copy first.
+  // The skill list follows the agent space (work vs code); project, user and
+  // locally installed skills join after their own space filter. The backend
+  // already returns them in run-time precedence (Kodo project → external
+  // project → Kodo user → external global), so the first copy of a name is
+  // the one `run()` resolves and the picker can show each name once.
   const seen = new Set<string>();
   const skills = [
     ...skillsFor(agentMode),
     ...userSkills
       .filter(
         (skill) =>
-          (skill.source === "user" || skill.source === "project") &&
-          skillSpace(skill.taskTypes) === agentMode,
+          skill.source !== "builtin" && skillSpace(skill.taskTypes) === agentMode,
       )
       .filter((skill) => {
         if (seen.has(skill.name)) return false;

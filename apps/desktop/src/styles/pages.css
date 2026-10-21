@@ -503,13 +503,16 @@
 }
 
 .skill-row:last-child,
-.user-skill-row:last-child { border-bottom: 0; }
+.user-skill-row:last-child,
+.external-skill-row:last-child { border-bottom: 0; }
 
 .skill-row:hover,
-.user-skill-row:hover { background: var(--kodo-hover); }
+.user-skill-row:hover,
+.external-skill-row:hover { background: var(--kodo-hover); }
 
 .skill-row svg,
 .user-skill-open svg,
+.external-skill-open svg,
 .agent-open svg { flex: none; }
 
 .skill-row-label {
@@ -522,7 +525,8 @@
 }
 
 .skill-row code,
-.user-skill-open code {
+.user-skill-open code,
+.external-skill-open code {
   margin-left: auto;
   min-width: 0;
   max-width: 55%;
@@ -557,6 +561,53 @@
   flex: none;
   align-items: center;
   gap: 2px;
+}
+
+/* External installs (Claude / Codex / plugin roots): preview only — the
+   source badge and 只读 marker take the place of the edit/delete actions. */
+.external-skill-row {
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--kodo-border);
+}
+
+.external-skill-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  color: var(--kodo-text-secondary);
+  text-align: left;
+}
+
+.skill-source-badge {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--kodo-border);
+  border-radius: 999px;
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-secondary);
+  white-space: nowrap;
+}
+
+.skill-row-readonly {
+  flex: none;
+  font-size: var(--kodo-font-xs);
+  color: var(--kodo-text-tertiary);
+  white-space: nowrap;
+}
+
+.skills-card-hint {
+  margin-left: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  color: var(--kodo-text-tertiary);
 }
 
 .skills-empty {
@@ -1140,6 +1191,27 @@
   color: var(--kodo-text);
   font-size: var(--kodo-font-md);
   line-height: 1.55;
+}
+
+.skill-detail-note {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--kodo-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-surface);
+  color: var(--kodo-text-secondary);
+  font-size: var(--kodo-font-sm);
+  line-height: 1.5;
+}
+
+.skill-detail-path {
+  display: block;
+  overflow: hidden;
+  color: var(--kodo-text-secondary);
+  font-family: var(--kodo-font-mono);
+  font-size: var(--kodo-font-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .skill-detail-md {

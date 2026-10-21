@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 // modules never form a runtime cycle.
 import { DEMO_AGENTS } from "./data/agents";
 import { DEMO_MCP_SERVERS, DEMO_MCP_TOOLS, demoMemoryEntries } from "./data/demo";
-import { DEMO_PROJECT_SKILLS, DEMO_USER_SKILLS } from "./data/skills";
+import { DEMO_EXTERNAL_SKILLS, DEMO_PROJECT_SKILLS, DEMO_USER_SKILLS } from "./data/skills";
 import {
   DEMO_CALENDAR_EVENTS,
   DEMO_RESULTS,
@@ -694,11 +694,37 @@ export type SkillStepDto = {
   title: string;
 };
 
-/** One skill as the Skills page previews it — builtin, project and user files
- *  share this shape. `markdown` is the raw SKILL.md source. */
+/** Where a skill came from. `builtin` / `user` / `project` are Kodo's own
+ *  stores; everything else is a local install discovered on this machine. */
+export type SkillSource =
+  | "builtin"
+  | "user"
+  | "project"
+  | "kodo-home"
+  | "claude"
+  | "codex"
+  | "qoder"
+  | "agents"
+  | `plugin:${string}`;
+
+/** One skill as the Skills page previews it — builtin, project, user and
+ *  locally installed skills share this shape. `markdown` is the raw SKILL.md
+ *  source. */
 export type SkillView = {
   name: string;
-  source: "builtin" | "user" | "project";
+  source: SkillSource;
+  /** `global` | `project` — where the file lives relative to the workspace. */
+  scope: string;
+  /** External rows are read-only (no edit/delete): Kodo never writes into
+   *  another agent's directory. */
+  readOnly: boolean;
+  /** `kodo` (section format) | `agent` (frontmatter `SKILL.md`). */
+  format: string;
+  /** Absolute file path; empty for embedded builtins. */
+  path: string;
+  /** Agent-format skills inject guidance only; Kodo's plan and gates still
+   *  apply. */
+  guidanceOnly: boolean;
   /** One-line `## description` (backend falls back to the first criterion). */
   description: string;
   /** Task type labels (`bug-fix`, `work`, …) — which space(s) it belongs to. */
@@ -721,24 +747,27 @@ export type SkillScope = "user" | "project";
  *  source for the `!isDesktop()` path). */
 export function listSkills(project?: string | null): Promise<SkillView[]> {
   if (!isDesktop()) {
-    return Promise.resolve(
-      project ? [...DEMO_PROJECT_SKILLS, ...DEMO_USER_SKILLS] : DEMO_USER_SKILLS,
-    );
+    return Promise.resolve([
+      ...(project ? DEMO_PROJECT_SKILLS : []),
+      ...DEMO_USER_SKILLS,
+      ...DEMO_EXTERNAL_SKILLS,
+    ]);
   }
   return read<SkillView[]>("list_skills", { project: project ?? null }).then((list) => list ?? []);
 }
 
 /** One skill's detail for the preview modal; null when it does not exist.
- *  `scope` narrows the lookup to one store (builtin rows omit it — the
- *  backend answers builtins first). */
+ *  `source` pins the row the user clicked (external rows carry `claude`,
+ *  `plugin:codex`, …); `scope` narrows a Kodo-store lookup. */
 export function readSkill(
   name: string,
-  opts?: { scope?: SkillScope; project?: string | null },
+  opts?: { scope?: SkillScope; project?: string | null; source?: SkillSource },
 ): Promise<SkillView | null> {
   return read<SkillView>("read_skill", {
     name,
     scope: opts?.scope ?? null,
     project: opts?.project ?? null,
+    source: opts?.source ?? null,
   });
 }
 

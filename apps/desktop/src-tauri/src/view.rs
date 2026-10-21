@@ -1061,8 +1061,20 @@ pub struct SkillStepView {
 #[serde(rename_all = "camelCase")]
 pub struct SkillView {
     pub name: String,
-    /// `builtin` | `project` | `user`.
+    /// `builtin` | `project` | `user` | `kodo-home` | `claude` | `codex` |
+    /// `qoder` | `agents` | `plugin:<tool>`.
     pub source: String,
+    /// `global` | `project` — where the file lives relative to the workspace.
+    pub scope: String,
+    /// External roots are read-only: no edit/delete in the UI.
+    pub read_only: bool,
+    /// `kodo` (section format) | `agent` (frontmatter `SKILL.md`).
+    pub format: String,
+    /// Absolute file path; empty for embedded builtins.
+    pub path: String,
+    /// Agent-format skills contribute guidance only — Kodo's plan and gates
+    /// still apply. The detail modal uses this for its hint line.
+    pub guidance_only: bool,
     /// One-line `## description` (falls back to the first criterion on load).
     pub description: String,
     /// Task type labels (`bug-fix`, `work`, …) — which space(s) it belongs to.
@@ -1098,6 +1110,15 @@ pub fn skill_view(spec: &kodo_agent::AgentSkillSpec, source: &str, markdown: Str
     SkillView {
         name: spec.name.clone(),
         source: source.to_owned(),
+        scope: if source == "project" {
+            "project".to_owned()
+        } else {
+            "global".to_owned()
+        },
+        read_only: source == "builtin",
+        format: "kodo".to_owned(),
+        path: String::new(),
+        guidance_only: spec.guidance_only,
         description: spec.description.clone(),
         task_types: spec
             .applicable_task_types
@@ -1116,6 +1137,17 @@ pub fn skill_view(spec: &kodo_agent::AgentSkillSpec, source: &str, markdown: Str
         guidance: spec.guidance.clone(),
         markdown,
     }
+}
+
+/// Map a discovered on-disk skill (Kodo or Agent format) onto the wire shape.
+pub fn skill_record_view(record: &kodo_agent::SkillRecord) -> SkillView {
+    let mut view = skill_view(&record.spec, &record.source, record.markdown.clone());
+    view.scope = record.scope.label().to_owned();
+    view.read_only = record.read_only;
+    view.format = record.format.label().to_owned();
+    view.path = record.path.to_string_lossy().into_owned();
+    view.guidance_only = record.spec.guidance_only;
+    view
 }
 
 /// One persona as the 插件 · 智能体 tab lists it. `source` distinguishes

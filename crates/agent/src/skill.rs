@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
+use kodo_core::skill_paths::{SkillRoot, SkillScope};
+
 use crate::classify::TaskType;
 use crate::context::ContextBudget;
 use crate::plan::SubtaskKind;
@@ -150,6 +152,14 @@ pub struct SkillSpec {
     pub description: String,
     /// Short human guidance (kept in the file; only compact excerpts reach prompts).
     pub guidance: String,
+    /// Loaded from the Agent Skills convention (frontmatter `SKILL.md`)
+    /// rather than Kodo's section format. These skills contribute guidance
+    /// and an optional tool allowlist; they never replace Kodo's plan,
+    /// verification policy, or permission gates.
+    pub guidance_only: bool,
+    /// Root the skill came from (`builtin`, `user`, `project`, `claude`,
+    /// `plugin:codex`, …). Empty for skills parsed directly.
+    pub source: String,
 }
 
 impl SkillSpec {
@@ -160,6 +170,15 @@ impl SkillSpec {
     }
 
     pub fn allows_label(&self, label: &str) -> bool {
+        // An external skill that declares no tool list is documentation, not
+        // a contract: it must not accidentally hide every tool from the
+        // model. A declared list still narrows (and Permission still gates).
+        if self.guidance_only
+            && self.allowed_tools.is_empty()
+            && self.allowed_external_tools.is_empty()
+        {
+            return true;
+        }
         ToolName::parse(label)
             .map(|t| self.allows(t))
             .unwrap_or_else(|| {
@@ -388,7 +407,437 @@ pub fn parse_skill(markdown: &str) -> Result<SkillSpec, String> {
         requires_final_answer,
         description,
         guidance,
+        guidance_only: false,
+        source: String::new(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Agent Skills adapter — frontmatter `SKILL.md`, no extra dependencies.
+// ---------------------------------------------------------------------------
+
+/// Anything larger is not a skill body; skip the file instead of feeding a
+/// multi-megabyte prompt.
+pub const MAX_SKILL_BYTES: u64 = 64 * 1024;
+const MAX_GUIDANCE_CHARS: usize = 32 * 1024;
+const MAX_DESCRIPTION_CHARS: usize = 500;
+const MAX_NAME_CHARS: usize = 64;
+/// How deep a root is walked for grouped layouts (`skills/ai/<name>/SKILL.md`).
+/// A directory with its own `SKILL.md` is a leaf and is never descended.
+const MAX_SKILL_SCAN_DEPTH: usize = 3;
+
+/// How a skill file is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillFormat {
+    /// Kodo's section format (`# Skill: name`, `## workflow`, …).
+    Kodo,
+    /// Agent Skills frontmatter (`--- name: … ---`) plus a Markdown body.
+    Agent,
+}
+
+impl SkillFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Kodo => "kodo",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+/// A loaded skill plus the file it came from — what the 插件 page lists.
+/// The runtime only reads `spec`; `markdown` and `path` drive the preview,
+/// `read_only` drives the edit gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillRecord {
+    pub spec: SkillSpec,
+    pub markdown: String,
+    pub source: String,
+    pub scope: SkillScope,
+    pub path: PathBuf,
+    pub read_only: bool,
+    pub format: SkillFormat,
+}
+
+/// `--- … ---` at the very top of the file. Returns `(frontmatter, body)`.
+fn split_frontmatter(markdown: &str) -> Option<(&str, &str)> {
+    let first_end = markdown.find('\n')?;
+    if markdown[..first_end].trim_end() != "---" {
+        return None;
+    }
+    let mut start = first_end + 1;
+    while start <= markdown.len() {
+        let end = markdown[start..]
+            .find('\n')
+            .map_or(markdown.len(), |offset| start + offset);
+        if markdown[start..end].trim_end() == "---" {
+            let body_start = if end < markdown.len() { end + 1 } else { end };
+            return Some((&markdown[first_end + 1..start], &markdown[body_start..]));
+        }
+        if end == markdown.len() {
+            break;
+        }
+        start = end + 1;
+    }
+    None
+}
+
+fn unquote(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.len() >= 2 {
+        let bytes = raw.as_bytes();
+        let quoted = (bytes[0] == b'"' && bytes[raw.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[raw.len() - 1] == b'\'');
+        if quoted {
+            return raw[1..raw.len() - 1].trim().to_owned();
+        }
+    }
+    raw.to_owned()
+}
+
+/// Minimal YAML subset: scalar `key: value`, `- item` lists, and folded
+/// (`>`) or literal (`|`) blocks. Nested maps are parsed as their flattened
+/// keys and simply never read — no dependency, no pretence of full YAML.
+fn frontmatter_fields(front: &str) -> Vec<(String, String)> {
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut last_key: Option<String> = None;
+    for line in front.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            if let Some(key) = last_key.as_ref() {
+                if let Some((_, value)) = fields.iter_mut().find(|(name, _)| name == key) {
+                    if !value.is_empty() {
+                        value.push('\n');
+                    }
+                    value.push_str(&unquote(item.trim()));
+                }
+            }
+            continue;
+        }
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if indented {
+            // Folded scalar continuation (`description: >` + indented lines).
+            if let Some(key) = last_key.as_ref() {
+                if let Some((_, value)) = fields.iter_mut().find(|(name, _)| name == key) {
+                    if matches!(value.as_str(), ">" | "|" | ">-" | "|-") {
+                        value.clear();
+                    }
+                    if !value.is_empty() {
+                        value.push(' ');
+                    }
+                    value.push_str(trimmed);
+                }
+            }
+            continue;
+        }
+        if let Some((key, value)) = trimmed.split_once(':') {
+            let key = key.trim().to_ascii_lowercase().replace('-', "_");
+            if key.is_empty() {
+                continue;
+            }
+            fields.push((key.clone(), unquote(value.trim())));
+            last_key = Some(key);
+        }
+    }
+    fields
+}
+
+fn field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(name, value)| name == key && !value.is_empty())
+        .map(|(_, value)| value.as_str())
+}
+
+/// Comma-, bracket- and newline-separated list entries.
+fn field_list(fields: &[(String, String)], key: &str) -> Vec<String> {
+    fields
+        .iter()
+        .filter(|(name, _)| name == key)
+        .flat_map(|(_, value)| {
+            let value = value.trim();
+            let value = value
+                .strip_prefix('[')
+                .and_then(|inner| inner.strip_suffix(']'))
+                .unwrap_or(value);
+            value
+                .split(|c| c == ',' || c == '\n')
+                .map(|part| unquote(part.trim()))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// Keep the chip id in the same alphabet `split_skill_chip` accepts, so an
+/// external skill named `PDF Tools` still round-trips through the Composer.
+fn sanitize_skill_name(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(MAX_NAME_CHARS).collect())
+}
+
+fn agent_tool_names(raw: &str) -> Vec<ToolName> {
+    // Claude-style scoping (`Bash(git:*)`) keeps the tool name before `(`.
+    let base = raw.split('(').next().unwrap_or(raw).trim();
+    match base.to_ascii_lowercase().as_str() {
+        "read" | "read_file" | "readfile" => vec![ToolName::ReadFile],
+        "grep" | "search" => vec![ToolName::Search],
+        "glob" | "list_files" | "ls" => vec![ToolName::ListFiles],
+        "write" | "write_file" | "writefile" | "create" | "create_file" => {
+            vec![ToolName::WriteFile, ToolName::CreateFile]
+        }
+        "edit" | "multiedit" | "multi_edit" | "apply_patch" | "patch" => {
+            vec![ToolName::ApplyPatch, ToolName::ReplaceRange]
+        }
+        "bash" | "run_command" | "command" | "shell" => vec![ToolName::RunCommand],
+        "websearch" | "web_search" | "webfetch" | "web_fetch" => vec![ToolName::WebSearch],
+        _ => Vec::new(),
+    }
+}
+
+fn agent_external_tool(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if !raw.starts_with("mcp__") {
+        return None;
+    }
+    if let Some(prefix) = raw.strip_suffix('*') {
+        return (!prefix.contains('*')).then(|| raw.to_owned());
+    }
+    // `mcp__github` names a server; Kodo's gate matches tool prefixes.
+    if raw["mcp__".len()..].contains("__") {
+        Some(raw.to_owned())
+    } else {
+        Some(format!("{raw}__*"))
+    }
+}
+
+fn description_from_body(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !line.starts_with('#')
+                && !line.starts_with("```")
+                && !line.starts_with("- ")
+                && !line.starts_with("* ")
+        })
+        .map(|line| truncate_chars(line, MAX_DESCRIPTION_CHARS))
+        .unwrap_or_default()
+}
+
+/// Parse the standard Agent Skills shape into Kodo's runtime contract.
+///
+/// The body becomes `guidance`; `allowed-tools` maps onto Kodo's tool names
+/// when the author declared them. Everything Kodo owns — planning, verify,
+/// permission — keeps its default behaviour, which the run pipeline expresses
+/// with `guidance_only = true`.
+pub fn parse_agent_skill(markdown: &str, fallback_name: &str) -> Result<SkillSpec, String> {
+    let (front, body) =
+        split_frontmatter(markdown).ok_or("missing YAML frontmatter (`--- name: … ---`)")?;
+    let fields = frontmatter_fields(front);
+
+    let raw_name = field(&fields, "name")
+        .map(str::to_owned)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| fallback_name.to_owned());
+    let name = sanitize_skill_name(&raw_name)
+        .ok_or_else(|| format!("skill name `{raw_name}` is not usable as a chip id"))?;
+
+    let mut task_types = Vec::new();
+    for raw in field_list(&fields, "task_types")
+        .into_iter()
+        .chain(field_list(&fields, "applicable_task_types"))
+    {
+        for part in raw.split(|c: char| c == ',' || c.is_whitespace()) {
+            if let Some(kind) = TaskType::parse(part) {
+                if !task_types.contains(&kind) {
+                    task_types.push(kind);
+                }
+            }
+        }
+    }
+    let space = field(&fields, "space")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if task_types.is_empty() {
+        task_types.push(if space == "work" {
+            TaskType::Work
+        } else {
+            TaskType::Feature
+        });
+    }
+
+    let mut allowed_tools: Vec<ToolName> = Vec::new();
+    let mut allowed_external_tools: Vec<String> = Vec::new();
+    for raw in field_list(&fields, "allowed_tools") {
+        if raw.starts_with("mcp__") {
+            if let Some(pattern) = agent_external_tool(&raw) {
+                if !allowed_external_tools.contains(&pattern) {
+                    allowed_external_tools.push(pattern);
+                }
+            }
+            continue;
+        }
+        for tool in agent_tool_names(&raw) {
+            if !allowed_tools.contains(&tool) {
+                allowed_tools.push(tool);
+            }
+        }
+    }
+
+    let description = field(&fields, "description")
+        .map(|text| truncate_chars(text, MAX_DESCRIPTION_CHARS))
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| description_from_body(body));
+    let guidance = truncate_chars(body.trim(), MAX_GUIDANCE_CHARS);
+    let completion_criteria = vec![if description.is_empty() {
+        format!("Follow the `{name}` skill guidance")
+    } else {
+        description.clone()
+    }];
+
+    Ok(SkillSpec {
+        name,
+        applicable_task_types: task_types.clone(),
+        context_strategy: if task_types.contains(&TaskType::Work) {
+            ContextStrategy::WorkFocused
+        } else {
+            ContextStrategy::MinimalChange
+        },
+        allowed_tools,
+        allowed_external_tools,
+        workflow: Vec::new(),
+        completion_criteria,
+        verification_policy: if task_types.contains(&TaskType::Work) {
+            VerificationPolicy::None
+        } else {
+            VerificationPolicy::Full
+        },
+        requires_final_answer: false,
+        description,
+        guidance,
+        guidance_only: true,
+        source: String::new(),
+    })
+}
+
+fn has_kodo_title(markdown: &str) -> bool {
+    markdown
+        .lines()
+        .any(|line| line.trim().starts_with("# Skill:"))
+}
+
+/// Skill files under one root. Directory layouts may be grouped one or two
+/// levels (`skills/<name>/SKILL.md`, `skills/ai/<name>/SKILL.md`); a
+/// directory with its own `SKILL.md` is a leaf. Flat `<name>.md` files are
+/// accepted at the root only.
+fn collect_skill_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > MAX_SKILL_SCAN_DEPTH {
+        return;
+    }
+    if depth > 0 && dir.join("SKILL.md").is_file() {
+        out.push(dir.join("SKILL.md"));
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    children.sort();
+    for path in children {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_skill_files(&path, depth + 1, out);
+        } else if depth == 0 && path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+            out.push(path);
+        }
+    }
+}
+
+fn load_skill_file(path: &Path, root: &SkillRoot) -> Option<SkillRecord> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_SKILL_BYTES {
+        return None;
+    }
+    let markdown = std::fs::read_to_string(path).ok()?;
+    if markdown.len() as u64 > MAX_SKILL_BYTES {
+        return None;
+    }
+    let (format, mut spec) = if has_kodo_title(&markdown) {
+        (SkillFormat::Kodo, parse_skill(&markdown).ok()?)
+    } else {
+        let fallback = if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+        } else {
+            path.file_stem().and_then(|name| name.to_str())
+        }
+        .unwrap_or_default();
+        (
+            SkillFormat::Agent,
+            parse_agent_skill(&markdown, fallback).ok()?,
+        )
+    };
+    spec.source = root.source.clone();
+    Some(SkillRecord {
+        spec,
+        markdown,
+        source: root.source.clone(),
+        scope: root.scope,
+        path: path.to_path_buf(),
+        read_only: root.read_only,
+        format,
+    })
+}
+
+/// Every skill readable under `root`, sorted by name then path.
+/// Unreadable, oversized and malformed files are skipped — one broken skill
+/// must not hide the rest of the directory.
+pub fn discover_skills(root: &SkillRoot) -> Vec<SkillRecord> {
+    let mut files = Vec::new();
+    collect_skill_files(&root.path, 0, &mut files);
+    let mut out: Vec<SkillRecord> = files
+        .iter()
+        .filter_map(|path| load_skill_file(path, root))
+        .collect();
+    out.sort_by(|a, b| {
+        a.spec
+            .name
+            .cmp(&b.spec.name)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +875,11 @@ impl SkillRegistry {
     pub fn builtin() -> Self {
         let skills: Vec<SkillSpec> = SOURCES
             .iter()
-            .map(|src| parse_skill(src).expect("built-in SKILL.md must parse"))
+            .map(|src| {
+                let mut spec = parse_skill(src).expect("built-in SKILL.md must parse");
+                spec.source = "builtin".to_owned();
+                spec
+            })
             .collect();
         let builtin_names = skills.iter().map(|s| s.name.clone()).collect();
         Self {
@@ -896,6 +1349,148 @@ mod tests {
         let bug = skill_of(TaskType::BugFix);
         assert!(docs.context_strategy.budget().max_spans < bug.context_strategy.budget().max_spans);
     }
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kodo-skill-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn write_file(root: &Path, relative: &str, body: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("skill parent");
+        std::fs::write(path, body).expect("skill file");
+    }
+
+    /// Agent Skills frontmatter maps onto Kodo's contract: the body becomes
+    /// guidance, `allowed-tools` narrows the tool list, and the plan keeps
+    /// Kodo's defaults (`guidance_only`).
+    #[test]
+    fn agent_skill_frontmatter_maps_tools_and_guidance() {
+        let markdown = "---\n\
+name: PDF Tools!\n\
+description: \"Work with PDF files\"\n\
+allowed-tools:\n\
+  - Read\n\
+  - Bash(git:*)\n\
+  - mcp__github\n\
+---\n\
+\n\
+# PDF\n\
+Use pdfplumber for extraction.\n";
+        let spec = parse_agent_skill(markdown, "fallback").expect("agent skill");
+        assert_eq!(spec.name, "PDF-Tools");
+        assert_eq!(spec.description, "Work with PDF files");
+        assert!(spec.guidance_only);
+        assert!(spec.workflow.is_empty());
+        assert!(spec.allows(ToolName::ReadFile));
+        assert!(spec.allows(ToolName::RunCommand));
+        assert!(!spec.allows(ToolName::WriteFile));
+        assert_eq!(spec.allowed_external_tools, vec!["mcp__github__*"]);
+        assert!(spec.allows_label("mcp__github__search"));
+        assert!(spec.guidance.contains("pdfplumber"));
+        assert_eq!(spec.applicable_task_types, vec![TaskType::Feature]);
+        assert_eq!(spec.verification_policy, VerificationPolicy::Full);
+    }
+
+    /// No tool list = documentation, not an allowlist. The turn must keep
+    /// every tool; otherwise selecting a prose-only skill would brick the run.
+    #[test]
+    fn agent_skill_without_a_tool_list_is_unrestricted() {
+        let spec = parse_agent_skill(
+            "---\nname: notes\ndescription: Write notes\n---\nKeep it short.\n",
+            "notes",
+        )
+        .unwrap();
+        assert!(spec.allowed_tools.is_empty());
+        assert!(spec.allows_label("write_file"));
+        assert!(spec.allows_label("run_command"));
+        assert!(spec.allows_label("mcp__files__read"));
+        let registry = spec.filter_registry(ToolRegistry::standard());
+        assert!(registry.find("write_file").is_some());
+        assert!(registry.find("run_command").is_some());
+    }
+
+    #[test]
+    fn agent_skill_space_work_uses_work_policy() {
+        let spec = parse_agent_skill(
+            "---\nname: deck\ndescription: Build a deck\nspace: work\n---\nBody.\n",
+            "deck",
+        )
+        .unwrap();
+        assert_eq!(spec.applicable_task_types, vec![TaskType::Work]);
+        assert_eq!(spec.context_strategy, ContextStrategy::WorkFocused);
+        assert_eq!(spec.verification_policy, VerificationPolicy::None);
+    }
+
+    #[test]
+    fn agent_skill_requires_frontmatter_and_a_usable_name() {
+        assert!(parse_agent_skill("# just markdown\nbody\n", "dir").is_err());
+        assert!(parse_agent_skill("---\nname: !!!\n---\nbody\n", "dir").is_err());
+        let named_by_dir =
+            parse_agent_skill("---\ndescription: From the folder\n---\nbody\n", "my-skill")
+                .unwrap();
+        assert_eq!(named_by_dir.name, "my-skill");
+    }
+
+    /// Grouped layouts (`skills/ai/<name>/SKILL.md`), flat files, Kodo and
+    /// Agent formats coexist in one root; broken files are skipped.
+    #[test]
+    fn discover_skills_reads_grouped_and_flat_layouts() {
+        let dir = temp_dir("discover");
+        write_file(
+            &dir,
+            "alpha/SKILL.md",
+            "---\nname: alpha\ndescription: Alpha skill\nallowed-tools:\n  - Read\n  - Grep\n---\n# Alpha\nDo alpha things.\n",
+        );
+        write_file(
+            &dir,
+            "ai/beta/SKILL.md",
+            "---\nname: beta\nspace: work\n---\nBeta body.\n",
+        );
+        write_file(
+            &dir,
+            "flat.md",
+            "# Skill: flat\n## applicable_task_types\n- docs\n## context_strategy\ndocs-focused\n## allowed_tools\n- read_file\n## verification_policy\nnone\n## workflow\n- s1 | read | read\n## completion_criteria\n- done\n## guidance\nflat guidance\n",
+        );
+        write_file(&dir, "README.md", "No frontmatter here.");
+        write_file(&dir, "broken/SKILL.md", "---\nname: !!!\n---\nbody\n");
+
+        let root = SkillRoot::new("codex", SkillScope::Global, &dir, 11, true);
+        let records = discover_skills(&root);
+        let names: Vec<&str> = records
+            .iter()
+            .map(|record| record.spec.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["alpha", "beta", "flat"]);
+
+        let alpha = &records[0];
+        assert_eq!(alpha.format, SkillFormat::Agent);
+        assert_eq!(alpha.source, "codex");
+        assert_eq!(alpha.spec.source, "codex");
+        assert_eq!(alpha.scope, SkillScope::Global);
+        assert!(alpha.read_only);
+        assert!(alpha.path.ends_with("alpha/SKILL.md"));
+        assert!(alpha.spec.allows(ToolName::ReadFile));
+
+        let beta = &records[1];
+        assert!(beta.path.ends_with("ai/beta/SKILL.md"));
+        assert_eq!(beta.spec.applicable_task_types, vec![TaskType::Work]);
+
+        let flat = &records[2];
+        assert_eq!(flat.format, SkillFormat::Kodo);
+        assert!(!flat.spec.guidance_only);
+        assert!(flat.markdown.contains("flat guidance"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn external_tools_need_a_skill_allowlist_and_review_never_grants_opaque_tools() {
         let source = builtin_markdown("feature").unwrap();
