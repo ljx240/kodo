@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use kodo_agent::{AgentMode, Permission};
+use kodo_sandbox::SandboxMode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -12,6 +13,10 @@ pub struct Args {
     pub permission: Option<Permission>,
     /// `--mode` flag; `None` → the shared settings store decides.
     pub mode: Option<AgentMode>,
+    /// `--sandbox` flag; `None` → the shared settings store decides.
+    pub sandbox: Option<SandboxMode>,
+    /// `--sandbox-status` prints the measured sandbox capabilities and exits.
+    pub sandbox_status: bool,
     /// `--session <id>`: resume this session.
     pub session: Option<String>,
     /// `-c/--continue`: resume the most recent session for this project.
@@ -139,6 +144,8 @@ pub const USAGE: &str = "\
 选项:
   --project <目录>        项目根目录（默认当前目录）
   --permission <模式>     ask | auto | full（默认读取与桌面端共享的设置）
+  --sandbox <模式>        read-only | workspace-write | unrestricted（默认 workspace-write）
+  --sandbox-status        打印当前沙箱后端与强制能力后退出
   --mode <模式>           work | code（默认读取与桌面端共享的设置）
   --session <id>          继续指定会话
   -c, --continue          继续本项目最近一次会话
@@ -173,6 +180,8 @@ pub fn parse(argv: &[String]) -> Parsed {
 
     let mut project: Option<PathBuf> = None;
     let mut permission: Option<Permission> = None;
+    let mut sandbox: Option<SandboxMode> = None;
+    let mut sandbox_status = false;
     let mut mode: Option<AgentMode> = None;
     let mut session: Option<String> = None;
     let mut resume_last = false;
@@ -198,6 +207,18 @@ pub fn parse(argv: &[String]) -> Parsed {
                 Ok(value) => project = Some(PathBuf::from(value)),
                 Err(err) => return Parsed::Error(err),
             },
+            "--sandbox" => match take_value("--sandbox") {
+                Ok(value) => match SandboxMode::parse(&value) {
+                    Some(mode) => sandbox = Some(mode),
+                    None => {
+                        return Parsed::Error(format!(
+                            "--sandbox 必须是 read-only、workspace-write 或 unrestricted，收到：{value}"
+                        ))
+                    }
+                },
+                Err(error) => return Parsed::Error(error),
+            },
+            "--sandbox-status" => sandbox_status = true,
             "--permission" => match take_value("--permission") {
                 Ok(value) => match value.as_str() {
                     "ask" | "auto" | "full" => permission = Some(Permission::parse(&value)),
@@ -241,6 +262,8 @@ pub fn parse(argv: &[String]) -> Parsed {
     Parsed::Run(Args {
         project: project.unwrap_or_else(|| PathBuf::from(".")),
         permission,
+        sandbox,
+        sandbox_status,
         mode,
         session,
         resume_last,

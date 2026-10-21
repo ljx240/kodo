@@ -13,6 +13,7 @@ path = "src/main.rs"
 kodo-core = { path = "../core" }
 kodo-agent = { path = "../agent" }
 kodo-shell = { path = "../shell" }
+kodo-sandbox = { path = "../sandbox" }
 kodo-memory = { path = "../memory", features = ["download"] }
 serde_json = "1"
 
