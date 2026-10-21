@@ -162,6 +162,11 @@ export function DecisionSettingsBody() {
   return (
     <div className="decision-settings" data-testid="decision-settings">
       <p className="decision-settings-notice">{T.decision.outboundNotice}</p>
+      {!dto?.assistAvailable && (
+        <p className="decision-settings-notice" role="status" data-testid="decision-quality-status">
+          {T.decision.qualityNotEvaluated}
+        </p>
+      )}
 
       {dto?.configError && (
         <p className="decision-settings-error" role="alert" data-testid="decision-config-error">
@@ -209,7 +214,7 @@ export function DecisionSettingsBody() {
               aria-checked={form.mode === mode}
               className={`decision-mode-option${form.mode === mode ? " decision-mode-option--on" : ""}`}
               data-testid={`decision-mode-${mode}`}
-              disabled={busy}
+              disabled={busy || (mode === "assist" && !dto?.assistAvailable)}
               onClick={() => set("mode", mode)}
             >
               {T.decision.modes[mode]}

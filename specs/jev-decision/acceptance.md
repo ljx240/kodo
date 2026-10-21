@@ -343,3 +343,76 @@ playwright --project=behaviour --grep "决策辅助设置小节|发送预览展�
 - 任务分支 `feat/jev-decision`、`feat/jev-openrouter`、`fix/jev-settings-record`、`fix/jev-recover-truncated-record` 均已在合入后删除；要单独查看任务边界可用 `git log c0f67a3..4189423`。
 - 7 条 stash 与第二个 worktree 的未提交改动保持原样，未被本任务改动。
 - 文档：`specs/jev-decision/` 四件套是下一次续接的入口；续接时先重新读 `crates/agent/src/decision.rs` 与 `crates/shell/src/decision.rs` 的当前内容（本文档记录的行号可能已过时）。
+
+## 8. 2026-10-21 评审问题修复（最新记录）
+
+状态：**本地修复与验证已完成，用户已明确授权本地提交、以 --no-ff 合入 main，并删除已合并任务分支。** 本节 Git 哈希及文件清单是提交前快照，最终提交和合并结果见本轮交付说明及 Git 历史。此状态只针对 `fix/jev-decision-review`，不改写上文既往交付的历史。本轮从本地 main `a7133b220cefce56c3da760c3096f3c5f9b76507` 创建唯一任务分支，工作目录仍是原仓库，7 条既有 stash 原样保留。
+
+### 8.1 问题与证据
+
+| 修复项 | 行为 | 新增或增强的验证 |
+| --- | --- | --- |
+| RF-001 | 授权绑定服务配置代次，预览前和响应后失效检查；Agent 采纳前复核 | `stale_configuration_never_reaches_the_server`、`configuration_changed_during_http_discards_the_answer`、`cancellation_during_http_discards_the_answer`、`the_agent_rechecks_host_validity_before_adopting_a_result` |
+| RF-002 | 真实质量门未评估，生产 Assist 有效模式强制 Observe；设置返回 `assistAvailable=false`，界面禁用并解释原因 | `unevaluated_assist_is_effectively_observe`、`saved_assist_is_observe_even_with_a_high_probability_response`、浏览器断言采纳按钮禁用和未评估提示 |
+| RF-003 | 正文和生成 Token 精确单字母匹配；不补齐缺失选项、不重分配缺失概率质量 | `openrouter_refusals_and_explanations_are_not_option_letters`、`openrouter_generated_token_must_match_the_answer`、`openrouter_does_not_invent_missing_option_probabilities` |
+| RF-004 | 恢复仅回写校验成功后的单行 JSON，写入失败显示配置错误；配置指纹使用规范化内容 | 增强 `a_truncated_record_is_recovered_and_written_back`，断言第二次 recovered=false、字节内容和配置代次不变 |
+| RF-005 | 生产服务使用进程共享并发槽和来源/凭据代次熔断，运行级授权/预算不共享；作用域释放名额及探测位 | `three_runs_share_the_same_two_network_slots`、`multiple_runs_share_two_slots_and_release_them_on_drop`、`authentication_block_is_shared_until_the_credential_changes`、`cooldown_and_single_probe_are_shared_across_runs`、`production_services_default_to_the_same_runtime` |
+
+之前 AC-007/012/018 的“通过”只覆盖部分时序，本轮补充了真实 loopback 在途换代与取消用例。AC-013 本轮已验证三运行并发：只有两个请求到达本机模拟服务器。旧 `Assist` 配置保持可读取，但本轮及当前生产构建均不会实际采纳建议。原场景测试中的假句柄仍可验证有界采纳策略，不代表真实质量门达标。
+
+### 8.2 本轮命令和结果
+
+全部使用本机已安装工具与离线 Cargo 依赖，没有新增依赖或调用真实端点。
+
+```text
+cargo fmt --all -- --check
+exit 0
+
+cargo check --offline --locked --workspace --all-targets
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 37.40s
+
+cargo test --offline --locked -p kodo-agent -p kodo-shell --lib
+kodo-agent: 652 passed; 0 failed
+kodo-shell: test result: ok. 103 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+cargo test --offline --locked -p kodo-desktop --bin kodo-desktop
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+cargo test --offline --locked -p kodo-agent --test decision_scenarios
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+cargo test --offline --locked -p kodo-shell --test decision_transport
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+/opt/homebrew/bin/node node_modules/typescript/lib/tsc.js --noEmit
+exit 0
+
+/opt/homebrew/bin/node node_modules/vite/bin/vite.js build
+✓ built in 1.00s
+
+/opt/homebrew/bin/node node_modules/@playwright/test/cli.js test --config <仓库外的本轮配置>
+3 passed (3.8s)
+
+git diff --check
+exit 0
+```
+
+前端命令在 `apps/desktop` 运行，显式使用已安装的 `/opt/homebrew/bin/node`，避免 npm 子进程误用 Node 18。浏览器配置在仓库外 `jev-fix-2026-10-21/playwright.config.cjs`，使用独占 `127.0.0.1:1439`，不复用其他任务的服务、不更新截图基线。Rust 不重复计数的本轮测试合计 852 项，另有 3 项浏览器用例；36/31 项定向决策单元测试是上述 lib 套件的子集。
+
+### 8.3 Git 现场、范围与恢复
+
+修改文件：`crates/agent/src/decision.rs`、`crates/shell/src/decision.rs`、对应两个 Rust 集成测试、`apps/desktop/src/{decisionApi.ts,i18n.ts,pages/DecisionSettings.tsx}`、`apps/desktop/tests/visual/decision.spec.ts` 和本功能四份规格文件，共 12 个文件。
+
+```text
+git worktree list --porcelain
+worktree /Users/lijianxue/work/WorkSpace/kodo
+HEAD a7133b220cefce56c3da760c3096f3c5f9b76507
+branch refs/heads/fix/jev-decision-review
+
+git branch --no-merged main
+（尚无独有提交，无输出）
+```
+
+HEAD、本地 main、缓存 origin/main 均为 `a7133b220cefce56c3da760c3096f3c5f9b76507`。未 fetch，远程新鲜度未核验；本轮没有新提交、远程操作或 PR。未 pop/drop/clear stash，未创建 worktree、删除分支或清理其他现场。
+
+提交前恢复位置为 `fix/jev-decision-review` 的上述 12 个文件。用户已授权随后的本地提交、main 合并和任务分支清理，仍未授权远程操作；最终恢复入口为 main 的本轮合并提交。真实模型效果评测尚未完成。本轮未验证真实模型效果、真实端点连通性、取消后的底层网络瞬时中断、完整视觉回归和安装包；已有大 chunk 构建警告保留。质量门保持未评估，没有以模拟测试冒充收益证明。

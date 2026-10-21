@@ -1383,7 +1383,7 @@ export const T = {
     loading: "读取决策辅助配置…",
     saved: "已保存决策辅助配置。",
     outboundNotice:
-      "此功能会向 TypeSafe 发送您逐次批准的内容。每次发送前都会显示完整预览；不批准就不会发送。",
+      "此功能会向所选的 TypeSafe 或 OpenRouter 发送您逐次批准的内容。每次发送前都会显示完整预览；不批准就不会发送。",
     providerLabel: "服务来源",
     providerHint:
       "官方 Jev（TypeSafe）或 OpenRouter 路由。两者一次只启用一个；失败不会自动换到另一个。",
@@ -1395,6 +1395,7 @@ export const T = {
       "上次的配置记录被截断，已从日志中恢复并重写为完整记录；设置值保持不变。",
     modeLabel: "启用状态",
     modeHint: "关闭时不会发起任何请求；观察只记录建议；采纳按场景分别生效。",
+    qualityNotEvaluated: "真实模型质量尚未评估，暂不开放采纳模式；已有采纳配置也仅记录建议。",
     modes: {
       off: "关闭",
       observe: "观察",

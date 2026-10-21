@@ -16,14 +16,19 @@ use kodo_agent::decision::{
     DecisionScenario, DecisionSettings, TaskRouteInput,
 };
 use kodo_shell::decision::{
-    DecisionConfig, DecisionConsent, DecisionConsentAnswer, DecisionPreview, DecisionService,
+    DecisionConfig, DecisionConsent, DecisionConsentAnswer, DecisionPreview, DecisionRuntime,
+    DecisionService,
 };
+
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// What the mock service answers.
 #[derive(Clone)]
 enum Reply {
     /// A well formed answer for the task-route question.
     Ok,
+    ChangeConfig,
+    Cancel(Arc<AtomicBool>),
     /// A well formed OpenRouter answer, with token logprobs.
     OpenRouterOk,
     /// A well formed OpenRouter answer without token logprobs.
@@ -175,6 +180,14 @@ fn serve(
             let body = ok_body("refactor", 0.93, 0.02);
             (200, body, Duration::ZERO)
         }
+        Reply::ChangeConfig => {
+            kodo_shell::decision::bump_config_generation();
+            (200, ok_body("refactor", 0.93, 0.02), Duration::ZERO)
+        }
+        Reply::Cancel(alive) => {
+            alive.store(false, Ordering::SeqCst);
+            (200, ok_body("refactor", 0.93, 0.02), Duration::ZERO)
+        }
         Reply::OpenRouterOk => (200, openrouter_body(true), Duration::ZERO),
         Reply::OpenRouterNoLogprobs => (200, openrouter_body(false), Duration::ZERO),
         Reply::Raw(status, body) => (status, body, Duration::ZERO),
@@ -312,13 +325,16 @@ fn service(
     timeout_ms: u64,
     consent: Arc<dyn DecisionConsent>,
 ) -> Arc<DecisionService> {
-    Arc::new(DecisionService::new(
-        config(mode, timeout_ms),
-        DecisionClient::for_local_endpoint(DecisionProvider::TypeSafe, origin),
-        consent,
-        "session-1",
-        1,
-    ))
+    Arc::new(
+        DecisionService::new(
+            config(mode, timeout_ms),
+            DecisionClient::for_local_endpoint(DecisionProvider::TypeSafe, origin),
+            consent,
+            "session-1",
+            1,
+        )
+        .with_runtime(Arc::new(DecisionRuntime::default())),
+    )
 }
 
 /// The service on the OpenRouter path, pointed at the loopback mock.
@@ -328,13 +344,16 @@ fn openrouter_service(
     timeout_ms: u64,
     consent: Arc<dyn DecisionConsent>,
 ) -> Arc<DecisionService> {
-    Arc::new(DecisionService::new(
-        openrouter_config(mode, timeout_ms),
-        DecisionClient::for_local_endpoint(DecisionProvider::OpenRouter, origin),
-        consent,
-        "session-1",
-        1,
-    ))
+    Arc::new(
+        DecisionService::new(
+            openrouter_config(mode, timeout_ms),
+            DecisionClient::for_local_endpoint(DecisionProvider::OpenRouter, origin),
+            consent,
+            "session-1",
+            1,
+        )
+        .with_runtime(Arc::new(DecisionRuntime::default())),
+    )
 }
 
 fn task_route_input() -> DecisionInput {
@@ -347,6 +366,7 @@ fn task_route_input() -> DecisionInput {
 
 #[test]
 fn off_makes_no_request_at_all() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Ok);
     let service = service(&mock.origin(), DecisionMode::Off, 1500, Arc::new(AllowAll));
     let outcome = service.evaluate(&task_route_input(), &|| true);
@@ -356,6 +376,7 @@ fn off_makes_no_request_at_all() {
 
 #[test]
 fn a_refused_request_makes_no_request_at_all() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Ok);
     let service = service(
         &mock.origin(),
@@ -374,6 +395,7 @@ fn a_refused_request_makes_no_request_at_all() {
 
 #[test]
 fn an_allowed_request_reaches_the_destination_with_the_frozen_bytes() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Ok);
     let service = service(
         &mock.origin(),
@@ -412,6 +434,7 @@ fn an_allowed_request_reaches_the_destination_with_the_frozen_bytes() {
 
 #[test]
 fn the_openrouter_path_sends_its_own_shape_to_its_own_path() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::OpenRouterOk);
     let service = openrouter_service(
         &mock.origin(),
@@ -451,6 +474,7 @@ fn the_openrouter_path_sends_its_own_shape_to_its_own_path() {
 
 #[test]
 fn an_openrouter_answer_without_logprobs_is_never_adoptable() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::OpenRouterNoLogprobs);
     let service = openrouter_service(
         &mock.origin(),
@@ -467,6 +491,7 @@ fn an_openrouter_answer_without_logprobs_is_never_adoptable() {
 
 #[test]
 fn an_authentication_failure_is_reported_and_not_retried() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Raw(401, "{\"error\":\"unauthorized\"}".to_owned()));
     let service = service(
         &mock.origin(),
@@ -484,6 +509,7 @@ fn an_authentication_failure_is_reported_and_not_retried() {
 
 #[test]
 fn a_rate_limit_is_reported_and_not_retried() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Raw(429, "{}".to_owned()));
     let service = service(
         &mock.origin(),
@@ -501,6 +527,7 @@ fn a_rate_limit_is_reported_and_not_retried() {
 
 #[test]
 fn a_server_error_is_reported_and_not_retried() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Raw(503, "{}".to_owned()));
     let service = service(
         &mock.origin(),
@@ -518,6 +545,7 @@ fn a_server_error_is_reported_and_not_retried() {
 
 #[test]
 fn a_redirect_is_refused() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Raw(302, "{}".to_owned()));
     let service = service(
         &mock.origin(),
@@ -536,6 +564,7 @@ fn a_redirect_is_refused() {
 
 #[test]
 fn an_invalid_body_is_refused() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Raw(200, "not json".to_owned()));
     let service = service(
         &mock.origin(),
@@ -552,6 +581,7 @@ fn an_invalid_body_is_refused() {
 
 #[test]
 fn an_oversized_response_is_refused() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let body = "x".repeat(200_000);
     let mock = MockService::start(Reply::Raw(200, body));
     let service = service(
@@ -569,6 +599,7 @@ fn an_oversized_response_is_refused() {
 
 #[test]
 fn a_slow_answer_times_out_without_a_retry() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mock = MockService::start(Reply::Delayed(Duration::from_millis(600)));
     let service = service(
         &mock.origin(),
@@ -592,6 +623,7 @@ fn a_slow_answer_times_out_without_a_retry() {
 
 #[test]
 fn a_model_mismatch_is_refused() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let body = "{\"model\":\"jev-1.14.0\",\"answers\":{\"task_type\":{\"type\":\"choice\",\"choice\":\"refactor\",\"probabilities\":{\"bug-fix\":0.02,\"feature\":0.02,\"test\":0.02,\"refactor\":0.93,\"code-review\":0.0,\"docs\":0.0,\"unknown\":0.01},\"confidence\":0.9}}}}";
     let mock = MockService::start(Reply::Raw(200, body.to_owned()));
     let service = service(
@@ -605,4 +637,134 @@ fn a_model_mismatch_is_refused() {
         DecisionResult::Fallback(failure) => assert_eq!(failure.code, "invalid_response"),
         other => panic!("expected a fallback, got {other:?}"),
     }
+}
+
+#[test]
+fn stale_configuration_never_reaches_the_server() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mock = MockService::start(Reply::Ok);
+    let svc = service(
+        &mock.origin(),
+        DecisionMode::Assist,
+        1500,
+        Arc::new(AllowAll),
+    );
+    kodo_shell::decision::bump_config_generation();
+    let outcome = svc.evaluate(&task_route_input(), &|| true);
+    assert!(matches!(outcome.result, DecisionResult::Fallback(f) if f.code == "config_changed"));
+    assert!(mock.requests().is_empty());
+}
+
+#[test]
+fn configuration_changed_during_http_discards_the_answer() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mock = MockService::start(Reply::ChangeConfig);
+    let svc = service(
+        &mock.origin(),
+        DecisionMode::Assist,
+        1500,
+        Arc::new(AllowAll),
+    );
+    let outcome = svc.evaluate(&task_route_input(), &|| true);
+    assert!(matches!(outcome.result, DecisionResult::Fallback(f) if f.code == "config_changed"));
+    assert_eq!(mock.requests().len(), 1);
+}
+
+#[test]
+fn cancellation_during_http_discards_the_answer() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let alive = Arc::new(AtomicBool::new(true));
+    let mock = MockService::start(Reply::Cancel(alive.clone()));
+    let svc = service(
+        &mock.origin(),
+        DecisionMode::Assist,
+        1500,
+        Arc::new(AllowAll),
+    );
+    let outcome = svc.evaluate(&task_route_input(), &|| alive.load(Ordering::SeqCst));
+    assert!(matches!(outcome.result, DecisionResult::Cancelled));
+    assert_eq!(mock.requests().len(), 1);
+}
+
+#[test]
+fn saved_assist_is_observe_even_with_a_high_probability_response() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mock = MockService::start(Reply::Ok);
+    let svc = service(
+        &mock.origin(),
+        DecisionMode::Assist,
+        1500,
+        Arc::new(AllowAll),
+    );
+    let mut diagnostics = Vec::new();
+    let input = match task_route_input() {
+        DecisionInput::TaskRoute(input) => input,
+        _ => unreachable!(),
+    };
+    let outcome = kodo_agent::decision::consult_task_route(
+        &svc.handle(),
+        &input,
+        kodo_agent::TaskType::Feature,
+        &|| true,
+        &mut |event| {
+            if let kodo_agent::SinkEvent::Finished {
+                step:
+                    kodo_agent::Step::Reasoning {
+                        diagnostics: Some(record),
+                        ..
+                    },
+                ..
+            } = event
+            {
+                diagnostics.push(record);
+            }
+            true
+        },
+    );
+    assert_eq!(outcome, kodo_agent::decision::TaskRouteOutcome::Unchanged);
+    assert_eq!(mock.requests().len(), 1);
+    assert!(diagnostics
+        .iter()
+        .any(|record| record.contains("\"mode\":\"observe\"")
+            && record.contains("\"applied\":false")));
+}
+
+#[test]
+fn three_runs_share_the_same_two_network_slots() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mock = MockService::start(Reply::Delayed(Duration::from_millis(300)));
+    let runtime = Arc::new(DecisionRuntime::default());
+    let make = |id| {
+        Arc::new(
+            DecisionService::new(
+                config(DecisionMode::Observe, 1500),
+                DecisionClient::for_local_endpoint(DecisionProvider::TypeSafe, mock.origin()),
+                Arc::new(AllowAll),
+                format!("session-{id}"),
+                1,
+            )
+            .with_runtime(runtime.clone()),
+        )
+    };
+    let one = make(1);
+    let two = make(2);
+    let third = make(3);
+    let first = thread::spawn(move || one.evaluate(&task_route_input(), &|| true));
+    let second = thread::spawn(move || two.evaluate(&task_route_input(), &|| true));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while mock.requests().len() < 2 && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(mock.requests().len(), 2);
+    let outcome = third.evaluate(&task_route_input(), &|| true);
+    assert!(matches!(outcome.result, DecisionResult::Fallback(f) if f.code == "busy"));
+    assert!(matches!(
+        first.join().unwrap().result,
+        DecisionResult::Suggested(_)
+    ));
+    assert!(matches!(
+        second.join().unwrap().result,
+        DecisionResult::Suggested(_)
+    ));
+    assert_eq!(mock.requests().len(), 2);
 }
