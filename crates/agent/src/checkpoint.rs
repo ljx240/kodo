@@ -96,6 +96,17 @@ pub fn is_kodo_state_path(path: &str) -> bool {
     path == ".kodo" || path.starts_with(".kodo/")
 }
 
+/// Result of one bounded workspace capture for an opaque mutation.
+///
+/// A partial capture (`complete == false`) must never be diffed against: a
+/// path the before-pass skipped can show up only in the after-pass and would
+/// then look like a Kodo-created file — which undo would delete.
+#[derive(Debug)]
+pub struct CommandSnapshot {
+    pub files: BTreeMap<String, FileSnapshot>,
+    pub complete: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TurnChangeSet {
@@ -124,36 +135,54 @@ impl TurnChangeSet {
     }
 
     /// Bounded before/after capture for shell and opaque external mutations.
-    pub fn capture_command_files(
-        &self,
-        project: &Path,
-    ) -> Result<BTreeMap<String, FileSnapshot>, String> {
+    ///
+    /// VCS metadata and Kodo's own state never enter the snapshot. Files over
+    /// the per-file cap are skipped; hitting the total/file-count caps marks
+    /// the capture incomplete instead of failing — bookkeeping must never
+    /// block the command itself.
+    pub fn capture_command_files(&self, project: &Path) -> CommandSnapshot {
+        const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+        const MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+        const MAX_FILES: usize = 20_000;
+
         fn visit(
             project: &Path,
             dir: &Path,
             out: &mut BTreeMap<String, FileSnapshot>,
             total: &mut u64,
-        ) -> Result<(), String> {
-            for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                let kind = entry.file_type().map_err(|e| e.to_string())?;
+        ) -> bool {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return false;
+            };
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    return false;
+                };
+                let Ok(kind) = entry.file_type() else {
+                    return false;
+                };
                 if kind.is_symlink() {
                     continue;
                 }
                 let path = entry.path();
-                let relative = path
-                    .strip_prefix(project)
-                    .map_err(|e| e.to_string())?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if crate::tools::resolve_in_project(project, &relative).is_err() {
+                let Ok(relative) = path.strip_prefix(project) else {
+                    return false;
+                };
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                if is_kodo_state_path(&relative)
+                    || crate::tools::resolve_in_project(project, &relative).is_err()
+                {
                     continue;
                 }
                 if kind.is_dir() {
                     if matches!(
                         entry.file_name().to_str(),
                         Some(
-                            "node_modules"
+                            ".git"
+                                | ".hg"
+                                | ".svn"
+                                | ".jj"
+                                | "node_modules"
                                 | "target"
                                 | "dist"
                                 | "build"
@@ -165,16 +194,26 @@ impl TurnChangeSet {
                     ) {
                         continue;
                     }
-                    visit(project, &path, out, total)?;
-                } else if kind.is_file() {
-                    let size = entry.metadata().map_err(|e| e.to_string())?.len();
-                    *total += size;
-                    if size > 8 * 1024 * 1024 || *total > 128 * 1024 * 1024 || out.len() >= 20_000 {
-                        return Err(
-                            "command snapshot limit exceeded; use targeted file tools".into()
-                        );
+                    if !visit(project, &path, out, total) {
+                        return false;
                     }
-                    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+                } else if kind.is_file() {
+                    let Ok(size) = entry.metadata().map(|m| m.len()) else {
+                        return false;
+                    };
+                    // A single huge file (binary, archive, database) is not
+                    // restorable from memory anyway; skip it rather than make
+                    // the whole workspace untrackable.
+                    if size > MAX_FILE_BYTES {
+                        continue;
+                    }
+                    if *total + size > MAX_TOTAL_BYTES || out.len() >= MAX_FILES {
+                        return false;
+                    }
+                    let Ok(bytes) = fs::read(&path) else {
+                        return false;
+                    };
+                    *total += bytes.len() as u64;
                     out.insert(
                         relative.clone(),
                         FileSnapshot {
@@ -187,39 +226,61 @@ impl TurnChangeSet {
                     );
                 }
             }
-            Ok(())
+            true
         }
-        let mut out = BTreeMap::new();
-        visit(project, project, &mut out, &mut 0)?;
-        Ok(out)
+
+        let mut files = BTreeMap::new();
+        let complete = visit(project, project, &mut files, &mut 0);
+        CommandSnapshot { files, complete }
     }
 
+    /// Diff two complete command snapshots and record Kodo's opaque edits.
+    ///
+    /// Incomplete captures are skipped entirely: a partial before-pass cannot
+    /// tell "created by the command" apart from "skipped earlier", and
+    /// treating the latter as created would let undo delete a file that
+    /// predates the command.
     pub fn record_command_changes(
         &mut self,
         project: &Path,
-        before: &BTreeMap<String, FileSnapshot>,
-    ) -> Result<Vec<String>, String> {
-        let after = self.capture_command_files(project)?;
-        let paths: BTreeSet<String> = before.keys().chain(after.keys()).cloned().collect();
+        before: &CommandSnapshot,
+    ) -> Vec<String> {
+        if !before.complete {
+            return Vec::new();
+        }
+        let after = self.capture_command_files(project);
+        if !after.complete {
+            return Vec::new();
+        }
+        let paths: BTreeSet<String> = before
+            .files
+            .keys()
+            .chain(after.files.keys())
+            .cloned()
+            .collect();
         let mut changed = Vec::new();
         for path in paths {
-            if before.get(&path).map(|s| &s.content_hash)
-                == after.get(&path).map(|s| &s.content_hash)
+            if before.files.get(&path).map(|s| &s.content_hash)
+                == after.files.get(&path).map(|s| &s.content_hash)
             {
                 continue;
             }
-            let baseline = before.get(&path).cloned().unwrap_or_else(|| FileSnapshot {
-                path: path.clone(),
-                content_hash: "missing".into(),
-                existed: false,
-                bytes: None,
-                pre_existing_git: String::new(),
-            });
+            let baseline = before
+                .files
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| FileSnapshot {
+                    path: path.clone(),
+                    content_hash: "missing".into(),
+                    existed: false,
+                    bytes: None,
+                    pre_existing_git: String::new(),
+                });
             self.baselines.entry(path.clone()).or_insert(baseline);
             self.record_kodo_change(project, &path);
             changed.push(path);
         }
-        Ok(changed)
+        changed
     }
 
     /// Was this path already dirty before Kodo started?
@@ -1354,10 +1415,10 @@ mod tests {
         fs::write(root.join("untouched.txt"), "user-only").unwrap();
         let mut changes = TurnChangeSet::default();
         changes.baseline_dirty.insert("user.txt".into());
-        let before = changes.capture_command_files(&root).unwrap();
+        let before = changes.capture_command_files(&root);
         fs::write(root.join("user.txt"), "kodo result\n").unwrap();
         fs::write(root.join("created.txt"), "created").unwrap();
-        let changed = changes.record_command_changes(&root, &before).unwrap();
+        let changed = changes.record_command_changes(&root, &before);
         assert_eq!(changed, ["created.txt", "user.txt"]);
         assert!(changes.was_pre_existing("user.txt"));
         assert!(!changes.kodo_touched.contains("untouched.txt"));
@@ -1374,5 +1435,75 @@ mod tests {
             "user-only"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn command_snapshot_excludes_vcs_metadata_and_kodo_state() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-snapshot-exclude-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join(".git/objects/pack")).unwrap();
+        fs::create_dir_all(root.join(".kodo")).unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::write(root.join("src/a.rs"), "a\n").unwrap();
+        fs::write(root.join(".git/objects/pack/pack.pack"), "git data").unwrap();
+        fs::write(root.join(".git/HEAD"), "ref").unwrap();
+        fs::write(root.join(".kodo/changeset.json"), "{}").unwrap();
+        fs::write(root.join("node_modules/x.js"), "x").unwrap();
+
+        let snapshot = TurnChangeSet::default().capture_command_files(&root);
+        assert!(snapshot.complete);
+        assert!(snapshot.files.contains_key("src/a.rs"));
+        assert!(!snapshot.files.contains_key(".git/HEAD"));
+        assert!(!snapshot.files.contains_key(".git/objects/pack/pack.pack"));
+        assert!(!snapshot.files.contains_key(".kodo/changeset.json"));
+        assert!(!snapshot.files.contains_key("node_modules/x.js"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn command_snapshot_skips_oversized_files_and_keeps_small_ones_tracked() {
+        let root = std::env::temp_dir().join(format!("kodo-snapshot-big-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.rs"), "one\n").unwrap();
+        fs::write(root.join("artifact.bin"), vec![0u8; 8 * 1024 * 1024 + 1]).unwrap();
+
+        let mut changes = TurnChangeSet::default();
+        let before = changes.capture_command_files(&root);
+        assert!(before.complete, "oversized files must not fail the capture");
+        assert!(before.files.contains_key("src/a.rs"));
+        assert!(!before.files.contains_key("artifact.bin"));
+
+        fs::write(root.join("src/a.rs"), "two\n").unwrap();
+        let changed = changes.record_command_changes(&root, &before);
+        assert_eq!(changed, ["src/a.rs"]);
+        assert_eq!(
+            changes.kodo_touched.iter().collect::<Vec<_>>(),
+            vec!["src/a.rs"]
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn incomplete_command_snapshot_records_no_changes() {
+        let root =
+            std::env::temp_dir().join(format!("kodo-snapshot-incomplete-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "before\n").unwrap();
+
+        let mut changes = TurnChangeSet::default();
+        let before = CommandSnapshot {
+            files: BTreeMap::new(),
+            complete: false,
+        };
+        fs::write(root.join("a.txt"), "after\n").unwrap();
+        let changed = changes.record_command_changes(&root, &before);
+        assert!(changed.is_empty());
+        assert!(changes.kodo_touched.is_empty());
+        assert!(changes.baselines.is_empty());
+        let _ = fs::remove_dir_all(&root);
     }
 }
