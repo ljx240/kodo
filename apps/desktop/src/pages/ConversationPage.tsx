@@ -26,7 +26,6 @@ import {
 import { AssistantReply } from "../conversation/AssistantReply";
 import { Composer } from "../conversation/Composer";
 import { ContextCard } from "../conversation/ContextCard";
-import { DecisionPreviewDialog } from "../conversation/DecisionPreviewDialog";
 import { FindBar } from "../conversation/FindBar";
 import { KnowledgeBinding } from "../conversation/KnowledgeBinding";
 import { KnowledgeSources } from "../conversation/KnowledgeSources";
@@ -60,11 +59,6 @@ import {
 import { snapshotFromTurn, type LiveSnapshot } from "../data/liveContext";
 import { type ProviderConfig } from "../data/providers";
 import type { Project } from "../data/types";
-import {
-  decisionConfirmPreview,
-  demoDecisionPreview,
-  type DecisionPreviewDto,
-} from "../decisionApi";
 import { T } from "../i18n";
 import { navigate } from "../routes";
 import type { ConvActions } from "../shell/TopBar";
@@ -561,11 +555,6 @@ export function ConversationPage({
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [knowledgeFallbackAvailable, setKnowledgeFallbackAvailable] = useState(false);
   const [knowledgeApproval, setKnowledgeApproval] = useState<PreparedTurn | null>(null);
-  /** The pending decision send preview. Only one may be open at a time:
-   *  the run waits for the answer before it continues. */
-  const [decisionPreview, setDecisionPreview] = useState<DecisionPreviewDto | null>(() =>
-    demoDecisionPreview(),
-  );
   const [knowledgeReload, setKnowledgeReload] = useState(0);
   const knowledgeSelectionRef = useRef(knowledgeSelection);
   knowledgeSelectionRef.current = knowledgeSelection;
@@ -683,20 +672,6 @@ export function ConversationPage({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [knowledgeApproval]);
-
-  /** Answer the pending decision send preview. A failed answer means the
-   *  grant is already gone — the run has moved on, and the preview must
-   *  not stay on screen. */
-  const answerDecisionPreview = async (approved: boolean) => {
-    const pending = decisionPreview;
-    setDecisionPreview(null);
-    if (!pending) return;
-    try {
-      await decisionConfirmPreview(pending.requestId, approved);
-    } catch {
-      // The backend refused: the run already stopped waiting.
-    }
-  };
 
   // A create-send races its own run: the first answer can finish before
   // send_message returns the new session id. Keep one long-lived subscription,
@@ -1212,26 +1187,6 @@ export function ConversationPage({
         reason: event.reason,
       });
       setProgress({ phase: "等待审批", detail: "请确认后继续执行" });
-      return;
-    }
-    if (event.type === "decisionPreview") {
-      setDecisionPreview({
-        session: event.session,
-        requestId: event.requestId,
-        runGeneration: event.runGeneration,
-        scenario: event.scenario,
-        mode: event.mode,
-        origin: event.origin,
-        path: event.path,
-        model: event.model,
-        purpose: event.purpose,
-        requestBody: event.requestBody,
-        questions: event.questions,
-        requestBytes: event.requestBytes,
-        stateBytes: event.stateBytes,
-        expiresInSeconds: event.expiresInSeconds,
-      });
-      setProgress({ phase: "等待确认外发", detail: "请检查预览后决定是否允许发送" });
       return;
     }
     if (event.type === "textDelta") {
@@ -2059,14 +2014,6 @@ export function ConversationPage({
                 </ul>
               </div>
             )}
-
-            {/* The decision send preview sits outside the turn list: the run
-                is waiting for the answer, not for another step. */}
-            <DecisionPreviewDialog
-              preview={decisionPreview}
-              onApprove={() => void answerDecisionPreview(true)}
-              onSkip={() => void answerDecisionPreview(false)}
-            />
 
             {/* Approval sits outside the turn list so it also shows on an empty turn. */}
             {liveSession && approval && (

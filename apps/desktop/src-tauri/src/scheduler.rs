@@ -24,7 +24,7 @@ use std::thread;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 use kodo_agent::Permission;
 use kodo_core::scheduler::{
@@ -669,15 +669,7 @@ fn execute_agent_run(
     };
     // A scheduled run never gets a decision handle: it cannot ask a human
     // for permission, and it must not inherit a desktop approval.
-    let decisions: tauri::State<'_, crate::decision::DecisionRegistry> = app.state();
-    let started = run::start(
-        &app,
-        &runs,
-        &approvals,
-        decisions.inner(),
-        start_args,
-        token.clone(),
-    );
+    let started = run::start(&app, &runs, &approvals, start_args, token.clone());
     let (terminal, timed_out) = match started {
         Ok(()) => {
             let deadline =

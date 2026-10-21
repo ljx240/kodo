@@ -755,30 +755,6 @@ pub enum RunEvent {
         #[serde(default)]
         reason: String,
     },
-    /// The runner is waiting for the user to allow one outbound decision
-    /// request. The preview carries the *actual* bytes that would be sent:
-    /// a summary cannot be approved, only inspected.
-    DecisionPreview {
-        session: String,
-        request_id: String,
-        run_generation: u64,
-        /// `taskRoute` or `failureTriage`.
-        scenario: String,
-        /// `off`, `observe` or `assist`.
-        mode: String,
-        origin: String,
-        path: String,
-        model: String,
-        /// What the request is for, in plain words.
-        purpose: String,
-        /// The exact JSON body that would be sent.
-        request_body: String,
-        /// The questions and their answer space.
-        questions: String,
-        request_bytes: usize,
-        state_bytes: usize,
-        expires_in_seconds: u64,
-    },
     /// Incremental assistant text while the model streams (not persisted).
     TextDelta {
         session: String,

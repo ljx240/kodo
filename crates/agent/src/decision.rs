@@ -1102,8 +1102,8 @@ pub struct FailureTriageInput {
     pub exit_code: Option<i32>,
     /// Flags the local rules already computed.
     pub known_flags: Vec<String>,
-    /// A short excerpt the run already produced. It is shown in full in the
-    /// consent preview and only sent after the user approves it.
+    /// A short excerpt the run already produced. It is sent verbatim; the
+    /// CLI preview shows it before the user answers.
     pub error_excerpt: String,
 }
 

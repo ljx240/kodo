@@ -183,15 +183,6 @@ struct RunEventEnvelope {
     event: RunEvent,
 }
 
-/// Emit a run event for a run that is already registered.
-///
-/// The decision bridge uses this to show the send preview: the preview
-/// travels on the same channel as every other run event, so the frontend
-/// has exactly one place to listen.
-pub fn emit_for(app: &AppHandle, token: &RunToken, event: RunEvent) {
-    emit_run(app, token, event);
-}
-
 fn emit_run(app: &AppHandle, token: &RunToken, event: RunEvent) {
     // Mirror the run's lifecycle onto the status item. The window can be hidden
     // for the whole run (closing hides rather than quits), so this is the only
@@ -432,14 +423,12 @@ pub fn start(
     app: &AppHandle,
     runs: &Runs,
     approvals: &Approvals,
-    decisions: &crate::decision::DecisionRegistry,
     args: StartArgs,
     token: RunToken,
 ) -> Result<(), String> {
     let app = app.clone();
     let runs = runs.clone();
     let approvals = approvals.clone();
-    let decisions = decisions.clone();
 
     thread::spawn(move || {
         let notify = |event: RunEvent| {
@@ -822,11 +811,6 @@ pub fn start(
 
         let result = agent::run(&request, &alive, &approve, &mut sink);
         approvals.clear_session(&args.id);
-        // The run's decision service dies with the run: its credential
-        // handle, its pending grants and its quota counters are not
-        // inherited by the next turn.
-        decisions.release_run(&args.id);
-        decisions.clear_session(&args.id);
         let terminal_kind = if result.is_err() {
             TurnTerminalKind::Failed
         } else if !token.is_live() {

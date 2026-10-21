@@ -148,6 +148,7 @@
 - RF-003：OpenRouter 的正文和生成 Token 必须是同一合法单字母；拒答、解释、缺失选项或概率质量不足时不得采纳，不以单词首字符或补齐归一化构造概率（AC-005）。
 - RF-004：恢复配置仅回写校验后的紧凑单行 JSON；第二次读取不再恢复或追加（AC-016）。
 - RF-005：进程共享最多两个在途请求；熔断按来源及凭据代次跨运行共享，凭据更新隔离旧状态，单轮授权和调用额度继续隔离（AC-011/013）。
+- RF-008（2026-10-21 用户明确要求）：桌面端取消 Jev 逐次发送确认。运行存活时授权桥直接放行，停止运行时取消在途请求；设置页外发说明改为自动外发。CLI 仍保留终端预览确认。RF-007 的预览恢复界面随弹框一并移除，壳层授权 TTL、代次校验与原子消费保留。
 
 本轮只做本地修复和虚构数据验证，不执行真实模型评测或新增依赖。工程基线为 `a7133b220cefce56c3da760c3096f3c5f9b76507`；任务分支 `fix/jev-decision-review`，7 条既有 stash 保留，远程新鲜度未核验。
 
@@ -159,3 +160,18 @@
 - 设置页增加第三个来源；选择腾讯时模型输入锁定为 `@makers/jev`，服务端也拒绝其他模型值。三个来源的凭据、熔断代次与设置仍相互隔离，失败不自动换源。
 - 本轮只做本地实现、虚构数据与回环模拟验证，**未**向腾讯 EdgeOne 发起真实请求。真实连通性、鉴权头是否仍为 `Authorization: Bearer $MAKERS_MODELS_KEY`、实际解析版本与限流行为均未核验。
 - 工程基线为本地 `main` @ `e5b8fa6c46ef4bade3871aa5598bcba935e44a20`；本次未 fetch，远程新鲜度未核验。
+
+## 11. 2026-10-21 待确认预览丢失与无限等待修复（RF-007）
+
+- 问题：Jev 预览事件只投递给发起运行时的会话；用户切到其他会话再切回，预览不会重现，`run_state` 也不含预览，授权等待又没有上限，运行会永久停在"执行中"。
+- RF-007：运行登记表保存完整 `DecisionPreview`；新增 `decision_pending_preview(session)`，只返回该会话当前运行代次且未过期的预览；前端加载运行中会话时恢复预览对话框；授权等待以预览的 `expiresInSeconds`（壳层 `CONSENT_TTL`，300 秒）为上限，到期按 `Skip` 返回并清理待确认项。
+- 已验证：`a_pending_preview_is_visible_only_to_its_current_run`、`an_expired_preview_is_skipped_without_an_answer`；桌面 68 项测试、`npm run typecheck`、`npm run build` 通过。实机"运行中切走再切回后对话框重现"的恢复路径未在本轮演练。
+- 工程基线为本地 `main` @ `cf503c2ea6c978c44ccbc43d2714aa406a347d54`；本次未 fetch，远程新鲜度未核验。
+
+## 12. 2026-10-21 桌面端取消逐次 Jev 确认（RF-008）
+
+- 现场：用户点击“允许本次发送”后运行仍卡住。根因是 `RunEvent::DecisionPreview` 的字段按 snake_case 序列化（`request_id`、`request_body` 等），前端按 camelCase 读取，`requestId` 等为 `undefined`；批准调用缺少参数被后端拒绝，运行只能等到 300 秒 TTL。
+- 按用户明确要求，桌面端不再展示逐次预览：`DesktopDecisionConsent` 在运行存活时直接返回 `Allow`，停止时返回 `Cancelled`；删除 `decision_confirm_preview`、`decision_pending_preview`、`DecisionRegistry` 与 `RunEvent::DecisionPreview`；前端删除预览弹框、DTO、事件分支与恢复逻辑。
+- 设置页保留外发说明，并明确“启用场景并保存后自动外发、不再逐次确认”。CLI 的终端预览保留。
+- 已验证：`a_live_run_sends_without_a_confirmation`、`a_stopped_run_cancels_the_request`；桌面 63 项测试、`npm run typecheck`、`npm run build`、`decision.spec.ts` 3 项行为用例通过。
+- 工程基线为本地 `main` @ `cf503c2ea6c978c44ccbc43d2714aa406a347d54`；本次未 fetch，远程新鲜度未核验。

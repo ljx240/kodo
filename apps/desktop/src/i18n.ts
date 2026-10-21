@@ -1375,15 +1375,14 @@ export const T = {
       return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
     },
   },
-  /** Decision assistance (Jev): settings, the send preview and the
-   *  Inspector record. */
+  /** Decision assistance (Jev): settings and the Inspector record. */
   decision: {
     section: "决策辅助",
     sectionHint: "让外部模型在少数模糊场景给出建议",
     loading: "读取决策辅助配置…",
     saved: "已保存决策辅助配置。",
     outboundNotice:
-      "此功能会向所选的 TypeSafe、OpenRouter 或腾讯 EdgeOne 发送您逐次批准的内容。每次发送前都会显示完整预览；不批准就不会发送。",
+      "此功能会向所选的 TypeSafe、OpenRouter 或腾讯 EdgeOne 发送当前消息与模式，或失败命令类别、退出码与错误摘录。启用场景并保存后，符合条件时会自动外发，不再逐次弹窗确认。",
     providerLabel: "服务来源",
     providerHint:
       "官方 Jev（TypeSafe）、OpenRouter 路由或腾讯 EdgeOne Makers。三者一次只启用一个；失败不会自动换到另一个。",
@@ -1418,21 +1417,10 @@ export const T = {
     credentialSaved: "已保存密钥。",
     credentialCleared: "已清除密钥。",
     save: "保存配置",
-    previewEyebrow: "发送前确认",
-    previewTitle: "允许这次外发？",
-    previewSkip: "跳过 Jev",
-    previewApprove: "允许本次发送",
-    previewWarning: "发送后无法撤回，也无法要求接收方删除。请确认上方内容可以外发。",
-    destinationLabel: "接收方",
-    sizeLabel: "请求大小",
-    stateSizeLabel: "状态",
-    expiryLabel: "有效期",
-    bodyLabel: "实际发送内容",
-    questionsLabel: "问题与答案空间",
     inspectorTitle: "决策记录",
     scenarioLabel: "建议：",
     durationLabel: "耗时",
-    consentWaitLabel: "等待确认",
+    consentWaitLabel: "发送等待",
     rejectedLabel: "未采纳原因：",
     rejectedReasons: {
       observe_mode: "观察模式只记录建议",
