@@ -159,3 +159,10 @@
 - 设置页增加第三个来源；选择腾讯时模型输入锁定为 `@makers/jev`，服务端也拒绝其他模型值。三个来源的凭据、熔断代次与设置仍相互隔离，失败不自动换源。
 - 本轮只做本地实现、虚构数据与回环模拟验证，**未**向腾讯 EdgeOne 发起真实请求。真实连通性、鉴权头是否仍为 `Authorization: Bearer $MAKERS_MODELS_KEY`、实际解析版本与限流行为均未核验。
 - 工程基线为本地 `main` @ `e5b8fa6c46ef4bade3871aa5598bcba935e44a20`；本次未 fetch，远程新鲜度未核验。
+
+## 11. 2026-10-21 待确认预览丢失与无限等待修复（RF-007）
+
+- 问题：Jev 预览事件只投递给发起运行时的会话；用户切到其他会话再切回，预览不会重现，`run_state` 也不含预览，授权等待又没有上限，运行会永久停在"执行中"。
+- RF-007：运行登记表保存完整 `DecisionPreview`；新增 `decision_pending_preview(session)`，只返回该会话当前运行代次且未过期的预览；前端加载运行中会话时恢复预览对话框；授权等待以预览的 `expiresInSeconds`（壳层 `CONSENT_TTL`，300 秒）为上限，到期按 `Skip` 返回并清理待确认项。
+- 已验证：`a_pending_preview_is_visible_only_to_its_current_run`、`an_expired_preview_is_skipped_without_an_answer`；桌面 68 项测试、`npm run typecheck`、`npm run build` 通过。实机"运行中切走再切回后对话框重现"的恢复路径未在本轮演练。
+- 工程基线为本地 `main` @ `cf503c2ea6c978c44ccbc43d2714aa406a347d54`；本次未 fetch，远程新鲜度未核验。

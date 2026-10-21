@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kodo_agent::decision::DecisionProvider;
 use kodo_shell::decision::{
@@ -90,10 +90,50 @@ pub fn decision_confirm_preview(
     }
 }
 
+/// The preview a running conversation is still waiting on, in the form the
+/// GUI needs to put the dialog back after the user returns to it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPreviewView {
+    pub session: String,
+    pub request_id: String,
+    pub run_generation: u64,
+    pub scenario: String,
+    pub mode: String,
+    pub origin: String,
+    pub path: String,
+    pub model: String,
+    pub purpose: String,
+    pub request_body: String,
+    pub questions: String,
+    pub request_bytes: usize,
+    pub state_bytes: usize,
+    pub expires_in_seconds: u64,
+}
+
+/// Recover the preview a live conversation is still waiting on.
+///
+/// The run event that carried the preview was addressed to the conversation
+/// that was open at the time. A user who switched away must see the same
+/// dialog when they come back, or the run would wait for an answer nobody
+/// knows about.
+#[tauri::command]
+pub fn decision_pending_preview(
+    decisions: State<'_, DecisionRegistry>,
+    session: String,
+) -> Option<PendingPreviewView> {
+    decisions.pending_preview(&session)
+}
+
 /// One consent waiting for an answer.
 struct PendingConsent {
     session_id: String,
     run_generation: u64,
+    /// Kept whole so a conversation opened later can show the same bytes.
+    preview: DecisionPreview,
+    /// The shell grants expire after the preview's advertised lifetime; the
+    /// wait must not outlive them.
+    expires_at: Instant,
     sender: mpsc::Sender<DecisionConsentAnswer>,
 }
 
@@ -146,6 +186,59 @@ impl DecisionRegistry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|_, pending| pending.session_id != session_id);
+    }
+
+    /// The preview this session's current run is waiting on.
+    ///
+    /// A preview from a run that no longer owns the session is not returned:
+    /// re-opening a conversation must never revive an answer from a finished
+    /// run.
+    pub fn pending_preview(&self, session_id: &str) -> Option<PendingPreviewView> {
+        let (preview, expires_at, run_generation) = {
+            let pending = self
+                .inner
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = pending
+                .values()
+                .find(|pending| pending.session_id == session_id)?;
+            (
+                entry.preview.clone(),
+                entry.expires_at,
+                entry.run_generation,
+            )
+        };
+        let current = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .map(|(generation, _)| *generation);
+        if current != Some(run_generation) {
+            return None;
+        }
+        let remaining = expires_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        Some(PendingPreviewView {
+            session: session_id.to_owned(),
+            request_id: preview.request_id,
+            run_generation,
+            scenario: preview.scenario.label().to_owned(),
+            mode: preview.mode.label().to_owned(),
+            origin: preview.origin,
+            path: preview.path,
+            model: preview.model,
+            purpose: preview.purpose,
+            request_body: preview.request_body,
+            questions: preview.questions,
+            request_bytes: preview.request_bytes,
+            state_bytes: preview.state_bytes,
+            expires_in_seconds: remaining.as_secs(),
+        })
     }
 
     /// Answer a pending consent.
@@ -230,6 +323,7 @@ impl DesktopDecisionConsent {
 impl DecisionConsent for DesktopDecisionConsent {
     fn request(&self, preview: &DecisionPreview) -> DecisionConsentAnswer {
         let (sender, receiver) = mpsc::channel();
+        let expires_at = Instant::now() + Duration::from_secs(preview.expires_in_seconds);
         self.registry
             .inner
             .pending
@@ -240,6 +334,8 @@ impl DecisionConsent for DesktopDecisionConsent {
                 PendingConsent {
                     session_id: self.session_id.clone(),
                     run_generation: self.run_generation,
+                    preview: preview.clone(),
+                    expires_at,
                     sender,
                 },
             );
@@ -261,12 +357,20 @@ impl DecisionConsent for DesktopDecisionConsent {
         });
 
         // The wait is a poll, not one blocking receive: a stopped run has
-        // to release this thread promptly.
+        // to release this thread promptly. It also ends with the grant: a
+        // preview nobody answers must not park the run forever.
         let answer = loop {
             if !self.alive.load(Ordering::SeqCst) {
                 break DecisionConsentAnswer::Cancelled;
             }
-            match receiver.recv_timeout(Duration::from_millis(100)) {
+            let now = Instant::now();
+            if now >= expires_at {
+                break DecisionConsentAnswer::Skip;
+            }
+            let wait = expires_at
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(100));
+            match receiver.recv_timeout(wait) {
                 Ok(answer) => break answer,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break DecisionConsentAnswer::Skip,
@@ -285,8 +389,26 @@ impl DecisionConsent for DesktopDecisionConsent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kodo_agent::decision::{DecisionClient, DecisionMode, DecisionSettings};
-    use kodo_shell::decision::DecisionConfig;
+    use kodo_agent::decision::{DecisionClient, DecisionMode, DecisionScenario, DecisionSettings};
+    use kodo_shell::decision::{DecisionConfig, DecisionPreview};
+
+    fn preview(expires_in_seconds: u64) -> DecisionPreview {
+        DecisionPreview {
+            request_id: "req-1".to_owned(),
+            scenario: DecisionScenario::TaskRoute,
+            mode: DecisionMode::Observe,
+            origin: "https://example.invalid".to_owned(),
+            path: "/v1/systemone".to_owned(),
+            model: "jev-1.13.0".to_owned(),
+            policy_version: "kodo-jev-v1".to_owned(),
+            purpose: "test".to_owned(),
+            request_body: "{}".to_owned(),
+            questions: "[]".to_owned(),
+            request_bytes: 2,
+            state_bytes: 2,
+            expires_in_seconds,
+        }
+    }
 
     fn config() -> DecisionConfig {
         DecisionConfig {
@@ -318,6 +440,8 @@ mod tests {
             PendingConsent {
                 session_id: "s".to_owned(),
                 run_generation: 4,
+                preview: preview(300),
+                expires_at: Instant::now() + Duration::from_secs(300),
                 sender,
             },
         );
@@ -336,11 +460,61 @@ mod tests {
             PendingConsent {
                 session_id: "s".to_owned(),
                 run_generation: 1,
+                preview: preview(300),
+                expires_at: Instant::now() + Duration::from_secs(300),
                 sender,
             },
         );
         registry.clear_session("s");
         assert_eq!(registry.pending_count(), 0);
+    }
+
+    #[test]
+    fn a_pending_preview_is_visible_only_to_its_current_run() {
+        let registry = DecisionRegistry::default();
+        registry.register_run("s", 4, test_service());
+        let (sender, _receiver) = mpsc::channel();
+        registry.inner.pending.lock().unwrap().insert(
+            "req-1".to_owned(),
+            PendingConsent {
+                session_id: "s".to_owned(),
+                run_generation: 4,
+                preview: preview(300),
+                expires_at: Instant::now() + Duration::from_secs(300),
+                sender,
+            },
+        );
+        let visible = registry
+            .pending_preview("s")
+            .expect("the current run's preview is visible");
+        assert_eq!(visible.request_id, "req-1");
+        assert_eq!(visible.scenario, "taskRoute");
+        assert!(visible.expires_in_seconds > 0);
+        assert!(registry.pending_preview("another-session").is_none());
+
+        // A newer run owns the session now: the old preview must not come back.
+        registry.register_run("s", 5, test_service());
+        assert!(registry.pending_preview("s").is_none());
+    }
+
+    #[test]
+    fn an_expired_preview_is_skipped_without_an_answer() {
+        let registry = DecisionRegistry::default();
+        registry.register_run("s", 1, test_service());
+        let emitted = Arc::new(AtomicBool::new(false));
+        let emitted_by_consent = emitted.clone();
+        let consent = DesktopDecisionConsent::new(
+            registry.clone(),
+            Box::new(move |_| emitted_by_consent.store(true, Ordering::SeqCst)),
+            "s".to_owned(),
+            1,
+            Arc::new(AtomicBool::new(true)),
+        );
+        let answer = consent.request(&preview(0));
+        assert_eq!(answer, DecisionConsentAnswer::Skip);
+        assert!(emitted.load(Ordering::SeqCst), "the preview is still shown");
+        assert_eq!(registry.pending_count(), 0);
+        assert!(registry.pending_preview("s").is_none());
     }
 
     fn test_service() -> Arc<DecisionService> {
@@ -363,6 +537,8 @@ mod tests {
             PendingConsent {
                 session_id: "s".to_owned(),
                 run_generation: 4,
+                preview: preview(300),
+                expires_at: Instant::now() + Duration::from_secs(300),
                 sender,
             },
         );

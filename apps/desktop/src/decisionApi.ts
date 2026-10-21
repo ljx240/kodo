@@ -160,6 +160,24 @@ export function decisionConfirmPreview(
   return invoke<void>("decision_confirm_preview", { requestId, approved });
 }
 
+/** The preview a live conversation is still waiting on.
+ *
+ *  The run event reaches only the conversation that was open when it was
+ *  emitted. A user who switched away gets the dialog back from this call
+ *  when they return; the backend refuses a run that no longer owns the
+ *  session. */
+export function decisionPendingPreview(
+  session: string,
+): Promise<DecisionPreviewDto | null> {
+  if (!isDesktop()) return Promise.resolve(null);
+  return invoke<DecisionPreviewDto | null>("decision_pending_preview", {
+    session,
+  }).catch((error: unknown) => {
+    console.warn("kodo: decision_pending_preview failed:", error);
+    return null;
+  });
+}
+
 /**
  * The demo send preview.
  *

@@ -22,7 +22,7 @@ use run::{ApprovalChoice, Approvals, Runs, StartArgs};
 mod decision;
 use decision::{
     decision_clear_credential, decision_confirm_preview, decision_get_settings,
-    decision_save_settings, decision_set_credential,
+    decision_pending_preview, decision_save_settings, decision_set_credential,
 };
 mod knowledge;
 mod platform;
@@ -1981,6 +1981,7 @@ fn main() {
             decision_set_credential,
             decision_clear_credential,
             decision_confirm_preview,
+            decision_pending_preview,
             stop_run,
             respond_approval,
             list_project_files,

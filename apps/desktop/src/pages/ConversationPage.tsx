@@ -62,6 +62,7 @@ import { type ProviderConfig } from "../data/providers";
 import type { Project } from "../data/types";
 import {
   decisionConfirmPreview,
+  decisionPendingPreview,
   demoDecisionPreview,
   type DecisionPreviewDto,
 } from "../decisionApi";
@@ -433,6 +434,7 @@ export function ConversationPage({
     setRunning(false);
     setRunStartedAt(null);
     setApproval(null);
+    setDecisionPreview(null);
     setProgress(null);
     // A run can be live while the user is elsewhere. The log carries every
     // finished step; `run_state` adds the facts the log cannot: still running,
@@ -444,7 +446,15 @@ export function ConversationPage({
     let alive = true;
     void (async () => {
       const live = await runState(conversationId);
-      const loaded = await loadSession(conversationId);
+      const [loaded, pendingPreview] = await Promise.all([
+        loadSession(conversationId),
+        // The preview event only reaches the conversation that was open
+        // when it was emitted. A user returning to this one must get the
+        // dialog back, or the run waits for an answer nobody can give.
+        live?.running
+          ? decisionPendingPreview(conversationId)
+          : Promise.resolve(null),
+      ]);
       if (!alive || !loaded) {
         if (loadingEventsRef.current === loading) loadingEventsRef.current = null;
         return;
@@ -454,9 +464,9 @@ export function ConversationPage({
       const last = loaded.turns.length > 0 ? loaded.turns[loaded.turns.length - 1] : null;
       const logFinished = Boolean(last && (last.done || last.stopped || last.error));
       // A run that already wrote its terminal envelope may still be registered
-      // for a few milliseconds; the approval branch is the one case where a
-      // finished-looking log still needs the live UI.
-      if (live?.running && (!logFinished || live.approval)) {
+      // for a few milliseconds; a pending approval or decision preview is the
+      // one case where a finished-looking log still needs the live UI.
+      if (live?.running && (!logFinished || live.approval || pendingPreview)) {
         setRunning(true);
         setRunStartedAt(live.startedAt ?? Date.now());
         setApproval(
@@ -472,13 +482,19 @@ export function ConversationPage({
               }
             : null,
         );
+        setDecisionPreview(pendingPreview);
         setProgress(
-          live.approval ? { phase: "等待审批", detail: "请确认后继续执行" } : live.progress,
+          live.approval
+            ? { phase: "等待审批", detail: "请确认后继续执行" }
+            : pendingPreview
+              ? { phase: "等待确认外发", detail: "请检查预览后决定是否允许发送" }
+              : live.progress,
         );
       } else {
         setRunning(false);
         setRunStartedAt(null);
         setApproval(null);
+        setDecisionPreview(null);
       }
       if (loadingEventsRef.current === loading) {
         loadingEventsRef.current = null;
@@ -1333,6 +1349,7 @@ export function ConversationPage({
       acceptStreamRef.current = false;
       setRunning(false);
       setApproval(null);
+      setDecisionPreview(null);
       textBufRef.current = "";
       setProgress(null);
       setBudget(null);

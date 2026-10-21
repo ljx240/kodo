@@ -434,3 +434,45 @@ git branch --no-merged main
 HEAD、本地 main、缓存 origin/main 均为 `a7133b220cefce56c3da760c3096f3c5f9b76507`。未 fetch，远程新鲜度未核验；本轮没有新提交、远程操作或 PR。未 pop/drop/clear stash，未创建 worktree、删除分支或清理其他现场。
 
 提交前恢复位置为 `fix/jev-decision-review` 的上述 12 个文件。用户已授权随后的本地提交、main 合并和任务分支清理，仍未授权远程操作；最终恢复入口为 main 的本轮合并提交。真实模型效果评测尚未完成。本轮未验证真实模型效果、真实端点连通性、取消后的底层网络瞬时中断、完整视觉回归和安装包；已有大 chunk 构建警告保留。质量门保持未评估，没有以模拟测试冒充收益证明。
+
+## 9. 2026-10-21 待确认预览丢失卡死修复（RF-007）
+
+### 9.1 现象与根因
+
+用户现场的会话停在"执行中 · 正在处理您的请求"。本机 `sample` 显示运行线程停在 `consult_task_route → DecisionService::evaluate → DesktopDecisionConsent::request → recv_timeout`。
+
+- `RunEvent::DecisionPreview` 只送给发起运行时会话的监听器。用户切到其他会话后事件被忽略；切回时 `run_state` 只恢复 approval，不恢复预览，对话框不会再出现。
+- `DesktopDecisionConsent::request` 只轮询 alive 标志，没有截止时间；无人能作答时线程永久等待，界面只能显示通用的"执行中"。
+
+### 9.2 修复
+
+- 后端 `PendingConsent` 保存完整 `DecisionPreview` 与 `expires_at`；新增 `decision_pending_preview(session)`，仅当该会话的当前运行代次仍持有预览且未过期时返回，供前端重建对话框。
+- 授权等待以预览的 `expiresInSeconds`（`CONSENT_TTL = 300`）为上限；到期或通道断开按 `Skip` 返回，并清理待确认项，运行继续走基线。
+- 前端在加载运行中会话时并行调用 `decisionPendingPreview`，恢复预览对话框并显示"等待确认外发"；终态、停止、切换会话时清空预览。
+
+### 9.3 验证
+
+```text
+cargo fmt --all -- --check
+exit 0
+
+cargo test --offline --locked -p kodo-desktop --bin kodo-desktop
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+npm run typecheck
+exit 0
+
+npm run build
+✓ built
+
+git diff --check
+exit 0
+```
+
+新增用例：`a_pending_preview_is_visible_only_to_its_current_run`（本会话当前代次可见；其他会话不可见；新代次接管后旧预览不可见）、`an_expired_preview_is_skipped_without_an_answer`（过期返回 `Skip`、预览仍展示、待确认项被清理）。
+
+**未验证**：实机"运行中切走再切回、对话框重现"的端到端恢复（需要用户触发一次运行并同意/跳过）；真实 Jev 请求。修复只保证不再无限等待，恢复路径的界面演练仍待补。
+
+### 9.4 Git 现场
+
+基线为本地 `main` @ `cf503c2ea6c978c44ccbc43d2714aa406a347d54`；任务分支 `fix/jev-preview-recovery`。改动 4 个代码文件（`apps/desktop/src-tauri/src/{decision,main}.rs`、`apps/desktop/src/{decisionApi.ts,pages/ConversationPage.tsx}`）与 3 份规格文件。本次未 fetch，远程新鲜度未核验；未推送、未创建 PR、未合并；7 条既有 stash 未 pop / drop / clear。旧卡死运行已由 Tauri dev 自动重建终止，修复需重启后的应用才生效。
