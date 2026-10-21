@@ -281,6 +281,7 @@ fn score_all(m: &str) -> [(TaskType, u32); 6] {
                     "please review",
                     "审查",
                     "评审",
+                    "评估",
                     "code-review",
                     "review",
                 ],
@@ -495,6 +496,16 @@ mod tests {
             TaskType::CodeReview
         );
         assert_eq!(classify("审查一下这个 PR 的改动"), TaskType::CodeReview);
+    }
+
+    #[test]
+    fn assessment_requests_are_reviews_not_features() {
+        assert_eq!(classify("评估这次改动的风险点"), TaskType::CodeReview);
+        assert_eq!(classify("评估一下这次改动的可维护性"), TaskType::CodeReview);
+        assert_eq!(
+            classify("对k2k-rust的能力做一个详细的评估"),
+            TaskType::CodeReview
+        );
     }
 
     #[test]
