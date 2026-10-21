@@ -5,7 +5,10 @@
 //! Every spawned process goes through [`crate::process::ProcessRunner`]
 //! (timeout + cancel + process-tree kill + output caps).
 
-use crate::process::{EnvPolicy, ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStatus};
+use crate::process::{
+    EnvPolicy, ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStatus, SandboxReport,
+};
+use kodo_sandbox::SandboxContext;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -556,6 +559,9 @@ pub struct CommandOutcome {
     pub timed_out: bool,
     pub cancelled: bool,
     pub truncation: TruncationInfo,
+    /// The sandbox decision for this run. `None` for a trusted control-plane
+    /// command that was never meant to be confined.
+    pub sandbox: Option<SandboxReport>,
 }
 
 /// Default wall-clock timeout for agent shell commands (seconds).
@@ -610,13 +616,42 @@ pub fn command_output_interruptible(
     (outcome.output, outcome.exit_code, outcome.cancelled)
 }
 
-/// Full command runner — thin adapter over [`ProcessRunner`].
-/// Env is a minimal allowlist (not full parent inherit). cwd is the project.
+/// Run a *trusted control-plane* command.
+///
+/// Only commands Kodo itself issues belong here (its own `git status` query,
+/// a user-started terminal). Model-driven commands must go through
+/// [`command_run_confined`], which requires a sandbox context.
 pub fn command_run(
     cwd: &Path,
     command: &str,
     alive: &dyn Fn() -> bool,
     timeout_secs: u64,
+) -> CommandOutcome {
+    command_run_with(cwd, command, alive, timeout_secs, None)
+}
+
+/// Run a *model-driven* command under OS confinement.
+///
+/// The sandbox context is mandatory: a command the model chose is never
+/// executed without confinement. When the sandbox cannot be established the
+/// command is refused — it is not started unconfined.
+pub fn command_run_confined(
+    cwd: &Path,
+    command: &str,
+    alive: &dyn Fn() -> bool,
+    timeout_secs: u64,
+    sandbox: &SandboxContext,
+) -> CommandOutcome {
+    command_run_with(cwd, command, alive, timeout_secs, Some(sandbox))
+}
+
+/// Shared implementation for both command paths.
+fn command_run_with(
+    cwd: &Path,
+    command: &str,
+    alive: &dyn Fn() -> bool,
+    timeout_secs: u64,
+    sandbox: Option<&SandboxContext>,
 ) -> CommandOutcome {
     let began = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs.clamp(1, MAX_COMMAND_TIMEOUT_SECS));
@@ -629,12 +664,15 @@ pub fn command_run(
         // Repository config must not turn an automatic query into a hook or pager run.
         if matches!(args[0], "status" | "diff") {
             submodules_ignored = true;
-            let spec = ProcessSpec::shell(cwd,
+            let mut spec = ProcessSpec::shell(cwd,
                 r#"git --no-pager --no-optional-locks -c core.fsmonitor=false config --null --name-only --get-regexp "^filter\..*\.(clean|smudge|process|required)$""#)
                 .env(agent_env_policy())
                 .timeout(timeout)
                 .stdout_limit(48 * 1024)
                 .stderr_limit(16 * 1024);
+            if let Some(sandbox) = sandbox {
+                spec = spec.sandbox(sandbox.clone());
+            }
             let mut config = ProcessRunner::run(&spec, alive);
             let no_filters = config.status == ProcessStatus::ExitFailure
                 && config.exit_code == Some(1)
@@ -685,7 +723,7 @@ pub fn command_run(
     } else {
         command.to_owned()
     };
-    let spec = ProcessSpec::shell(cwd, command)
+    let mut spec = ProcessSpec::shell(cwd, command)
         .timeout(
             timeout
                 .saturating_sub(began.elapsed())
@@ -694,6 +732,9 @@ pub fn command_run(
         .env(env)
         .stdout_limit(48 * 1024)
         .stderr_limit(16 * 1024);
+    if let Some(sandbox) = sandbox {
+        spec = spec.sandbox(sandbox.clone());
+    }
     let outcome = ProcessRunner::run(&spec, alive);
     let mut outcome = map_process_outcome(outcome, timeout_secs);
     if filters_disabled {
@@ -803,6 +844,7 @@ fn map_process_outcome(outcome: ProcessOutcome, timeout_secs: u64) -> CommandOut
         timed_out: outcome.timed_out,
         cancelled: outcome.cancelled,
         truncation,
+        sandbox: outcome.sandbox,
     }
 }
 

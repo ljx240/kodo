@@ -65,8 +65,8 @@ use base64::Engine as _;
 use skill::{SkillRegistry, SkillSpec};
 use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason, Transition};
 use tools::{
-    classify_command_risk, command_run, search_files, write_project_file_checked,
-    CommandOutcomeKind,
+    classify_command_risk, command_run, command_run_confined, search_files,
+    write_project_file_checked, CommandOutcomeKind, TruncationInfo,
 };
 use verify::{
     failure_triage_eligible, FailureClass, FinalStatus, RepairDecision, VerificationPlan,
@@ -542,6 +542,13 @@ pub struct RunRequest {
     pub pinned_force_inline: Vec<String>,
     pub provider: Option<Provider>,
     pub permission: Permission,
+    /// OS-level confinement for every model-driven command in this run.
+    ///
+    /// `None` means the caller did not establish a sandbox. Model-driven
+    /// commands then run *unconfined*, so entry points that talk to a model
+    /// must always supply a context — the CLI, the desktop app and the
+    /// scheduler all build one from the shared configuration.
+    pub sandbox: Option<kodo_sandbox::SandboxContext>,
     pub mode: AgentMode,
     pub fallback_to_local: bool,
     pub max_output_tokens: u32,
@@ -776,18 +783,96 @@ fn command_step(
         return Ok((false, None));
     }
     let began = Instant::now();
-    let outcome = command_run(project, command, alive, tools::DEFAULT_COMMAND_TIMEOUT_SECS);
+    // A model-driven command is always confined. When the request carries no
+    // sandbox context the command is refused rather than run unconfined.
+    let mut outcome = match request.sandbox.as_ref() {
+        Some(sandbox) => command_run_confined(
+            project,
+            command,
+            alive,
+            tools::DEFAULT_COMMAND_TIMEOUT_SECS,
+            sandbox,
+        ),
+        None => CommandOutcome {
+            kind: CommandOutcomeKind::Error,
+            output: "沙箱未初始化，已拒绝执行该命令".to_owned(),
+            exit_code: Some(126),
+            duration_ms: 0,
+            timed_out: false,
+            cancelled: false,
+            truncation: TruncationInfo::default(),
+            sandbox: None,
+        },
+    };
+
+    // The sandbox refused the run. Offer a one-shot escalation: the grant is
+    // bound to this session and this exact command, and is burnt on use — a
+    // second identical command needs a new approval.
+    let mut escalated = false;
+    if outcome.kind == CommandOutcomeKind::Error
+        && outcome.exit_code == Some(126)
+        && request.sandbox.is_some()
+    {
+        let safe_cmd = tools::redact_secrets(command);
+        let request_text = format!(
+            "沙箱拒绝了该命令，需要单次越权（仅本次生效，不改变会话沙箱设置）：\n{safe_cmd}"
+        );
+        if approve(StepKind::Permission, &request_text) {
+            if let Some(sandbox) = request.sandbox.as_ref() {
+                let digest = kodo_sandbox::operation_digest(command);
+                let session = request.session_id.clone().unwrap_or_default();
+                sandbox.runtime().issue_grant(kodo_sandbox::GrantScope::new(
+                    session.clone(),
+                    digest.clone(),
+                    kodo_sandbox::GrantWidening::UnrestrictedCommand,
+                    300,
+                ));
+                // The grant is consumed immediately, so it cannot be replayed.
+                if sandbox.runtime().consume_grant(&session, &digest).is_some() {
+                    outcome =
+                        command_run(project, command, alive, tools::DEFAULT_COMMAND_TIMEOUT_SECS);
+                    escalated = true;
+                    notes.push(format!(
+                        "`{safe_cmd}` → 已获单次越权授权（沙箱已绕过，仅本次）"
+                    ));
+                }
+            }
+        }
+    }
     let duration_ms = began.elapsed().as_millis() as u64;
+    // Audit record: the backend, the mode and the measured enforcement. No
+    // command text, no environment, no credentials.
+    if let Some(report) = outcome.sandbox.as_ref() {
+        notes.push(format!(
+            "[沙箱] {} · {} · 文件读={} 文件写={} 网络={}{}",
+            report.backend,
+            report.mode.label(),
+            report.file_read.label(),
+            report.file_write.label(),
+            report.network_egress.label(),
+            report
+                .refusal
+                .as_ref()
+                .map(|reason| format!(" · 拒绝：{reason}"))
+                .unwrap_or_default()
+        ));
+    }
     let output = outcome.output.clone();
     let command_label = tools::redact_secrets(command);
     let code = outcome.exit_code;
     let ok = matches!(outcome.kind, CommandOutcomeKind::Success);
-    let summary = match outcome.kind {
-        CommandOutcomeKind::Success => "ok",
-        CommandOutcomeKind::Failed => "非零退出",
-        CommandOutcomeKind::TimedOut => "超时",
-        CommandOutcomeKind::Cancelled => "已中断",
-        CommandOutcomeKind::Error => "执行错误",
+    let summary: String = match outcome.kind {
+        CommandOutcomeKind::Success => "ok".to_owned(),
+        CommandOutcomeKind::Failed => "非零退出".to_owned(),
+        CommandOutcomeKind::TimedOut => "超时".to_owned(),
+        CommandOutcomeKind::Cancelled => "已中断".to_owned(),
+        CommandOutcomeKind::Error => "执行错误".to_owned(),
+    };
+    // The audit trail says *how* the command ran, not just that it ran.
+    let summary = if escalated {
+        format!("{summary}（单次越权）")
+    } else {
+        summary.to_owned()
     };
     let result = if ok {
         ToolResult::success(
@@ -858,7 +943,7 @@ fn external_step(
     }
     let wire = call.name.clone();
     let args_label = tools::redact_secrets(&call.args_label());
-    let detail = mcp.connection_config(&wire).map_or_else(
+    let mut detail = mcp.connection_config(&wire).map_or_else(
         || format!("{wire} {args_label}"),
         |server| {
             format!(
@@ -873,6 +958,14 @@ fn external_step(
             )
         },
     );
+    // A local MCP server is a separate process that Kodo starts outside the
+    // sandbox. Say so in the approval text instead of letting the user
+    // believe the sandbox covers it.
+    if let Some(server) = mcp.connection_config(&wire) {
+        if server.transport == mcp::McpTransportKind::Stdio && request.sandbox.is_some() {
+            detail.push_str(" [外部 MCP 服务不受沙箱限制，将以当前用户权限运行]");
+        }
+    }
     let cwd = project.to_string_lossy().into_owned();
     let provisional = Step::Command {
         command: detail.clone(),
@@ -1150,6 +1243,58 @@ fn stale_edit_block(dedup: &dedup::TurnDedup, project: &Path, path: &str) -> Opt
 }
 
 /// Runs one typed tool call and returns (keep, observation).
+/// A file mutation the sandbox policy refuses.
+struct WriteRefusal {
+    note: String,
+    result: ToolResult,
+}
+
+/// Check a filesystem-mutating tool call against the sandbox policy.
+///
+/// Returns `None` when the call is allowed, when it does not touch the
+/// filesystem, or when no sandbox is in force. A read-only session refuses
+/// every mutation, and a mutation outside the allowed write roots is refused
+/// even in workspace-write mode.
+fn sandbox_write_refusal(
+    call: &ToolCall,
+    project: &Path,
+    request: &RunRequest,
+) -> Option<WriteRefusal> {
+    let sandbox = request.sandbox.as_ref()?;
+    let relative = match (&call.name, &call.args) {
+        (ToolName::WriteFile, ToolArgs::WriteFile { path, .. })
+        | (ToolName::ApplyPatch, ToolArgs::ApplyPatch { path, .. })
+        | (ToolName::ReplaceRange, ToolArgs::ReplaceRange { path, .. })
+        | (ToolName::CreateFile, ToolArgs::CreateFile { path, .. })
+        | (ToolName::DeleteFile, ToolArgs::DeleteFile { path }) => path,
+        _ => return None,
+    };
+    // The path is resolved with the same rules the file tools use, so the
+    // policy sees the real target rather than the model's spelling of it.
+    let target = match tools::resolve_in_project(project, relative) {
+        Ok(target) => target,
+        // Path resolution failures are reported by the tool itself.
+        Err(_) => return None,
+    };
+    if sandbox.allows_write(&target) {
+        return None;
+    }
+    let reason = if sandbox.mode() == kodo_sandbox::SandboxMode::ReadOnly {
+        "沙箱为只读模式，不能修改工作区文件".to_owned()
+    } else {
+        format!("沙箱策略不允许写入 `{}`", relative)
+    };
+    Some(WriteRefusal {
+        note: reason.clone(),
+        result: ToolResult::failure(
+            call.id.clone(),
+            call.name.label(),
+            relative.clone(),
+            ToolError::permission_denied(&reason),
+        ),
+    })
+}
+
 fn execute_tool_call(
     call: &ToolCall,
     project: &Path,
@@ -1160,6 +1305,13 @@ fn execute_tool_call(
     notes: &mut Vec<String>,
     dedup: &mut dedup::TurnDedup,
 ) -> StepOutcome {
+    // Every filesystem mutation goes through the sandbox policy first. The
+    // operating system cannot enforce this for the built-in file tools —
+    // they run inside Kodo itself — so the policy is checked here.
+    if let Some(refusal) = sandbox_write_refusal(call, project, request) {
+        notes.push(refusal.note.clone());
+        return Ok((true, Some(refusal.result)));
+    }
     match (&call.name, &call.args) {
         (ToolName::RunCommand, ToolArgs::RunCommand { command }) => command_step(
             command,
@@ -4093,7 +4245,10 @@ pub fn run(
                         machine.budget().max_repairs
                     ),
                 });
-                let verifier = VerificationRunner::new(90_000);
+                let mut verifier = VerificationRunner::new(90_000);
+                if let Some(sandbox) = request.sandbox.as_ref() {
+                    verifier = verifier.with_sandbox(sandbox.clone());
+                }
                 let changed: Vec<String> = changeset
                     .kodo_changes()
                     .iter()
@@ -7261,8 +7416,30 @@ mod tests {
         ToolRegistry::standard()
     }
 
+    /// The shared sandbox runtime for tests. Detection is cached, so this
+    /// costs one probe per process.
+    fn test_runtime() -> std::sync::Arc<kodo_sandbox::SandboxRuntime> {
+        static RUNTIME: std::sync::OnceLock<std::sync::Arc<kodo_sandbox::SandboxRuntime>> =
+            std::sync::OnceLock::new();
+        RUNTIME
+            .get_or_init(kodo_sandbox::SandboxRuntime::detect)
+            .clone()
+    }
+
+    /// A confinement context for a test workspace.
+    ///
+    /// Tests build one exactly like the real entry points do, so a
+    /// model-driven command is confined in tests too — a test may not pass
+    /// because the sandbox was never wired up.
+    fn test_sandbox(dir: &Path) -> kodo_sandbox::SandboxContext {
+        let runtime = test_runtime();
+        let policy = runtime.policy_for(dir, kodo_sandbox::SandboxMode::WorkspaceWrite);
+        kodo_sandbox::SandboxContext::new(runtime, policy)
+    }
+
     fn temp_request(dir: &Path, permission: Permission) -> RunRequest {
         RunRequest {
+            sandbox: Some(test_sandbox(dir)),
             project: Some(dir.to_path_buf()),
             message: "test".to_owned(),
             conversation_history: Vec::new(),
@@ -9143,6 +9320,89 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_sandbox_refuses_a_file_write() {
+        // The file tools run inside Kodo, so the operating system cannot
+        // enforce the boundary for them — the policy has to.
+        let dir = std::env::temp_dir().join(format!("kodo-ro-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut request = temp_request(&dir, Permission::Full);
+        let runtime = test_runtime();
+        let policy = runtime.policy_for(&dir, kodo_sandbox::SandboxMode::ReadOnly);
+        request.sandbox = Some(kodo_sandbox::SandboxContext::new(runtime, policy));
+
+        let call = ToolCall {
+            id: ToolCallId::new("ro"),
+            name: ToolName::WriteFile,
+            args: ToolArgs::WriteFile {
+                path: "out.txt".to_owned(),
+                content: "nope".to_owned(),
+            },
+        };
+        let mut notes = Vec::new();
+        let mut dedup = dedup::TurnDedup::new();
+        let (_keep, result) = execute_tool_call(
+            &call,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |_| true,
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("the call returns a result");
+        let result = result.expect("a result");
+        assert!(!result.ok, "a read-only sandbox must refuse the write");
+        assert!(
+            !dir.join("out.txt").exists(),
+            "the file must not have been written"
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("只读")),
+            "the refusal must say why: {notes:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_command_without_a_sandbox_context_is_refused() {
+        // Fail closed: a model-driven command never runs unconfined.
+        let dir = std::env::temp_dir().join(format!("kodo-no-sandbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut request = temp_request(&dir, Permission::Full);
+        request.sandbox = None;
+        let call = ToolCall {
+            id: ToolCallId::new("ns"),
+            name: ToolName::RunCommand,
+            args: ToolArgs::RunCommand {
+                command: "echo should-not-run > marker.txt".to_owned(),
+            },
+        };
+        let mut notes = Vec::new();
+        let mut dedup = dedup::TurnDedup::new();
+        let (_keep, result) = execute_tool_call(
+            &call,
+            &dir,
+            &request,
+            &|| true,
+            &|_, _| true,
+            &mut |_| true,
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("the call returns a result");
+        let result = result.expect("a result");
+        assert!(!result.ok, "the command must be refused");
+        assert!(
+            !dir.join("marker.txt").exists(),
+            "the command must never have started"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn execute_tool_call_run_command_returns_output() {
         let dir = std::env::temp_dir().join(format!("kodo-obs-bash-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -10529,6 +10789,7 @@ mod tests {
         .expect("script");
         let provider = Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
         let request = RunRequest {
+            sandbox: None,
             project: Some(project),
             message: "介绍下什么是数据仓库".to_owned(),
             conversation_history: Vec::new(),
@@ -10860,6 +11121,7 @@ mod tests {
     #[test]
     fn run_without_project_emits_no_command_or_file_steps() {
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "帮我写一份周报总结".to_owned(),
             conversation_history: Vec::new(),
@@ -10904,6 +11166,7 @@ mod tests {
         // guarantees (DESIGN.md §11): the run completes, but no command or
         // file-write step may ever fire — the registry is empty without a root.
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "修复未知表路由".to_owned(),
             conversation_history: Vec::new(),
@@ -10949,6 +11212,7 @@ mod tests {
         // completed, and no "**Verification status:**" footer is appended —
         // none of the report chrome that used to frame a knowledge answer.
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "介绍下什么是数据仓库".to_owned(),
             conversation_history: Vec::new(),
@@ -11027,6 +11291,7 @@ mod tests {
             "缴费基数按实际工资申报，上下限按社平工资调整。\n".as_bytes(),
         );
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "介绍下什么是缴费基数".to_owned(),
             conversation_history: Vec::new(),
@@ -11089,6 +11354,7 @@ mod tests {
         let (_dir, abs) =
             temp_attachment("deploy_note.txt", "发布步骤：先灰度再全量。\n".as_bytes());
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "你好".to_owned(),
             conversation_history: Vec::new(),
@@ -11142,6 +11408,7 @@ mod tests {
         // Control for the guard above: no files pinned → instant canned
         // answer, no model/offline round trip.
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "你好".to_owned(),
             conversation_history: Vec::new(),
@@ -11198,6 +11465,7 @@ mod tests {
         // `image_attachment_oversize_falls_back_to_descriptor_even_with_vision`.
         let (_dir, abs) = temp_attachment("shot.png", &[0x89, b'P', b'N', b'G', 0, 0, 0, 0]);
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "分析并为我解释一下这个文档".to_owned(),
             conversation_history: Vec::new(),
@@ -11257,6 +11525,7 @@ mod tests {
         // note (no vision framing) in the offline fallback answer.
         let (_dir, abs) = temp_attachment("plan.docx", b"fake docx bytes");
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "总结一下这个附件".to_owned(),
             conversation_history: Vec::new(),
@@ -11332,6 +11601,7 @@ mod tests {
         // the producer side (pinned-context loop → inlined_images) is
         // covered by the provider serializer tests in `provider.rs`.
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "描述一下这张图".to_owned(),
             conversation_history: Vec::new(),
@@ -11383,6 +11653,7 @@ mod tests {
         // A successful inlining here would blow the request body.
         let (_dir, abs) = temp_attachment("huge.png", &vec![0x89; 5 * 1024 * 1024]);
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "看一下图".to_owned(),
             conversation_history: Vec::new(),
@@ -11497,6 +11768,7 @@ mod tests {
         .expect("script");
         let provider = Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
         let mut request = RunRequest {
+            sandbox: None,
             project: Some(project.clone()),
             message: "【技能：code-review】\n介绍下什么是数据仓库".to_owned(),
             conversation_history: Vec::new(),
@@ -11641,6 +11913,7 @@ mod tests {
         let xlsx = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qa.xlsx");
         let abs = xlsx.to_string_lossy().to_string();
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "分析并为我解释一下这个文档".to_owned(),
             conversation_history: Vec::new(),
@@ -11776,6 +12049,7 @@ mod tests {
         .expect("script");
         let provider = Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
         let request = RunRequest {
+            sandbox: None,
             project: None,
             message: "介绍下什么是数据仓库".to_owned(),
             conversation_history: Vec::new(),
@@ -11851,6 +12125,7 @@ mod tests {
         std::fs::write(&script, "{\"text\":\"数据仓库集中存储分析数据。\"}\n").expect("script");
         let provider = Provider::new("fake", "fake-key", script.to_string_lossy(), "fake-model");
         let request = RunRequest {
+            sandbox: None,
             project: Some(project.clone()),
             message: "介绍下什么是数据仓库".to_owned(),
             conversation_history: Vec::new(),

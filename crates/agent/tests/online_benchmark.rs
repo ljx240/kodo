@@ -30,6 +30,7 @@ fn online_read_only_smoke() {
 
     let provider = Provider::new("openai", key, endpoint, model);
     let request = RunRequest {
+        sandbox: None,
         project: Some(project.clone()),
         message: "What is this repository? One sentence.".into(),
         conversation_history: Vec::new(),

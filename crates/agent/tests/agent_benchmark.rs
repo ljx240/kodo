@@ -220,6 +220,7 @@ fn run_scenario(
     );
 
     let request = RunRequest {
+        sandbox: None,
         project: Some(project.to_path_buf()),
         message: message.to_owned(),
         conversation_history: Vec::new(),
