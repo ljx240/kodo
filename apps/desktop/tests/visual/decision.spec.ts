@@ -72,3 +72,24 @@ test("腾讯来源固定使用 @makers/jev 并锁定模型输入", async ({ page
   await expect(page.getByTestId("decision-model")).toHaveValue("typesafe/jev-1.14");
   await expect(page.getByTestId("decision-model")).toBeEnabled();
 });
+
+test("决策辅助样式表加载：外发说明与来源选择按设计排版", async ({ page }) => {
+  await page.goto("/ui-demo/settings");
+  await page.getByRole("button", { name: "决策辅助" }).click();
+
+  // These styles live in decision.css, which no component-local import can
+  // guarantee: a missing stylesheet still keeps every behavioural assertion
+  // green, so assert the computed layout directly.
+  const settings = page.getByTestId("decision-settings");
+  await expect(settings.locator(".decision-settings-notice").first()).toHaveCSS(
+    "border-top-width",
+    "1px",
+  );
+
+  const providers = page.getByTestId("decision-provider-typeSafe").locator("..");
+  await expect(providers).toHaveCSS("display", "grid");
+
+  const option = page.getByTestId("decision-provider-typeSafe");
+  await expect(option).toHaveCSS("border-top-width", "1px");
+  await expect(option).toHaveCSS("text-align", "center");
+});
