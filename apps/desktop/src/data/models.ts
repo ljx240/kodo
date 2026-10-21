@@ -20,7 +20,7 @@ export const PERMISSIONS: { value: Permission; label: string; description: strin
   {
     value: "full",
     label: "项目内自动执行",
-    description: "项目文件编辑与已识别的只读命令自动执行；其他命令和外部调用需确认",
+    description: "项目文件编辑、已识别的只读命令与项目构建/测试命令自动执行；其他命令和外部调用需确认",
   },
 ];
 
