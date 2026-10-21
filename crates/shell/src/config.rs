@@ -5,6 +5,9 @@
 use kodo_agent::mcp::{merge_secrets, McpSecrets, McpServerConfig};
 use kodo_agent::{AgentMode, Permission, Provider};
 use kodo_core::settings;
+use kodo_sandbox::{SandboxContext, SandboxMode, SandboxRuntime};
+use std::path::Path;
+use std::sync::Arc;
 
 /// Per-process CLI flags that beat the stored settings.
 #[derive(Debug, Default, Clone)]
@@ -12,6 +15,8 @@ pub struct Overrides {
     pub permission: Option<Permission>,
     pub mode: Option<AgentMode>,
     pub model: Option<String>,
+    /// Sandbox mode for this process. `None` → the shared settings decide.
+    pub sandbox: Option<SandboxMode>,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +31,11 @@ pub struct ShellConfig {
     /// Enabled and disabled servers alike; `run()` connects only the enabled
     /// ones. Secret values are merged in from `credentials.log`.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Sandbox mode in force. Shared by the CLI, the desktop app and the
+    /// scheduler so every surface enforces the same boundary.
+    pub sandbox_mode: SandboxMode,
+    /// The measured sandbox backend for this host.
+    pub sandbox_runtime: Arc<SandboxRuntime>,
 }
 
 /// Stored shape of one entry in the `providers` settings array (camelCase
@@ -104,6 +114,12 @@ impl ShellConfig {
 
         let mcp_servers = load_mcp_servers(read_setting, creds);
 
+        // Secure by default: a missing or unparsable sandbox setting falls
+        // back to the restricted mode, never to "no sandbox".
+        let sandbox_mode = overrides
+            .sandbox
+            .unwrap_or_else(|| sandbox_mode_from_settings(read_setting("sandbox-mode")));
+
         Self {
             provider,
             permission,
@@ -113,7 +129,31 @@ impl ShellConfig {
             extended_thinking,
             local_trace: read_setting("local-detailed-traces").as_deref() == Some("true"),
             mcp_servers,
+            sandbox_mode,
+            sandbox_runtime: SandboxRuntime::detect(),
         }
+    }
+
+    /// Build the confinement context for a project.
+    ///
+    /// `None` only for [`SandboxMode::Unrestricted`], which requires an
+    /// explicit user action and is recorded as a sandbox bypass.
+    pub fn sandbox_context(&self, project: &Path) -> Option<SandboxContext> {
+        if !self.sandbox_mode.confines() {
+            return None;
+        }
+        let policy = self.sandbox_runtime.policy_for(project, self.sandbox_mode);
+        Some(SandboxContext::new(
+            Arc::clone(&self.sandbox_runtime),
+            policy,
+        ))
+    }
+
+    /// One-line description of the sandbox in force, from the measured
+    /// capability report rather than a hand-written banner.
+    pub fn sandbox_status(&self) -> String {
+        let capabilities = self.sandbox_runtime.capabilities();
+        format!("{} · {}", self.sandbox_mode.label(), capabilities.summary())
     }
 }
 
@@ -148,6 +188,13 @@ pub fn permission_from_settings(value: Option<String>) -> Permission {
     value
         .map(|raw| Permission::parse(&raw))
         .unwrap_or(Permission::Ask)
+}
+
+/// Secure by default: an unknown or missing sandbox mode stays restricted.
+pub fn sandbox_mode_from_settings(value: Option<String>) -> SandboxMode {
+    value
+        .and_then(|raw| SandboxMode::parse(&raw))
+        .unwrap_or(SandboxMode::WorkspaceWrite)
 }
 
 /// Default mode is Code — Kodo stays a coding agent unless the user switches.
@@ -322,6 +369,7 @@ mod tests {
             permission: Some(Permission::Full),
             mode: Some(AgentMode::Work),
             model: Some("override-model".into()),
+            sandbox: Some(SandboxMode::ReadOnly),
         };
         // ShellConfig::load reads the real config dir; only assert the
         // override plumbing here so the test stays hermetic.
@@ -385,6 +433,7 @@ mod tests {
                 permission: Some(Permission::Ask),
                 mode: Some(AgentMode::Code),
                 model: Some("override".into()),
+                sandbox: None,
             },
             &next,
             Some(&creds),

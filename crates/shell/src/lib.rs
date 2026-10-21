@@ -15,7 +15,7 @@ pub mod turn;
 
 pub use approve::{approval_fingerprint, step_kind_label, ApprovalChoice};
 pub use apps::AppStore;
-pub use config::{permission_from_settings, Overrides, ShellConfig};
+pub use config::{permission_from_settings, sandbox_mode_from_settings, Overrides, ShellConfig};
 pub use decision::{
     bump_config_generation, clear_decision_credential, current_config_generation,
     decision_settings_view, load_decision_config, mask_secret, save_decision_credential,

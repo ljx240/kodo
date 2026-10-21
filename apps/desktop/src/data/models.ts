@@ -26,3 +26,33 @@ export const PERMISSIONS: { value: Permission; label: string; description: strin
 
 export const PERMISSION_SETTING = "permission";
 export const DEFAULT_PERMISSION: Permission = "ask";
+
+/**
+ * Sandbox modes for untrusted project code.
+ *
+ * Orthogonal to the permission mode: the permission mode decides whether a
+ * human is asked, the sandbox decides what the process may reach. Default is
+ * `workspace-write` (Secure by Default).
+ */
+export type SandboxMode = "read-only" | "workspace-write" | "unrestricted";
+
+export const SANDBOXES: { value: SandboxMode; label: string; description: string }[] = [
+  {
+    value: "read-only",
+    label: "工作区只读",
+    description: "源码不可修改，仅允许在私有临时目录写入",
+  },
+  {
+    value: "workspace-write",
+    label: "工作区写入",
+    description: "可写工作区，项目外写入被操作系统阻止，禁止出网",
+  },
+  {
+    value: "unrestricted",
+    label: "不受限",
+    description: "关闭沙箱，命令以当前用户权限直接执行（风险自负）",
+  },
+];
+
+export const SANDBOX_SETTING = "sandbox-mode";
+export const DEFAULT_SANDBOX: SandboxMode = "workspace-write";

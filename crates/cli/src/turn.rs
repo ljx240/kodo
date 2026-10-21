@@ -183,6 +183,7 @@ impl TurnContext {
             pinned_force_inline: Vec::new(),
             provider: self.config.provider.clone(),
             permission: self.permission,
+            sandbox: self.config.sandbox_context(&self.project),
             mode: AgentMode::Code,
             fallback_to_local: self.config.fallback_to_local,
             max_output_tokens: self.config.max_output_tokens,
@@ -319,6 +320,8 @@ mod tests {
             local_trace: false,
             mode: kodo_agent::AgentMode::Code,
             mcp_servers: Vec::new(),
+            sandbox_mode: kodo_sandbox::SandboxMode::WorkspaceWrite,
+            sandbox_runtime: kodo_sandbox::SandboxRuntime::detect(),
         };
         TurnContext::new(project, session_dir, config)
     }

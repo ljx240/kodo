@@ -754,6 +754,11 @@ pub enum RunEvent {
         /// Human-readable reason for the risk.
         #[serde(default)]
         reason: String,
+        /// The sandbox scope the step runs under, e.g.
+        /// "工作区写入 · 文件写=完整 · 网络=完整". Empty when the sandbox is
+        /// not in force.
+        #[serde(default)]
+        sandbox: String,
     },
     /// Incremental assistant text while the model streams (not persisted).
     TextDelta {

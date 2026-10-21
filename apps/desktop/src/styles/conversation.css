@@ -1635,7 +1635,8 @@ button.changed-file-path:focus-visible {
 
 /* Structured approval risk context. */
 .approval-reason,
-.approval-cwd {
+.approval-cwd,
+.approval-sandbox {
   display: block;
   font-size: var(--kodo-font-xs);
   color: var(--kodo-text-secondary);
@@ -1644,6 +1645,12 @@ button.changed-file-path:focus-visible {
 
 .approval-cwd {
   font-family: var(--kodo-font-mono);
+}
+
+/* The protected scope the approved step runs under. */
+.approval-sandbox {
+  font-family: var(--kodo-font-mono);
+  color: var(--kodo-accent-fg);
 }
 
 /* ── Interaction polish: status, markdown, queue, slash, model groups ─────── */

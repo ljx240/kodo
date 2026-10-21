@@ -18,6 +18,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use kodo_sandbox::{EnforcementLevel, SandboxContext, SandboxMode};
+
 /// Hard cap so a mis-set timeout cannot run forever (seconds).
 pub const MAX_PROCESS_TIMEOUT_SECS: u64 = 600;
 
@@ -80,6 +82,47 @@ pub struct ProcessSpec {
     pub env: EnvPolicy,
     pub stdout_limit: usize,
     pub stderr_limit: usize,
+    /// Confinement to apply before spawning.
+    ///
+    /// `None` means *trusted control plane* — a command Kodo itself starts
+    /// (its own `git status` query, a user-started terminal). `Some` means
+    /// the command runs untrusted project code and must be confined by the
+    /// operating system. Model-driven commands always carry `Some`.
+    pub sandbox: Option<SandboxContext>,
+}
+
+/// What the sandbox decided for one run.
+///
+/// The report is the source of truth for "was this confined?" — the UI and
+/// the audit log read it instead of assuming confinement happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxReport {
+    pub backend: String,
+    pub mode: SandboxMode,
+    pub file_read: EnforcementLevel,
+    pub file_write: EnforcementLevel,
+    pub network_egress: EnforcementLevel,
+    /// Set when the sandbox refused to start the command.
+    pub refusal: Option<String>,
+}
+
+impl SandboxReport {
+    fn from_context(context: &SandboxContext) -> Self {
+        let capabilities = context.runtime().capabilities();
+        Self {
+            backend: capabilities.backend.clone(),
+            mode: context.mode(),
+            file_read: capabilities.file_read,
+            file_write: capabilities.file_write,
+            network_egress: capabilities.network_egress,
+            refusal: None,
+        }
+    }
+
+    /// True when the command ran under OS confinement.
+    pub fn is_confined(&self) -> bool {
+        self.refusal.is_none() && self.mode.confines()
+    }
 }
 
 impl ProcessSpec {
@@ -91,6 +134,7 @@ impl ProcessSpec {
             env: EnvPolicy::Inherit,
             stdout_limit: 64 * 1024,
             stderr_limit: 16 * 1024,
+            sandbox: None,
         }
     }
 
@@ -113,6 +157,12 @@ impl ProcessSpec {
         self.stderr_limit = limit;
         self
     }
+
+    /// Confine this run at the OS level.
+    pub fn sandbox(mut self, sandbox: SandboxContext) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
 }
 
 /// Result of one run. `stdout`/`stderr` are always bounded by the spec limits
@@ -132,6 +182,9 @@ pub struct ProcessOutcome {
     pub stdout_hit_limit: bool,
     /// True when the stderr byte cap stopped reading while data remained.
     pub stderr_hit_limit: bool,
+    /// The sandbox decision for this run. `None` for trusted control-plane
+    /// commands that were never meant to be confined.
+    pub sandbox: Option<SandboxReport>,
 }
 
 impl ProcessOutcome {
@@ -190,6 +243,7 @@ impl ProcessRunner {
                 command: spec.command.clone(),
                 stdout_hit_limit: false,
                 stderr_hit_limit: false,
+                sandbox: None,
             };
         }
         if !alive() {
@@ -205,6 +259,7 @@ impl ProcessRunner {
                 command: spec.command.clone(),
                 stdout_hit_limit: false,
                 stderr_hit_limit: false,
+                sandbox: None,
             };
         }
 
@@ -212,8 +267,27 @@ impl ProcessRunner {
             .timeout
             .min(Duration::from_secs(MAX_PROCESS_TIMEOUT_SECS))
             .max(Duration::from_millis(50));
-        let mut cmd = shell_command(&spec.command);
-        apply_env(&mut cmd, &spec.env);
+        // The sandbox is applied *before* the process exists. When it refuses,
+        // the command never starts — there is no fallback to an unconfined run.
+        let (mut cmd, sandbox, profile_path) = match build_command(spec) {
+            Ok(built) => built,
+            Err(refusal) => {
+                return ProcessOutcome {
+                    status: ProcessStatus::SpawnFailure,
+                    stdout: String::new(),
+                    stderr: refusal.message.clone(),
+                    exit_code: Some(126),
+                    duration_ms: began.elapsed().as_millis() as u64,
+                    timed_out: false,
+                    cancelled: false,
+                    spawn_error: Some(refusal.message),
+                    command: spec.command.clone(),
+                    stdout_hit_limit: false,
+                    stderr_hit_limit: false,
+                    sandbox: Some(refusal.report),
+                };
+            }
+        };
         let mut child = match cmd
             .current_dir(&spec.cwd)
             .stdin(Stdio::null())
@@ -235,6 +309,7 @@ impl ProcessRunner {
                     command: spec.command.clone(),
                     stdout_hit_limit: false,
                     stderr_hit_limit: false,
+                    sandbox,
                 };
             }
         };
@@ -372,6 +447,13 @@ impl ProcessRunner {
             None
         };
 
+        if let Some(profile) = profile_path {
+            let _ = std::fs::remove_file(&profile);
+            if let Some(parent) = profile.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+
         ProcessOutcome {
             status,
             stdout: stdout_text,
@@ -384,7 +466,83 @@ impl ProcessRunner {
             command: spec.command.clone(),
             stdout_hit_limit,
             stderr_hit_limit,
+            sandbox,
         }
+    }
+}
+
+/// A sandbox refusal: the command must not run.
+#[derive(Debug, Clone)]
+struct SandboxRefusal {
+    message: String,
+    report: SandboxReport,
+}
+
+/// Build the command to spawn, applying the sandbox when one is configured.
+///
+/// * No sandbox context → a trusted control-plane command runs unchanged.
+/// * A sandbox context → the target is wrapped by the OS confinement
+///   mechanism and the resulting program/argv are spawned.
+///
+/// Returning `Err` means the command is refused. There is deliberately no
+/// branch that downgrades a refusal into an unconfined run.
+fn build_command(
+    spec: &ProcessSpec,
+) -> Result<(Command, Option<SandboxReport>, Option<PathBuf>), SandboxRefusal> {
+    let Some(context) = spec.sandbox.as_ref() else {
+        let mut cmd = shell_command(&spec.command);
+        apply_env(&mut cmd, &spec.env);
+        return Ok((cmd, None, None));
+    };
+
+    let mut report = SandboxReport::from_context(context);
+    let (program, args) = shell_invocation(&spec.command);
+    let prepared = match context.prepare(&program, &args, &spec.cwd) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            report.refusal = Some(error.to_string());
+            return Err(SandboxRefusal {
+                message: error.to_string(),
+                report,
+            });
+        }
+    };
+
+    let mut cmd = Command::new(&prepared.program);
+    cmd.args(&prepared.args);
+    // The sandbox launcher leads its own process group, so the tree kill
+    // reaches the confined process and every descendant it spawns.
+    isolate_process_group(&mut cmd);
+    apply_env(&mut cmd, &spec.env);
+    // The backend's environment additions (a private TMPDIR) must survive the
+    // scrubbed environment, so they are applied last.
+    for (key, value) in &prepared.env {
+        cmd.env(key, value);
+    }
+    // The Seatbelt profile is a private artefact of this run; it is removed
+    // once the process is done.
+    let profile_path = prepared.profile_path.clone();
+    Ok((cmd, Some(report), profile_path))
+}
+
+/// The program and argv the shell line is executed through.
+fn shell_invocation(command: &str) -> (std::path::PathBuf, Vec<std::ffi::OsString>) {
+    if cfg!(windows) {
+        (
+            std::path::PathBuf::from("cmd"),
+            vec![
+                std::ffi::OsString::from("/C"),
+                std::ffi::OsString::from(command),
+            ],
+        )
+    } else {
+        (
+            std::path::PathBuf::from("/bin/sh"),
+            vec![
+                std::ffi::OsString::from("-c"),
+                std::ffi::OsString::from(command),
+            ],
+        )
     }
 }
 

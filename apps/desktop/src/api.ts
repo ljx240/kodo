@@ -38,6 +38,28 @@ export function coreInfo(): Promise<CoreInfo | null> {
   return isDesktop() ? invoke<CoreInfo>("core_info") : Promise.resolve(null);
 }
 
+/**
+ * The measured sandbox state of this machine.
+ *
+ * The per-axis levels come from the backend's functional probe, so the GUI
+ * reports what the host really enforces rather than what we hope it does.
+ */
+export type SandboxStatus = {
+  mode: string;
+  modeLabel: string;
+  backend: string;
+  fileRead: string;
+  fileWrite: string;
+  networkEgress: string;
+  available: boolean;
+  notes: string[];
+};
+
+/** Returns null outside the desktop shell, where there is no backend to reach. */
+export function sandboxStatus(): Promise<SandboxStatus | null> {
+  return isDesktop() ? invoke<SandboxStatus>("sandbox_status") : Promise.resolve(null);
+}
+
 /** A project the user registered by hand. There is no scan and no default root. */
 export type ProjectDto = {
   path: string;
@@ -232,6 +254,7 @@ type RunEventPayload =
       cwd?: string;
       riskCategory?: string;
       reason?: string;
+      sandbox?: string;
     }
   | { type: "textDelta"; session: string; text: string }
   | { type: "progress"; session: string; phase: string; detail: string }
@@ -295,6 +318,7 @@ export type PendingApprovalDto = {
   cwd: string;
   riskCategory: string;
   reason: string;
+  sandbox: string;
 };
 
 /** Authoritative live state for a conversation that is being opened. */

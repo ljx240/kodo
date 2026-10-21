@@ -76,7 +76,31 @@ fn run(parsed: args::Args) -> i32 {
         permission: parsed.permission,
         mode: parsed.mode,
         model: parsed.model,
+        sandbox: parsed.sandbox,
     });
+    // The warnings come first: turning the sandbox off is the one state the
+    // user must not reach by accident, and it must be visible even when the
+    // process only prints the status.
+    if !config.sandbox_mode.confines() {
+        eprintln!(
+            "⚠ 沙箱已关闭（--sandbox unrestricted）：模型命令将以当前用户权限直接执行，sandbox_bypassed=true"
+        );
+    } else if !config.sandbox_runtime.is_available() {
+        eprintln!(
+            "⚠ 本机没有可用的沙箱后端，受限命令将被拒绝执行。{}",
+            config.sandbox_runtime.capabilities().summary()
+        );
+    }
+    if parsed.sandbox_status {
+        // The banner text comes from the measured capability report, never
+        // from a hard-coded string.
+        let capabilities = config.sandbox_runtime.capabilities();
+        println!("沙箱状态：{}", config.sandbox_status());
+        for note in &capabilities.notes {
+            println!("  · {note}");
+        }
+        return 0;
+    }
     let mut ctx = TurnContext::new(project, session_dir, config);
     ctx.allow_verify = parsed.allow_verify;
 

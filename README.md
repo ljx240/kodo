@@ -14,6 +14,7 @@ Rust Core + Agent + Tauri/React GUI。GUI 服务项目级对话、执行过程�
 - Response Trace / Archive / Settings
 - 多 AI Provider（Anthropic / OpenAI / DeepSeek / 自定义兼容端点）
 - **Secure by Default**：默认 `ask` 权限，危险命令与写文件需审批
+- **操作系统级沙箱**：默认 `workspace-write`，项目外写入与出网被系统直接阻止
 
 ## 快速开始
 
@@ -48,6 +49,7 @@ Rust Core + Agent + Tauri/React GUI。GUI 服务项目级对话、执行过程�
 |---|---|---|
 | Core | `crates/core` | 项目/会话/设置的 append-only 日志 |
 | Agent | `crates/agent` | 工具循环、可选 LLM HTTP、写文件与验证 |
+| Sandbox | `crates/sandbox` | 沙箱策略、能力探测、macOS/Linux 操作系统隔离 |
 | Shell | `apps/desktop/src-tauri` | Tauri 命令、run 线程、审批 |
 | GUI | `apps/desktop/src` | React + Vite |
 
@@ -73,6 +75,25 @@ Rust Core + Agent + Tauri/React GUI。GUI 服务项目级对话、执行过程�
 | `full` | 项目内工作自动执行（不推荐） |
 
 危险命令示例：`rm`、`sudo`、`git push`、管道下载执行等。
+
+## 沙箱
+
+权限决定"要不要问人"，沙箱决定"进程能碰到什么"——两条轴互不影响。
+默认 `workspace-write`：可写工作区，项目外写入与出网被操作系统直接阻止，
+子进程同样受限。沙箱初始化失败时受限命令会被**拒绝执行**，不会退化为无沙箱运行。
+
+| 档位 | 行为 |
+|---|---|
+| `read-only` | 源码不可修改，仅私有临时目录可写 |
+| `workspace-write`（默认） | 可写工作区；项目外写入被系统阻止；禁止出网 |
+| `unrestricted` | 关闭沙箱（需显式确认，会在日志中标记） |
+
+```bash
+kodo --sandbox-status          # 查看本机后端与实测强制能力
+```
+
+桌面端：**Settings → 工具** 可切换档位并查看当前强制能力。
+平台能力矩阵、验证方式与剩余风险见 `docs/design/SECURE_EXECUTION.md`。
 
 ## 开发
 

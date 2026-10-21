@@ -13,6 +13,7 @@ import {
   Scale,
   Search,
   Settings,
+  ShieldCheck,
   SlidersHorizontal,
   SquareTerminal,
   Trash2,
@@ -29,6 +30,8 @@ import {
 } from "../api";
 import { DEFAULT_PERMISSION, MODELS } from "../data/models";
 import { PERMISSIONS, PERMISSION_SETTING } from "../data/models";
+import { SANDBOXES, SANDBOX_SETTING, DEFAULT_SANDBOX } from "../data/models";
+import { sandboxStatus, type SandboxStatus } from "../api";
 import { T } from "../i18n";
 import { Field, Switch } from "../shell/controls";
 import {
@@ -739,6 +742,25 @@ function ProviderEditor({
 function ToolsBody() {
   // Same default as DEFAULT_PERMISSION / the composer trigger ("ask", Secure by Default).
   const [permission, setPermission] = useSetting(PERMISSION_SETTING, DEFAULT_PERMISSION);
+  // Sandbox mode is orthogonal to the permission mode: Secure by Default is
+  // `workspace-write`, the same default the CLI resolves.
+  const [sandbox, setSandbox] = useSetting(SANDBOX_SETTING, DEFAULT_SANDBOX);
+  const [status, setStatus] = useState<SandboxStatus | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    sandboxStatus()
+      .then((next) => {
+        if (live) setStatus(next);
+      })
+      .catch(() => {
+        if (live) setStatus(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
   return (
     <>
       <Field
@@ -761,7 +783,66 @@ function ToolsBody() {
           ))}
         </select>
       </Field>
+      <Field
+        icon={<ShieldCheck size={20} strokeWidth={1.6} />}
+        label={T.page.settings.rows.sandboxMode}
+        hint={T.page.settings.rows.sandboxHint}
+        hintBelow
+        wide
+      >
+        <select
+          className="select"
+          value={sandbox}
+          onChange={(e) => setSandbox(e.target.value)}
+          aria-label={T.page.settings.rows.sandboxMode}
+        >
+          {SANDBOXES.map((item) => (
+            <option key={item.value} value={item.value}>
+              {item.label} — {item.description}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {status && <SandboxStatusRow status={status} />}
     </>
+  );
+}
+
+/**
+ * The measured enforcement of this host.
+ *
+ * Every level comes from the backend's functional probe, so the row cannot
+ * claim an isolation the machine does not actually provide.
+ */
+function SandboxStatusRow({ status }: { status: SandboxStatus }) {
+  const level = (raw: string) => {
+    if (raw === "full") return T.page.settings.rows.sandboxLevelFull;
+    if (raw === "partial") return T.page.settings.rows.sandboxLevelPartial;
+    return T.page.settings.rows.sandboxLevelUnsupported;
+  };
+  return (
+    <Field
+      label={T.page.settings.rows.sandboxStatusLabel}
+      hint={`${status.backend}`}
+      hintBelow
+      wide
+    >
+      {!status.available && (
+        <p className="settings-hint" role="note">
+          {T.page.settings.rows.sandboxUnavailable}
+        </p>
+      )}
+      <p className="settings-hint">
+        {T.page.settings.rows.sandboxReadonly}：{level(status.fileRead)} ·{" "}
+        {T.page.settings.rows.sandboxWrite}：{level(status.fileWrite)} ·{" "}
+        {T.page.settings.rows.sandboxNetwork}：{level(status.networkEgress)}
+      </p>
+      {status.notes.map((note) => (
+        <p key={note} className="settings-hint" role="note">
+          {note}
+        </p>
+      ))}
+    </Field>
   );
 }
 

@@ -952,13 +952,29 @@ impl FinalStatus {
 /// Infers and runs build/typecheck/test/lint with timeouts.
 pub struct VerificationRunner {
     pub default_timeout_ms: u64,
+    /// OS confinement for the commands this runner executes.
+    ///
+    /// Verification commands are planned by the model, so they run under the
+    /// same sandbox as any other model-driven command. `None` means the
+    /// caller did not establish a sandbox — the entry points that talk to a
+    /// model always set it.
+    pub sandbox: Option<kodo_sandbox::SandboxContext>,
 }
 
 impl Default for VerificationRunner {
     fn default() -> Self {
         Self {
             default_timeout_ms: 90_000,
+            sandbox: None,
         }
+    }
+}
+
+impl VerificationRunner {
+    /// Run verification commands under OS confinement.
+    pub fn with_sandbox(mut self, sandbox: kodo_sandbox::SandboxContext) -> Self {
+        self.sandbox = Some(sandbox);
+        self
     }
 }
 
@@ -1143,7 +1159,10 @@ fn cargo_check_command(rel_dir: &str) -> String {
 
 impl VerificationRunner {
     pub fn new(default_timeout_ms: u64) -> Self {
-        Self { default_timeout_ms }
+        Self {
+            default_timeout_ms,
+            sandbox: None,
+        }
     }
 
     /// Infer candidate commands from project layout and package scripts.
@@ -1589,7 +1608,17 @@ impl VerificationRunner {
     ) -> VerifyOutcome {
         let timeout_secs = (cmd.timeout_ms.max(1_000)).div_ceil(1_000);
         // Shared ProcessRunner path — no uncancellable side channel.
-        let outcome = crate::tools::command_run(project, &cmd.command, alive, timeout_secs);
+        // Verification commands are model-planned, so they are confined.
+        let outcome = match self.sandbox.as_ref() {
+            Some(sandbox) => crate::tools::command_run_confined(
+                project,
+                &cmd.command,
+                alive,
+                timeout_secs,
+                sandbox,
+            ),
+            None => crate::tools::command_run(project, &cmd.command, alive, timeout_secs),
+        };
         let combined = crate::tools::redact_secrets(&outcome.output);
         let code = outcome.exit_code;
         let ok = outcome.kind == crate::tools::CommandOutcomeKind::Success;

@@ -2192,6 +2192,7 @@ dependencies = [
  "calamine",
  "kodo-core",
  "kodo-memory",
+ "kodo-sandbox",
  "libc",
  "quick-xml 0.42.0",
  "serde",
@@ -2207,6 +2208,7 @@ dependencies = [
  "kodo-agent",
  "kodo-core",
  "kodo-memory",
+ "kodo-sandbox",
  "kodo-shell",
  "libc",
  "serde_json",
@@ -2230,6 +2232,7 @@ dependencies = [
  "kodo-core",
  "kodo-knowledge",
  "kodo-memory",
+ "kodo-sandbox",
  "kodo-shell",
  "libc",
  "parking_lot",
@@ -2287,12 +2290,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kodo-sandbox"
+version = "0.0.1"
+
+[[package]]
 name = "kodo-shell"
 version = "0.0.1"
 dependencies = [
  "kodo-agent",
  "kodo-core",
  "kodo-memory",
+ "kodo-sandbox",
  "parking_lot",
  "rusqlite",
  "serde",

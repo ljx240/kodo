@@ -146,6 +146,7 @@ fn request(
     decision: Option<kodo_agent::DecisionHandle>,
 ) -> RunRequest {
     RunRequest {
+        sandbox: None,
         project: Some(project),
         message: message.to_owned(),
         conversation_history: Vec::new(),
