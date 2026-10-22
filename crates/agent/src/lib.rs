@@ -863,7 +863,14 @@ fn command_step(
                     notes.push(format!(
                         "`{safe_cmd}` → 已获单次越权授权（沙箱已绕过，仅本次）"
                     ));
-                    notes.push(format!("[沙箱] 越权原因：{error}"));
+                    // The audit says *why* the sandbox refused: a policy
+                    // denial and a missing backend are different events.
+                    let cause = if error.is_policy_denial() {
+                        "策略拒绝"
+                    } else {
+                        "后端无法执行该策略"
+                    };
+                    notes.push(format!("[沙箱] 越权原因（{cause}）：{error}"));
                 }
             }
         } else {
@@ -1328,8 +1335,14 @@ fn sandbox_write_refusal(
     } else {
         format!("沙箱策略不允许写入 `{}`", relative)
     };
+    // The *policy* refused this operation — not the backend, which is a
+    // different kind of refusal. The code makes the two distinguishable in
+    // the audit trail.
+    let error = kodo_sandbox::SandboxError::Denied {
+        reason: reason.clone(),
+    };
     Some(WriteRefusal {
-        note: reason.clone(),
+        note: format!("[沙箱] 策略拒绝（{}）：{reason}", error.code()),
         result: ToolResult::failure(
             call.id.clone(),
             call.name.label(),
