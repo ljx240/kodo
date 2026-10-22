@@ -16,11 +16,15 @@ import {
   loadFileSpan,
   loadLlmIo,
   loadSession,
+  onRunEvent,
+  runState,
+  type RunEventDto,
   type ArtifactRefDto,
   type FileSpanDto,
   type LlmIoDto,
   type SessionDto,
 } from "../api";
+import { SubagentDetails, subagentStatus } from "../conversation/SubagentDetails";
 import { LlmIoViewer } from "../conversation/LlmIoViewer";
 import { ThinkingView } from "../conversation/ThinkingView";
 import { FileSpanModal } from "../conversation/FileSpanModal";
@@ -36,6 +40,7 @@ import { TraceMap } from "../traceMap/TraceMap";
 
 const TABS = [
   { id: "timeline", label: T.page.traceTabs.timeline },
+  { id: "agents", label: "子 Agent" },
   { id: "logs", label: T.page.traceTabs.logs },
   { id: "artifacts", label: T.page.traceTabs.artifacts },
   { id: "llmIo", label: T.page.traceTabs.llmIo },
@@ -68,7 +73,7 @@ function TypePill({ type }: { type: TimelineRow["type"] }) {
   );
 }
 
-function liveTimeline(session: SessionDto): {
+function liveTimeline(session: SessionDto, running = false): {
   rows: TimelineRow[];
   /** Parallel to `rows`: the underlying `ItemDto.id` for cross-tab anchors. */
   itemIds: number[];
@@ -111,6 +116,10 @@ function liveTimeline(session: SessionDto): {
       duration: formatDuration(item.duration),
     };
     switch (item.kind) {
+      case "subagent":
+        rows.push({ ...base, type: "Run", title: "子 Agent", chip: item.trace.agent,
+          note: `${subagentStatus(item.trace.status === "running" && !running ? turn.stopped ? "cancelled" : "interrupted" : item.trace.status)} · ${item.trace.task}`, ok: item.trace.status === "completed" });
+        break;
       case "reasoning":
         rows.push({ ...base, type: "Thinking", title: T.step.thinking, note: item.summary });
         break;
@@ -168,11 +177,27 @@ function liveTimeline(session: SessionDto): {
     done: turn.done,
     stopped: turn.stopped,
     interrupted:
+      !running &&
       !turn.done &&
       !turn.stopped &&
       !turn.error &&
       (Boolean(turn.interrupted) || turn.items.some((item) => item.status === "running")),
   };
+}
+
+function updateTraceSession(session: SessionDto | null, event: RunEventDto): SessionDto | null {
+  if (!session || session.id !== event.session || !session.turns.length) return session;
+  const turns = [...session.turns];
+  const turn = { ...turns[turns.length - 1] };
+  if (event.type === "itemStarted" || event.type === "itemCompleted") {
+    const index = turn.items.findIndex((item) => item.id === event.item.id);
+    turn.items = index < 0 ? [...turn.items, event.item] : turn.items.map((item, i) => i === index ? event.item : item);
+  } else if (event.type === "turnComplete") turn.done = true;
+  else if (event.type === "stopped") turn.stopped = true;
+  else if (event.type === "error") turn.error = event.message;
+  else return session;
+  turns[turns.length - 1] = turn;
+  return { ...session, turns };
 }
 
 /**
@@ -229,6 +254,7 @@ export function TracePage({
     window.history.replaceState({}, "", url.toString());
   };
   const [session, setSession] = useState<SessionDto | null>(live ?? null);
+  const [running, setRunning] = useState(false);
   const [openSpanRef, setOpenSpanRef] = useState<ArtifactRefDto | null>(null);
   const [openSpan, setOpenSpan] = useState<FileSpanDto | null>(null);
   const [openSpanLoading, setOpenSpanLoading] = useState<boolean>(false);
@@ -247,11 +273,48 @@ export function TracePage({
       return;
     }
     let alive = true;
-    void loadSession(conversationId).then((loaded) => {
-      if (alive) setSession(loaded);
-    });
+    let off: (() => void) | undefined;
+    let pending: RunEventDto[] | null = [];
+    let runRevision = 0;
+    let loadRevision = 0;
+    let generation: number | undefined;
+    setRunning(false);
+    const refresh = () => {
+      const revision = ++loadRevision;
+      pending = [];
+      void Promise.all([loadSession(conversationId), runState(conversationId)]).then(([loaded, state]) => {
+        if (!alive || revision !== loadRevision) return;
+        setSession((pending ?? []).reduce(updateTraceSession, loaded));
+        pending = null;
+        if (!runRevision) setRunning(Boolean(state?.running));
+      });
+    };
+    void onRunEvent((event) => {
+      if (!alive || event.session !== conversationId) return;
+      if (event.runId !== undefined) {
+        if (event.type === "turnStarted") {
+          if (generation !== undefined && event.runId < generation) return;
+        } else if (generation !== undefined && event.runId !== generation) return;
+        generation = event.runId;
+      }
+      if (event.type === "itemStarted" || event.type === "turnStarted") {
+        runRevision += 1;
+        setRunning(true);
+      } else if (["turnComplete", "stopped", "error"].includes(event.type)) {
+        runRevision += 1;
+        setRunning(false);
+      }
+      if (event.type === "turnStarted") {
+        refresh();
+        return;
+      }
+      if (pending) pending.push(event);
+      else setSession((current) => updateTraceSession(current, event));
+    }).then((stop) => { if (alive) off = stop; else stop(); });
+    refresh();
     return () => {
       alive = false;
+      off?.();
     };
   }, [demoMode, conversationId, live]);
 
@@ -325,7 +388,7 @@ export function TracePage({
         crumbTitle: demo.conversation.title,
       }
     : (() => {
-        const mapped = liveTimeline(session!);
+        const mapped = liveTimeline(session!, running);
         return {
           ...mapped,
           crumbProject: session!.project.split("/").pop() || session!.project,
@@ -348,7 +411,9 @@ export function TracePage({
 
   const statusLabel = demoMode
     ? T.lifecycle.completed
-    : data.stopped
+    : running
+      ? T.reply.inProgress
+      : data.stopped
       ? T.lifecycle.stopped
       : data.done
         ? T.lifecycle.completed
@@ -430,7 +495,7 @@ export function TracePage({
           </section>
 
           <nav className="page-tabs" role="tablist" aria-label={T.page.traceViews}>
-            {TABS.map(({ id, label }) => (
+            {TABS.filter(({ id }) => id !== "agents" || data.items.some((item) => item.kind === "subagent")).map(({ id, label }) => (
               <button
                 key={id}
                 type="button"
@@ -482,6 +547,15 @@ export function TracePage({
                     />
                   );
                 })
+              )}
+            </div>
+          )}
+
+          {tab === "agents" && (
+            <div className="trace-subagents">
+              {data.items.filter((item) => item.kind === "subagent").map((item) =>
+                <SubagentDetails key={item.id} trace={item.trace}
+                  status={item.status === "running" && (data.interrupted || data.stopped || data.done) ? data.stopped ? "stopped" : "interrupted" : item.status} />
               )}
             </div>
           )}

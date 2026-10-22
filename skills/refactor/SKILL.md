@@ -10,6 +10,7 @@ Restructure code with minimal behavioral change and full verification.
 minimal-change
 
 ## allowed_tools
+- subagent
 - search
 - read_file
 - list_files

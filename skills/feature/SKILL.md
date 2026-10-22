@@ -10,6 +10,7 @@ Implement new behavior against explicit acceptance criteria, then verify.
 acceptance-first
 
 ## allowed_tools
+- subagent
 - search
 - read_file
 - list_files

@@ -1,3 +1,5 @@
+import type { SubagentTraceDto } from "../api";
+
 /** Shapes mirroring demo/conversation.fixture.json. */
 
 export type ConversationRef = {
@@ -26,7 +28,7 @@ export type Project = {
 export type StepStatus = "done" | "running" | "failed" | "interrupted" | "stopped";
 
 export type TraceStep = {
-  type: "thinking" | "search" | "read" | "run" | "model" | "edit" | "finalize" | "note";
+  type: "thinking" | "search" | "read" | "run" | "model" | "edit" | "finalize" | "note" | "subagent";
   label: string;
   detail: string;
   /**
@@ -66,6 +68,7 @@ export type TraceStep = {
   llmIoRef?: string | null;
   /** File-span ref for `edit` steps; opens the before/after modal. */
   fileSpanRef?: string | null;
+  subagent?: SubagentTraceDto;
 };
 
 export type ChangedFile = {

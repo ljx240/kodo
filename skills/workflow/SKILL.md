@@ -10,6 +10,7 @@ Execute an explicit chained-command workflow step by step and record each outcom
 work-focused
 
 ## allowed_tools
+- subagent
 - search
 - read_file
 - write_file

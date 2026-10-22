@@ -3,6 +3,7 @@ import { useId, useState } from "react";
 import { splitDetail, type TraceStep } from "../data/types";
 import { T, failureCopy } from "../i18n";
 import { DiffRows } from "./diff";
+import { SubagentDetails, subagentStatus } from "./SubagentDetails";
 import { formatDuration, groupPhases, stripAnsi, type PhaseGroup } from "./trace";
 
 /**
@@ -14,6 +15,7 @@ import { formatDuration, groupPhases, stripAnsi, type PhaseGroup } from "./trace
 /** A run step's failure, in words — never color alone. */
 function failureLine(step: TraceStep): string | null {
   if (step.status !== "failed" && !step.denied) return null;
+  if (step.type === "subagent" && step.subagent) return subagentStatus(step.subagent.status);
   if (step.denied) return failureCopy("denied").reason;
   const cls = step.failureClass ?? (step.exitCode === 127 ? "command_not_found" : "non_zero_exit");
   return failureCopy(cls).reason;
@@ -57,6 +59,10 @@ function Expanded({
     );
   }
   switch (step.type) {
+    case "subagent":
+      return <div className="trace-expand" id={panelId}>
+        {step.subagent && <SubagentDetails trace={step.subagent} status={step.status} />}
+      </div>;
     case "run": {
       const meta = [
         step.cwd ? `cwd ${step.cwd}` : null,

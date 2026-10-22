@@ -966,6 +966,8 @@ pub fn evidence_from_tool_result(
         ));
     }
     let kind = match tool {
+        // Child work is separate evidence; only its actual changed_files enter the parent ledger.
+        ToolName::Subagent => return None,
         ToolName::Search => {
             // "N 个文件匹配" / "N matches"
             let hits = result

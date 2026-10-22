@@ -117,6 +117,11 @@ function projectItem(item: ItemDto): NodeProjection {
   const wire = item as ItemDto & Record<string, unknown>;
   const kind = wire.kind as string;
   switch (kind) {
+    case "subagent": {
+      const trace = (item as Extract<ItemDto, { kind: "subagent" }>).trace;
+      return { label: "子 Agent", detail: trace.task,
+        chips: [trace.agent, `${trace.inputTokens} → ${trace.outputTokens}`] };
+    }
     case "reasoning":
       return {
         label: "思考",

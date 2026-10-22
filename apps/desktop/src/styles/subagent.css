@@ -1,0 +1,45 @@
+.subagent-details {
+  min-width: 0;
+  padding: 12px 0;
+}
+
+.subagent-task {
+  margin: 8px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.subagent-identity {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 8px 0 16px;
+  font-size: 12px;
+}
+
+.subagent-identity dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.subagent-steps {
+  display: grid;
+  gap: 8px;
+  padding-left: 20px;
+}
+
+.subagent-steps summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.subagent-step-label {
+  margin-right: 12px;
+}
+
+.subagent-details .trace-output {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

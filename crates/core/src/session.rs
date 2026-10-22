@@ -138,10 +138,40 @@ pub enum Phase {
     Failed,
 }
 
+/// Bounded public execution trace of one delegated task, never private reasoning.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentTrace {
+    pub id: String,
+    pub parent_id: String,
+    pub agent: String,
+    pub task: String,
+    /// running / completed / failed / blocked / cancelled / timed_out.
+    pub status: String,
+    pub output: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub steps: Vec<SubagentTraceStep>,
+    pub omitted_steps: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentTraceStep {
+    pub kind: String,
+    pub label: String,
+    pub status: String,
+    pub output: String,
+    pub duration_ms: Option<u64>,
+}
+
 /// The per-kind payload. Each kind renders differently, so each carries only
 /// what its own renderer needs — there is no generic `tool { name, state }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemKind {
+    Subagent {
+        trace: SubagentTrace,
+    },
     /// A summary only. The model's actual reasoning is deliberately not a field
     /// here, so no renderer can show what must stay hidden.
     Reasoning {
@@ -820,6 +850,9 @@ fn encode_item(item: &Item) -> Vec<String> {
     ];
 
     match &item.kind {
+        ItemKind::Subagent { trace } => {
+            fields.push(serde_json::to_string(trace).expect("subagent trace is serializable"));
+        }
         ItemKind::Reasoning {
             summary,
             phase,
@@ -1015,6 +1048,9 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
     let duration_ms = duration.parse().ok();
 
     let kind = match (kind.as_str(), payload) {
+        ("subagent", [trace]) => ItemKind::Subagent {
+            trace: serde_json::from_str(trace).ok()?,
+        },
         ("reasoning", [summary]) => ItemKind::reasoning(summary.clone()),
         ("reasoning", [summary, phase, diagnostics]) => ItemKind::Reasoning {
             summary: summary.clone(),
@@ -1240,6 +1276,7 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
 
 fn kind_name(kind: &ItemKind) -> &'static str {
     match kind {
+        ItemKind::Subagent { .. } => "subagent",
         ItemKind::Reasoning { .. } => "reasoning",
         ItemKind::Search { .. } => "search",
         ItemKind::FileRead { .. } => "fileRead",

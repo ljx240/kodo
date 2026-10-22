@@ -69,6 +69,7 @@ pub struct TurnLogger {
     seq: u32,
     /// id of the in-flight started step, if any
     open_id: Option<u32>,
+    subagent_ids: std::collections::HashMap<String, u32>,
     capture_turn: Option<u32>,
     capture_seq: u32,
     pending_trace: Option<(&'static str, serde_json::Value)>,
@@ -86,6 +87,7 @@ impl TurnLogger {
             session_id,
             seq: 0,
             open_id: None,
+            subagent_ids: std::collections::HashMap::new(),
             capture_turn: None,
             capture_seq: 0,
             pending_trace: None,
@@ -167,6 +169,49 @@ impl TurnLogger {
     /// client, so the log is the source of truth.
     pub fn record(&mut self, event: &SinkEvent) -> Logged {
         match event {
+            SinkEvent::Subagent { trace, duration_ms } => {
+                let id = if let Some(id) = self.subagent_ids.get(&trace.id) {
+                    *id
+                } else {
+                    self.seq += 1;
+                    self.subagent_ids.insert(trace.id.clone(), self.seq);
+                    self.seq
+                };
+                let running = trace.status == "running";
+                let failed = !running && trace.status != "completed";
+                let item = Item {
+                    id,
+                    at: session::now(),
+                    status: if running {
+                        Status::Running
+                    } else if failed {
+                        Status::Failed
+                    } else {
+                        Status::Done
+                    },
+                    duration_ms: Some(*duration_ms),
+                    kind: ItemKind::Subagent {
+                        trace: trace.clone(),
+                    },
+                };
+                let phase = if running {
+                    Phase::Started
+                } else {
+                    Phase::Completed
+                };
+                if session::record_item(&self.dir, &self.session_id, &item, phase).is_err()
+                    || (failed
+                        && session::record_item(&self.dir, &self.session_id, &item, Phase::Failed)
+                            .is_err())
+                {
+                    return Logged::WriteFailed;
+                }
+                if running {
+                    Logged::Started(item)
+                } else {
+                    Logged::Finished(item)
+                }
+            }
             SinkEvent::LocalTrace { kind, capture } => {
                 if self.capture_turn.is_some() {
                     self.pending_trace = Some((kind, capture.clone()));
@@ -460,6 +505,89 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagent_snapshots_reload_without_consuming_parent_step_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let id = session::open(
+            dir,
+            std::path::Path::new("/tmp/fixture"),
+            "delegate",
+            1,
+            session::Mode::Code,
+        )
+        .unwrap();
+        session::record_ask(dir, &id, 2, "delegate task").unwrap();
+        let mut logger = TurnLogger::new(dir.into(), id.clone());
+        let parent = Step::Reasoning {
+            summary: "parent continues".into(),
+            phase: "execute",
+            diagnostics: None,
+        };
+        let Logged::Started(parent_item) = logger.record(&SinkEvent::Started {
+            step: parent.clone(),
+        }) else {
+            panic!("parent started")
+        };
+        let mut trace = session::SubagentTrace {
+            id: "child-1".into(),
+            parent_id: id.clone(),
+            agent: "executor".into(),
+            task: "inspect".into(),
+            status: "running".into(),
+            output: String::new(),
+            input_tokens: 12,
+            output_tokens: 4,
+            steps: vec![session::SubagentTraceStep {
+                kind: "fileRead".into(),
+                label: "README.md".into(),
+                status: "done".into(),
+                output: "synthetic evidence".into(),
+                duration_ms: Some(2),
+            }],
+            omitted_steps: 0,
+        };
+        let Logged::Started(child_item) = logger.record(&SinkEvent::Subagent {
+            trace: trace.clone(),
+            duration_ms: 1,
+        }) else {
+            panic!("child started")
+        };
+        trace.output = "partial output".into();
+        logger.record(&SinkEvent::Subagent {
+            trace: trace.clone(),
+            duration_ms: 2,
+        });
+        trace.status = "failed".into();
+        let Logged::Finished(finished) = logger.record(&SinkEvent::Subagent {
+            trace: trace.clone(),
+            duration_ms: 3,
+        }) else {
+            panic!("child finished")
+        };
+        assert_eq!(finished.id, child_item.id);
+        assert_eq!(finished.status, Status::Failed);
+        let Logged::Finished(parent_done) = logger.record(&SinkEvent::Finished {
+            step: parent,
+            duration_ms: 4,
+            denied: false,
+        }) else {
+            panic!("parent finished")
+        };
+        assert_eq!(parent_done.id, parent_item.id);
+        logger.finish(TurnOutcome::Complete).unwrap();
+        let loaded = session::load(dir, &id).unwrap();
+        assert_eq!(loaded.turns[0].items.len(), 2);
+        assert!(loaded.turns[0].items.iter().any(|item| item.kind
+            == ItemKind::Subagent {
+                trace: trace.clone()
+            }
+            && item.status == Status::Failed));
+        assert!(conversation_history(&loaded)
+            .iter()
+            .all(|(_, text)| !text.contains("partial output")));
+    }
 
     fn record_answer_turn(
         dir: &std::path::Path,

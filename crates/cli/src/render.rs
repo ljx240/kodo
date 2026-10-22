@@ -81,6 +81,14 @@ impl<O: Write, E: Write> Renderer<O, E> {
                 duration_ms,
                 denied,
             } => self.finished(step, *duration_ms, *denied),
+            SinkEvent::Subagent { trace, .. } => {
+                if trace.steps.is_empty() || trace.status != "running" {
+                    self.note(&format!(
+                        "· 子任务 {} · {} · {}",
+                        trace.agent, trace.id, trace.status
+                    ));
+                }
+            }
             SinkEvent::Progress { phase, detail } => {
                 self.note(&format!("· {phase} — {detail}"));
             }

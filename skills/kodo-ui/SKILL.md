@@ -12,6 +12,7 @@ Implement or modify Kodo GUI with fidelity to the approved design — reproduce 
 acceptance-first
 
 ## allowed_tools
+- subagent
 - search
 - read_file
 - list_files

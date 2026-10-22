@@ -10,6 +10,7 @@ Produce a work deliverable (documents, summaries, file organization) with no cod
 work-focused
 
 ## allowed_tools
+- subagent
 - search
 - read_file
 - write_file

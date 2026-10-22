@@ -10,6 +10,7 @@ Reproduce a bug, locate its root cause, apply the smallest fix, and verify the f
 repro-first
 
 ## allowed_tools
+- subagent
 - search
 - read_file
 - list_files

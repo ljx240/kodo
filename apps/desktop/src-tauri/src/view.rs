@@ -272,6 +272,9 @@ pub struct ItemView {
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ItemDetail {
+    Subagent {
+        trace: session::SubagentTrace,
+    },
     Reasoning {
         summary: String,
         /// Public phase code. Empty for legacy rows.
@@ -483,6 +486,7 @@ pub struct UndoConflictView {
 impl From<session::Item> for ItemView {
     fn from(item: session::Item) -> Self {
         let detail = match item.kind {
+            session::ItemKind::Subagent { trace } => ItemDetail::Subagent { trace },
             session::ItemKind::Reasoning {
                 summary,
                 phase,

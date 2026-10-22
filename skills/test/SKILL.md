@@ -10,6 +10,7 @@ Add or repair tests for existing behavior under a tests-only verification policy
 test-first
 
 ## allowed_tools
+- subagent
 - search
 - read_file
 - list_files
