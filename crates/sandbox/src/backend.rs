@@ -16,8 +16,15 @@ use crate::policy::SandboxPolicy;
 ///
 /// Every variant is a **refusal**. A backend that cannot honour the policy
 /// must surface one of these instead of returning an unrestricted command.
+///
+/// The variants are the structured replacement for guessing a security
+/// state from an exit code: the caller decides what to do next from the
+/// variant, never from `126` or from an error string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxError {
+    /// The policy itself refused the operation: the target is outside the
+    /// allowed scope, so the run was never attempted.
+    Denied { reason: String },
     /// No usable confinement backend on this host.
     Unavailable { reason: String },
     /// A backend exists but cannot meet the policy's enforcement floor.
@@ -36,17 +43,31 @@ impl SandboxError {
     /// Stable, machine-readable reason for the audit log and the UI.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Denied { .. } => "sandbox_denied",
             Self::Unavailable { .. } => "sandbox_unavailable",
             Self::PartialEnforcement { .. } => "sandbox_partial_enforcement",
             Self::Unsupported { .. } => "sandbox_unsupported",
             Self::Io { .. } => "sandbox_io_error",
         }
     }
+
+    /// True when the *policy* refused the operation.
+    ///
+    /// Only this refusal may be answered with a one-shot escalation request:
+    /// the user is asked to let one exact operation outside the boundary.
+    /// A backend that is missing or too weak is a different problem — the
+    /// run stays refused.
+    pub fn is_policy_denial(&self) -> bool {
+        matches!(self, Self::Denied { .. })
+    }
 }
 
 impl std::fmt::Display for SandboxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Denied { reason } => {
+                write!(f, "沙箱策略拒绝了该操作：{reason}")
+            }
             Self::Unavailable { reason } => {
                 write!(f, "沙箱不可用，已拒绝执行：{reason}")
             }

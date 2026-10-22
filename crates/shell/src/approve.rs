@@ -23,6 +23,24 @@ impl ApprovalChoice {
     pub fn allows(self) -> bool {
         matches!(self, Self::AllowOnce | Self::AllowSession)
     }
+
+    /// The choice a surface must act on for the given step kind.
+    ///
+    /// A sandbox escalation is a one-shot decision by construction: it
+    /// lifts the boundary for exactly one operation. `AllowSession` is
+    /// therefore downgraded to `AllowOnce` — the session-allow cache must
+    /// never widen a sandbox grant.
+    pub fn for_kind(self, kind: StepKind) -> Self {
+        match (self, kind) {
+            (Self::AllowSession, StepKind::SandboxEscalation) => Self::AllowOnce,
+            (choice, _) => choice,
+        }
+    }
+
+    /// True when this choice may be remembered for the session.
+    pub fn is_session_wide(self, kind: StepKind) -> bool {
+        matches!(self.for_kind(kind), Self::AllowSession)
+    }
 }
 
 /// Stable fingerprint for "this exact step" when the user picks Allow for session.
@@ -49,6 +67,7 @@ pub fn step_kind_label(kind: StepKind) -> &'static str {
         StepKind::PlanStep => "plan step",
         StepKind::Permission => "permission",
         StepKind::ContextBudget => "context budget",
+        StepKind::SandboxEscalation => "sandbox escalation",
     }
 }
 
@@ -84,5 +103,28 @@ mod tests {
         );
         assert!(ApprovalChoice::AllowOnce.allows());
         assert!(!ApprovalChoice::Deny.allows());
+    }
+
+    #[test]
+    fn a_sandbox_escalation_is_never_remembered_for_the_session() {
+        // "本会话允许" must not turn into a standing permission to run
+        // outside the sandbox.
+        let choice = ApprovalChoice::AllowSession.for_kind(StepKind::SandboxEscalation);
+        assert_eq!(choice, ApprovalChoice::AllowOnce);
+        assert!(!choice.is_session_wide(StepKind::SandboxEscalation));
+        // Ordinary commands keep the graduated allow.
+        assert!(ApprovalChoice::AllowSession.is_session_wide(StepKind::Command));
+        assert_eq!(
+            ApprovalChoice::AllowSession.for_kind(StepKind::Command),
+            ApprovalChoice::AllowSession
+        );
+    }
+
+    #[test]
+    fn an_escalation_has_its_own_fingerprint_space() {
+        let escalation = approval_fingerprint(StepKind::SandboxEscalation, "cargo build");
+        let command = approval_fingerprint(StepKind::Command, "cargo build");
+        assert_ne!(escalation, command);
+        assert!(escalation.starts_with("sandbox escalation::"));
     }
 }

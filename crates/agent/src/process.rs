@@ -18,10 +18,54 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use kodo_sandbox::{EnforcementLevel, SandboxContext, SandboxMode};
+use kodo_sandbox::{EnforcementLevel, SandboxContext, SandboxError, SandboxMode};
 
 /// Hard cap so a mis-set timeout cannot run forever (seconds).
 pub const MAX_PROCESS_TIMEOUT_SECS: u64 = 600;
+
+/// Why a run ended without producing a normal exit status.
+///
+/// The classification is **structural**: it comes from the sandbox backend
+/// and the process manager, never from an exit code. A program that happens
+/// to exit with `126` is an ordinary failure — not a permission problem —
+/// and the product must never confuse the two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunFailure {
+    /// The sandbox refused to establish the confinement. The command never
+    /// started, so nothing ran outside the boundary.
+    SandboxRefused(SandboxError),
+    /// The process could not be spawned at all.
+    SpawnFailed(String),
+    /// The process tree was killed because the run was cancelled.
+    Cancelled,
+    /// The process tree was killed because the run hit its timeout.
+    TimedOut,
+}
+
+impl RunFailure {
+    /// True when the sandbox refused the run.
+    pub fn is_sandbox_refusal(&self) -> bool {
+        matches!(self, Self::SandboxRefused(_))
+    }
+
+    /// Stable, machine-readable reason for the audit trail and the UI.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::SandboxRefused(error) => error.code(),
+            Self::SpawnFailed(_) => "process_spawn_failed",
+            Self::Cancelled => "process_cancelled",
+            Self::TimedOut => "process_timed_out",
+        }
+    }
+
+    /// The sandbox error, when the sandbox refused the run.
+    pub fn sandbox_error(&self) -> Option<&SandboxError> {
+        match self {
+            Self::SandboxRefused(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// How the child process environment is built.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -104,6 +148,8 @@ pub struct SandboxReport {
     pub network_egress: EnforcementLevel,
     /// Set when the sandbox refused to start the command.
     pub refusal: Option<String>,
+    /// Stable code of the refusal, e.g. `sandbox_unavailable`.
+    pub refusal_code: Option<&'static str>,
 }
 
 impl SandboxReport {
@@ -116,12 +162,18 @@ impl SandboxReport {
             file_write: capabilities.file_write,
             network_egress: capabilities.network_egress,
             refusal: None,
+            refusal_code: None,
         }
     }
 
     /// True when the command ran under OS confinement.
     pub fn is_confined(&self) -> bool {
         self.refusal.is_none() && self.mode.confines()
+    }
+
+    /// True when the user explicitly turned the sandbox off for this run.
+    pub fn is_bypassed(&self) -> bool {
+        self.refusal.is_none() && !self.mode.confines()
     }
 }
 
@@ -185,6 +237,11 @@ pub struct ProcessOutcome {
     /// The sandbox decision for this run. `None` for trusted control-plane
     /// commands that were never meant to be confined.
     pub sandbox: Option<SandboxReport>,
+    /// Why the run did not end normally. `None` for an ordinary exit.
+    ///
+    /// This is the only signal that may classify a run as "the sandbox
+    /// refused"; an exit code never is.
+    pub failure: Option<RunFailure>,
 }
 
 impl ProcessOutcome {
@@ -244,6 +301,7 @@ impl ProcessRunner {
                 stdout_hit_limit: false,
                 stderr_hit_limit: false,
                 sandbox: None,
+                failure: None,
             };
         }
         if !alive() {
@@ -260,6 +318,7 @@ impl ProcessRunner {
                 stdout_hit_limit: false,
                 stderr_hit_limit: false,
                 sandbox: None,
+                failure: Some(RunFailure::Cancelled),
             };
         }
 
@@ -285,6 +344,7 @@ impl ProcessRunner {
                     stdout_hit_limit: false,
                     stderr_hit_limit: false,
                     sandbox: Some(refusal.report),
+                    failure: Some(RunFailure::SandboxRefused(refusal.error)),
                 };
             }
         };
@@ -310,6 +370,7 @@ impl ProcessRunner {
                     stdout_hit_limit: false,
                     stderr_hit_limit: false,
                     sandbox,
+                    failure: Some(RunFailure::SpawnFailed(error.to_string())),
                 };
             }
         };
@@ -447,6 +508,23 @@ impl ProcessRunner {
             None
         };
 
+        // The structural failure reason. An ordinary non-zero exit — even
+        // `126` — is *not* a failure of this kind: it is a normal run that
+        // happened to report a code.
+        let failure = if cancelled {
+            Some(RunFailure::Cancelled)
+        } else if timed_out {
+            Some(RunFailure::TimedOut)
+        } else if wait_failed {
+            Some(RunFailure::SpawnFailed(
+                spawn_error
+                    .clone()
+                    .unwrap_or_else(|| "进程等待失败".to_owned()),
+            ))
+        } else {
+            None
+        };
+
         if let Some(profile) = profile_path {
             let _ = std::fs::remove_file(&profile);
             if let Some(parent) = profile.parent() {
@@ -467,6 +545,7 @@ impl ProcessRunner {
             stdout_hit_limit,
             stderr_hit_limit,
             sandbox,
+            failure,
         }
     }
 }
@@ -476,6 +555,9 @@ impl ProcessRunner {
 struct SandboxRefusal {
     message: String,
     report: SandboxReport,
+    /// The structured reason. The decision "may this run outside the
+    /// sandbox?" is taken from this value, never from the exit code.
+    error: SandboxError,
 }
 
 /// Build the command to spawn, applying the sandbox when one is configured.
@@ -501,9 +583,11 @@ fn build_command(
         Ok(prepared) => prepared,
         Err(error) => {
             report.refusal = Some(error.to_string());
+            report.refusal_code = Some(error.code());
             return Err(SandboxRefusal {
                 message: error.to_string(),
                 report,
+                error,
             });
         }
     };
@@ -514,8 +598,16 @@ fn build_command(
     // reaches the confined process and every descendant it spawns.
     isolate_process_group(&mut cmd);
     apply_env(&mut cmd, &spec.env);
-    // The backend's environment additions (a private TMPDIR) must survive the
-    // scrubbed environment, so they are applied last.
+    // A proxy variable is not a security boundary. A confined run must not
+    // inherit one: the only thing that decides whether the process may
+    // reach the network is the operating-system rule.
+    if spec.sandbox.is_some() {
+        for key in PROXY_ENV_KEYS {
+            cmd.env_remove(key);
+        }
+    }
+    // The backend's environment additions (a private HOME, TMPDIR) must
+    // survive the scrubbed environment, so they are applied last.
     for (key, value) in &prepared.env {
         cmd.env(key, value);
     }
@@ -524,6 +616,19 @@ fn build_command(
     let profile_path = prepared.profile_path.clone();
     Ok((cmd, Some(report), profile_path))
 }
+
+/// Environment variables that route traffic through a proxy. They are
+/// dropped for confined runs so nobody mistakes them for a network policy.
+const PROXY_ENV_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
 
 /// The program and argv the shell line is executed through.
 fn shell_invocation(command: &str) -> (std::path::PathBuf, Vec<std::ffi::OsString>) {

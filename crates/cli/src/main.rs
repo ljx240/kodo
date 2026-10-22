@@ -23,6 +23,13 @@ use crate::turn::{permission_label, TurnContext, TurnStatus};
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // The sandbox capability probe re-invokes this binary to perform one
+    // observable action inside the sandbox. The check comes first so the
+    // probe never touches the REPL or the settings store.
+    kodo_sandbox::probe::register_self_probe();
+    if let Some(code) = kodo_sandbox::probe::serve(&argv) {
+        std::process::exit(code);
+    }
     let code = match args::parse(&argv) {
         Parsed::Help => {
             print!("{}", args::USAGE);

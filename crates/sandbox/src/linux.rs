@@ -6,14 +6,23 @@
 //! axis stronger than the macOS backend — but it also means the toolchain
 //! caches have to be bound explicitly or builds break.
 //!
-//! `--unshare-net` gives a fresh, empty network namespace: no route, no
-//! DNS, no loopback service. The Docker socket and the SSH agent socket live
-//! under `/var/run` and `/run`, which are masked with an empty tmpfs.
+//! `--unshare-all` gives fresh user, pid, network, ipc and uts namespaces:
+//! no route, no DNS, no loopback service. The Docker socket and the SSH
+//! agent socket live under `/var/run` and `/run`, which are masked with an
+//! empty tmpfs.
 //!
 //! `bwrap` needs unprivileged user namespaces, which many hardened kernels
 //! and container runtimes disable. The backend therefore probes the host
 //! functionally; when the probe fails the backend reports `Unavailable` and
 //! restricted runs are refused — never silently executed unconfined.
+//!
+//! # Home and toolchains
+//!
+//! The confined process gets a **private, writable** home (the session's
+//! scratch directory), not the user's real one. The toolchain caches stay
+//! readable — bound read-only at a fixed in-sandbox path — and the
+//! environment points the tools at them, so `cargo`, `node`, `java` and
+//! `python` keep working while the home itself stays empty and writable.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -26,26 +35,49 @@ use crate::policy::SandboxPolicy;
 
 /// System directories mounted read-only into the sandbox.
 const SYSTEM_ROOTS: &[&str] = &[
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/lib",
-    "/lib32",
-    "/lib64",
-    "/etc",
-    "/opt",
-    "/etc/alternatives",
+    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt",
 ];
 
-/// Directories below the user's home that hold toolchains. They are bound
-/// read-only so a build still finds `cargo`, `node` or `java`.
-const TOOLCHAIN_ROOTS: &[&str] = &[
-    ".cargo", ".rustup", ".nvm", ".fnm", ".volta", ".asdf", ".mise", ".pyenv", ".sdkman", ".go",
-    "go", ".m2", ".gradle", ".npm", ".deno", ".bun", ".local",
-];
+/// Paths below `/etc` that hold host secrets and are masked even though
+/// `/etc` itself is readable.
+const MASKED_ETC_PATHS: &[&str] = &["/etc/ssh", "/etc/ssl/private"];
 
 /// Directories that are masked so host sockets stay invisible.
 const MASKED_HOST_DIRS: &[&str] = &["/var/run", "/run", "/var/lock"];
+
+/// Toolchain directories bound read-only into the sandbox, and the
+/// environment variable that points a tool at the in-sandbox copy.
+///
+/// The variable is only set when the directory exists on the host, so a
+/// missing toolchain never produces a dangling path.
+const TOOLCHAIN_ROOTS: &[(&str, &str)] = &[
+    (".cargo", "CARGO_HOME"),
+    (".rustup", "RUSTUP_HOME"),
+    (".nvm", "NVM_DIR"),
+    (".fnm", "FNM_DIR"),
+    (".volta", "VOLTA_HOME"),
+    (".asdf", "ASDF_DIR"),
+    (".mise", "MISE_DATA_DIR"),
+    (".pyenv", "PYENV_ROOT"),
+    (".sdkman", "SDKMAN_DIR"),
+    (".m2", "M2_HOME"),
+    (".gradle", "GRADLE_USER_HOME"),
+    (".npm", "NPM_CONFIG_CACHE"),
+    (".deno", "DENO_DIR"),
+    (".bun", "BUN_INSTALL"),
+    (".go", "GOPATH"),
+    ("go", "GOROOT"),
+];
+
+/// Credential files that live *inside* a toolchain directory. They are
+/// masked with an empty file so the toolchain stays usable while the
+/// tokens stay unreadable.
+const TOOLCHAIN_CREDENTIALS: &[&str] = &[
+    ".cargo/credentials.toml",
+    ".cargo/config.toml",
+    ".m2/settings.xml",
+    ".npmrc",
+];
 
 #[derive(Debug, Clone)]
 struct Probe {
@@ -139,17 +171,23 @@ impl SandboxBackend for BubblewrapBackend {
                 reason: "Bubblewrap 无法强制执行域名白名单".to_owned(),
             });
         }
-        if policy.require_full_enforcement {
-            let report = self.inspect();
-            if !report.capabilities().is_full() {
-                return Err(SandboxError::PartialEnforcement {
-                    reason: format!("本机强制能力为 {}，不满足完整强制要求", report.summary()),
-                    capabilities: report.capabilities(),
-                });
-            }
+        // Per-axis enforcement floor: the policy promises no outbound
+        // traffic, so a network isolation that could not be verified refuses
+        // the run instead of quietly shrinking the boundary.
+        let report = self.inspect();
+        let required = policy.required_enforcement();
+        if !report.capabilities().meets(&required) {
+            let missing = report.capabilities().missing(&required);
+            return Err(SandboxError::PartialEnforcement {
+                reason: format!(
+                    "本机强制能力为 {}，不满足策略要求（缺少：{}）",
+                    report.summary(),
+                    missing.join("、")
+                ),
+                capabilities: report.capabilities(),
+            });
         }
 
-        let mut argv: Vec<OsString> = vec![OsString::from("--")];
         let mut bwrap_args: Vec<OsString> = Vec::new();
         let mut push = |value: &str| bwrap_args.push(OsString::from(value));
 
@@ -174,26 +212,63 @@ impl SandboxBackend for BubblewrapBackend {
             push("/var");
             push("/var");
         }
-        // Mask host sockets: the Docker daemon, the SSH agent and friends.
+        // Mask host sockets and host secrets.
         for dir in MASKED_HOST_DIRS {
             if Path::new(dir).exists() {
                 push("--tmpfs");
                 push(dir);
             }
         }
+        for path in MASKED_ETC_PATHS {
+            if Path::new(path).exists() {
+                push("--tmpfs");
+                push(path);
+            }
+        }
         push("--tmpfs");
         push("/tmp");
 
+        // The in-sandbox home. It only holds the toolchain caches; the
+        // process' own HOME is the private scratch directory, which the
+        // runtime points at through the environment.
+        let home = sandbox_home();
+        push("--dir");
+        push(&home);
+
         // Toolchain caches from the user's home, read-only.
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            for relative in TOOLCHAIN_ROOTS {
-                let path = home.join(relative);
-                if path.exists() {
-                    let target = format!("/home/{}/{}", user_name(), relative);
-                    push("--ro-bind");
-                    push(&path.display().to_string());
-                    push(&target);
+        let host_home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut env: Vec<(String, String)> = Vec::new();
+        if let Some(host_home) = host_home.as_ref() {
+            for (relative, variable) in TOOLCHAIN_ROOTS {
+                let path = host_home.join(relative);
+                if !path.exists() {
+                    continue;
                 }
+                let target = format!("{home}/{relative}");
+                push("--ro-bind");
+                push(&path.display().to_string());
+                push(&target);
+                env.push(((*variable).to_owned(), target));
+            }
+            // Credentials inside the toolchain caches stay unreadable.
+            for relative in TOOLCHAIN_CREDENTIALS {
+                let path = host_home.join(relative);
+                if !path.exists() {
+                    continue;
+                }
+                let target = format!("{home}/{relative}");
+                push("--ro-bind");
+                push("/dev/null");
+                push(&target);
+            }
+            // Git's global configuration is not a secret and the repository
+            // needs it for author information.
+            let git_config = host_home.join(".gitconfig");
+            if git_config.exists() {
+                env.push((
+                    "GIT_CONFIG_GLOBAL".to_owned(),
+                    git_config.display().to_string(),
+                ));
             }
         }
 
@@ -233,26 +308,26 @@ impl SandboxBackend for BubblewrapBackend {
             }
         }
 
-        // Home inside the sandbox points at a directory that is not mounted;
-        // tools that need a writable home get one through the write roots.
-        push("--setenv");
-        push("HOME");
-        push(&format!("/home/{}", user_name()));
         push("--chdir");
         push(&sandbox_cwd(policy, cwd).display().to_string());
 
-        argv.splice(0..1, bwrap_args);
+        let mut argv = bwrap_args;
         argv.push(program.as_os_str().to_os_string());
         argv.extend(args.iter().cloned());
 
         Ok(PreparedCommand {
             program: binary.clone(),
             args: argv,
-            env: Vec::new(),
+            env,
             cwd: cwd.to_path_buf(),
             profile_path: None,
         })
     }
+}
+
+/// The in-sandbox home directory that holds the toolchain caches.
+fn sandbox_home() -> String {
+    format!("/home/{}", user_name())
 }
 
 /// The working directory the confined child starts in.
@@ -316,8 +391,7 @@ fn run_probe() -> (Probe, Option<PathBuf>) {
     let _ = std::fs::create_dir_all(&outside);
     let _ = std::fs::write(inside.join("secret.txt"), "probe-secret");
 
-    // The probe bind-mounts the scratch area and checks that a write inside
-    // it succeeds while a write outside it fails.
+    // ── Write confinement: allowed inside the root, denied outside it. ──
     let write_ok = run_bwrap(
         &binary,
         &[
@@ -386,45 +460,49 @@ fn run_probe() -> (Probe, Option<PathBuf>) {
         EnforcementLevel::Unsupported
     };
 
-    // Read confinement: a path that is not bound must not be readable.
-    let read_denied = run_bwrap(
-        &binary,
-        &[
-            "--unshare-all",
-            "--die-with-parent",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind",
-            "/bin",
-            "/bin",
-            "--ro-bind",
-            "/lib",
-            "/lib",
-            "--ro-bind",
-            "/lib64",
-            "/lib64",
-            "--ro-bind",
-            "/etc",
-            "/etc",
-            "--tmpfs",
-            "/tmp",
-            "--",
-            "/bin/sh",
-            "-c",
-            &format!("cat {}/secret.txt", inside.display()),
-        ],
-    );
-    let file_read = if read_denied {
-        EnforcementLevel::Full
-    } else {
-        EnforcementLevel::Unsupported
+    // ── Read confinement: a path that is not bound must not be readable. ──
+    //
+    // The probe reads the file with a helper instead of inferring the
+    // result from a command's exit status: the control read happens
+    // *outside* the sandbox and must succeed, so a missing file can never
+    // be mistaken for a working isolation.
+    let helper = match helper() {
+        Ok(helper) => helper,
+        Err(error) => {
+            return (
+                Probe {
+                    available: file_write != EnforcementLevel::Unsupported,
+                    file_write,
+                    file_read: EnforcementLevel::Unsupported,
+                    network_egress: EnforcementLevel::Unsupported,
+                    notes: vec![error],
+                },
+                Some(binary),
+            )
+        }
+    };
+    let runner = BubblewrapProbeRunner {
+        binary: binary.clone(),
+    };
+    let file_read = match crate::probe::measure_read(&helper, &runner, &inside.join("secret.txt")) {
+        Ok(()) => EnforcementLevel::Full,
+        Err(error) => {
+            return (
+                Probe {
+                    available: file_write != EnforcementLevel::Unsupported,
+                    file_write,
+                    file_read: EnforcementLevel::Unsupported,
+                    network_egress: EnforcementLevel::Unsupported,
+                    notes: vec![error, "bubblewrap 读取隔离未通过探测".to_owned()],
+                },
+                Some(binary),
+            )
+        }
     };
 
-    // Network: a fresh network namespace must not reach a live loopback port.
-    let network_egress = match probe_network(&binary) {
-        Ok(true) => EnforcementLevel::Full,
-        Ok(false) => EnforcementLevel::Unsupported,
+    // ── Network: a fresh network namespace must not reach a live loopback port. ──
+    let network_egress = match crate::probe::measure_network(&helper, &runner) {
+        Ok(()) => EnforcementLevel::Full,
         Err(error) => {
             return (
                 Probe {
@@ -432,19 +510,16 @@ fn run_probe() -> (Probe, Option<PathBuf>) {
                     file_write,
                     file_read,
                     network_egress: EnforcementLevel::Unsupported,
-                    notes: vec![error, "bwrap 存在但网络命名空间探测失败".to_owned()],
+                    notes: vec![error, "bubblewrap 网络隔离未通过探测".to_owned()],
                 },
                 Some(binary),
             )
         }
     };
 
-    let mut notes = Vec::new();
+    let mut notes = vec!["沙箱内可读：/etc、/var、/opt（只读），工具链缓存只读".to_owned()];
     if file_write == EnforcementLevel::Unsupported {
         notes.push("bubblewrap 写入限制探测失败".to_owned());
-    }
-    if file_read == EnforcementLevel::Unsupported {
-        notes.push("bubblewrap 读取限制探测失败".to_owned());
     }
 
     let _ = std::fs::remove_dir_all(&scratch);
@@ -460,6 +535,13 @@ fn run_probe() -> (Probe, Option<PathBuf>) {
     )
 }
 
+/// The probe helper. A host without it cannot verify the network and read
+/// isolation, so the backend refuses instead of guessing.
+fn helper() -> Result<crate::probe::ProbeHelper, String> {
+    crate::probe::ProbeHelper::locate()
+        .ok_or_else(|| "未找到沙箱探测辅助程序，无法验证隔离能力".to_owned())
+}
+
 fn run_bwrap(binary: &Path, args: &[&str]) -> bool {
     Command::new(binary)
         .args(args)
@@ -468,47 +550,49 @@ fn run_bwrap(binary: &Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// Verify that `--unshare-net` really blocks a live loopback connection.
-fn probe_network(binary: &Path) -> Result<bool, String> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|error| format!("无法监听回环端口：{error}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|error| format!("无法读取监听地址：{error}"))?
-        .port();
-    let _guard = listener;
-    let connected = Command::new(binary)
-        .args([
-            "--unshare-all",
-            "--die-with-parent",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind",
-            "/bin",
-            "/bin",
-            "--ro-bind",
-            "/lib",
-            "/lib",
-            "--ro-bind",
-            "/lib64",
-            "/lib64",
-            "--ro-bind",
-            "/etc",
-            "/etc",
-            "--tmpfs",
-            "/tmp",
-            "--",
-            "/bin/sh",
-            "-c",
-            &format!(
-                "exec 3<>/dev/tcp/127.0.0.1/{port} 2>/dev/null && echo connected || echo blocked"
-            ),
-        ])
-        .output()
-        .map_err(|error| format!("网络探测执行失败：{error}"))?;
-    let stdout = String::from_utf8_lossy(&connected.stdout);
-    Ok(stdout.contains("blocked"))
+/// Runs the probe helper inside a Bubblewrap namespace.
+struct BubblewrapProbeRunner {
+    binary: PathBuf,
+}
+
+impl crate::probe::SandboxProbeRunner for BubblewrapProbeRunner {
+    fn run_in_sandbox(&self, helper: &Path, args: &[OsString]) -> crate::probe::ProbeOutcome {
+        let mut bwrap: Vec<OsString> = Vec::new();
+        let mut push = |value: &str| bwrap.push(OsString::from(value));
+        push("--unshare-all");
+        push("--die-with-parent");
+        for root in ["/usr", "/bin", "/lib", "/lib64", "/etc"] {
+            if Path::new(root).exists() {
+                push("--ro-bind");
+                push(root);
+                push(root);
+            }
+        }
+        push("--tmpfs");
+        push("/tmp");
+        // The helper must stay executable inside the namespace.
+        push("--ro-bind");
+        push(&helper.display().to_string());
+        push(&helper.display().to_string());
+        bwrap.push(OsString::from("--"));
+        bwrap.push(helper.as_os_str().to_os_string());
+        bwrap.extend(args.iter().cloned());
+
+        let output = Command::new(&self.binary).args(&bwrap).output();
+        match output {
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let code = output.status.code().unwrap_or(-1);
+                if code == 126 || code == 127 {
+                    return crate::probe::ProbeOutcome::Other(format!(
+                        "探测辅助程序无法在沙箱内启动（exit {code}）"
+                    ));
+                }
+                crate::probe::ProbeOutcome::from_exit_code(code, &stderr)
+            }
+            Err(error) => crate::probe::ProbeOutcome::Other(format!("沙箱探测执行失败：{error}")),
+        }
+    }
 }
 
 /// A backend that confines nothing — used on platforms without a P0 backend.
@@ -581,5 +665,10 @@ mod tests {
         let report = backend.inspect();
         assert_eq!(report.file_write, EnforcementLevel::Unsupported);
         assert_eq!(report.network_egress, EnforcementLevel::Unsupported);
+    }
+
+    #[test]
+    fn the_in_sandbox_home_is_a_fixed_path() {
+        assert!(sandbox_home().starts_with("/home/"));
     }
 }

@@ -12,6 +12,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use crate::capabilities::{EnforcementCapabilities, EnforcementLevel};
+
 /// Execution space granted to untrusted project code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SandboxMode {
@@ -97,7 +99,40 @@ pub struct SandboxPolicy {
     /// When true, the backend must reach `EnforcementLevel::Full` on every
     /// axis or the run is refused. A partial backend may still be used when
     /// this is false, but the report says so out loud.
+    ///
+    /// Prefer [`SandboxPolicy::required_enforcement`]: it states the floor
+    /// per axis, so a policy that only needs network isolation is not
+    /// rejected because the read axis is a deny-list.
     pub require_full_enforcement: bool,
+}
+
+impl SandboxPolicy {
+    /// The minimum enforcement each axis must reach for this policy.
+    ///
+    /// The floors are derived from what the policy actually promises:
+    ///
+    /// * **file write** — every confined mode keeps the write allow-list
+    ///   enforced by the kernel, so `Full` is required.
+    /// * **file read** — a deny-list is an accepted enforcement model (the
+    ///   macOS backend uses one), so `Partial` is the floor. The capability
+    ///   report still says `partial` so the UI never claims a full read
+    ///   isolation it does not have.
+    /// * **network egress** — `DenyAll` promises *no* outbound traffic, so
+    ///   only a genuinely enforced isolation reaches the floor. A backend
+    ///   that could not verify isolation reports `unsupported` and the run
+    ///   is refused.
+    pub fn required_enforcement(&self) -> EnforcementCapabilities {
+        let floor = EnforcementCapabilities {
+            file_read: EnforcementLevel::Partial,
+            file_write: EnforcementLevel::Full,
+            network_egress: EnforcementLevel::Full,
+        };
+        if self.require_full_enforcement {
+            EnforcementCapabilities::full()
+        } else {
+            floor
+        }
+    }
 }
 
 impl SandboxPolicy {

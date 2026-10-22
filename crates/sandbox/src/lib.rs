@@ -41,6 +41,7 @@ pub mod grant;
 pub mod linux;
 pub mod macos;
 pub mod policy;
+pub mod probe;
 pub mod runtime;
 
 pub use audit::{SandboxEvent, SandboxEventKind};
@@ -51,4 +52,4 @@ pub use policy::{NetworkPolicy, SandboxMode, SandboxPolicy};
 pub use runtime::{SandboxContext, SandboxRuntime};
 
 /// Version of the secure-execution contract implemented by this crate.
-pub const SANDBOX_VERSION: &str = "V1";
+pub const SANDBOX_VERSION: &str = "V1.1";

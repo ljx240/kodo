@@ -6,7 +6,7 @@
 //! (timeout + cancel + process-tree kill + output caps).
 
 use crate::process::{
-    EnvPolicy, ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStatus, SandboxReport,
+    EnvPolicy, ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStatus, RunFailure, SandboxReport,
 };
 use kodo_sandbox::SandboxContext;
 use std::fs;
@@ -562,6 +562,10 @@ pub struct CommandOutcome {
     /// The sandbox decision for this run. `None` for a trusted control-plane
     /// command that was never meant to be confined.
     pub sandbox: Option<SandboxReport>,
+    /// Why the run did not end normally. `None` for an ordinary exit —
+    /// including a non-zero exit such as `126`, which is a normal result
+    /// and never a permission problem.
+    pub failure: Option<RunFailure>,
 }
 
 /// Default wall-clock timeout for agent shell commands (seconds).
@@ -845,6 +849,7 @@ fn map_process_outcome(outcome: ProcessOutcome, timeout_secs: u64) -> CommandOut
         cancelled: outcome.cancelled,
         truncation,
         sandbox: outcome.sandbox,
+        failure: outcome.failure,
     }
 }
 

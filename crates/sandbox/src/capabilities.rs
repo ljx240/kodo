@@ -41,6 +41,15 @@ impl EnforcementLevel {
         }
     }
 
+    /// True when this level reaches `floor`.
+    ///
+    /// `Unsupported` never reaches anything. `Partial` reaches a `Partial`
+    /// floor but not a `Full` one. This is the comparison a policy uses to
+    /// decide whether the host can honour it.
+    pub fn meets(self, floor: Self) -> bool {
+        self.rank() >= floor.rank()
+    }
+
     fn rank(self) -> u8 {
         match self {
             Self::Unsupported => 0,
@@ -78,6 +87,31 @@ impl EnforcementCapabilities {
         self.file_read
             .weaker(self.file_write)
             .weaker(self.network_egress)
+    }
+
+    /// The axes that do not reach their floor.
+    ///
+    /// A backend reports every axis it cannot honour, so the refusal says
+    /// *which* boundary is missing instead of hiding it behind one boolean.
+    pub fn missing(&self, required: &EnforcementCapabilities) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.file_read.meets(required.file_read) {
+            missing.push("file_read");
+        }
+        if !self.file_write.meets(required.file_write) {
+            missing.push("file_write");
+        }
+        if !self.network_egress.meets(required.network_egress) {
+            missing.push("network_egress");
+        }
+        missing
+    }
+
+    /// True when every axis reaches its floor.
+    pub fn meets(&self, required: &EnforcementCapabilities) -> bool {
+        self.file_read.meets(required.file_read)
+            && self.file_write.meets(required.file_write)
+            && self.network_egress.meets(required.network_egress)
     }
 }
 

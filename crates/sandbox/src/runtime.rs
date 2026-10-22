@@ -149,9 +149,17 @@ impl SandboxRuntime {
         &self.capabilities.backend
     }
 
-    /// True when the host can confine commands at all.
+    /// True when this host can confine commands at the level the default
+    /// policy requires.
+    ///
+    /// A host whose network isolation could not be verified is **not**
+    /// available: the default policy promises no outbound traffic, and a
+    /// boundary that was not measured is not a boundary.
     pub fn is_available(&self) -> bool {
-        self.capabilities.file_write != crate::capabilities::EnforcementLevel::Unsupported
+        let reference = SandboxPolicy::for_workspace(std::env::temp_dir());
+        self.capabilities
+            .capabilities()
+            .meets(&reference.required_enforcement())
     }
 
     /// The private scratch area, created on first use.
@@ -202,6 +210,11 @@ impl SandboxRuntime {
     }
 
     /// Prepare a confined command.
+    ///
+    /// `Unrestricted` is an **explicit** policy decision, not an accident:
+    /// the policy says the user turned the sandbox off, so the command runs
+    /// unchanged. Every other mode goes through the backend, and a backend
+    /// that refuses produces an error — never an unconfined run.
     pub fn prepare(
         &self,
         program: &Path,
@@ -209,8 +222,22 @@ impl SandboxRuntime {
         policy: &SandboxPolicy,
         cwd: &Path,
     ) -> Result<PreparedCommand, SandboxError> {
+        if !policy.mode.confines() {
+            // The user explicitly disabled the sandbox. The command runs
+            // unchanged, and the audit trail records the bypass.
+            return Ok(PreparedCommand::new(
+                program.to_path_buf(),
+                args.to_vec(),
+                cwd.to_path_buf(),
+            ));
+        }
         let mut prepared = self.backend.prepare(program, args, policy, cwd)?;
         if let Ok(scratch) = self.scratch() {
+            // A private, writable home: tools that insist on one get a
+            // usable directory instead of the user's real home.
+            prepared
+                .env
+                .push(("HOME".to_owned(), scratch.home.display().to_string()));
             prepared
                 .env
                 .push(("TMPDIR".to_owned(), scratch.work.display().to_string()));

@@ -33,7 +33,6 @@ use crate::capabilities::{CapabilityReport, EnforcementLevel};
 use crate::policy::{normalize_root, SandboxPolicy};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const CURL: &str = "/usr/bin/curl";
 
 /// Paths inside the user's home that hold secrets or private documents.
 ///
@@ -191,14 +190,22 @@ impl SandboxBackend for SeatbeltBackend {
                 reason: "macOS Seatbelt 无法强制执行域名白名单".to_owned(),
             });
         }
-        if policy.require_full_enforcement {
-            let report = self.inspect();
-            if !report.capabilities().is_full() {
-                return Err(SandboxError::PartialEnforcement {
-                    reason: format!("本机强制能力为 {}，不满足完整强制要求", report.summary()),
-                    capabilities: report.capabilities(),
-                });
-            }
+        // Per-axis enforcement floor. A policy that promises no outbound
+        // traffic needs a *verified* network isolation; a weak backend is
+        // refused instead of being used with a smaller boundary than the
+        // policy promises.
+        let report = self.inspect();
+        let required = policy.required_enforcement();
+        if !report.capabilities().meets(&required) {
+            let missing = report.capabilities().missing(&required);
+            return Err(SandboxError::PartialEnforcement {
+                reason: format!(
+                    "本机强制能力为 {}，不满足策略要求（缺少：{}）",
+                    report.summary(),
+                    missing.join("、")
+                ),
+                capabilities: report.capabilities(),
+            });
         }
 
         let profile = render_profile(policy);
@@ -405,34 +412,30 @@ fn run_probe() -> Probe {
     }
 
     // ── Read confinement: the denied path must stay unreadable. ──
+    //
+    // The control read (outside the sandbox) must succeed, otherwise the
+    // probe would "prove" isolation for a file that was simply missing.
     let read_profile = format!(
         "(version 1)\n(allow default)\n(deny file-read* (subpath \"{}\"))\n",
         escape(&inside)
     );
-    let read = run_sandbox(
-        &read_profile,
-        &format!("cat {}/secret.txt", inside.display()),
-    );
-    let file_read = if read.failed() {
-        // The deny-list model hides known sensitive roots but cannot prove
-        // every secret on the host is covered, hence `partial`.
-        EnforcementLevel::Partial
-    } else {
-        EnforcementLevel::Unsupported
+    let file_read = match probe_read(&read_profile, &inside.join("secret.txt")) {
+        Ok(()) => {
+            // The deny-list model hides known sensitive roots but cannot
+            // prove every secret on the host is covered, hence `partial`.
+            EnforcementLevel::Partial
+        }
+        Err(error) => {
+            notes.push(format!("Seatbelt 读取限制探测失败：{error}"));
+            EnforcementLevel::Unsupported
+        }
     };
-    if file_read == EnforcementLevel::Unsupported {
-        notes.push("Seatbelt 读取限制探测失败".to_owned());
-    }
 
     // ── Network confinement: a live loopback socket must stay unreachable. ──
     let network_egress = match probe_network() {
-        Ok(true) => EnforcementLevel::Full,
-        Ok(false) => {
-            notes.push("沙箱内仍可连接本机回环端口，网络限制未生效".to_owned());
-            EnforcementLevel::Unsupported
-        }
+        Ok(()) => EnforcementLevel::Full,
         Err(error) => {
-            notes.push(format!("网络探测失败：{error}"));
+            notes.push(format!("网络隔离未通过探测：{error}"));
             EnforcementLevel::Unsupported
         }
     };
@@ -478,39 +481,84 @@ fn run_sandbox(profile: &str, command: &str) -> ProbeRun {
     }
 }
 
+/// Verify that a denied path really is unreadable inside the sandbox.
+///
+/// The control read happens outside the sandbox and must succeed; only a
+/// blocked read under the profile proves the boundary.
+fn probe_read(profile: &str, target: &Path) -> Result<(), String> {
+    let helper = crate::probe::ProbeHelper::locate()
+        .ok_or_else(|| "未找到读取探测辅助程序，无法验证读取隔离".to_owned())?;
+    crate::probe::measure_read(&helper, &SeatbeltReadRunner { profile }, target)
+}
+
+/// Runs the probe helper under a Seatbelt profile.
+struct SeatbeltReadRunner<'a> {
+    profile: &'a str,
+}
+
+impl crate::probe::SandboxProbeRunner for SeatbeltReadRunner<'_> {
+    fn run_in_sandbox(&self, helper: &Path, args: &[OsString]) -> crate::probe::ProbeOutcome {
+        let mut argv = vec![OsString::from("-p"), OsString::from(self.profile)];
+        argv.push(helper.as_os_str().to_os_string());
+        argv.extend(args.iter().cloned());
+        let output = Command::new(SANDBOX_EXEC).args(&argv).output();
+        match output {
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let code = output.status.code().unwrap_or(-1);
+                if code == 126 || code == 127 {
+                    return crate::probe::ProbeOutcome::Other(format!(
+                        "探测辅助程序无法在沙箱内启动（exit {code}）"
+                    ));
+                }
+                crate::probe::ProbeOutcome::from_exit_code(code, &stderr)
+            }
+            Err(error) => crate::probe::ProbeOutcome::Other(format!("读取探测执行失败：{error}")),
+        }
+    }
+}
+
 /// Verify that `deny network*` really blocks a live loopback connection.
 ///
-/// Returns `Ok(true)` when the connection was blocked. A host with no
-/// loopback listener available produces `Err` and the caller reports the
-/// network axis as unsupported rather than assuming it works.
-fn probe_network() -> Result<bool, String> {
-    if !Path::new(CURL).exists() {
-        return Err("未找到 curl，无法探测网络限制".to_owned());
+/// The measurement uses a real TCP listener and a real connect attempt. The
+/// control run — the same address, without confinement — must succeed
+/// first; only a blocked connect *inside* the sandbox proves the isolation.
+/// A missing helper or an unreachable listener is reported as "cannot
+/// verify" rather than as "isolated".
+fn probe_network() -> Result<(), String> {
+    let helper = crate::probe::ProbeHelper::locate()
+        .ok_or_else(|| "未找到网络探测辅助程序，无法验证网络隔离".to_owned())?;
+    crate::probe::measure_network(&helper, &SeatbeltProbeRunner)
+}
+
+/// Runs the probe helper under Seatbelt with the production network rule.
+struct SeatbeltProbeRunner;
+
+impl crate::probe::SandboxProbeRunner for SeatbeltProbeRunner {
+    fn run_in_sandbox(&self, helper: &Path, args: &[OsString]) -> crate::probe::ProbeOutcome {
+        // The probe profile allows everything except the network, so the
+        // helper itself stays executable inside the sandbox.
+        let profile = "(version 1)\n(allow default)\n(deny network*)\n";
+        let mut argv = vec![OsString::from("-p"), OsString::from(profile)];
+        argv.push(helper.as_os_str().to_os_string());
+        argv.extend(args.iter().cloned());
+        let output = Command::new(SANDBOX_EXEC).args(&argv).output();
+        match output {
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let code = output.status.code().unwrap_or(-1);
+                // The helper never started (the launcher could not exec it):
+                // that is a probe anomaly, not a blocked connection.
+                if code == 126 || code == 127 {
+                    return crate::probe::ProbeOutcome::Other(format!(
+                        "探测辅助程序无法在沙箱内启动（exit {code}）"
+                    ));
+                }
+                crate::probe::ProbeOutcome::from_exit_code(code, &stderr)
+            }
+            Err(error) => crate::probe::ProbeOutcome::Other(format!("网络探测执行失败：{error}")),
+        }
     }
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|error| format!("无法监听回环端口：{error}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|error| format!("无法读取监听地址：{error}"))?
-        .port();
-    // Keep the listener alive for the whole probe.
-    let _guard = listener;
-    let profile = "(version 1)\n(allow default)\n(deny network*)\n";
-    let output = Command::new(SANDBOX_EXEC)
-        .arg("-p")
-        .arg(profile)
-        .arg(CURL)
-        .args([
-            "-s",
-            "-m",
-            "5",
-            "-o",
-            "/dev/null",
-            &format!("http://127.0.0.1:{port}/"),
-        ])
-        .output()
-        .map_err(|error| format!("网络探测执行失败：{error}"))?;
-    Ok(!output.status.success())
 }
 
 #[cfg(test)]

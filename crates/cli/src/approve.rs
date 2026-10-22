@@ -67,6 +67,26 @@ pub fn prompt_block(kind: StepKind, command: &str, cwd: &str) -> String {
     )
 }
 
+/// The prompt block for a request to run **outside** the sandbox.
+///
+/// The block states the risk and the scope, because this decision lifts the
+/// boundary the product promised. It offers one option only: a sandbox
+/// escalation is one-shot by construction.
+pub fn escalation_prompt_block(command: &str, cwd: &str) -> String {
+    let safe_command = tools::redact_secrets(command);
+    format!(
+        "────────────────────────────────────────\n\
+         需要批准 · 沙箱越权\n\
+         \x20 {safe_command}\n\
+         \x20 原因：沙箱拒绝了该命令，本次将**不带沙箱限制**执行\n\
+         \x20 风险：命令将以当前用户权限运行，可访问工作区之外的文件与网络\n\
+         \x20 范围：仅本次生效，不改变本会话的沙箱设置\n\
+         \x20 目录：{cwd}\n\
+         [y] 仅本次允许   [n] 拒绝\n\
+         > "
+    )
+}
+
 pub struct Approver {
     allows: RefCell<HashSet<String>>,
     escalate: Cell<bool>,
@@ -108,19 +128,33 @@ impl Approver {
         if interrupt::pending() {
             return false;
         }
+        // A sandbox escalation is a one-shot decision by construction. It
+        // never consults the session-allow cache — a command that was
+        // allowed earlier does not authorise running outside the sandbox —
+        // and it is never remembered either.
+        let escalation = matches!(kind, StepKind::SandboxEscalation);
         let fingerprint = approval_fingerprint(kind, command);
-        if self.allows.borrow().contains(&fingerprint) {
+        if !escalation && self.allows.borrow().contains(&fingerprint) {
             let _ = writeln!(output, "· 本会话已允许 {command}");
             let _ = output.flush();
             return true;
         }
         if !interactive {
-            let _ = writeln!(output, "非交互输入，已拒绝：{command}");
+            if escalation {
+                let _ = writeln!(output, "非交互执行，已拒绝沙箱越权：{command}");
+            } else {
+                let _ = writeln!(output, "非交互输入，已拒绝：{command}");
+            }
             let _ = output.flush();
             return false;
         }
 
-        let _ = write!(output, "{}", prompt_block(kind, command, &self.cwd));
+        let block = if escalation {
+            escalation_prompt_block(command, &self.cwd)
+        } else {
+            prompt_block(kind, command, &self.cwd)
+        };
+        let _ = write!(output, "{block}");
         let _ = output.flush();
 
         let mut line = String::new();
@@ -133,6 +167,13 @@ impl Approver {
             Ok(_) => match parse_reply(&line) {
                 Reply::Deny => false,
                 Reply::Once => true,
+                // A sandbox escalation is never remembered and never widens
+                // the session: "本会话" is downgraded to "仅本次".
+                Reply::Session | Reply::All if escalation => {
+                    let _ = writeln!(output, "· 沙箱越权仅对本次生效，不会记住");
+                    let _ = output.flush();
+                    true
+                }
                 Reply::Session => {
                     self.allows.borrow_mut().insert(fingerprint);
                     let _ = writeln!(output, "· 已允许（本会话不再询问）");
@@ -254,5 +295,78 @@ mod tests {
         let block = prompt_block(StepKind::FileChange, "src/lib.rs", "/tmp/p");
         assert!(block.contains("需要批准 · 编辑文件"), "{block}");
         assert!(!block.contains("$ "), "{block}");
+    }
+
+    #[test]
+    fn an_escalation_is_never_remembered_for_the_session() {
+        let a = approver();
+        // "s" on an escalation grants this one operation only.
+        let mut input = Cursor::new("s\n");
+        let mut out = Vec::new();
+        assert!(a.decide(
+            StepKind::SandboxEscalation,
+            "cargo build",
+            &mut input,
+            &mut out,
+            true
+        ));
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(text.contains("仅对本次生效"), "{text}");
+        assert!(
+            !a.allows.borrow().contains(&approval_fingerprint(
+                StepKind::SandboxEscalation,
+                "cargo build"
+            )),
+            "an escalation must never enter the session-allow cache"
+        );
+    }
+
+    #[test]
+    fn a_session_allow_does_not_authorise_an_escalation() {
+        let a = approver();
+        // The command itself was allowed for the session …
+        let mut input = Cursor::new("s\n");
+        let mut out = Vec::new();
+        assert!(a.decide(StepKind::Command, "cargo build", &mut input, &mut out, true));
+        // … but the escalation still asks, and the cached allow does not
+        // answer it.
+        let mut input = Cursor::new("");
+        let mut out = Vec::new();
+        assert!(!a.decide(
+            StepKind::SandboxEscalation,
+            "cargo build",
+            &mut input,
+            &mut out,
+            true
+        ));
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(text.contains("需要批准 · 沙箱越权"), "{text}");
+    }
+
+    #[test]
+    fn a_non_interactive_escalation_is_refused() {
+        let a = approver();
+        let mut input = Cursor::new("y\n");
+        let mut out = Vec::new();
+        assert!(!a.decide(
+            StepKind::SandboxEscalation,
+            "cargo build",
+            &mut input,
+            &mut out,
+            false
+        ));
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(text.contains("已拒绝沙箱越权"), "{text}");
+        assert_eq!(input.position(), 0);
+    }
+
+    #[test]
+    fn the_escalation_prompt_states_the_risk_and_the_scope() {
+        let block = escalation_prompt_block("curl https://example.com", "/tmp/p");
+        assert!(block.contains("需要批准 · 沙箱越权"), "{block}");
+        assert!(block.contains("风险："), "{block}");
+        assert!(block.contains("范围：仅本次生效"), "{block}");
+        assert!(block.contains("[y] 仅本次允许"), "{block}");
+        assert!(!block.contains("[s] 本会话允许"), "{block}");
     }
 }

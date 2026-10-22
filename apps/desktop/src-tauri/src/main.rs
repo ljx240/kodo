@@ -1451,6 +1451,8 @@ fn send_message(
             sandbox,
             // Interactive runs wait for the user; cancellation is the bound.
             approval_timeout: None,
+            // A human is watching this run, so it may ask for an approval.
+            headless: false,
             mode: agent_mode(found.mode),
             fallback_to_local: config.fallback_to_local,
             max_output_tokens: config.max_output_tokens,
@@ -1992,6 +1994,15 @@ fn snapshot() -> Result<Workspace, String> {
 }
 
 fn main() {
+    // The sandbox capability probe re-invokes this binary to perform one
+    // observable action inside the sandbox. The check comes first so the
+    // probe never starts the app or touches the session store.
+    kodo_sandbox::probe::register_self_probe();
+    let probe_argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = kodo_sandbox::probe::serve(&probe_argv) {
+        std::process::exit(code);
+    }
+
     // App restart: any Running persisted session becomes Interrupted here —
     // never Completed. No live runs exist yet, so the live set is empty.
     if let Some(dir) = session::dir() {

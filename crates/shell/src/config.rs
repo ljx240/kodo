@@ -136,12 +136,13 @@ impl ShellConfig {
 
     /// Build the confinement context for a project.
     ///
-    /// `None` only for [`SandboxMode::Unrestricted`], which requires an
-    /// explicit user action and is recorded as a sandbox bypass.
+    /// The context is **always** built — including for
+    /// [`SandboxMode::Unrestricted`]. An unrestricted session is an explicit
+    /// user decision, and it is expressed by the policy, not by the absence
+    /// of a policy: a missing context therefore means "the caller never
+    /// established a sandbox", which the agent refuses instead of
+    /// silently trusting.
     pub fn sandbox_context(&self, project: &Path) -> Option<SandboxContext> {
-        if !self.sandbox_mode.confines() {
-            return None;
-        }
         let policy = self.sandbox_runtime.policy_for(project, self.sandbox_mode);
         Some(SandboxContext::new(
             Arc::clone(&self.sandbox_runtime),
@@ -154,6 +155,20 @@ impl ShellConfig {
     pub fn sandbox_status(&self) -> String {
         let capabilities = self.sandbox_runtime.capabilities();
         format!("{} · {}", self.sandbox_mode.label(), capabilities.summary())
+    }
+
+    /// The warning shown when the user turned the sandbox off.
+    ///
+    /// An unrestricted session runs model-chosen code with the user's own
+    /// privileges. The wording says so in one line instead of hiding it.
+    pub fn sandbox_bypass_warning(&self) -> Option<String> {
+        if self.sandbox_mode.confines() {
+            return None;
+        }
+        Some(
+            "沙箱已关闭：模型命令将以当前用户权限直接执行，不受操作系统限制（sandbox_bypassed=true）"
+                .to_owned(),
+        )
     }
 }
 

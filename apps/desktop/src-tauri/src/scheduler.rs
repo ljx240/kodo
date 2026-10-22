@@ -662,6 +662,9 @@ fn execute_agent_run(
         permission: AGENT_RUN_PERMISSION,
         sandbox,
         approval_timeout: Some(SCHEDULED_APPROVAL_TIMEOUT),
+        // A scheduled run has nobody to answer an approval card, so it may
+        // never ask for an interactive sandbox escalation.
+        headless: true,
         mode: agent_mode,
         fallback_to_local: config.fallback_to_local,
         max_output_tokens: config.max_output_tokens,

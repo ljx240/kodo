@@ -342,6 +342,43 @@ impl Drop for ApprovalTicket {
     }
 }
 
+/// How an approval request is answered before the UI is involved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalGate {
+    /// The request is answered by policy — no card is shown.
+    Auto,
+    /// A human must answer; the card is shown.
+    Ask,
+    /// The request is refused: nobody can answer it.
+    Refuse,
+}
+
+/// Decide how an approval request is handled.
+///
+/// A sandbox escalation is the interesting case: it asks to run *outside*
+/// the boundary the product promised, so it may never be answered by
+/// policy. `Ask`, `Auto` and `Full` all produce [`ApprovalGate::Ask`], and
+/// an unattended run produces [`ApprovalGate::Refuse`] — the boundary then
+/// stays exactly as it was.
+pub fn approval_gate(
+    kind: StepKind,
+    permission: Permission,
+    headless: bool,
+    command: &str,
+) -> ApprovalGate {
+    if matches!(kind, StepKind::SandboxEscalation) {
+        return if headless {
+            ApprovalGate::Refuse
+        } else {
+            ApprovalGate::Ask
+        };
+    }
+    if !permission.needs_approval(kind, Some(command)) {
+        return ApprovalGate::Auto;
+    }
+    ApprovalGate::Ask
+}
+
 pub struct StartArgs {
     pub dir: PathBuf,
     pub id: String,
@@ -363,13 +400,19 @@ pub struct StartArgs {
     pub permission: Permission,
     /// OS-level confinement for model-driven commands.
     ///
-    /// `None` only when the user explicitly turned the sandbox off
-    /// (`unrestricted`); the desktop never drops confinement silently.
+    /// `None` means the caller never established a sandbox — the agent
+    /// refuses model-driven commands in that case. Turning the sandbox off
+    /// is expressed by the policy (`unrestricted`), not by a missing
+    /// context, so the desktop never drops confinement silently.
     pub sandbox: Option<kodo_sandbox::SandboxContext>,
     /// How long to wait for a human approval decision. `None` = wait until
     /// the user answers or the run is cancelled. Only headless callers, which
     /// have no UI to answer the card, pass a bound.
     pub approval_timeout: Option<Duration>,
+    /// True when no human is watching this run (scheduled jobs, background
+    /// triggers). Such a run never asks for an interactive escalation: a
+    /// sandbox refusal stays a refusal.
+    pub headless: bool,
     pub mode: agent::AgentMode,
     pub fallback_to_local: bool,
     pub max_output_tokens: u32,
@@ -471,16 +514,25 @@ pub fn start(
         let approve_token = token.clone();
         let permission = args.permission;
         let approval_timeout = args.approval_timeout;
+        let headless = args.headless;
         let approve_seq = Arc::new(Mutex::new(0u32));
         let approve = {
             let approve_seq = approve_seq.clone();
             move |kind: StepKind, command: &str| -> bool {
-                if !permission.needs_approval(kind, Some(command)) {
-                    return true;
+                // A sandbox escalation asks to run *outside* the boundary the
+                // product promised. It never answers itself: no permission
+                // mode may approve it, and the session-allow cache must not
+                // be consulted — a command that was allowed earlier does not
+                // authorise running outside the sandbox.
+                let escalation = matches!(kind, StepKind::SandboxEscalation);
+                match approval_gate(kind, permission, headless, command) {
+                    ApprovalGate::Refuse => return false,
+                    ApprovalGate::Auto => return true,
+                    ApprovalGate::Ask => {}
                 }
                 // Session-wide allow from an earlier "本会话允许".
                 let fingerprint = approval_fingerprint(kind, command);
-                if approve_approvals.is_session_allowed(&approve_id, &fingerprint) {
+                if !escalation && approve_approvals.is_session_allowed(&approve_id, &fingerprint) {
                     return true;
                 }
                 // Run already cancelled — never wait for an approval ticket.
@@ -494,39 +546,55 @@ pub fn start(
                 let (ticket, rx) =
                     approve_approvals.wait_point(&approve_id, approve_token.generation, step);
                 let risk = kodo_agent::tools::classify_command_risk(command);
-                let reason = agent::tools::redact_secrets(
-                    agent::dangerous_reason(command).unwrap_or_else(|| risk.reason()),
-                );
-                let risk_category = match risk {
-                    kodo_agent::tools::CommandRisk::Catastrophic => "Catastrophic",
-                    kodo_agent::tools::CommandRisk::DestructiveGit => "DestructiveGit",
-                    kodo_agent::tools::CommandRisk::SensitiveData => "SensitiveData",
-                    kodo_agent::tools::CommandRisk::Unknown => "Unknown",
-                    kodo_agent::tools::CommandRisk::ProcessControl => "ProcessControl",
-                    kodo_agent::tools::CommandRisk::PackageInstall => "PackageInstall",
-                    kodo_agent::tools::CommandRisk::Network => "Network",
-                    kodo_agent::tools::CommandRisk::FilesystemWrite => "FilesystemWrite",
-                    kodo_agent::tools::CommandRisk::ProjectBuild => "ProjectBuild",
-                    kodo_agent::tools::CommandRisk::ReadOnly => {
-                        if matches!(kind, StepKind::FileChange) {
-                            "FilesystemWrite"
-                        } else {
-                            "Safe"
+                let reason = if escalation {
+                    "沙箱拒绝了该命令，本次将不带沙箱限制执行".to_owned()
+                } else {
+                    agent::tools::redact_secrets(
+                        agent::dangerous_reason(command).unwrap_or_else(|| risk.reason()),
+                    )
+                };
+                let risk_category = if escalation {
+                    // The card must not look like an ordinary command
+                    // approval: it lifts the confinement.
+                    "SandboxEscalation".to_owned()
+                } else {
+                    match risk {
+                        kodo_agent::tools::CommandRisk::Catastrophic => "Catastrophic",
+                        kodo_agent::tools::CommandRisk::DestructiveGit => "DestructiveGit",
+                        kodo_agent::tools::CommandRisk::SensitiveData => "SensitiveData",
+                        kodo_agent::tools::CommandRisk::Unknown => "Unknown",
+                        kodo_agent::tools::CommandRisk::ProcessControl => "ProcessControl",
+                        kodo_agent::tools::CommandRisk::PackageInstall => "PackageInstall",
+                        kodo_agent::tools::CommandRisk::Network => "Network",
+                        kodo_agent::tools::CommandRisk::FilesystemWrite => "FilesystemWrite",
+                        kodo_agent::tools::CommandRisk::ProjectBuild => "ProjectBuild",
+                        kodo_agent::tools::CommandRisk::ReadOnly => {
+                            if matches!(kind, StepKind::FileChange) {
+                                "FilesystemWrite"
+                            } else {
+                                "Safe"
+                            }
                         }
                     }
+                    .to_owned()
                 };
                 let cwd = approve_project.to_string_lossy().into_owned();
                 let safe_command = kodo_agent::tools::redact_secrets(command);
                 let kind_label = step_kind_label(kind).to_owned();
-                let detail = format!("{safe_command}  ·  {reason}");
+                let detail = if escalation {
+                    format!("{safe_command}  ·  {reason}  ·  仅本次生效，不改变会话沙箱设置")
+                } else {
+                    format!("{safe_command}  ·  {reason}")
+                };
                 // The approval card must state the protected scope, so the
                 // user knows what the command is confined to.
                 let sandbox = match approve_sandbox.as_ref() {
                     Some(context) => {
                         let capabilities = context.runtime().capabilities();
                         format!(
-                            "{} · 文件写={} · 网络={}",
+                            "{} · 文件读={} · 文件写={} · 网络={}",
                             context.mode().label(),
+                            level_label(capabilities.file_read),
                             level_label(capabilities.file_write),
                             level_label(capabilities.network_egress)
                         )
@@ -571,7 +639,11 @@ pub fn start(
                 let deadline = approval_timeout.map(|timeout| std::time::Instant::now() + timeout);
                 let choice = wait_for_approval(&rx, deadline, &approve_token);
                 drop(ticket);
-                if choice == ApprovalChoice::AllowSession {
+                // A sandbox escalation is one-shot by construction: the
+                // session-allow cache is never written for it, and a
+                // "本会话允许" answer is downgraded to a single approval.
+                let choice = choice.for_kind(kind);
+                if choice.is_session_wide(kind) {
                     approve_approvals.remember_session_allow(&approve_id, &fingerprint);
                 }
                 choice.allows()
@@ -985,6 +1057,69 @@ fn open_memory_handle() -> Option<MemoryHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sandbox_escalation_never_answers_itself() {
+        // The core of P0-1: no permission mode may turn a sandbox escalation
+        // into an automatic approval. All three modes ask a human.
+        for permission in [Permission::Ask, Permission::Auto, Permission::Full] {
+            assert_eq!(
+                approval_gate(
+                    StepKind::SandboxEscalation,
+                    permission,
+                    false,
+                    "cargo build"
+                ),
+                ApprovalGate::Ask,
+                "{permission:?} must not auto-approve an escalation"
+            );
+        }
+    }
+
+    #[test]
+    fn a_headless_run_never_asks_for_an_escalation() {
+        for permission in [Permission::Ask, Permission::Auto, Permission::Full] {
+            assert_eq!(
+                approval_gate(StepKind::SandboxEscalation, permission, true, "cargo build"),
+                ApprovalGate::Refuse,
+                "{permission:?} must refuse an escalation without a human"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_commands_keep_their_permission_semantics() {
+        // The escalation gate must not change how ordinary commands behave.
+        assert_eq!(
+            approval_gate(StepKind::Command, Permission::Full, false, "cargo build"),
+            ApprovalGate::Auto
+        );
+        assert_eq!(
+            approval_gate(StepKind::Command, Permission::Ask, false, "cargo build"),
+            ApprovalGate::Ask
+        );
+        assert_eq!(
+            approval_gate(StepKind::ExternalTool, Permission::Full, false, "mcp__x__y"),
+            ApprovalGate::Ask
+        );
+    }
+
+    #[test]
+    fn a_session_allow_never_covers_a_sandbox_escalation() {
+        // The fingerprint space is separate, and "本会话允许" is downgraded.
+        assert_ne!(
+            approval_fingerprint(StepKind::Command, "cargo build"),
+            approval_fingerprint(StepKind::SandboxEscalation, "cargo build")
+        );
+        assert_eq!(
+            ApprovalChoice::AllowSession.for_kind(StepKind::SandboxEscalation),
+            ApprovalChoice::AllowOnce
+        );
+        assert_eq!(
+            ApprovalChoice::AllowSession.for_kind(StepKind::Command),
+            ApprovalChoice::AllowSession
+        );
+    }
 
     #[test]
     fn cancelled_run_cannot_revive_or_release_successor() {

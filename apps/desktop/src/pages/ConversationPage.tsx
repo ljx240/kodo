@@ -2023,7 +2023,7 @@ export function ConversationPage({
               <div className="approval-bar" role="alertdialog" aria-label="审批工具步骤" data-testid="approval-bar">
                 <div className="approval-text">
                   <strong>
-                    需要批准 · {approval.kind === "FileChange" ? "修改文件" : approval.kind}
+                    需要批准 · {approval.kind === "FileChange" ? "修改文件" : approval.kind === "sandbox escalation" ? "沙箱越权" : approval.kind}
                     {approval.riskCategory ? ` · ${approval.riskCategory}` : ""}
                   </strong>
                   <code data-testid="approval-command">{approval.detail || "继续执行该步骤"}</code>
@@ -2042,6 +2042,11 @@ export function ConversationPage({
                       风险：{approval.riskCategory}
                     </span>
                   )}
+                  {approval.kind === "sandbox escalation" && (
+                    <span className="approval-risk" data-testid="approval-escalation-scope">
+                      范围：仅本次生效，不改变本会话的沙箱设置
+                    </span>
+                  )}
                   {approval.sandbox && (
                     <span className="approval-sandbox" data-testid="approval-sandbox">
                       沙箱：{approval.sandbox}
@@ -2052,15 +2057,19 @@ export function ConversationPage({
                   <button type="button" className="btn" data-testid="approval-deny" onClick={() => decide(false)}>
                     拒绝
                   </button>
-                  <button
-                    type="button"
-                    className="btn"
-                    data-testid="approval-allow-session"
-                    title="本会话内相同命令不再询问"
-                    onClick={() => decide(true, true)}
-                  >
-                    本会话允许
-                  </button>
+                  {/* A sandbox escalation is one-shot by construction: the
+                      session-allow option is not offered for it. */}
+                  {approval.kind !== "sandbox escalation" && (
+                    <button
+                      type="button"
+                      className="btn"
+                      data-testid="approval-allow-session"
+                      title="本会话内相同命令不再询问"
+                      onClick={() => decide(true, true)}
+                    >
+                      本会话允许
+                    </button>
+                  )}
                   <button type="button" className="btn btn--primary" data-testid="approval-allow" onClick={() => decide(true)}>
                     允许
                   </button>

@@ -99,6 +99,7 @@ pub use patch::PatchOutcome;
 pub use plan::{Evidence, Subtask, SubtaskKind, SubtaskStatus};
 pub use process::{
     kill_process_tree, EnvPolicy, ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStatus,
+    RunFailure,
 };
 pub use protocol::{
     ToolDefinition, ToolError as AgentToolError, ToolRegistry as AgentToolRegistry,
@@ -165,6 +166,10 @@ impl Permission {
             StepKind::FileChange => !matches!(self, Self::Full),
             // Opaque tool effects and network egress always require consent.
             StepKind::ExternalTool | StepKind::WebSearch => true,
+            // A sandbox escalation asks to run **outside** the boundary the
+            // product promised. No permission mode may approve it on its
+            // own: it always needs an explicit human decision.
+            StepKind::SandboxEscalation => true,
             _ => false,
         }
     }
@@ -226,6 +231,13 @@ pub enum StepKind {
     PlanStep,
     Permission,
     ContextBudget,
+    /// A request to run one operation **outside** the sandbox.
+    ///
+    /// This kind is deliberately separate from the ordinary permission
+    /// kinds: it always requires an explicit human decision, it never
+    /// consults the session-allow cache, and it never widens the session's
+    /// sandbox configuration.
+    SandboxEscalation,
 }
 
 /// One finished unit of work, ready to be written to the session log.
@@ -783,8 +795,14 @@ fn command_step(
         return Ok((false, None));
     }
     let began = Instant::now();
-    // A model-driven command is always confined. When the request carries no
-    // sandbox context the command is refused rather than run unconfined.
+    // A model-driven command always runs under the session's sandbox
+    // policy. Two states are distinguished here:
+    //
+    // * `None` — the caller never established a sandbox. The command is
+    //   refused; it never runs unconfined by accident.
+    // * `Some(context)` — the policy is in force. `Unrestricted` is an
+    //   explicit user decision that the runtime honours; every other mode
+    //   confines the process at the operating-system level.
     let mut outcome = match request.sandbox.as_ref() {
         Some(sandbox) => command_run_confined(
             project,
@@ -802,25 +820,35 @@ fn command_step(
             cancelled: false,
             truncation: TruncationInfo::default(),
             sandbox: None,
+            failure: Some(RunFailure::SandboxRefused(
+                kodo_sandbox::SandboxError::Unavailable {
+                    reason: "沙箱未初始化".to_owned(),
+                },
+            )),
         },
     };
 
-    // The sandbox refused the run. Offer a one-shot escalation: the grant is
-    // bound to this session and this exact command, and is burnt on use — a
-    // second identical command needs a new approval.
+    // The sandbox refused the run. The refusal is **structural** — it comes
+    // from the backend, never from an exit code — so an ordinary failure
+    // (a program that happens to exit with 126, a timeout, a crash) never
+    // reaches this branch.
+    //
+    // The escalation itself goes through a dedicated approval kind: it
+    // always needs an explicit human decision, it never reuses the
+    // session-allow cache, and the grant is bound to this exact command.
     let mut escalated = false;
-    if outcome.kind == CommandOutcomeKind::Error
-        && outcome.exit_code == Some(126)
-        && request.sandbox.is_some()
-    {
+    if let Some(RunFailure::SandboxRefused(error)) = outcome.failure.clone() {
         let safe_cmd = tools::redact_secrets(command);
         let request_text = format!(
             "沙箱拒绝了该命令，需要单次越权（仅本次生效，不改变会话沙箱设置）：\n{safe_cmd}"
         );
-        if approve(StepKind::Permission, &request_text) {
+        if approve(StepKind::SandboxEscalation, &request_text) {
             if let Some(sandbox) = request.sandbox.as_ref() {
                 let digest = kodo_sandbox::operation_digest(command);
                 let session = request.session_id.clone().unwrap_or_default();
+                // The grant is bound to this session and this exact command,
+                // and is burnt on use — a second identical command needs a
+                // new approval. It never changes the session's policy.
                 sandbox.runtime().issue_grant(kodo_sandbox::GrantScope::new(
                     session.clone(),
                     digest.clone(),
@@ -835,8 +863,14 @@ fn command_step(
                     notes.push(format!(
                         "`{safe_cmd}` → 已获单次越权授权（沙箱已绕过，仅本次）"
                     ));
+                    notes.push(format!("[沙箱] 越权原因：{error}"));
                 }
             }
+        } else {
+            // A refusal keeps the original boundary: nothing ran outside it.
+            notes.push(format!(
+                "`{safe_cmd}` → 用户拒绝越权，已保持沙箱边界（{error}）"
+            ));
         }
     }
     let duration_ms = began.elapsed().as_millis() as u64;
@@ -856,6 +890,11 @@ fn command_step(
                 .map(|reason| format!(" · 拒绝：{reason}"))
                 .unwrap_or_default()
         ));
+        // The bypass is recorded out loud: an unconfined run must never
+        // look like a confined one in the trail.
+        if report.is_bypassed() {
+            notes.push("[沙箱] 用户已显式关闭沙箱：本次命令不受操作系统限制".to_owned());
+        }
     }
     let output = outcome.output.clone();
     let command_label = tools::redact_secrets(command);
@@ -9400,6 +9439,285 @@ mod tests {
             "the command must never have started"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A backend that always refuses to prepare a command.
+    ///
+    /// It stands in for a host whose sandbox cannot be established, so the
+    /// tests exercise the refusal path on every machine.
+    struct RefusingBackend;
+
+    impl kodo_sandbox::SandboxBackend for RefusingBackend {
+        fn id(&self) -> &'static str {
+            "refusing"
+        }
+
+        fn inspect(&self) -> kodo_sandbox::CapabilityReport {
+            kodo_sandbox::CapabilityReport {
+                backend: "refusing".to_owned(),
+                file_read: kodo_sandbox::EnforcementLevel::Unsupported,
+                file_write: kodo_sandbox::EnforcementLevel::Unsupported,
+                network_egress: kodo_sandbox::EnforcementLevel::Unsupported,
+                notes: vec!["测试后端：始终拒绝".to_owned()],
+            }
+        }
+
+        fn prepare(
+            &self,
+            _program: &Path,
+            _args: &[std::ffi::OsString],
+            _policy: &kodo_sandbox::SandboxPolicy,
+            _cwd: &Path,
+        ) -> Result<kodo_sandbox::PreparedCommand, kodo_sandbox::SandboxError> {
+            Err(kodo_sandbox::SandboxError::Unavailable {
+                reason: "测试注入的沙箱故障".to_owned(),
+            })
+        }
+    }
+
+    /// A backend that hands the command through unchanged.
+    ///
+    /// It lets a test observe how the agent classifies an *ordinary* run,
+    /// independent of what the host's real sandbox can do.
+    struct PassThroughBackend;
+
+    impl kodo_sandbox::SandboxBackend for PassThroughBackend {
+        fn id(&self) -> &'static str {
+            "passthrough"
+        }
+
+        fn inspect(&self) -> kodo_sandbox::CapabilityReport {
+            kodo_sandbox::CapabilityReport {
+                backend: "passthrough".to_owned(),
+                file_read: kodo_sandbox::EnforcementLevel::Full,
+                file_write: kodo_sandbox::EnforcementLevel::Full,
+                network_egress: kodo_sandbox::EnforcementLevel::Full,
+                notes: vec!["测试后端：不做任何限制".to_owned()],
+            }
+        }
+
+        fn prepare(
+            &self,
+            program: &Path,
+            args: &[std::ffi::OsString],
+            _policy: &kodo_sandbox::SandboxPolicy,
+            cwd: &Path,
+        ) -> Result<kodo_sandbox::PreparedCommand, kodo_sandbox::SandboxError> {
+            Ok(kodo_sandbox::PreparedCommand::new(
+                program.to_path_buf(),
+                args.to_vec(),
+                cwd.to_path_buf(),
+            ))
+        }
+    }
+
+    fn refusing_sandbox(dir: &Path) -> kodo_sandbox::SandboxContext {
+        let runtime =
+            kodo_sandbox::SandboxRuntime::with_backend(std::sync::Arc::new(RefusingBackend));
+        let policy = runtime.policy_for(dir, kodo_sandbox::SandboxMode::WorkspaceWrite);
+        kodo_sandbox::SandboxContext::new(runtime, policy)
+    }
+
+    fn pass_through_sandbox(dir: &Path) -> kodo_sandbox::SandboxContext {
+        let runtime =
+            kodo_sandbox::SandboxRuntime::with_backend(std::sync::Arc::new(PassThroughBackend));
+        let policy = runtime.policy_for(dir, kodo_sandbox::SandboxMode::WorkspaceWrite);
+        kodo_sandbox::SandboxContext::new(runtime, policy)
+    }
+
+    /// Run one command through the agent and report which approval kinds
+    /// were requested.
+    fn run_command_with_approvals(
+        dir: &Path,
+        request: &RunRequest,
+        command: &str,
+        approve: &dyn Fn(StepKind, &str) -> bool,
+    ) -> Vec<StepKind> {
+        let call = ToolCall {
+            id: ToolCallId::new("esc"),
+            name: ToolName::RunCommand,
+            args: ToolArgs::RunCommand {
+                command: command.to_owned(),
+            },
+        };
+        let asked: std::cell::RefCell<Vec<StepKind>> = std::cell::RefCell::new(Vec::new());
+        let mut notes = Vec::new();
+        let mut dedup = dedup::TurnDedup::new();
+        let recorder = |kind: StepKind, text: &str| {
+            asked.borrow_mut().push(kind);
+            approve(kind, text)
+        };
+        let _ = execute_tool_call(
+            &call,
+            dir,
+            request,
+            &|| true,
+            &recorder,
+            &mut |_| true,
+            &mut notes,
+            &mut dedup,
+        )
+        .expect("the call returns a result");
+        asked.into_inner()
+    }
+
+    #[test]
+    fn a_sandbox_refusal_asks_for_an_explicit_escalation_in_every_mode() {
+        // The heart of P0-1: no permission mode may turn the escalation into
+        // an automatic approval, and the request must use the dedicated
+        // escalation kind — never the ordinary permission kind.
+        for permission in [Permission::Ask, Permission::Auto, Permission::Full] {
+            let dir = std::env::temp_dir().join(format!("kodo-esc-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut request = temp_request(&dir, permission);
+            request.sandbox = Some(refusing_sandbox(&dir));
+            // The command itself is approved; only the escalation is not.
+            let asked = run_command_with_approvals(&dir, &request, "echo hi", &|kind, _| {
+                !matches!(kind, StepKind::SandboxEscalation)
+            });
+            assert!(
+                asked.contains(&StepKind::SandboxEscalation),
+                "{permission:?} must ask for an explicit escalation: {asked:?}"
+            );
+            assert!(
+                !asked.contains(&StepKind::Permission),
+                "{permission:?} must not use the ordinary permission kind: {asked:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_refused_escalation_keeps_the_sandbox_boundary() {
+        // The user says no: the command must not run outside the sandbox.
+        let dir = std::env::temp_dir().join(format!("kodo-esc-no-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut request = temp_request(&dir, Permission::Full);
+        request.sandbox = Some(refusing_sandbox(&dir));
+        let marker = dir.join("escaped.txt");
+        let asked = run_command_with_approvals(
+            &dir,
+            &request,
+            &format!("echo escaped > {}", marker.display()),
+            &|kind, _| !matches!(kind, StepKind::SandboxEscalation),
+        );
+        assert!(asked.contains(&StepKind::SandboxEscalation), "{asked:?}");
+        assert!(
+            !marker.exists(),
+            "a refused escalation must leave the boundary intact"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_approved_escalation_runs_the_command_once() {
+        // The counterpart: with an explicit approval the command does run —
+        // outside the sandbox, exactly once, and only for this operation.
+        let dir = std::env::temp_dir().join(format!("kodo-esc-yes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut request = temp_request(&dir, Permission::Full);
+        request.sandbox = Some(refusing_sandbox(&dir));
+        let marker = dir.join("escaped.txt");
+        let asked = run_command_with_approvals(
+            &dir,
+            &request,
+            &format!("echo escaped > {}", marker.display()),
+            &|_kind, _| true,
+        );
+        assert!(asked.contains(&StepKind::SandboxEscalation), "{asked:?}");
+        assert!(
+            marker.exists(),
+            "an approved escalation must run the command"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_program_that_exits_with_126_never_triggers_an_escalation() {
+        // The old implementation read the exit code. `126` is an ordinary
+        // program result and must stay one.
+        let dir = std::env::temp_dir().join(format!("kodo-esc-126-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut request = temp_request(&dir, Permission::Full);
+        request.sandbox = Some(pass_through_sandbox(&dir));
+        let asked = run_command_with_approvals(&dir, &request, "exit 126", &|_, _| true);
+        assert!(
+            !asked.contains(&StepKind::SandboxEscalation),
+            "an ordinary exit code must never ask for an escalation: {asked:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_program_that_exits_with_zero_never_triggers_an_escalation() {
+        let dir = std::env::temp_dir().join(format!("kodo-esc-0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut request = temp_request(&dir, Permission::Full);
+        request.sandbox = Some(pass_through_sandbox(&dir));
+        let asked = run_command_with_approvals(&dir, &request, "exit 0", &|_, _| true);
+        assert!(!asked.contains(&StepKind::SandboxEscalation), "{asked:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_unrestricted_mode_is_an_explicit_policy_not_a_missing_context() {
+        // `unrestricted` must run the command — the user asked for it — and
+        // the report must say that the run was not confined.
+        let dir = std::env::temp_dir().join(format!("kodo-unrestricted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = test_runtime();
+        let policy = runtime.policy_for(&dir, kodo_sandbox::SandboxMode::Unrestricted);
+        let mut request = temp_request(&dir, Permission::Full);
+        request.sandbox = Some(kodo_sandbox::SandboxContext::new(runtime, policy));
+        let marker = dir.join("written.txt");
+        let asked = run_command_with_approvals(
+            &dir,
+            &request,
+            &format!("echo written > {}", marker.display()),
+            &|_, _| true,
+        );
+        assert!(
+            !asked.contains(&StepKind::SandboxEscalation),
+            "an unrestricted session must not ask for an escalation: {asked:?}"
+        );
+        assert!(
+            marker.exists(),
+            "the unrestricted mode must run the command"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_unrestricted_mode_is_reported_as_a_bypass() {
+        let dir =
+            std::env::temp_dir().join(format!("kodo-unrestricted-report-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = test_runtime();
+        let policy = runtime.policy_for(&dir, kodo_sandbox::SandboxMode::Unrestricted);
+        let context = kodo_sandbox::SandboxContext::new(runtime, policy);
+        assert_eq!(context.mode(), kodo_sandbox::SandboxMode::Unrestricted);
+        assert!(!context.policy().confines());
+        // The application layer follows the same rule: an unrestricted
+        // session may write where the user asks.
+        assert!(context.allows_write(&dir.join("anything.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sandbox_escalation_always_requires_approval() {
+        for permission in [Permission::Ask, Permission::Auto, Permission::Full] {
+            assert!(
+                permission.needs_approval(StepKind::SandboxEscalation, Some("cargo build")),
+                "{permission:?} must never auto-approve an escalation"
+            );
+        }
     }
 
     #[test]
