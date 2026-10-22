@@ -274,8 +274,16 @@ export type Core = {
   skills?: unknown[];
   /** `read_skill` payload by name; builtins are configured here in tests. */
   skillDetails?: Record<string, unknown>;
+  /** `list_skill_files` payload by skill name. Missing names expose a single
+   *  virtual `SKILL.md`, which is also what flat store skills do. */
+  skillFiles?: Record<string, Array<{ path: string; size?: number }>>;
+  /** `read_skill_file` bodies keyed `"<skill>:<path>"`; `SKILL.md` falls back
+   *  to the skill's `markdown`. */
+  skillFileContents?: Record<string, string>;
   /** When set, `save_skill` rejects with this reason. */
   failSaveSkill?: string;
+  /** When set, `save_skill_file` rejects with this reason. */
+  failSaveSkillFile?: string;
   /** `list_agents` payload — persona records; stateful like the skill store. */
   agents?: unknown[];
   /** When set, `save_agent` rejects with this reason. */
@@ -403,10 +411,37 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
     const browseLog: Array<{ command: string; args?: Record<string, unknown> }> = [];
     (window as unknown as { __browseLog?: unknown }).__browseLog = browseLog;
     let providersState = (config.providers ?? []) as Array<Record<string, unknown>>;
-    /** `save_skill` / `delete_skill` calls, for asserting CRUD reached the core. */
-    const skillOps: Array<{ op: "save" | "delete"; name: string }> = [];
+    /** `save_skill` / `save_skill_file` / `delete_skill` calls, for asserting
+     *  CRUD reached the core. */
+    const skillOps: Array<{ op: "save" | "save-file" | "delete"; name: string; file?: string }> = [];
     (window as unknown as { __skillOps?: unknown }).__skillOps = skillOps;
     let skillsState = (config.skills ?? []) as Array<Record<string, unknown>>;
+    /** File bodies by `"<skill>:<path>"`, seeded from the fixture. */
+    const skillFileState = new Map<string, string>(Object.entries(config.skillFileContents ?? {}));
+    // New view fields default the way `skill_record_view` fills them so
+    // fixtures written before the discovery work stay valid.
+    const normalizeSkill = (skill: Record<string, unknown>): Record<string, unknown> => {
+      const format = typeof skill.format === "string" ? skill.format : "kodo";
+      return {
+        scope: skill.source === "project" ? "project" : "global",
+        readOnly: skill.source !== "user" && skill.source !== "project",
+        format,
+        path: "",
+        modifiedAt: null,
+        guidanceOnly: format === "agent",
+        ...skill,
+      };
+    };
+    const findSkill = (name: string, wanted: string | null) => {
+      const fromStore = skillsState.find(
+        (skill) =>
+          skill.name === name &&
+          (wanted === null || skill.source === wanted || skill.source === undefined),
+      );
+      const detail = fromStore ?? config.skillDetails?.[name];
+      if (!detail) throw "技能不存在";
+      return normalizeSkill(detail as Record<string, unknown>);
+    };
     /** Persona CRUD (`save_agent` / `delete_agent`) + `__agentsLog` order log. */
     let agentsState = (config.agents ?? []) as Array<Record<string, unknown>>;
     // The frontend stub doesn't load the 12 `include_str!` builtins — the
@@ -947,27 +982,64 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
           case "read_skill": {
             const name = String(args?.name ?? "");
             const wanted = typeof args?.source === "string" ? args.source : null;
-            // New view fields default the way `skill_record_view` fills them so
-            // fixtures written before the discovery work stay valid.
-            const normalize = (skill: Record<string, unknown>) => {
-              const format = typeof skill.format === "string" ? skill.format : "kodo";
-              return {
-                scope: skill.source === "project" ? "project" : "global",
-                readOnly: skill.source !== "user" && skill.source !== "project",
-                format,
-                path: "",
-                guidanceOnly: format === "agent",
-                ...skill,
-              };
+            return findSkill(name, wanted);
+          }
+          case "list_skill_files": {
+            const name = String(args?.name ?? "");
+            const wanted = typeof args?.source === "string" ? args.source : null;
+            const detail = findSkill(name, wanted);
+            const configured = config.skillFiles?.[name];
+            const entries = configured ?? [
+              { path: "SKILL.md", size: String(detail.markdown ?? "").length },
+            ];
+            return entries.map((entry) => {
+              const body =
+                entry.path === "SKILL.md"
+                  ? String(detail.markdown ?? "")
+                  : (skillFileState.get(`${name}:${entry.path}`) ?? "");
+              return { path: entry.path, size: entry.size ?? body.length };
+            });
+          }
+          case "read_skill_file": {
+            const name = String(args?.name ?? "");
+            const file = String(args?.file ?? "");
+            const wanted = typeof args?.source === "string" ? args.source : null;
+            const detail = findSkill(name, wanted);
+            const content =
+              file === "SKILL.md"
+                ? String(detail.markdown ?? "")
+                : skillFileState.get(`${name}:${file}`);
+            if (content === undefined) throw "文件不存在";
+            return {
+              path: file,
+              content,
+              binary: false,
+              truncated: false,
+              size: content.length,
             };
-            const fromStore = skillsState.find(
-              (skill) =>
-                skill.name === name &&
-                (wanted === null || skill.source === wanted || skill.source === undefined),
-            );
-            const detail = fromStore ?? config.skillDetails?.[name];
-            if (!detail) throw "技能不存在";
-            return normalize(detail as Record<string, unknown>);
+          }
+          case "save_skill_file": {
+            const name = String(args?.name ?? "");
+            const file = String(args?.file ?? "");
+            const content = String(args?.content ?? "");
+            const wanted = typeof args?.source === "string" ? args.source : null;
+            const detail = findSkill(name, wanted);
+            if (detail.readOnly) throw "外部技能为只读，不能保存";
+            if (config.failSaveSkillFile) throw config.failSaveSkillFile;
+            if (file === "SKILL.md") {
+              skillsState = skillsState.map((skill) =>
+                skill.name === name ? { ...skill, markdown: content } : skill,
+              );
+            }
+            skillFileState.set(`${name}:${file}`, content);
+            skillOps.push({ op: "save-file", name, file });
+            return {
+              path: file,
+              content,
+              binary: false,
+              truncated: false,
+              size: content.length,
+            };
           }
           case "save_skill": {
             if (config.failSaveSkill) throw config.failSaveSkill;

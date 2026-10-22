@@ -35,7 +35,16 @@ import {
 /** "Open this referenced file in the sidebar" — threaded to inline code. */
 export type OpenPath = (path: string) => void;
 
-export function Markdown({ text, onOpenPath = null }: { text: string; onOpenPath?: OpenPath | null }) {
+export function Markdown({
+  text,
+  onOpenPath = null,
+  toc = true,
+}: {
+  text: string;
+  onOpenPath?: OpenPath | null;
+  /** Off inside fixed dialogs, where the heading list would eat the width. */
+  toc?: boolean;
+}) {
   const scope = useId().replace(/:/g, "");
   const blocks = useMemo(() => parseBlocks(text), [text]);
   const headings = useMemo(
@@ -57,7 +66,7 @@ export function Markdown({ text, onOpenPath = null }: { text: string; onOpenPath
     [blocks],
   );
   const fnIds = useMemo(() => new Set(footnotes.map((footnote) => footnote.id)), [footnotes]);
-  const showToc = headings.length >= 4;
+  const showToc = toc && headings.length >= 4;
   // Scroll-follow: track which headings sit in the reading band and light up
   // the first one in document order. IO with the viewport root works even
   // though the conversation scrolls in an inner container.

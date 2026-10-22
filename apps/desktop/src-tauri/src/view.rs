@@ -1077,6 +1077,9 @@ pub struct SkillView {
     pub format: String,
     /// Absolute file path; empty for embedded builtins.
     pub path: String,
+    /// Last modification time in seconds since the Unix epoch. `None` for
+    /// embedded builtins and when the filesystem cannot report it.
+    pub modified_at: Option<u64>,
     /// Agent-format skills contribute guidance only — Kodo's plan and gates
     /// still apply. The detail modal uses this for its hint line.
     pub guidance_only: bool,
@@ -1123,6 +1126,7 @@ pub fn skill_view(spec: &kodo_agent::AgentSkillSpec, source: &str, markdown: Str
         read_only: source == "builtin",
         format: "kodo".to_owned(),
         path: String::new(),
+        modified_at: None,
         guidance_only: spec.guidance_only,
         description: spec.description.clone(),
         task_types: spec
@@ -1151,8 +1155,33 @@ pub fn skill_record_view(record: &kodo_agent::SkillRecord) -> SkillView {
     view.read_only = record.read_only;
     view.format = record.format.label().to_owned();
     view.path = record.path.to_string_lossy().into_owned();
+    view.modified_at = std::fs::metadata(&record.path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_secs());
     view.guidance_only = record.spec.guidance_only;
     view
+}
+
+/// One file in a skill folder, as the detail modal's tree lists it.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillFileView {
+    /// Path relative to the skill folder, `/`-separated.
+    pub path: String,
+    pub size: u64,
+}
+
+/// One file's preview/editor payload. `content` is `None` for binaries.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillFileContentView {
+    pub path: String,
+    pub content: Option<String>,
+    pub binary: bool,
+    pub truncated: bool,
+    pub size: u64,
 }
 
 /// One persona as the 插件 · 智能体 tab lists it. `source` distinguishes

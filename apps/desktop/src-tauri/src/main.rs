@@ -72,7 +72,8 @@ use scheduler_cmds::{
 
 use view::{
     agent_view, skill_record_view, skill_view, AgentView, ArchivedItemView, ModelOptionView,
-    ProjectView, ProviderView, SessionRefView, SessionView, SkillView, Workspace,
+    ProjectView, ProviderView, SessionRefView, SessionView, SkillFileContentView, SkillFileView,
+    SkillView, Workspace,
 };
 
 /// The agent's mode, mapped onto the core's per-session tag.
@@ -1015,25 +1016,24 @@ fn list_skills(project: Option<String>) -> Result<Vec<SkillView>, String> {
 /// …). Without one, the lookup mirrors the run-time shadowing order:
 /// builtin → project Kodo store → external project roots → user Kodo store →
 /// external global roots.
-#[tauri::command]
-fn read_skill(
-    name: String,
-    scope: Option<String>,
-    project: Option<String>,
-    source: Option<String>,
+fn resolve_skill(
+    name: &str,
+    scope: Option<&str>,
+    project: Option<&str>,
+    source: Option<&str>,
 ) -> Result<SkillView, String> {
-    if let Some(source) = source.as_deref() {
+    if let Some(source) = source {
         if source == "builtin" {
-            return builtin_skill_view(&name).ok_or_else(|| "技能不存在".to_owned());
+            return builtin_skill_view(name).ok_or_else(|| "技能不存在".to_owned());
         }
         if matches!(source, "user" | "project") {
-            let (dir, store_source) = skill_store(Some(source), project.as_deref())?;
+            let (dir, store_source) = skill_store(Some(source), project)?;
             return load_store_skills(&dir, store_source)
                 .into_iter()
                 .find(|skill| skill.name == name)
                 .ok_or_else(|| "技能不存在".to_owned());
         }
-        let project_path = project.as_deref().filter(|p| !p.trim().is_empty());
+        let project_path = project.filter(|p| !p.trim().is_empty());
         let mut roots = kodo_core::skill_paths::local_skill_roots(project_path.map(Path::new));
         roots.sort_by(|a, b| b.priority.cmp(&a.priority));
         for root in roots.iter().filter(|root| root.source == source) {
@@ -1047,16 +1047,16 @@ fn read_skill(
         return Err("技能不存在".to_owned());
     }
     if scope.is_some() {
-        let (dir, source) = skill_store(scope.as_deref(), project.as_deref())?;
+        let (dir, source) = skill_store(scope, project)?;
         return load_store_skills(&dir, source)
             .into_iter()
             .find(|s| s.name == name)
             .ok_or_else(|| "技能不存在".to_owned());
     }
-    if let Some(view) = builtin_skill_view(&name) {
+    if let Some(view) = builtin_skill_view(name) {
         return Ok(view);
     }
-    let project_path = project.as_deref().filter(|p| !p.trim().is_empty());
+    let project_path = project.filter(|p| !p.trim().is_empty());
     if let Some(root) = project_path {
         if let Some(view) = load_store_skills(&project_skills_dir(root)?, "project")
             .into_iter()
@@ -1066,7 +1066,7 @@ fn read_skill(
         }
     }
     if let Some(view) = external_skill_view(
-        &name,
+        name,
         project_path,
         Some(kodo_core::skill_paths::SkillScope::Project),
     ) {
@@ -1079,11 +1079,26 @@ fn read_skill(
         return Ok(view);
     }
     external_skill_view(
-        &name,
+        name,
         project_path,
         Some(kodo_core::skill_paths::SkillScope::Global),
     )
     .ok_or_else(|| "技能不存在".to_owned())
+}
+
+#[tauri::command]
+fn read_skill(
+    name: String,
+    scope: Option<String>,
+    project: Option<String>,
+    source: Option<String>,
+) -> Result<SkillView, String> {
+    resolve_skill(
+        &name,
+        scope.as_deref(),
+        project.as_deref(),
+        source.as_deref(),
+    )
 }
 
 /// Validate and persist one skill — `parse_skill` inside `save_user_skill` is
@@ -1111,6 +1126,170 @@ fn delete_skill(
 ) -> Result<(), String> {
     let (dir, _) = skill_store(scope.as_deref(), project.as_deref())?;
     kodo_agent::delete_user_skill(&dir, &name)
+}
+
+/// A store skill saved by the flat layout is `<name>.md`; a folder skill is
+/// `<name>/SKILL.md`. The viewer exposes the flat file as a virtual
+/// `SKILL.md`, so the two layouts share one tree UI.
+fn is_flat_skill(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md")
+}
+
+/// Resolve the folder a skill file belongs to plus the file's real name.
+/// Flat store skills share their folder with other skills, so the caller must
+/// only ever touch the exact resolved file there.
+fn skill_file_root(view: &SkillView) -> Result<(PathBuf, String), String> {
+    let path = PathBuf::from(&view.path);
+    let parent = path.parent().ok_or_else(|| "技能文件位置无效".to_owned())?;
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "技能文件位置无效".to_owned())?;
+    Ok((parent.to_path_buf(), file.to_owned()))
+}
+
+/// The files a skill ships. Builtins are one embedded `SKILL.md`; flat store
+/// skills are a single virtual `SKILL.md`; folder skills list their real tree.
+#[tauri::command]
+fn list_skill_files(
+    name: String,
+    scope: Option<String>,
+    project: Option<String>,
+    source: Option<String>,
+) -> Result<Vec<SkillFileView>, String> {
+    let view = resolve_skill(
+        &name,
+        scope.as_deref(),
+        project.as_deref(),
+        source.as_deref(),
+    )?;
+    if view.path.is_empty() {
+        return Ok(vec![SkillFileView {
+            path: "SKILL.md".to_owned(),
+            size: view.markdown.len() as u64,
+        }]);
+    }
+    let path = PathBuf::from(&view.path);
+    if is_flat_skill(&path) {
+        let size = std::fs::metadata(&path)
+            .map(|meta| meta.len())
+            .unwrap_or(view.markdown.len() as u64);
+        return Ok(vec![SkillFileView {
+            path: "SKILL.md".to_owned(),
+            size,
+        }]);
+    }
+    let (root, _) = skill_file_root(&view)?;
+    kodo_agent::skill_files::list_skill_files(&root).map(|files| {
+        files
+            .into_iter()
+            .map(|file| SkillFileView {
+                path: file.path,
+                size: file.size,
+            })
+            .collect()
+    })
+}
+
+/// Read one file of a resolved skill. The skill is looked up again here, so a
+/// caller never supplies the directory that is read from.
+#[tauri::command]
+fn read_skill_file(
+    name: String,
+    scope: Option<String>,
+    project: Option<String>,
+    source: Option<String>,
+    file: String,
+) -> Result<SkillFileContentView, String> {
+    let view = resolve_skill(
+        &name,
+        scope.as_deref(),
+        project.as_deref(),
+        source.as_deref(),
+    )?;
+    if view.path.is_empty() {
+        if file != "SKILL.md" {
+            return Err("文件不存在".to_owned());
+        }
+        let size = view.markdown.len() as u64;
+        return Ok(SkillFileContentView {
+            path: file,
+            content: Some(view.markdown),
+            binary: false,
+            truncated: false,
+            size,
+        });
+    }
+    let path = PathBuf::from(&view.path);
+    let flat = is_flat_skill(&path);
+    if flat && file != "SKILL.md" {
+        return Err("文件不存在".to_owned());
+    }
+    let (root, real_file) = skill_file_root(&view)?;
+    let relative = if flat { real_file } else { file.clone() };
+    let content = kodo_agent::skill_files::read_skill_file(&root, &relative)?;
+    Ok(SkillFileContentView {
+        path: file,
+        content: content.content,
+        binary: content.binary,
+        truncated: content.truncated,
+        size: content.size,
+    })
+}
+
+/// Save one file of a Kodo store skill. External and builtin skills are
+/// read-only. `SKILL.md` is re-parsed before the write so the editor can never
+/// leave a skill the run would silently skip; auxiliary files are plain text.
+#[tauri::command]
+fn save_skill_file(
+    name: String,
+    scope: Option<String>,
+    project: Option<String>,
+    source: Option<String>,
+    file: String,
+    content: String,
+) -> Result<SkillFileContentView, String> {
+    let view = resolve_skill(
+        &name,
+        scope.as_deref(),
+        project.as_deref(),
+        source.as_deref(),
+    )?;
+    if view.read_only || view.path.is_empty() {
+        return Err("外部技能为只读，不能保存".to_owned());
+    }
+    let path = PathBuf::from(&view.path);
+    let flat = is_flat_skill(&path);
+    if flat && file != "SKILL.md" {
+        return Err("文件不存在".to_owned());
+    }
+    let skill_file = file == "SKILL.md";
+    if skill_file {
+        if content.len() as u64 > kodo_agent::MAX_SKILL_BYTES {
+            return Err("技能内容过大".to_owned());
+        }
+        if view.format == "kodo" {
+            let spec = kodo_agent::parse_skill(&content)?;
+            if spec.name != view.name {
+                return Err("技能标题中的名称与文件名不一致".to_owned());
+            }
+        } else {
+            let spec = kodo_agent::parse_agent_skill(&content, &view.name)?;
+            if spec.name != view.name {
+                return Err("技能 frontmatter 中的名称与文件名不一致".to_owned());
+            }
+        }
+    }
+    let (root, real_file) = skill_file_root(&view)?;
+    let relative = if flat { real_file } else { file.clone() };
+    kodo_agent::skill_files::write_skill_file(&root, &relative, &content)?;
+    Ok(SkillFileContentView {
+        path: file,
+        content: Some(content.clone()),
+        binary: false,
+        truncated: false,
+        size: content.len() as u64,
+    })
 }
 
 /// Load user-scope agents with their raw markdown. The 12 builtins are
@@ -2110,6 +2289,9 @@ fn main() {
             mcp_list_tools,
             list_skills,
             read_skill,
+            list_skill_files,
+            read_skill_file,
+            save_skill_file,
             save_skill,
             delete_skill,
             list_agents,
