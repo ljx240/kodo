@@ -266,7 +266,7 @@ fn asks_for_code_change(scores: &[(TaskType, u32)]) -> bool {
 
 /// The rule scores for every keyword-driven category, in rule order.
 fn score_all(m: &str) -> [(TaskType, u32); 6] {
-    let scores = [
+    let mut scores = [
         (
             TaskType::CodeReview,
             score(
@@ -401,6 +401,61 @@ fn score_all(m: &str) -> [(TaskType, u32); 6] {
         ),
     ];
 
+    let lower = m.to_ascii_lowercase();
+    let executing = ["run ", "execute ", "运行", "执行"]
+        .iter()
+        .any(|word| lower.contains(word))
+        && [
+            "sh ",
+            "python",
+            "npm ",
+            "cargo ",
+            "pytest",
+            "命令",
+            "脚本",
+            "run_command",
+        ]
+        .iter()
+        .any(|word| lower.contains(word));
+    if executing {
+        // Running existing checks or reading a README is not authoring them.
+        let writing_tests = ["add", "write", "create", "generate"].iter().any(|verb| {
+            ["test", "unit test", "integration test", "regression test"]
+                .iter()
+                .any(|subject| lower.contains(&format!("{verb} {subject}")))
+        }) || ["补", "写", "加", "新增", "添加", "编写", "增加"]
+            .iter()
+            .any(|verb| {
+                ["测试", "单元测试", "集成测试", "回归测试"]
+                    .iter()
+                    .any(|subject| lower.contains(&format!("{verb}{subject}")))
+            });
+        if !writing_tests {
+            scores[3].1 = 0;
+        }
+        let writing_docs = lower
+            .split(['。', '，', ',', ';', '；', '\n'])
+            .any(|clause| {
+                [
+                    "update", "edit", "write", "补充", "更新", "编写", "撰写", "修改",
+                ]
+                .iter()
+                .any(|word| clause.contains(word))
+                    && [
+                        "readme",
+                        "documentation",
+                        "changelog",
+                        "docs",
+                        "文档",
+                        "注释",
+                    ]
+                    .iter()
+                    .any(|word| clause.contains(word))
+            });
+        if !writing_docs {
+            scores[4].1 = 0;
+        }
+    }
     scores
 }
 
@@ -453,6 +508,35 @@ mod tests {
     use super::*;
 
     // Two representative tasks per task_type — both must classify correctly.
+    #[test]
+    fn executing_existing_commands_does_not_request_test_or_docs_authoring() {
+        for message in [
+            "请执行这个合成测试任务：读取 numbers.txt，计算整数数量和总和，创建 result.json；读回文件并运行 python3 verify.py。",
+            "请执行这个合成取消测试：读取 README.md 和 cancel.sh，然后通过命令工具运行 sh cancel.sh。不要修改脚本。",
+            "Read README.md, then run sh cancel.sh and wait for cancellation.",
+            "Run the existing test suite with npm test and report the result.",
+        ] {
+            assert_eq!(classify(message), TaskType::Feature, "{message}");
+        }
+        for (message, kind) in [
+            ("Add unit tests, then run npm test", TaskType::Test),
+            ("Create unit tests, then run npm test", TaskType::Test),
+            ("添加单元测试，并运行 npm test", TaskType::Test),
+            ("给模块补测试用例，并运行 python3 verify.py", TaskType::Test),
+            (
+                "Update the README installation section, then run npm test",
+                TaskType::Docs,
+            ),
+            ("修复登录错误后运行 npm test", TaskType::BugFix),
+            (
+                "Review the changes, then run npm test",
+                TaskType::CodeReview,
+            ),
+        ] {
+            assert_eq!(classify(message), kind, "{message}");
+        }
+    }
+
     #[test]
     fn classifies_bug_fix_examples() {
         assert_eq!(

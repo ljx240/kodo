@@ -932,6 +932,105 @@ mod tests {
     }
 
     #[test]
+    fn unpinned_script_task_keeps_command_tools_and_cancels_its_process() {
+        let fixture = Fixture::new(vec![tool("run_command", json!({"command":"sh cancel.sh"}))]);
+        std::fs::write(
+            fixture.root.join("cancel.sh"),
+            "printf started > started.txt\nsleep 10\nprintf forbidden > must-not-exist.txt\n",
+        )
+        .unwrap();
+        let mut request = fixture.request();
+        request.mode = crate::AgentMode::Code;
+        request.message = "/subagent 请执行这个合成取消测试：读取 README.md 和 cancel.sh，然后通过命令工具运行 sh cancel.sh。不要修改脚本。".into();
+        let mut traces = Vec::new();
+        let alive = || !fixture.root.join("started.txt").exists();
+        crate::run(&request, &alive, &|_, _| true, &mut |event| {
+            if let SinkEvent::Subagent { trace, .. } = event {
+                traces.push(trace);
+            }
+            true
+        })
+        .unwrap();
+        assert!(fixture.root.join("started.txt").exists());
+        assert!(!fixture.root.join("must-not-exist.txt").exists());
+        let trace = traces.last().unwrap();
+        assert_eq!(trace.status, "cancelled", "{}", trace.output);
+        assert!(trace
+            .steps
+            .iter()
+            .any(|step| step.kind == "commandExecution" && step.label == "sh cancel.sh"));
+    }
+
+    #[test]
+    fn accepted_child_tools_produce_a_completion_summary_without_a_model_final() {
+        for verify in [true, false] {
+            let fixture = Fixture::new(vec![
+                tool("read_file", json!({"path":"input.txt"})),
+                tool("read_file", json!({"path":"README.md"})),
+                tool(
+                    "write_file",
+                    json!({"path":"result.json","content":r#"{"count":3,"total":21}"#}),
+                ),
+                reply("MUST_NOT_CALL_AFTER_ACCEPTANCE"),
+            ]);
+            std::fs::write(fixture.root.join("input.txt"), "3\n7\n11\n").unwrap();
+            if verify {
+                std::fs::write(
+                    fixture.root.join("package.json"),
+                    r#"{"private":true,"scripts":{"test":"printf 'SYNTHETIC_CHECK_OK\n'"}}"#,
+                )
+                .unwrap();
+            }
+            let mut request = fixture.request();
+            request.mode = crate::AgentMode::Code;
+            request.message = "/subagent 新增汇总产物 result.json，计算数量和总和。".into();
+            let mut traces = Vec::new();
+            let mut final_message = None;
+            crate::run(&request, &|| true, &|_, _| true, &mut |event| {
+                match event {
+                    SinkEvent::Subagent { trace, .. } => traces.push(trace),
+                    SinkEvent::Finished {
+                        step:
+                            Step::AgentMessage {
+                                text,
+                                delivery,
+                                verification,
+                                ..
+                            },
+                        ..
+                    } => {
+                        final_message = Some((text, delivery, verification));
+                    }
+                    _ => {}
+                }
+                true
+            })
+            .unwrap();
+            let trace = traces.last().unwrap();
+            let (text, delivery, verification) = final_message.unwrap();
+            assert_eq!(trace.status, "completed", "{verify}: {trace:?}");
+            assert_eq!(delivery, "ready", "{verify}: {text}");
+            assert_eq!(verification, if verify { "passed" } else { "not_run" });
+            assert!(text.contains("result.json"), "{text}");
+            for contradiction in [
+                "任务尚未完成",
+                "未产出可用回答",
+                "MUST_NOT_CALL_AFTER_ACCEPTANCE",
+            ] {
+                assert!(!text.contains(contradiction), "{verify}: {text}");
+            }
+            if verify {
+                assert!(text.contains("npm run test"), "{text}");
+            } else {
+                assert!(
+                    text.contains("未运行验证") || text.contains("未经验证"),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn delegated_writes_enter_parent_diff_and_safe_undo() {
         let fixture = Fixture::new(vec![
             tool(

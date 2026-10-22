@@ -34,3 +34,11 @@ Kodo 的 `run()`、Provider、SkillSpec、Permission、SandboxContext 与 TurnLo
 ## Analyze
 
 FR-001/002 对应协议和入口；FR-003/004/005 对应运行 scope；FR-006/008 对应 session/TurnLogger/UI；FR-007 对应现有 opaque 文件变更合并。无未解决的兼容性决策；Git 提交和本地合并须待验证结果可复核后获得单独授权。
+
+## 完成摘要与执行意图修复
+
+复用既有状态机和验收证据：Finish 的空正文路径生成实际变更路径、真实校验命令摘要；不改变失败/截断/提供方错误优先级，不从拒绝的模型承诺推导成功。路由在共享 classifier 识别“运行已有命令”的动作，避免弱测试词和读取材料名压过动作；明确作者任务继续原路由。沿用现有 skill、沙箱与 Scope 过滤，不引入依赖或新任务类型。
+
+先添加失败回归，再修改共享根因。验证 kodo-agent 全部单测及调用方 check/test；真实联网只在独立临时项目中通过现有 provider 加载接口进行，清空历史、记忆、用户技能、MCP 和 fallback。旧失败证据保留；新验收断言必须包含正文与结构化状态的一致性。
+
+Analyze：FR-009 对应完成路径和真实委派回归，FR-010 对应 classifier 与实际工具路由回归，AC-011 对应合成项目执行/取消/Trace。没有新增协议、依赖或权限扩张。

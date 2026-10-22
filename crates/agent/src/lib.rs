@@ -5609,6 +5609,36 @@ fn run_scoped(
                     );
                     checks = vec!["用户停止 / 会话取消".to_owned()];
                 }
+                AgentState::Finish
+                    if model_gap.is_none() && !provider_error_seen && !truncated_output =>
+                {
+                    // Tool acceptance may finish before the model sends prose.
+                    let paths = changeset
+                        .kodo_changes()
+                        .iter()
+                        .map(|path| format!("`{path}`"))
+                        .collect::<Vec<_>>();
+                    answer = if paths.is_empty() {
+                        "本轮验收条件已由工具证据满足。".to_owned()
+                    } else {
+                        format!("已完成本轮改动：{}。", paths.join("、"))
+                    };
+                    let commands = machine
+                        .evidence()
+                        .verify_evidence
+                        .iter()
+                        .filter(|evidence| evidence.ok)
+                        .map(|evidence| format!("`{}`", evidence.command))
+                        .collect::<Vec<_>>();
+                    if commands.is_empty() {
+                        answer.push_str("\n未运行验证；请按实际交付内容核对结果。");
+                    } else {
+                        answer.push_str(&format!("\n已通过验证：{}。", commands.join("、")));
+                    }
+                    if checks.is_empty() {
+                        checks = vec!["验收标准已由工具证据满足".to_owned()];
+                    }
+                }
                 AgentState::Finish => {
                     answer = offline_answer(
                         &request.message,
