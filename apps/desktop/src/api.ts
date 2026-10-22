@@ -5,7 +5,12 @@ import { listen } from "@tauri-apps/api/event";
 // modules never form a runtime cycle.
 import { DEMO_AGENTS } from "./data/agents";
 import { DEMO_MCP_SERVERS, DEMO_MCP_TOOLS, demoMemoryEntries } from "./data/demo";
-import { DEMO_EXTERNAL_SKILLS, DEMO_PROJECT_SKILLS, DEMO_USER_SKILLS } from "./data/skills";
+import {
+  DEMO_EXTERNAL_SKILLS,
+  DEMO_PROJECT_SKILLS,
+  DEMO_SKILL_AUX,
+  DEMO_USER_SKILLS,
+} from "./data/skills";
 import {
   DEMO_CALENDAR_EVENTS,
   DEMO_RESULTS,
@@ -746,6 +751,8 @@ export type SkillView = {
   format: string;
   /** Absolute file path; empty for embedded builtins. */
   path: string;
+  /** File mtime in epoch seconds; absent for embedded builtins. */
+  modifiedAt?: number | null;
   /** Agent-format skills inject guidance only; Kodo's plan and gates still
    *  apply. */
   guidanceOnly: boolean;
@@ -820,6 +827,146 @@ export function deleteSkill(
     name,
     scope: opts?.scope ?? null,
     project: opts?.project ?? null,
+  });
+}
+
+/** One file inside a skill folder, as the detail modal's tree lists it. */
+export type SkillFileEntry = { path: string; size: number };
+
+/** One file's contents. `content` is null for binary files; `truncated` marks
+ *  a text file cut at the backend's 512 KiB read cap. */
+export type SkillFileContent = {
+  path: string;
+  content: string | null;
+  binary: boolean;
+  truncated: boolean;
+  size: number;
+};
+
+type SkillFileTarget = {
+  scope?: SkillScope;
+  project?: string | null;
+  source?: SkillSource;
+};
+
+function demoSkill(name: string): SkillView | null {
+  return (
+    [...DEMO_USER_SKILLS, ...DEMO_PROJECT_SKILLS, ...DEMO_EXTERNAL_SKILLS].find(
+      (skill) => skill.name === name,
+    ) ?? null
+  );
+}
+
+/** Browser-only edits, so the demo viewer's save keeps its preview instead of
+ *  dropping to "读取失败". Desktop always reads the real folder. */
+const demoFileOverrides = new Map<string, string>();
+
+function demoFileKey(name: string, file: string): string {
+  return `${name}:${file}`;
+}
+
+/** Files under a skill's folder. Builtins and flat-store skills expose the
+ *  virtual `SKILL.md` only; folder skills list their real tree. External
+ *  folders are listed too — the editor gates on `readOnly`, not on this. */
+export function listSkillFiles(
+  name: string,
+  opts?: SkillFileTarget,
+): Promise<SkillFileEntry[]> {
+  if (!isDesktop()) {
+    const skill = demoSkill(name);
+    if (!skill) return Promise.resolve([]);
+    const skillBody = demoFileOverrides.get(demoFileKey(name, "SKILL.md")) ?? skill.markdown;
+    return Promise.resolve([
+      { path: "SKILL.md", size: skillBody.length },
+      ...(DEMO_SKILL_AUX[name] ?? []).map((file) => ({
+        path: file.path,
+        size: (demoFileOverrides.get(demoFileKey(name, file.path)) ?? file.content).length,
+      })),
+    ]);
+  }
+  return read<SkillFileEntry[]>("list_skill_files", {
+    name,
+    scope: opts?.scope ?? null,
+    project: opts?.project ?? null,
+    source: opts?.source ?? null,
+  }).then((list) => list ?? []);
+}
+
+/** Read one file from a skill folder; null when it does not exist. */
+export function readSkillFile(
+  name: string,
+  file: string,
+  opts?: SkillFileTarget,
+): Promise<SkillFileContent | null> {
+  if (!isDesktop()) {
+    const overrideKey = demoFileKey(name, file);
+    const override = demoFileOverrides.get(overrideKey);
+    if (override !== undefined) {
+      return Promise.resolve({
+        path: file,
+        content: override,
+        binary: false,
+        truncated: false,
+        size: override.length,
+      });
+    }
+    if (file === "SKILL.md") {
+      const skill = demoSkill(name);
+      if (!skill) return Promise.resolve(null);
+      return Promise.resolve({
+        path: file,
+        content: skill.markdown,
+        binary: false,
+        truncated: false,
+        size: skill.markdown.length,
+      });
+    }
+    const aux = (DEMO_SKILL_AUX[name] ?? []).find((entry) => entry.path === file);
+    if (!aux) return Promise.resolve(null);
+    return Promise.resolve({
+      path: file,
+      content: aux.content,
+      binary: false,
+      truncated: false,
+      size: aux.content.length,
+    });
+  }
+  return read<SkillFileContent>("read_skill_file", {
+    name,
+    file,
+    scope: opts?.scope ?? null,
+    project: opts?.project ?? null,
+    source: opts?.source ?? null,
+  });
+}
+
+/** Overwrite one text file in a skill folder. Rejects with the backend's
+ *  zh-CN reason (missing file, traversal, not text, invalid SKILL.md); never
+ *  creates files and never writes into read-only external folders. Saving
+ *  `SKILL.md` re-parses it and rejects a renamed skill. */
+export function saveSkillFile(
+  name: string,
+  file: string,
+  content: string,
+  opts?: SkillFileTarget,
+): Promise<SkillFileContent | null> {
+  if (!isDesktop()) {
+    demoFileOverrides.set(demoFileKey(name, file), content);
+    return Promise.resolve({
+      path: file,
+      content,
+      binary: false,
+      truncated: false,
+      size: content.length,
+    });
+  }
+  return write<SkillFileContent>("save_skill_file", {
+    name,
+    file,
+    content,
+    scope: opts?.scope ?? null,
+    project: opts?.project ?? null,
+    source: opts?.source ?? null,
   });
 }
 

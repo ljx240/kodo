@@ -95,8 +95,29 @@ const pdfTools = {
     "---\nname: pdf-tools\ndescription: Extract text and fill forms in PDF files\nallowed-tools:\n  - Read\n  - Bash\n---\n\n# PDF tools\n\nUse pdfplumber for extraction and pdf-lib for form filling.\n",
 };
 
-const UPDATED_MARKDOWN = [
-  "# Skill: changelog",
+/** Folder-layout user skill (`<skills>/changelog/SKILL.md`) with aux files. */
+const folderSkill = {
+  ...changelog,
+  path: "/tmp/kodo/skills/changelog/SKILL.md",
+  modifiedAt: 1_790_000_000,
+};
+
+const FOLDER_FILES = {
+  changelog: [
+    { path: "SKILL.md" },
+    { path: "references/style-guide.md" },
+    { path: "scripts/collect.sh" },
+  ],
+};
+
+const FOLDER_CONTENTS = {
+  "changelog:references/style-guide.md":
+    "# Style guide\n\nGroup by audience and use ISO dates.\n",
+  "changelog:scripts/collect.sh":
+    "#!/usr/bin/env bash\n# List commits since the last tag\n",
+};
+
+const UPDATED_MARKDOWN = [  "# Skill: changelog",
   "",
   "## description",
   "Group the changes by audience",
@@ -158,7 +179,7 @@ const DEPLOY_GATE_MARKDOWN = [
   "",
 ].join("\n");
 
-test("builtin row opens a read-only detail with workflow rows", async ({ page }) => {
+test("builtin row opens a read-only detail with rendered content", async ({ page }) => {
   await stubShell(page, { skillDetails: { "bug-fix": bugFixDetail } });
   await page.goto("/ui-demo/plugins");
 
@@ -167,8 +188,15 @@ test("builtin row opens a read-only detail with workflow rows", async ({ page })
   await expect(modal).toBeVisible();
   await expect(modal).toContainText("缺陷修复");
   await expect(page.locator(".skill-detail-source")).toHaveText("内置");
-  await expect(page.locator(".skill-detail-steps li")).toHaveCount(3);
-  await expect(page.locator(".skill-detail-md")).toContainText("# Skill: bug-fix");
+  // Builtins are one virtual SKILL.md, pinned first in the tree.
+  const files = page.locator('[data-testid="skill-file"]');
+  await expect(files).toHaveCount(1);
+  await expect(files.first()).toHaveAttribute("data-path", "SKILL.md");
+  // The title line is replaced by the metadata rows; the sections render.
+  await expect(page.locator(".skill-detail-meta")).toContainText("bug-fix");
+  await expect(page.locator('[data-testid="skill-detail-md"]')).toContainText(
+    "applicable_task_types",
+  );
   // Builtins are read-only: no edit/delete affordance.
   await expect(page.locator('[data-testid="skill-detail-edit"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="skill-detail-delete"]')).toHaveCount(0);
@@ -240,7 +268,9 @@ test("edit round-trips content and the row delete is a two-step confirm", async 
 
   // Reopen: the saved content is what the preview shows.
   await page.locator(".user-skill-open").click();
-  await expect(page.locator(".skill-detail-md")).toContainText("更新后的说明 marker");
+  await expect(page.locator('[data-testid="skill-detail-md"]')).toContainText(
+    "更新后的说明 marker",
+  );
   await page.locator('[data-testid="skill-detail-close"]').click();
 
   // Two-step delete on the row.
@@ -267,7 +297,15 @@ test("user section shows the empty state when the space has no skills", async ({
 });
 
 test("local installs land in the read-only 本地已安装 card", async ({ page }) => {
-  await stubShell(page, { skills: [pdfTools] });
+  await stubShell(page, {
+    skills: [pdfTools],
+    skillFiles: {
+      "pdf-tools": [{ path: "SKILL.md" }, { path: "references/forms.md" }],
+    },
+    skillFileContents: {
+      "pdf-tools:references/forms.md": "# Filling forms\n\nRead the field names first.\n",
+    },
+  });
   await page.goto("/ui-demo/plugins");
 
   const card = page.locator('[data-testid="skills-local-card"]');
@@ -295,6 +333,69 @@ test("local installs land in the read-only 本地已安装 card", async ({ page 
   await expect(modal).toContainText("Use pdfplumber for extraction");
   await expect(page.locator('[data-testid="skill-detail-edit"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="skill-detail-delete"]')).toHaveCount(0);
+
+  // External folders list their files too, but every file stays read-only.
+  await expect(page.locator('[data-testid="skill-file"]')).toHaveCount(2);
+  await page.locator('[data-testid="skill-file"][data-path="references/forms.md"]').click();
+  await expect(page.locator('[data-testid="skill-detail-md"]')).toContainText(
+    "Read the field names first",
+  );
+  await expect(page.locator('[data-testid="skill-file-edit"]')).toHaveCount(0);
+});
+
+test("viewer lists nested files and saves an auxiliary file in place", async ({ page }) => {
+  await stubShell(page, {
+    skills: [folderSkill],
+    skillFiles: FOLDER_FILES,
+    skillFileContents: FOLDER_CONTENTS,
+  });
+  await page.goto("/ui-demo/plugins");
+  await page.locator(".user-skill-open").click();
+
+  const files = page.locator('[data-testid="skill-file"]');
+  await expect(files).toHaveCount(3);
+  await expect(files.first()).toHaveAttribute("data-path", "SKILL.md");
+  const tree = page.locator('[data-testid="skill-file-tree"]');
+  await expect(tree).toContainText("references");
+  await expect(tree).toContainText("scripts");
+
+  // SKILL.md: metadata rows above the rendered body.
+  await expect(page.locator(".skill-detail-meta")).toContainText("名称");
+  await expect(page.locator(".skill-detail-meta")).toContainText("Group the changes");
+
+  // Auxiliary markdown previews as markdown, not as raw source.
+  await page.locator('[data-testid="skill-file"][data-path="references/style-guide.md"]').click();
+  await expect(page.locator(".skill-viewer-file")).toHaveText("references/style-guide.md");
+  await expect(page.locator('[data-testid="skill-detail-md"]')).toContainText("Group by audience");
+  await expect(page.locator('[data-testid="skill-detail-md"]')).not.toContainText("## Style");
+
+  // Edit → save keeps the file in place and unlocks the tree again.
+  await page.locator('[data-testid="skill-file-edit"]').click();
+  const editor = page.locator('[data-testid="skill-file-text"]');
+  await expect(editor).toHaveValue(FOLDER_CONTENTS["changelog:references/style-guide.md"]);
+  await editor.fill("# Style guide\n\nUpdated style marker\n");
+  await page.locator('[data-testid="skill-file-save"]').click();
+  await expect(page.locator('[data-testid="skill-detail-md"]')).toContainText(
+    "Updated style marker",
+  );
+  await expect.poll(() => skillOps(page)).toEqual([
+    { op: "save-file", name: "changelog", file: "references/style-guide.md" },
+  ]);
+
+  await page.locator('[data-testid="skill-file"][data-path="SKILL.md"]').click();
+  await expect(page.locator(".skill-detail-meta")).toContainText("changelog");
+});
+
+test("在聊天中试用 seeds the composer skill chip", async ({ page }) => {
+  await stubShell(page, { skills: [folderSkill], skillFiles: FOLDER_FILES });
+  await page.goto("/ui-demo/plugins");
+  await page.locator(".user-skill-open").click();
+
+  await page.locator('[data-testid="skill-try-in-chat"]').click();
+  await expect(page).toHaveURL(/\/ui-demo\/conversation/);
+  await expect(page.locator('.composer-skill[data-skill-id="changelog"]')).toContainText(
+    "changelog",
+  );
 });
 
 test("local card explains an empty discovery result", async ({ page }) => {

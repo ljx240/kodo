@@ -36,7 +36,7 @@ import {
   providerModelId,
   templateById,
 } from "../data/providers";
-import { skillSpace, skillsFor } from "../data/skills";
+import { PENDING_SKILL_KEY, skillSpace, skillsFor } from "../data/skills";
 import { type Permission, PERMISSIONS, PERMISSION_SETTING, DEFAULT_PERMISSION, DEFAULT_MODEL } from "../data/models";
 import { useSetting } from "../data/useSetting";
 import { fileLook, kindFromPath } from "../fileKind";
@@ -231,6 +231,24 @@ export function Composer({
   const [plusPanel, setPlusPanel] = useState<"skills" | "files" | null>(null);
   /** Skills selected from the + menu stay structured until send. */
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+
+  // 在聊天中试用 (skill viewer) hands one skill over in sessionStorage; seed
+  // the chip row once and clear the key so a later visit starts clean.
+  useEffect(() => {
+    let pending: string | null = null;
+    try {
+      pending = window.sessionStorage.getItem(PENDING_SKILL_KEY);
+      if (pending) window.sessionStorage.removeItem(PENDING_SKILL_KEY);
+    } catch {
+      return;
+    }
+    if (!pending) return;
+    const skillId = pending;
+    setSelectedSkills((current) =>
+      current.includes(skillId) ? current : [...current, skillId],
+    );
+    input.current?.focus();
+  }, []);
   const [fileQuery, setFileQuery] = useState("");
   const [projectFiles, setProjectFiles] = useState<string[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);

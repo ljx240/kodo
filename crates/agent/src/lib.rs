@@ -30,6 +30,7 @@ mod recovery;
 pub mod repomap;
 mod repository_instructions;
 mod skill;
+pub mod skill_files;
 #[cfg(test)]
 mod skill_flow_tests;
 pub mod state;
@@ -113,7 +114,7 @@ pub use skill::{
     builtin_markdown, delete_user_skill, discover_skills, load_user_skills, parse_agent_skill,
     parse_skill, save_user_skill, ContextStrategy, SkillFormat, SkillRecord,
     SkillRegistry as AgentSkillRegistry, SkillSpec as AgentSkillSpec, VerificationPolicy,
-    WorkflowStep,
+    WorkflowStep, MAX_SKILL_BYTES,
 };
 pub use state::{AgentState as TurnState, Budget as TurnBudget, FailReason as TurnFailReason};
 pub use tools::{dangerous_reason, CommandOutcome, CommandRisk};

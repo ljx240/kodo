@@ -13,6 +13,9 @@ import type { SkillView } from "../api";
 
 export type Skill = { id: string; label: string; detail?: string };
 
+/** One-shot handoff from the skill viewer's 在聊天中试用 to the composer. */
+export const PENDING_SKILL_KEY = "kodo:pending-skill";
+
 /** Code agent: the coding workflow skills. */
 export const CODE_SKILLS: Skill[] = [
   { id: "bug-fix", label: "缺陷修复", detail: "先复现、再修复、后验证的缺陷处理流程" },
@@ -109,6 +112,34 @@ export const DEMO_PROJECT_SKILLS: SkillView[] = [
       "# Skill: release-check\n\n## description\nRun the project's release checklist before tagging\n\n## applicable_task_types\n- docs\n\n## context_strategy\ndocs-focused\n\n## allowed_tools\n- search\n- read_file\n- list_files\n- run_command\n\n## verification_policy\nnone\n\n## workflow\n- s1 | read | Read the release checklist\n- s2 | command | Run the checklist commands\n- s3 | read | Record the outcomes\n\n## completion_criteria\n- Every checklist item has a recorded outcome\n\n## guidance\nNever skip an item; record skips with a reason.\n",
   },
 ];
+
+/**
+ * Auxiliary files for the demo skills, keyed by name. The detail modal's file
+ * tree reads these outside the desktop shell (where there is no filesystem);
+ * desktop runs list the real folder instead. `SKILL.md` itself always comes
+ * from the skill view, so it never appears here.
+ */
+export const DEMO_SKILL_AUX: Record<string, Array<{ path: string; content: string }>> = {
+  changelog: [
+    {
+      path: "references/style-guide.md",
+      content:
+        "# Changelog style\n\n- One line per user-facing change\n- Group by audience: users, operators, developers\n- Use ISO dates (`2026-10-22`)\n",
+    },
+    {
+      path: "scripts/collect.sh",
+      content:
+        "#!/usr/bin/env bash\n# List commits since the last tag\nset -euo pipefail\ngit log --pretty='- %s' \"$(git describe --tags --abbrev=0)\"..HEAD\n",
+    },
+  ],
+  "pdf-tools": [
+    {
+      path: "references/forms.md",
+      content:
+        "# Filling forms\n\nRead the field names first, then write values by field name. Never assume page coordinates.\n",
+    },
+  ],
+};
 
 /**
  * Demo fixture for the 本地已安装 card under `/ui-demo/skills`: one skill found
