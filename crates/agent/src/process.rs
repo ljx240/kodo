@@ -344,7 +344,7 @@ impl ProcessRunner {
                     stdout_hit_limit: false,
                     stderr_hit_limit: false,
                     sandbox: Some(refusal.report),
-                    failure: Some(RunFailure::SandboxRefused(refusal.error)),
+                    failure: Some(RunFailure::SandboxRefused(*refusal.error)),
                 };
             }
         };
@@ -557,7 +557,9 @@ struct SandboxRefusal {
     report: SandboxReport,
     /// The structured reason. The decision "may this run outside the
     /// sandbox?" is taken from this value, never from the exit code.
-    error: SandboxError,
+    ///
+    /// Boxed to keep the error variant of the result small.
+    error: Box<SandboxError>,
 }
 
 /// Build the command to spawn, applying the sandbox when one is configured.
@@ -587,7 +589,7 @@ fn build_command(
             return Err(SandboxRefusal {
                 message: error.to_string(),
                 report,
-                error,
+                error: Box::new(error),
             });
         }
     };

@@ -999,10 +999,15 @@ fn external_step(
     );
     // A local MCP server is a separate process that Kodo starts outside the
     // sandbox. Say so in the approval text instead of letting the user
-    // believe the sandbox covers it.
+    // believe the sandbox covers it. The execution model is decided in one
+    // place (`McpExecution`), so a sandboxed transport can be added later
+    // without touching this call site.
     if let Some(server) = mcp.connection_config(&wire) {
-        if server.transport == mcp::McpTransportKind::Stdio && request.sandbox.is_some() {
-            detail.push_str(" [外部 MCP 服务不受沙箱限制，将以当前用户权限运行]");
+        let execution = mcp::McpExecution::for_transport(server.transport);
+        if execution.is_outside_the_sandbox() && request.sandbox.is_some() {
+            if let Some(notice) = execution.notice() {
+                detail.push_str(&format!(" [{notice}]"));
+            }
         }
     }
     let cwd = project.to_string_lossy().into_owned();

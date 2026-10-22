@@ -96,7 +96,13 @@ const TOOLCHAIN_READ_ROOTS: &[&str] = &[
 
 /// Credential files that live *inside* a toolchain directory and must be
 /// re-denied after the toolchain allow-list re-grants it.
-const TOOLCHAIN_CREDENTIALS: &[&str] = &[".cargo/credentials.toml", ".cargo/config.toml"];
+const TOOLCHAIN_CREDENTIALS: &[&str] = &[
+    ".cargo/credentials.toml",
+    ".cargo/config.toml",
+    ".m2/settings.xml",
+    ".gradle/gradle.properties",
+    ".npmrc",
+];
 
 /// Device nodes a build legitimately writes to.
 const WRITABLE_DEVICES: &[&str] = &[

@@ -949,6 +949,32 @@ impl FinalStatus {
     }
 }
 
+/// How the verification runner executes its commands.
+///
+/// Unconfined execution is an **explicit** choice, never the meaning of a
+/// missing value: the runner refuses to execute when the caller never
+/// established a sandbox, exactly like the agent's own command path.
+#[derive(Debug, Clone)]
+pub enum VerificationConfinement {
+    /// Confined by the OS sandbox under the session's policy.
+    Confined(kodo_sandbox::SandboxContext),
+    /// Explicitly unconfined.
+    ///
+    /// Only for the trusted control plane — commands Kodo itself issues.
+    /// A model-planned verification command never lands here.
+    Unconfined,
+}
+
+impl VerificationConfinement {
+    /// The context, when the commands are confined.
+    pub fn context(&self) -> Option<&kodo_sandbox::SandboxContext> {
+        match self {
+            Self::Confined(context) => Some(context),
+            Self::Unconfined => None,
+        }
+    }
+}
+
 /// Infers and runs build/typecheck/test/lint with timeouts.
 pub struct VerificationRunner {
     pub default_timeout_ms: u64,
@@ -956,16 +982,16 @@ pub struct VerificationRunner {
     ///
     /// Verification commands are planned by the model, so they run under the
     /// same sandbox as any other model-driven command. `None` means the
-    /// caller did not establish a sandbox — the entry points that talk to a
-    /// model always set it.
-    pub sandbox: Option<kodo_sandbox::SandboxContext>,
+    /// caller did not establish a sandbox — the runner then **refuses** to
+    /// execute rather than falling back to an unconfined run.
+    pub confinement: Option<VerificationConfinement>,
 }
 
 impl Default for VerificationRunner {
     fn default() -> Self {
         Self {
             default_timeout_ms: 90_000,
-            sandbox: None,
+            confinement: None,
         }
     }
 }
@@ -973,7 +999,7 @@ impl Default for VerificationRunner {
 impl VerificationRunner {
     /// Run verification commands under OS confinement.
     pub fn with_sandbox(mut self, sandbox: kodo_sandbox::SandboxContext) -> Self {
-        self.sandbox = Some(sandbox);
+        self.confinement = Some(VerificationConfinement::Confined(sandbox));
         self
     }
 }
@@ -1161,7 +1187,19 @@ impl VerificationRunner {
     pub fn new(default_timeout_ms: u64) -> Self {
         Self {
             default_timeout_ms,
-            sandbox: None,
+            confinement: None,
+        }
+    }
+
+    /// A runner that executes its commands **without** confinement.
+    ///
+    /// An explicit, named decision for the trusted control plane. The
+    /// runner's default is to refuse, so an unconfined verification can
+    /// only happen when a caller asks for it by name.
+    pub fn unconfined(default_timeout_ms: u64) -> Self {
+        Self {
+            default_timeout_ms,
+            confinement: Some(VerificationConfinement::Unconfined),
         }
     }
 
@@ -1608,16 +1646,40 @@ impl VerificationRunner {
     ) -> VerifyOutcome {
         let timeout_secs = (cmd.timeout_ms.max(1_000)).div_ceil(1_000);
         // Shared ProcessRunner path — no uncancellable side channel.
-        // Verification commands are model-planned, so they are confined.
-        let outcome = match self.sandbox.as_ref() {
-            Some(sandbox) => crate::tools::command_run_confined(
+        //
+        // The execution semantics are the same as the agent's: model-planned
+        // verification commands are confined, an unconfined run is an
+        // explicit choice, and a caller that never established a sandbox
+        // gets a refusal instead of an unconfined execution.
+        let outcome = match self.confinement.as_ref() {
+            Some(VerificationConfinement::Confined(sandbox)) => crate::tools::command_run_confined(
                 project,
                 &cmd.command,
                 alive,
                 timeout_secs,
                 sandbox,
             ),
-            None => crate::tools::command_run(project, &cmd.command, alive, timeout_secs),
+            Some(VerificationConfinement::Unconfined) => {
+                crate::tools::command_run(project, &cmd.command, alive, timeout_secs)
+            }
+            None => {
+                return VerifyOutcome {
+                    command: cmd.clone(),
+                    exit_code: Some(126),
+                    ok: false,
+                    timed_out: false,
+                    cancelled: false,
+                    cwd: project.display().to_string(),
+                    duration_ms: 0,
+                    output_tail: "沙箱未初始化，已拒绝执行验证命令".to_owned(),
+                    failure: Some(FailureReport {
+                        command: cmd.command.clone(),
+                        exit_code: Some(126),
+                        primary_error: "沙箱未初始化，已拒绝执行验证命令".to_owned(),
+                        relevant_files: Vec::new(),
+                    }),
+                }
+            }
         };
         let combined = crate::tools::redact_secrets(&outcome.output);
         let code = outcome.exit_code;
@@ -1936,6 +1998,35 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn a_verification_without_a_sandbox_is_refused_not_run_unconfined() {
+        // The verification runner uses the same execution semantics as the
+        // agent: a missing sandbox context means the caller never
+        // established one, so the command is refused. It must not fall back
+        // to an unconfined run.
+        let dir =
+            std::env::temp_dir().join(format!("kodo-verify-nosandbox-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("must-not-exist.txt");
+        let command = VerifyCommand {
+            kind: VerifyKind::Test,
+            command: format!("echo ran > {}", marker.display()),
+            timeout_ms: 5_000,
+        };
+        let outcome = VerificationRunner::default().run_one(&dir, &command, &|| true);
+        assert!(!outcome.ok, "the verification must be refused: {outcome:?}");
+        assert!(
+            !marker.exists(),
+            "the command must never have started: {outcome:?}"
+        );
+        assert!(
+            outcome.output_tail.contains("沙箱未初始化"),
+            "the refusal must say why: {outcome:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn fixture_with_failing_test() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "kodo-verify-{}-{}",
@@ -1961,7 +2052,7 @@ mod tests {
     #[test]
     fn infer_reads_package_scripts() {
         let root = fixture_with_failing_test();
-        let runner = VerificationRunner::new(5_000);
+        let runner = VerificationRunner::unconfined(5_000);
         let cmds = runner.infer(&root);
         assert!(cmds
             .iter()
@@ -2019,7 +2110,7 @@ error[E0308]: mismatched types
     #[test]
     fn run_failing_command_produces_failure_report() {
         let root = fixture_with_failing_test();
-        let runner = VerificationRunner::new(10_000);
+        let runner = VerificationRunner::unconfined(10_000);
         let cmds = runner.infer(&root);
         let test_cmd = cmds
             .iter()
@@ -2039,7 +2130,7 @@ error[E0308]: mismatched types
     fn timeout_marks_failed() {
         let dir = std::env::temp_dir().join(format!("kodo-to-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let runner = VerificationRunner::new(50);
+        let runner = VerificationRunner::unconfined(50);
         let cmd = VerifyCommand {
             kind: VerifyKind::Test,
             command: "sleep 2".into(),
@@ -2077,7 +2168,7 @@ error[E0308]: mismatched types
             "[package]\nname = \"kodo-agent\"\n",
         )
         .unwrap();
-        let runner = VerificationRunner::new(5_000);
+        let runner = VerificationRunner::unconfined(5_000);
         let cmds = runner.infer_targeted(&dir, &["crates/agent/src/lib.rs".into()]);
         assert!(
             cmds.iter()
@@ -2100,7 +2191,7 @@ error[E0308]: mismatched types
         let marker = dir.join("v.marker");
         // Grandchild would write at t=3s; timeout at ~1s must kill the group first.
         let script = format!("(sleep 3; echo x > '{}') & sleep 10", marker.display());
-        let runner = VerificationRunner::new(5_000);
+        let runner = VerificationRunner::unconfined(5_000);
         let cmd = VerifyCommand {
             kind: VerifyKind::Test,
             command: script,
@@ -2175,7 +2266,7 @@ error[E0308]: mismatched types
     fn successful_command_is_ok() {
         let dir = std::env::temp_dir().join(format!("kodo-ok-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let runner = VerificationRunner::new(5_000);
+        let runner = VerificationRunner::unconfined(5_000);
         let cmd = VerifyCommand::test("true");
         let outcome = runner.run_one(&dir, &cmd, &|| true);
         assert!(outcome.ok);
@@ -2187,7 +2278,7 @@ error[E0308]: mismatched types
     fn process_verification_cancel_is_not_completed() {
         let dir = std::env::temp_dir().join(format!("kodo-vcancel-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let runner = VerificationRunner::new(30_000);
+        let runner = VerificationRunner::unconfined(30_000);
         let cmd = VerifyCommand {
             kind: VerifyKind::Test,
             command: "sleep 20".into(),
@@ -2732,7 +2823,7 @@ error[E0308]: mismatched types
     #[test]
     fn a_missing_tool_blocks_same_binary_and_skips_the_doomed_chain() {
         let dir = fixture_with_failing_test();
-        let runner = VerificationRunner::new(10_000);
+        let runner = VerificationRunner::unconfined(10_000);
         let cmds = vec![
             VerifyCommand::build("kodo_no_such_tool_xyz build"),
             VerifyCommand::test("kodo_no_such_tool_xyz test"),
@@ -2821,7 +2912,7 @@ error[E0308]: mismatched types
             }],
             ..Default::default()
         };
-        let runner = VerificationRunner::new(5000);
+        let runner = VerificationRunner::unconfined(5000);
         let denied = runner.run_plan_with_approval(&root, &plan, &|| true, false, &|_| false);
         assert_eq!(denied.len(), 1);
         assert_eq!(denied[0].failure_class, Some(FailureClass::Denied));

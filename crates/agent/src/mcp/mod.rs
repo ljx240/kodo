@@ -103,6 +103,48 @@ pub enum McpTransportKind {
     Http,
 }
 
+/// How an external call reaches the world.
+///
+/// This is the single place that decides whether an MCP server runs inside
+/// the operating-system sandbox or beside it. It exists so the answer is
+/// explicit at every call site and so a sandboxed MCP transport can be
+/// added later without touching the agent loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpExecution {
+    /// A local process Kodo starts itself. It runs with the user's own
+    /// privileges and is **not** covered by the session's sandbox.
+    ///
+    /// This is a documented limitation, not an oversight: the approval card
+    /// says so out loud before the call is made.
+    Unconfined,
+    /// A remote endpoint. The request is made by the Kodo process itself —
+    /// the trusted control plane — and never by the sandboxed child.
+    Remote,
+}
+
+impl McpExecution {
+    /// The execution model for a transport.
+    pub fn for_transport(transport: McpTransportKind) -> Self {
+        match transport {
+            McpTransportKind::Stdio => Self::Unconfined,
+            McpTransportKind::Http => Self::Remote,
+        }
+    }
+
+    /// True when the call is **not** covered by the OS sandbox.
+    pub fn is_outside_the_sandbox(self) -> bool {
+        matches!(self, Self::Unconfined)
+    }
+
+    /// The notice the approval card carries for this execution model.
+    pub fn notice(self) -> Option<&'static str> {
+        match self {
+            Self::Unconfined => Some("外部 MCP 服务不受沙箱限制，将以当前用户权限运行"),
+            Self::Remote => None,
+        }
+    }
+}
+
 /// One configured MCP server.
 ///
 /// Secret values never live in `settings.log`: `env` / `headers` values are

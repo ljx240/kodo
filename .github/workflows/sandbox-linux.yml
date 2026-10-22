@@ -1,0 +1,62 @@
+name: sandbox-linux
+
+# The Linux confinement backend can only be trusted when it is exercised on a
+# host that really has Bubblewrap and working unprivileged user namespaces.
+# The general CI runner does not provide that, so the backend gets its own
+# job — and the job fails when the backend is unavailable instead of letting
+# the tests quietly skip.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bubblewrap-confinement:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
+      - name: allow unprivileged user namespaces
+        # Ubuntu 24.04 restricts unprivileged user namespaces through
+        # AppArmor. Bubblewrap needs them; without this the backend reports
+        # "unavailable" and every confinement test would skip.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build the probe helper
+        run: cargo build -p kodo-sandbox --bin kodo-sandbox-probe
+
+      - name: the backend must be available
+        run: |
+          status="$(cargo run -q -p kodo-cli -- --sandbox-status)"
+          echo "$status"
+          case "$status" in
+            *bubblewrap*) ;;
+            *) echo "::error::the Linux sandbox backend is not active on this runner"; exit 1 ;;
+          esac
+          case "$status" in
+            *"network: full"*) ;;
+            *) echo "::error::the network isolation was not verified"; exit 1 ;;
+          esac
+
+      - name: confinement tests
+        run: cargo test -p kodo-sandbox --test confinement -- --nocapture
+
+      - name: fail-closed tests
+        run: cargo test -p kodo-sandbox --test failure -- --nocapture
+
+      - name: end-to-end agent tests
+        run: cargo test -p kodo-agent --test sandbox_execution -- --nocapture

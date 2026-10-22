@@ -137,6 +137,104 @@ fn a_domain_allow_list_is_refused_rather_than_faked() {
     let _ = std::fs::remove_dir_all(&workspace);
 }
 
+/// A backend whose network isolation could not be verified.
+struct WeakNetworkBackend;
+
+impl SandboxBackend for WeakNetworkBackend {
+    fn id(&self) -> &'static str {
+        "weak-network"
+    }
+
+    fn inspect(&self) -> CapabilityReport {
+        CapabilityReport {
+            backend: "weak-network".to_owned(),
+            // Writes are confined, but the network axis was never verified.
+            file_read: EnforcementLevel::Partial,
+            file_write: EnforcementLevel::Full,
+            network_egress: EnforcementLevel::Unsupported,
+            notes: vec!["测试用后端：网络隔离未通过探测".to_owned()],
+        }
+    }
+
+    fn prepare(
+        &self,
+        program: &Path,
+        args: &[OsString],
+        policy: &SandboxPolicy,
+        cwd: &Path,
+    ) -> Result<PreparedCommand, SandboxError> {
+        // The real backends check the policy floor before they build the
+        // confinement. This one does the same, so the refusal is produced by
+        // the shared rule rather than by the test.
+        let required = policy.required_enforcement();
+        let capabilities = self.inspect().capabilities();
+        if !capabilities.meets(&required) {
+            let missing = capabilities.missing(&required);
+            return Err(SandboxError::PartialEnforcement {
+                reason: format!("本机强制能力不足，缺少：{}", missing.join("、")),
+                capabilities,
+            });
+        }
+        Ok(PreparedCommand::new(
+            program.to_path_buf(),
+            args.to_vec(),
+            cwd.to_path_buf(),
+        ))
+    }
+}
+
+#[test]
+fn an_unverified_network_isolation_refuses_the_run() {
+    // The policy promises no outbound traffic. A backend that could not
+    // verify that promise must refuse the run — it must not fall back to an
+    // unconfined execution.
+    let runtime = SandboxRuntime::with_backend(Arc::new(WeakNetworkBackend));
+    let workspace = std::env::temp_dir().join(format!("kodo-sbx-net-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&workspace);
+    let marker = workspace.join("must-not-exist.txt");
+    let _ = std::fs::remove_file(&marker);
+
+    let policy = runtime.policy_for(&workspace, SandboxMode::WorkspaceWrite);
+    let context = SandboxContext::new(runtime, policy);
+    let prepared = context.prepare(
+        Path::new("/bin/sh"),
+        &[
+            OsString::from("-c"),
+            OsString::from(format!("echo ran > {}", marker.display())),
+        ],
+        &workspace,
+    );
+    let error = prepared.expect_err("an unverified network isolation must refuse");
+    assert_eq!(error.code(), "sandbox_partial_enforcement");
+    assert!(
+        error.to_string().contains("network_egress"),
+        "the refusal must name the missing axis: {error}"
+    );
+    assert!(!marker.exists(), "the command must never have started");
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[test]
+fn a_missing_sandbox_is_not_a_license_to_run_unconfined() {
+    // The runtime never downgrades a refusal into an unconfined run. The
+    // only way out is an explicit, user-approved one-shot escalation.
+    let runtime = SandboxRuntime::with_backend(Arc::new(BrokenBackend));
+    let workspace = std::env::temp_dir().join(format!("kodo-sbx-downgrade-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&workspace);
+    let policy = runtime.policy_for(&workspace, SandboxMode::WorkspaceWrite);
+    let context = SandboxContext::new(runtime, policy);
+    let prepared = context.prepare(
+        Path::new("/bin/sh"),
+        &[OsString::from("-c"), OsString::from("echo hi")],
+        &workspace,
+    );
+    assert!(
+        prepared.is_err(),
+        "a broken backend must not produce a command"
+    );
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
 #[test]
 fn the_unrestricted_mode_runs_without_a_backend() {
     // `unrestricted` is the explicit escape hatch: it runs the command
