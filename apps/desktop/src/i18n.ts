@@ -544,6 +544,7 @@ export const T = {
     deleteBuiltin: "内置智能体不可删除",
   },
   step: {
+    subagent: "子 Agent",
     // Note rows carry prose only and draw no label.
     note: "",
     thinking: "思考",

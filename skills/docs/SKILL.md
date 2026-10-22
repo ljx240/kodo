@@ -10,6 +10,7 @@ Update documentation accurately; no compile verification is required.
 docs-focused
 
 ## allowed_tools
+- subagent
 - search
 - read_file
 - list_files

@@ -83,7 +83,8 @@ pub fn event_for_item(item: &Item, phase: Phase) -> Option<SafeMemoryEvent> {
             cap_body(text),
         ),
         // Private or transport-level kinds. Not forwarded.
-        ItemKind::Reasoning { .. }
+        ItemKind::Subagent { .. }
+        | ItemKind::Reasoning { .. }
         | ItemKind::Thinking { .. }
         | ItemKind::ModelCall { .. }
         | ItemKind::Compaction { .. }

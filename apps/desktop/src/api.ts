@@ -127,12 +127,26 @@ export type ChangeDto = {
   edits?: number;
 };
 
+export type SubagentTraceDto = {
+  id: string;
+  parentId: string;
+  agent: string;
+  task: string;
+  status: "running" | "completed" | "failed" | "blocked" | "cancelled" | "timed_out";
+  output: string;
+  inputTokens: number;
+  outputTokens: number;
+  omittedSteps: number;
+  steps: { kind: string; label: string; status: string; output: string; durationMs: number | null }[];
+};
+
 export type ItemDto = {
   id: number;
   at: number;
   status: StepStatusDto;
   duration: number | null;
 } & (
+  | { kind: "subagent"; trace: SubagentTraceDto }
   | {
       kind: "reasoning";
       summary: string;

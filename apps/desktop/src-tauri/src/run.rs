@@ -693,6 +693,20 @@ pub fn start(
                 return false;
             }
             match event {
+                SinkEvent::Subagent { .. } => {
+                    let event = match logged {
+                        Logged::Started(item) => RunEvent::ItemStarted {
+                            session: record_id.clone(),
+                            item: ItemView::from(item),
+                        },
+                        Logged::Finished(item) => RunEvent::ItemCompleted {
+                            session: record_id.clone(),
+                            item: ItemView::from(item),
+                        },
+                        _ => return false,
+                    };
+                    emit_run(&record_app, &record_token, event);
+                }
                 SinkEvent::LocalTrace { .. } => {}
                 SinkEvent::TextDelta { text } => {
                     emit_run(

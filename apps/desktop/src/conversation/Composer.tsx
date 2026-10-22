@@ -307,7 +307,7 @@ export function Composer({
   const slashMatches =
     slashQuery === null
       ? []
-      : skills.filter(
+      : [{ id: "subagent", label: "委派子任务" }, ...skills].filter(
           (skill) =>
             slashQuery === "" ||
             skill.id.includes(slashQuery) ||
@@ -384,6 +384,11 @@ export function Composer({
 
   /** Slash selection uses the same structured chip as the + menu. */
   const applySkillFromSlash = (skillId: string) => {
+    if (skillId === "subagent") {
+      setDraft("/subagent ");
+      requestAnimationFrame(() => input.current?.focus());
+      return;
+    }
     setDraft("");
     applySkill(skillId);
   };

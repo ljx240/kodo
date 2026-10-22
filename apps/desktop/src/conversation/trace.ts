@@ -17,6 +17,7 @@ import { T, failureCopy } from "../i18n";
  * not how to phrase it.
  */
 const LABELS: Record<ItemDto["kind"], string> = {
+  subagent: T.step.subagent,
   reasoning: T.step.thinking,
   search: T.step.search,
   fileRead: T.step.read,
@@ -59,6 +60,12 @@ export function toStep(item: ItemDto): TraceStep {
   };
 
   switch (item.kind) {
+    case "subagent":
+      return {
+        ...base, type: "subagent", phase: "execute", chip: stripAnsi(item.trace.agent),
+        detail: stripAnsi(item.trace.task), subagent: item.trace,
+        status: item.trace.status === "cancelled" ? "stopped" : item.status,
+      };
     case "reasoning":
       return {
         ...base,
@@ -255,6 +262,9 @@ export function toReply(turn: TurnDto, running: boolean, awaitingApproval = fals
     (sum, item) => sum + (item.kind === "modelCall" ? item.outputTokens : 0),
     0,
   );
+  const children = turn.items.filter((item) => item.kind === "subagent");
+  const childInput = children.reduce((sum, item) => sum + (item.kind === "subagent" ? item.trace.inputTokens : 0), 0);
+  const childOutput = children.reduce((sum, item) => sum + (item.kind === "subagent" ? item.trace.outputTokens : 0), 0);
   const tokensPending = running;
   const verify = verifyCounts(steps);
   const failureGroups = mergeFailures(steps);
@@ -279,7 +289,7 @@ export function toReply(turn: TurnDto, running: boolean, awaitingApproval = fals
     stopped: Boolean(turn.stopped),
     error: turn.error ?? null,
     models,
-    tokens: modelCalls.length > 0 ? `${formatTokens(input, "done")} → ${formatTokens(output, "done")}` : null,
+    tokens: modelCalls.length + children.length > 0 ? `${formatTokens(input + childInput, "done")} → ${formatTokens(output + childOutput, "done")}` : null,
     tokensPending,
     contextBudget: null,
     verify,

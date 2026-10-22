@@ -28,7 +28,7 @@ export function ConversationProcess({ steps, fileDiffs, onOpenFile, onOpenPath }
       ) : null;
       const active = [...group].reverse().find((step) => step.status === "running");
       const failed = group.some((step) => step.status === "failed" || step.denied);
-      const actions = group.filter((step) => ["search", "read", "run", "edit"].includes(step.type)).length;
+      const actions = group.filter((step) => ["search", "read", "run", "edit", "subagent"].includes(step.type)).length;
       const label = failed ? T.reply.processFailed : active
         ? active.type === "model" ? T.reply.generating : active.type === "thinking" ? T.reply.working : `正在${active.label}`
         : T.reply.process;

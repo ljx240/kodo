@@ -54,6 +54,7 @@ pub enum ToolName {
     /// placeholder ToolResult so the agent loop keeps going even when no
     /// UI is wired up.
     AskUser,
+    Subagent,
 }
 
 impl ToolName {
@@ -73,6 +74,7 @@ impl ToolName {
             Self::ReadRange => "read_range",
             Self::WebSearch => "websearch",
             Self::AskUser => "ask_user",
+            Self::Subagent => "subagent",
         }
     }
 
@@ -92,6 +94,7 @@ impl ToolName {
             "read_range" => Some(Self::ReadRange),
             "websearch" | "search_web" | "web_search" => Some(Self::WebSearch),
             "ask_user" | "ask" | "ask-user" => Some(Self::AskUser),
+            "subagent" => Some(Self::Subagent),
             _ => None,
         }
     }
@@ -112,6 +115,11 @@ impl ToolName {
 /// Typed arguments — never a free-form map past the protocol boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolArgs {
+    Subagent {
+        task: String,
+        agent: Option<String>,
+        read_only: bool,
+    },
     Search {
         query: String,
         glob: Option<String>,
@@ -188,6 +196,24 @@ impl ToolArgs {
 
     fn from_json(name: ToolName, args: &Value) -> Result<Self, ToolError> {
         match name {
+            ToolName::Subagent => {
+                let task = require_string(args, "task")?;
+                if task.trim().is_empty() || task.chars().count() > 8_000 {
+                    return Err(ToolError::invalid_args(
+                        "task must contain 1..8000 characters",
+                    ));
+                }
+                let read_only = match args.get("read_only") {
+                    None => false,
+                    Some(Value::Bool(value)) => *value,
+                    Some(_) => return Err(ToolError::invalid_args("read_only must be a boolean")),
+                };
+                Ok(Self::Subagent {
+                    task,
+                    agent: optional_string(args, "agent")?,
+                    read_only,
+                })
+            }
             ToolName::Search => Ok(Self::Search {
                 // Schema-aware rejection: message lists every required
                 // field so the model fills them all next attempt instead
@@ -254,6 +280,9 @@ impl ToolArgs {
     /// Compact human label used in observations / approval prompts.
     pub fn label(&self) -> String {
         match self {
+            Self::Subagent { task, agent, .. } => {
+                format!("{}: {}", agent.as_deref().unwrap_or("executor"), task)
+            }
             Self::Search { query, glob } => match glob {
                 Some(pattern) => format!("{query} (glob: {pattern})"),
                 None => query.clone(),
@@ -738,6 +767,20 @@ impl ToolRegistry {
     pub fn standard() -> Self {
         Self {
             defs: vec![
+                ToolDefinition {
+                    name: "subagent",
+                    description: "Delegate one bounded task to an independent agent and wait for its result. Child inherits this run's sandbox, permission and tool restrictions; it cannot delegate again. At most four children per turn. Default agent is executor; an existing persona name may be supplied. Use read_only for exploration or review. Summarize the returned evidence and independently verify file changes before finishing.",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "task": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                            "agent": { "type": "string", "description": "Existing persona name, or executor" },
+                            "read_only": { "type": "boolean", "description": "Restrict child to reading and commands without side effects" }
+                        },
+                        "required": ["task"],
+                        "additionalProperties": false
+                    }),
+                },
                 ToolDefinition {
                     name: "search",
                     description: "Search project files for a text pattern. Returns each hit as `path:line` with the matched line; an optional glob narrows which files are searched.",

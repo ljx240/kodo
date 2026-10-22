@@ -10,6 +10,7 @@ Review changes read-only and report findings backed by tool evidence.
 review-only
 
 ## allowed_tools
+- subagent
 - search
 - read_file
 - list_files

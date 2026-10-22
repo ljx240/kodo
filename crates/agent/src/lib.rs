@@ -34,6 +34,7 @@ pub mod skill_files;
 #[cfg(test)]
 mod skill_flow_tests;
 pub mod state;
+mod subagent;
 pub mod tools;
 mod verify;
 pub mod websearch;
@@ -437,6 +438,11 @@ impl Step {
 
 /// What the shell receives while a turn runs.
 pub enum SinkEvent {
+    /// A public child-task snapshot. Kept separate from parent text and evidence.
+    Subagent {
+        trace: kodo_core::session::SubagentTrace,
+        duration_ms: u64,
+    },
     Started {
         step: Step,
     },
@@ -536,6 +542,7 @@ pub type Emit<'a> = dyn FnMut(SinkEvent) -> bool + 'a;
 pub type Alive<'a> = dyn Fn() -> bool + 'a;
 pub type Approve<'a> = dyn Fn(StepKind, &str) -> bool + 'a;
 
+#[derive(Clone)]
 pub struct RunRequest {
     /// Project root. `None` = no project selected (Work mode pure conversation):
     /// no tools run, only pinned attachments are read.
@@ -2275,6 +2282,7 @@ fn run_invocations(
     wrote_files: &mut bool,
     changeset: &mut TurnChangeSet,
     dedup: &mut dedup::TurnDedup,
+    delegation: &mut subagent::Delegation,
 ) -> Result<Option<Vec<ToolResult>>, String> {
     if invocations.is_empty() {
         return Ok(None);
@@ -2294,6 +2302,21 @@ fn run_invocations(
                 results.push(ToolResult::from_rejection(&reject));
             }
             ToolInvocation::External(call) => {
+                if delegation.scope.read_only
+                    || delegation
+                        .scope
+                        .allowed_tools
+                        .as_ref()
+                        .is_some_and(|tools| !tools.contains(&call.name))
+                {
+                    results.push(ToolResult::failure(
+                        call.id.clone(),
+                        &call.name,
+                        call.args_label(),
+                        ToolError::permission_denied("子任务不可扩展父任务的工具权限"),
+                    ));
+                    continue;
+                }
                 // The skill allowlist and Permission both apply to external calls.
                 let args_label = call.args_label();
                 if let Some(sk) = skill.filter(|sk| !mcp_connection_allowed(sk, mcp, &call.name)) {
@@ -2328,6 +2351,22 @@ fn run_invocations(
                 }
             }
             ToolInvocation::Ready(call) => {
+                if (delegation.scope.depth > 0 && call.name == ToolName::Subagent)
+                    || (delegation.scope.read_only && call.name.is_mutation())
+                    || delegation
+                        .scope
+                        .allowed_tools
+                        .as_ref()
+                        .is_some_and(|tools| !tools.iter().any(|name| name == call.name.label()))
+                {
+                    results.push(ToolResult::failure(
+                        call.id.clone(),
+                        call.name.label(),
+                        call.args.label(),
+                        ToolError::permission_denied("子任务不可扩展父任务的工具权限或继续委派"),
+                    ));
+                    continue;
+                }
                 if let Some(sk) = skill {
                     if let Some(denied) =
                         sk.gate(call.id.clone(), call.name.label(), &call.args.label())
@@ -2341,7 +2380,8 @@ fn run_invocations(
                         continue;
                     }
                 }
-                if skill.is_some_and(|sk| sk.context_strategy == ContextStrategy::ReviewOnly)
+                if (delegation.scope.read_only
+                    || skill.is_some_and(|sk| sk.context_strategy == ContextStrategy::ReviewOnly))
                     && matches!(&call.args, ToolArgs::RunCommand { command } if classify_command_risk(command) != tools::CommandRisk::ReadOnly)
                 {
                     results.push(ToolResult::failure(
@@ -2364,13 +2404,28 @@ fn run_invocations(
                         changeset.snapshot_before(project, path.trim());
                     }
                 }
-                let command_baseline = if call.name == ToolName::RunCommand {
-                    Some(changeset.capture_command_files(project))
+                let command_baseline =
+                    if matches!(call.name, ToolName::RunCommand | ToolName::Subagent) {
+                        Some(changeset.capture_command_files(project))
+                    } else {
+                        None
+                    };
+                let (keep, result) = if call.name == ToolName::Subagent {
+                    let registry = delegation.scope.registry(run_registry(request, skill, mcp));
+                    let outcome = subagent::execute(
+                        &call,
+                        request,
+                        &registry,
+                        delegation,
+                        skill.is_some_and(|sk| sk.context_strategy == ContextStrategy::ReviewOnly),
+                        alive,
+                        approve,
+                        emit,
+                    );
+                    (outcome.keep, Some(outcome.result))
                 } else {
-                    None
+                    execute_tool_call(&call, project, request, alive, approve, emit, notes, dedup)?
                 };
-                let (keep, result) =
-                    execute_tool_call(&call, project, request, alive, approve, emit, notes, dedup)?;
                 if let Some(mut result) = result {
                     if let Some(before) = command_baseline {
                         record_opaque_changes(
@@ -3352,6 +3407,16 @@ pub fn run(
     approve: &Approve,
     emit: &mut Emit,
 ) -> Result<(), String> {
+    run_scoped(request, alive, approve, emit, &subagent::Scope::default())
+}
+
+fn run_scoped(
+    request: &RunRequest,
+    alive: &Alive,
+    approve: &Approve,
+    emit: &mut Emit,
+    scope: &subagent::Scope,
+) -> Result<(), String> {
     let host_alive = alive;
     if !host_alive() {
         return Ok(());
@@ -3411,6 +3476,12 @@ pub fn run(
                 alive,
                 emit,
             );
+        }
+    }
+    if scope.depth == 0 {
+        let (_, message) = split_skill_chip(&request.message);
+        if let Some(command) = subagent::command(message) {
+            return subagent::run_command(command, request, alive, approve, emit);
         }
     }
     let has_project = request.project.is_some();
@@ -3580,7 +3651,11 @@ pub fn run(
     } else {
         McpClients::default()
     };
-    let mut registry = run_registry(request, skill.as_ref(), &mcp);
+    let mut registry = scope.registry(run_registry(request, skill.as_ref(), &mcp));
+    let mut delegation = subagent::Delegation {
+        scope: scope.clone(),
+        count: 0,
+    };
     let mut recovery_anchor = String::new();
     let mut plan = if conversational {
         TaskPlan::conversational(&request.message)
@@ -3614,11 +3689,16 @@ pub fn run(
     // The budget family is derived from the *baseline* category. A decision
     // suggestion may refine which skill runs; it never widens or narrows
     // the run's budget.
-    let budget = budget_for_task(
+    let mut budget = budget_for_task(
         baseline_task_type,
         project_summary,
         request.budget_family.as_deref(),
     );
+    if scope.depth > 0 {
+        budget.max_rounds = budget.max_rounds.min(12);
+        budget.max_tool_calls = budget.max_tool_calls.min(32);
+        budget.max_repairs = budget.max_repairs.min(1);
+    }
     let mut machine = AgentMachine::with_plan(&request.message, plan, budget);
     // Start with the configured window; refresh it after each model attempt
     // so failover uses the window of the provider that actually answered.
@@ -4112,7 +4192,7 @@ pub fn run(
     // prose, not a new tool batch.
     let mut final_only_requested = false;
     // One bounded lift; iteration and batch preflight share this flag.
-    let mut budget_lifted = false;
+    let mut budget_lifted = scope.depth > 0;
     // Wrap-up hint: pushed once per turn when either cap is within 20% so
     // the model gets one clear "land your drafts now" signal instead of a
     // repeat-every-iter nag. After the hint the model is expected to write
@@ -5067,6 +5147,9 @@ pub fn run(
                                                 "options": options
                                             })
                                         }
+                                        ToolArgs::Subagent { task, agent, read_only } => {
+                                            serde_json::json!({ "task": task, "agent": agent, "read_only": read_only })
+                                        }
                                     },
                                 },
                                 // External (MCP) calls must round-trip into
@@ -5324,6 +5407,7 @@ pub fn run(
                         &mut wrote_files,
                         &mut changeset,
                         &mut turn_dedup,
+                        &mut delegation,
                     )?
                     else {
                         machine.handle(AgentEvent::Cancel);
@@ -5341,7 +5425,8 @@ pub fn run(
                         &changeset,
                     )?;
                     push_tool_results(&mut history, &results, native_tools);
-                    let updated_registry = run_registry(request, skill.as_ref(), &mcp);
+                    let updated_registry =
+                        scope.registry(run_registry(request, skill.as_ref(), &mcp));
                     if updated_registry.external_definitions() != registry.external_definitions() {
                         // Keep discovered tools in the prefix that compaction preserves.
                         history[0] = ProviderMessage::system(history[0].text_of().replacen(
@@ -7495,7 +7580,7 @@ mod tests {
         kodo_sandbox::SandboxContext::new(runtime, policy)
     }
 
-    fn temp_request(dir: &Path, permission: Permission) -> RunRequest {
+    pub(super) fn temp_request(dir: &Path, permission: Permission) -> RunRequest {
         RunRequest {
             sandbox: Some(test_sandbox(dir)),
             project: Some(dir.to_path_buf()),
@@ -10479,6 +10564,7 @@ mod tests {
             &mut false,
             &mut TurnChangeSet::default(),
             &mut dedup::TurnDedup::new(),
+            &mut subagent::Delegation::default(),
         )
         .unwrap()
         .unwrap();
@@ -10520,6 +10606,7 @@ mod tests {
             &mut false,
             &mut TurnChangeSet::default(),
             &mut dedup::TurnDedup::new(),
+            &mut subagent::Delegation::default(),
         )
         .unwrap();
         assert!(!live.get());
@@ -10554,6 +10641,7 @@ mod tests {
             &mut wrote_files,
             &mut TurnChangeSet::default(),
             &mut dedup::TurnDedup::new(),
+            &mut subagent::Delegation::default(),
         )
         .unwrap()
         .unwrap();
@@ -10599,6 +10687,7 @@ mod tests {
             &mut wrote,
             &mut TurnChangeSet::default(),
             &mut dedup::TurnDedup::new(),
+            &mut subagent::Delegation::default(),
         )
         .expect("run")
         .expect("results");
@@ -10833,6 +10922,7 @@ mod tests {
             &mut false,
             &mut TurnChangeSet::default(),
             &mut dedup::TurnDedup::new(),
+            &mut subagent::Delegation::default(),
         )
         .expect("run")
         .expect("results");
@@ -10911,6 +11001,7 @@ mod tests {
             &mut false,
             &mut TurnChangeSet::default(),
             &mut dedup::TurnDedup::new(),
+            &mut subagent::Delegation::default(),
         )
         .expect("run")
         .expect("results");
@@ -11016,6 +11107,7 @@ mod tests {
             &mut false,
             &mut TurnChangeSet::default(),
             &mut dedup::TurnDedup::new(),
+            &mut subagent::Delegation::default(),
         )
         .expect("run")
         .expect("results");
@@ -11249,6 +11341,7 @@ mod tests {
             &mut wrote,
             &mut TurnChangeSet::default(),
             &mut dedup::TurnDedup::new(),
+            &mut subagent::Delegation::default(),
         )
         .expect("run")
         .expect("results");
