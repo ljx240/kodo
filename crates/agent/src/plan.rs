@@ -472,9 +472,15 @@ pub fn parse_output_contract(message: &str) -> OutputContract {
     let mut seen = std::collections::BTreeSet::new();
     candidates.retain(|(_, path)| seen.insert(path.clone()));
 
-    let has_create = CREATE_VERBS.iter().any(|verb| lower.contains(verb));
-    let has_update = UPDATE_VERBS.iter().any(|verb| lower.contains(verb));
-    let has_reuse = REUSE_VERBS.iter().any(|verb| lower.contains(verb));
+    let has_create = CREATE_VERBS
+        .iter()
+        .any(|verb| crate::classify::requests_action(&lower, verb));
+    let has_update = UPDATE_VERBS
+        .iter()
+        .any(|verb| crate::classify::requests_action(&lower, verb));
+    let has_reuse = REUSE_VERBS
+        .iter()
+        .any(|verb| crate::classify::requests_action(&lower, verb));
     let operation = if has_reuse {
         OutputOperation::Reuse
     } else if has_update {
@@ -528,6 +534,37 @@ pub fn parse_output_contract(message: &str) -> OutputContract {
         operation,
         requires_file_output,
     }
+}
+
+/// A read-only child keeps explicit file delivery, not incidental write descriptions.
+pub(crate) fn has_explicit_file_output(message: &str) -> bool {
+    let contract = parse_output_contract(message);
+    if !contract.requires_file_output {
+        return false;
+    }
+    let lower = message.to_lowercase();
+    CREATE_VERBS.iter().chain(UPDATE_VERBS).any(|verb| {
+        lower.match_indices(verb).any(|(offset, _)| {
+            if !crate::classify::action_is_requested_at(&lower, verb, offset) {
+                return false;
+            }
+            if contract.targets.is_empty() {
+                return true;
+            }
+            let boundary = |c: char| c.is_whitespace() || "`'\"“”「」:：".contains(c);
+            let before = lower[..offset].trim_end_matches(boundary);
+            let after = lower[offset + verb.len()..].trim_start_matches(boundary);
+            let after = ["到", "为", "成", "to ", "as "]
+                .iter()
+                .find_map(|prefix| after.strip_prefix(prefix))
+                .unwrap_or(after)
+                .trim_start_matches(boundary);
+            contract.targets.iter().any(|target| {
+                let target = target.to_lowercase();
+                before.ends_with(&target) || after.starts_with(&target)
+            })
+        })
+    })
 }
 
 /// Format limits that must be stated before a write happens (T021–T023).
@@ -1291,6 +1328,16 @@ impl TaskPlan {
                     _ => None,
                 });
             let maybe_item = evidence_from_tool_result(result, expectation.as_ref());
+            if result.name == ToolName::Subagent.label() {
+                for (index, path) in result.changed_files.iter().enumerate() {
+                    let item = EvidenceItem::new(
+                        format!("ev_{}_file_{index}", result.id),
+                        &result.name,
+                        EvidenceKind::FileChanged { path: path.clone() },
+                    );
+                    flipped += self.mark_first_accepting(&item);
+                }
+            }
             let kind_for_result = match ToolName::parse(&result.name) {
                 Some(ToolName::ReadFile) | Some(ToolName::Search) => Some(SubtaskKind::Read),
                 Some(name) if name.is_mutation() => Some(SubtaskKind::Edit),
@@ -2050,6 +2097,9 @@ pub struct AcceptanceEvidence {
     #[serde(default)]
     pub verify_stale: bool,
     pub model_claimed_done: bool,
+    /// A child result needs a fresh parent answer, including read-only work.
+    #[serde(default)]
+    pub has_delegated: bool,
     pub denied_tools: Vec<String>,
     /// Typed evidence bag for criterion matchers.
     pub bag: EvidenceBag,
@@ -2073,6 +2123,10 @@ pub struct AcceptanceEvidence {
 impl AcceptanceEvidence {
     pub fn absorb_results(&mut self, results: &[ToolResult]) {
         for r in results {
+            if r.name == ToolName::Subagent.label() {
+                self.has_delegated = true;
+                self.model_claimed_done = false;
+            }
             self.files_written.extend(r.changed_files.iter().cloned());
             if r.ok {
                 self.had_tool_success = true;
@@ -2095,6 +2149,10 @@ impl AcceptanceEvidence {
         expectation: Option<&CommandExpectation>,
     ) {
         for r in results {
+            if r.name == ToolName::Subagent.label() {
+                self.has_delegated = true;
+                self.model_claimed_done = false;
+            }
             self.files_written.extend(r.changed_files.iter().cloned());
             if r.ok {
                 self.had_tool_success = true;
@@ -2323,8 +2381,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("final_answer_errors");
+        legacy.as_object_mut().unwrap().remove("has_delegated");
         let restored: AcceptanceEvidence = serde_json::from_value(legacy).unwrap();
         assert!(restored.final_answer_errors.is_none());
+        assert!(!restored.has_delegated);
     }
 
     /// Plan-level final-answer gate (2026-10-13): read-only review skills
@@ -2930,6 +2990,41 @@ mod tests {
                 !parsed.requires_file_output,
                 "{message} must stay a question: {parsed:?}"
             );
+        }
+    }
+
+    #[test]
+    fn read_only_instructions_are_not_output_contracts() {
+        for message in [
+            "分析 SPEC.md 与 repository.save / catch 控制流的差异。",
+            "Explain README.md and save() in docs/overwrite.md.",
+            "分析 README.md 的差异，不要修改任何文件。",
+            "解释 README.md，不得更新文件，无需创建报告。",
+            "分析 README.md 的差异，说明未修改文件、没有创建报告。",
+            "Analyze README.md; do not update files; never create a report.",
+            "Explain README.md; must not write a report.",
+        ] {
+            let parsed = contract(message);
+            assert!(!parsed.requires_file_output, "{message}: {parsed:?}");
+            assert_eq!(parsed.operation, OutputOperation::None, "{message}");
+        }
+        assert!(contract("不要更新 README.md，但请创建 report.md").requires_file_output);
+        assert!(contract("Save report.md.").requires_file_output);
+        for message in [
+            "只读解释 README.md，说明 catch 分支写入 failed 记录。输出为两条结论。",
+            "检查 README.md，说明 catch 写入 failed 记录的原因。",
+            "不要保存到 report.md，只需说明保存失败的原因。",
+        ] {
+            assert!(!has_explicit_file_output(message), "{message}");
+        }
+        for message in [
+            "请将 `a.md` 更新",
+            "请把结论保存到 `summary.md`。",
+            "Save: \"report.txt\".",
+            "保存一份文档",
+            "不要保存到 a.md，但请保存到 b.md。",
+        ] {
+            assert!(has_explicit_file_output(message), "{message}");
         }
     }
 

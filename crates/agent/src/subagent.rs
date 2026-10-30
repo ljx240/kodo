@@ -676,6 +676,63 @@ mod tests {
     }
 
     #[test]
+    fn automatic_delegation_policy_reaches_both_protocols_only_when_available() {
+        let fixture = Fixture::new(vec![]);
+        let mut request = fixture.request();
+        let skills = crate::SkillRegistry::builtin();
+        let mcp = crate::mcp::McpClients::default();
+        for (mode, skill_name) in [
+            (crate::AgentMode::Code, "feature"),
+            (crate::AgentMode::Work, "work"),
+        ] {
+            request.mode = mode;
+            let mut skill = skills.get(skill_name).unwrap().clone();
+            let registry = crate::run_registry(&request, Some(&skill), &mcp);
+            let schemas = crate::tool_schemas(&registry);
+            let native = schemas.iter().find(|s| s.name == "subagent").unwrap();
+            let fallback = crate::protocol::protocol_instructions(&registry);
+            let system = crate::system_prompt(request.project.as_deref(), mode, &registry, "");
+            assert!(
+                system.find("Task orchestration").unwrap() < system.find("Tool protocol").unwrap()
+            );
+            for policy in [
+                "Automatically decide",
+                "user does not need",
+                "simple questions",
+                "avoid delegation",
+                "sequentially",
+            ] {
+                assert!(native.description.contains(policy), "{policy}");
+                assert!(fallback.contains(policy), "{policy}");
+            }
+            skill
+                .allowed_tools
+                .retain(|tool| *tool != ToolName::Subagent);
+            let child_scope = Scope {
+                depth: 1,
+                ..Scope::default()
+            };
+            let mut projectless = request.clone();
+            projectless.project = None;
+            for restricted in [
+                child_scope.registry(registry),
+                crate::run_registry(&request, Some(&skill), &mcp),
+                crate::run_registry(&projectless, None, &mcp),
+            ] {
+                assert!(!crate::tool_schemas(&restricted)
+                    .iter()
+                    .any(|s| s.name == "subagent"));
+                assert!(!crate::protocol::protocol_instructions(&restricted)
+                    .contains("Automatically decide"));
+                assert!(
+                    !crate::system_prompt(request.project.as_deref(), mode, &restricted, "")
+                        .contains("Task orchestration")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn child_request_isolates_history_and_keeps_security_and_context() {
         let fixture = Fixture::new(vec![]);
         let mut parent = fixture.request();
@@ -929,6 +986,200 @@ mod tests {
         })
         .unwrap();
         assert!(answer.contains("slash child answer"), "{answer}");
+    }
+
+    #[test]
+    fn ordinary_task_can_delegate_real_reads_before_parent_synthesis() {
+        let fixture = Fixture::new(vec![
+            tool(
+                "subagent",
+                json!({"task":"README.md 的输入格式有什么含义？请读取文件后回答。", "read_only":true}),
+            ),
+            tool("read_file", json!({"path":"README.md"})),
+            reply("child evidence"),
+            reply("parent synthesis"),
+        ]);
+        let mut request = fixture.request();
+        request.message =
+            "输入格式与校验规则有什么区别？请分别解释输入格式的边界与规则约束。".into();
+        let mut traces = Vec::new();
+        let mut answers = Vec::new();
+        crate::run(&request, &|| true, &|_, _| true, &mut |event| {
+            match event {
+                SinkEvent::Subagent { trace, .. } => traces.push(trace),
+                SinkEvent::Finished {
+                    step: Step::AgentMessage { text, .. },
+                    ..
+                } => answers.push(text),
+                _ => {}
+            }
+            true
+        })
+        .unwrap();
+        let trace = traces.last().unwrap();
+        assert_eq!(trace.status, "completed", "{}", trace.output);
+        assert!(trace
+            .steps
+            .iter()
+            .any(|s| s.kind == "fileRead" && s.label == "README.md"));
+        assert_eq!(trace.output, "child evidence");
+        assert_eq!(answers, vec!["parent synthesis"]);
+    }
+
+    #[test]
+    fn parent_finishes_remaining_work_after_delegated_changes_and_verification() {
+        let fixture = Fixture::new(vec![
+            tool("read_file", json!({"path":"input.txt"})),
+            tool("read_file", json!({"path":"README.md"})),
+            tool(
+                "subagent",
+                json!({"task":"新增 child.txt，内容为 child-output。"}),
+            ),
+            tool("read_file", json!({"path":"input.txt"})),
+            tool("read_file", json!({"path":"README.md"})),
+            tool(
+                "write_file",
+                json!({"path":"child.txt","content":"child-output"}),
+            ),
+            tool(
+                "write_file",
+                json!({"path":"parent.txt","content":"parent-output"}),
+            ),
+            reply("parent-synthesis: child.txt 与 parent.txt 已实际创建。"),
+        ]);
+        std::fs::write(fixture.root.join("input.txt"), "synthetic input\n").unwrap();
+        let mut request = fixture.request();
+        request.mode = crate::AgentMode::Code;
+        request.message = "新增两个产物 child.txt 与 parent.txt，完成后总结两项结果。".into();
+        let mut final_message = None;
+        let mut traces = Vec::new();
+        crate::run(&request, &|| true, &|_, _| true, &mut |event| {
+            match event {
+                SinkEvent::Subagent { trace, .. } => traces.push(trace),
+                SinkEvent::Finished {
+                    step: Step::AgentMessage { text, delivery, .. },
+                    ..
+                } => final_message = Some((text, delivery)),
+                _ => {}
+            }
+            true
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("child.txt")).unwrap(),
+            "child-output"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("parent.txt")).unwrap(),
+            "parent-output"
+        );
+        assert_eq!(traces.last().unwrap().status, "completed");
+        let (text, delivery) = final_message.unwrap();
+        assert_eq!(delivery, "ready", "{text}");
+        assert!(text.contains("parent-synthesis"), "{text}");
+    }
+
+    #[test]
+    fn read_only_explanation_of_readme_does_not_require_document_writes() {
+        for mode in [crate::AgentMode::Code, crate::AgentMode::Work] {
+            let fixture = Fixture::new(vec![
+                tool("read_file", json!({"path":"README.md"})),
+                reply("两项差异已根据 README.md 读取结果解释；未执行代码、未修改文件。"),
+            ]);
+            let mut request = fixture.request();
+            request.mode = mode;
+            let mut traces = Vec::new();
+            let outcome = execute(
+                &call(
+                    "只读复核 README.md 的内部实现与规范有何不一致？说明 catch 分支写入 failed 记录的控制流，不要分析其他模块的内部实现。输出为两条结论，不执行代码，不要修改任何文件。",
+                ),
+                &request,
+                &ToolRegistry::standard(),
+                &mut Delegation::default(),
+                true,
+                &|| true,
+                &|kind, _| {
+                    assert_ne!(kind, StepKind::FileChange);
+                    true
+                },
+                &mut |event| {
+                    if let SinkEvent::Subagent { trace, .. } = event {
+                        traces.push(trace);
+                    }
+                    true
+                },
+            );
+            let trace = traces.last().unwrap();
+            assert!(outcome.result.ok, "{}", trace.output);
+            assert_eq!(trace.status, "completed");
+            assert!(trace
+                .steps
+                .iter()
+                .any(|s| s.kind == "fileRead" && s.label == "README.md"));
+            assert!(trace.steps.iter().all(|s| s.kind != "fileChange"));
+        }
+    }
+
+    #[test]
+    fn read_only_child_keeps_explicit_writing_and_review_contracts() {
+        use crate::AgentMode::{Code, Work};
+        for (mode, task) in [
+            (Code, "将 report.txt 保存"),
+            (Work, "将 report.txt 保存"),
+            (Code, "保存一份文档"),
+            (Code, "保存到 report.txt"),
+            (Work, "保存到 report.txt"),
+            (Code, "说明 README.md 并保存到 report.md"),
+            (Work, "说明 README.md 并保存到 report.md"),
+            (Code, "【技能：docs】\n解释 README.md，不要修改文件。"),
+            (Code, "Review the code in README.md"),
+        ] {
+            let fixture = Fixture::new(vec![
+                tool("read_file", json!({"path":"README.md"})),
+                tool("read_file", json!({"path":"README.md"})),
+                reply("Only an explanation, without a saved document or a review report."),
+            ]);
+            let mut request = fixture.request();
+            request.mode = mode;
+            let outcome = execute(
+                &call(task),
+                &request,
+                &ToolRegistry::standard(),
+                &mut Delegation::default(),
+                true,
+                &|| true,
+                &|kind, _| {
+                    assert_ne!(kind, StepKind::FileChange);
+                    true
+                },
+                &mut |_| true,
+            );
+            assert!(!outcome.result.ok, "{mode:?}: {task}");
+            assert!(!fixture.root.join("report.md").exists());
+        }
+    }
+
+    #[test]
+    fn simple_question_answers_directly_without_a_child() {
+        let fixture = Fixture::new(vec![reply("count 表示数量，total 表示总和。")]);
+        let mut request = fixture.request();
+        request.message = "count 和 total 有什么区别？".into();
+        let mut child_count = 0;
+        let mut answer = String::new();
+        crate::run(&request, &|| true, &|_, _| true, &mut |event| {
+            match event {
+                SinkEvent::Subagent { .. } => child_count += 1,
+                SinkEvent::Finished {
+                    step: Step::AgentMessage { text, .. },
+                    ..
+                } => answer = text,
+                _ => {}
+            }
+            true
+        })
+        .unwrap();
+        assert_eq!(child_count, 0);
+        assert!(answer.contains("count 表示数量"), "{answer}");
     }
 
     #[test]

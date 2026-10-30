@@ -809,10 +809,11 @@ impl AgentMachine {
         // gate demands a fresh run, and keep the reason so the model is told
         // why an earlier green result no longer counts.
         let wrote_something = results.iter().any(|r| {
-            r.ok && (!r.changed_files.is_empty()
-                || crate::ToolName::parse(&r.name)
-                    .map(|n| n.is_mutation())
-                    .unwrap_or(false))
+            !r.changed_files.is_empty()
+                || (r.ok
+                    && crate::ToolName::parse(&r.name)
+                        .map(|n| n.is_mutation())
+                        .unwrap_or(false))
         });
         if wrote_something && self.evidence.verify_ok == Some(true) {
             self.evidence.verify_ok = None;
@@ -862,7 +863,14 @@ impl AgentMachine {
 
     fn try_finish(&mut self, from: AgentState) -> Result<AgentState, String> {
         self.budget.rounds_used = self.budget.rounds_used.saturating_add(1);
-        let report = self.plan.evaluate_acceptance(&self.evidence);
+        let mut report = self.plan.evaluate_acceptance(&self.evidence);
+        let awaiting_parent = self.evidence.has_delegated && !self.evidence.model_claimed_done;
+        if awaiting_parent {
+            report.ok = false;
+            report
+                .failures
+                .push("parent must integrate delegated results and return a fresh answer".into());
+        }
         self.last_acceptance = Some(report.clone());
         if report.ok {
             Ok(AgentState::Finish)
@@ -870,6 +878,8 @@ impl AgentMachine {
             Ok(AgentState::Failed {
                 reason: FailReason::BudgetExhausted,
             })
+        } else if awaiting_parent {
+            Ok(AgentState::Execute)
         } else {
             // Not enough evidence — stay so the loop can gather more.
             // If we were forced to finish-like claim, caller may BudgetExceeded.
@@ -1112,6 +1122,91 @@ mod tests {
             m.last_acceptance()
         );
         assert!(m.last_acceptance().map(|r| r.ok).unwrap_or(false));
+    }
+
+    #[test]
+    fn delegated_changes_need_a_fresh_parent_answer_after_verification() {
+        let mut machine = AgentMachine::new("Please update README with badges", Budget::default());
+        machine.handle(AgentEvent::TaskReceived);
+        machine.handle(AgentEvent::PlanReady);
+        machine.handle(AgentEvent::ContextGathered);
+        machine.evidence.model_claimed_done = true;
+        machine.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        let mut child = ToolResult::success(
+            ToolCallId::new("child"),
+            "subagent",
+            "update one part",
+            "child completed",
+        );
+        child.changed_files.push("README.md".into());
+        machine.handle(AgentEvent::ToolsFinished {
+            results: vec![child],
+        });
+        assert_eq!(machine.state(), &AgentState::Verify);
+        machine.handle(AgentEvent::VerifyFinished { ok: true });
+        assert_eq!(machine.state(), &AgentState::Execute);
+        assert!(!machine.evidence.model_claimed_done);
+        assert!(!machine.last_acceptance().unwrap().ok);
+        machine.handle(AgentEvent::ModelClaimedDone);
+        assert_eq!(machine.state(), &AgentState::Finish);
+        assert!(machine.last_acceptance().unwrap().ok);
+    }
+
+    #[test]
+    fn read_only_child_also_requires_a_fresh_parent_answer() {
+        let mut machine = AgentMachine::new("Please update README with badges", Budget::default());
+        machine.handle(AgentEvent::TaskReceived);
+        machine.handle(AgentEvent::PlanReady);
+        machine.handle(AgentEvent::ContextGathered);
+        machine.evidence.model_claimed_done = true;
+        machine.handle(AgentEvent::ModelRequestedTools { count: 2 });
+        machine.handle(AgentEvent::ToolsFinished {
+            results: vec![
+                ToolResult::success(
+                    ToolCallId::new("write"),
+                    "write_file",
+                    "README.md",
+                    "written",
+                ),
+                ToolResult::success(
+                    ToolCallId::new("review"),
+                    "subagent",
+                    "review only",
+                    "reviewed",
+                ),
+            ],
+        });
+        machine.handle(AgentEvent::VerifyFinished { ok: true });
+        assert_eq!(machine.state(), &AgentState::Execute);
+        assert!(machine.evidence.has_delegated);
+        assert!(!machine.evidence.model_claimed_done);
+        machine.handle(AgentEvent::ModelClaimedDone);
+        assert_eq!(machine.state(), &AgentState::Finish);
+    }
+
+    #[test]
+    fn failed_child_with_actual_changes_invalidates_prior_verification() {
+        let mut machine = AgentMachine::new("Please update README with badges", Budget::default());
+        machine.handle(AgentEvent::TaskReceived);
+        machine.handle(AgentEvent::PlanReady);
+        machine.handle(AgentEvent::ContextGathered);
+        machine.evidence.verify_ok = Some(true);
+        machine.evidence.model_claimed_done = true;
+        machine.handle(AgentEvent::ModelRequestedTools { count: 1 });
+        let mut child = ToolResult::failure(
+            ToolCallId::new("partial-child"),
+            "subagent",
+            "update one part",
+            ToolError::execution("child failed after editing"),
+        );
+        child.changed_files.push("README.md".into());
+        machine.handle(AgentEvent::ToolsFinished {
+            results: vec![child],
+        });
+        assert_eq!(machine.state(), &AgentState::Verify);
+        assert_eq!(machine.evidence.verify_ok, None);
+        assert!(machine.evidence.verify_stale);
+        assert!(!machine.evidence.model_claimed_done);
     }
 
     #[test]
