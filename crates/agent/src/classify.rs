@@ -78,6 +78,68 @@ fn score(task: &str, patterns: &[&str]) -> u32 {
         .sum()
 }
 
+/// Directly negated actions constrain a request; they do not ask for authoring.
+pub(crate) fn requests_action(lower: &str, verb: &str) -> bool {
+    lower
+        .match_indices(verb)
+        .any(|(offset, _)| action_is_requested_at(lower, verb, offset))
+}
+
+pub(crate) fn action_is_requested_at(lower: &str, verb: &str, offset: usize) -> bool {
+    const NEGATIONS: &[&str] = &[
+        "不要",
+        "不得",
+        "禁止",
+        "无需",
+        "无须",
+        "未",
+        "没有",
+        "不",
+        "do not",
+        "don't",
+        "don’t",
+        "never",
+        "must not",
+        "no need to",
+    ];
+    let before = &lower[..offset];
+    let after = &lower[offset + verb.len()..];
+    // English method/path names such as repository.save and save.md are data.
+    if verb.is_ascii() {
+        let attached_before = before
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || "_./\\:-".contains(c));
+        let attached_after = verb
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            && (after
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || "_/\\-".contains(c))
+                || after
+                    .strip_prefix('.')
+                    .or_else(|| after.strip_prefix(':'))
+                    .is_some_and(|tail| {
+                        tail.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                    }));
+        if attached_before || attached_after || after.starts_with('(') {
+            return false;
+        }
+    }
+    let prefix = before.trim_end();
+    !NEGATIONS.iter().any(|negation| {
+        prefix.strip_suffix(negation).is_some_and(|before| {
+            !negation.is_ascii()
+                || before
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !c.is_ascii_alphanumeric())
+        })
+    })
+}
+
 /// The margin between the winning rule score and the runner-up that still
 /// counts as a clear decision.
 ///
@@ -475,11 +537,20 @@ pub(crate) fn is_document_output(message: &str) -> bool {
         "refactor",
     ]
     .iter()
-    .any(|word| lower.contains(word))
+    .any(|word| requests_action(&lower, word))
     {
         return false;
     }
-    let output = [
+    let output = has_file_output_action(&lower);
+    let document = [".md", "markdown", "文档", "docs/", "docs下", "docs 下"]
+        .iter()
+        .any(|word| lower.contains(word));
+    output && document
+}
+
+pub(crate) fn has_file_output_action(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
         "输出到",
         "保存到",
         "保存为",
@@ -496,16 +567,33 @@ pub(crate) fn is_document_output(message: &str) -> bool {
         "output to",
     ]
     .iter()
-    .any(|word| lower.contains(word));
-    let document = [".md", "markdown", "文档", "docs/", "docs下", "docs 下"]
-        .iter()
-        .any(|word| lower.contains(word));
-    output && document
+    .any(|word| requests_action(&lower, word))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_document_mentions_do_not_request_file_creation() {
+        for message in [
+            "分析 SPEC.md 与 repository.save / catch 控制流的差异。",
+            "Explain README.md and the save.md input file.",
+            "Explain README.md and save() in docs/overwrite.md.",
+            "解释 README.md，不要保存到 report.md。",
+            "Analyze README.md; do not write a report.",
+            "Explain docs/a.md; never export to docs/b.md.",
+        ] {
+            assert!(!is_document_output(message), "{message}");
+        }
+        for message in [
+            "不要修复代码，请解释 README.md 并保存到 report.md。",
+            "Explain README.md; do not fix code, but write a report to summary.md.",
+            "Save README.md after you finish.",
+        ] {
+            assert!(is_document_output(message), "{message}");
+        }
+    }
 
     // Two representative tasks per task_type — both must classify correctly.
     #[test]
