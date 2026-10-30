@@ -18,6 +18,14 @@
 //! uses nothing but the standard library, so it adds no dependency to the
 //! product and behaves identically on macOS and Linux.
 //!
+//! The helper is always started with the magic flag [`PROBE_FLAG`] in front
+//! of the command. That is what makes one protocol work for two kinds of
+//! helper: the dedicated binary, and the running program itself when no
+//! dedicated binary is shipped next to it. A host program answers **only**
+//! a request that starts with the flag — without it, `read <path>` is just
+//! an ordinary launch, and for a desktop application that means a second
+//! copy of the whole GUI instead of a single file read.
+//!
 //! The classification is deliberately based on the raw operating-system
 //! error number: `Errno::PermissionDenied` alone would miss a refused
 //! socket and would happily call a broken probe "isolated".
@@ -219,10 +227,26 @@ pub fn serve(args: &[String]) -> Option<i32> {
 
 /// Run the probe protocol for a dedicated helper binary.
 ///
-/// The dedicated binary is *only* a probe helper, so its arguments are the
-/// command itself — no magic flag is needed.
+/// The dedicated binary is *only* a probe helper, so the command may arrive
+/// with or without the magic flag. The flag is stripped when it is there,
+/// which keeps one protocol for both kinds of helper.
 pub fn serve_direct(args: &[String]) -> i32 {
-    run_command(args)
+    let rest = match args.strip_prefix(&[PROBE_FLAG.to_owned()]) {
+        Some(rest) => rest,
+        None => args,
+    };
+    run_command(rest)
+}
+
+/// The argument vector a probe helper is started with.
+///
+/// The magic flag always comes first: it is what tells a host program that
+/// this process is a helper and not a normal launch.
+fn helper_argv(args: &[std::ffi::OsString]) -> Vec<std::ffi::OsString> {
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(std::ffi::OsString::from(PROBE_FLAG));
+    argv.extend(args.iter().cloned());
+    argv
 }
 
 fn run_command(rest: &[String]) -> i32 {
@@ -264,6 +288,12 @@ impl ProbeHelper {
     /// helper shipped next to the running program, then the one in the
     /// build directory, then the running program itself when it registered
     /// as a probe-capable host.
+    ///
+    /// The last case is the normal one for a desktop application, because
+    /// neither `cargo tauri dev` nor a bundled release ships the dedicated
+    /// helper binary. It is only safe because the driver always starts the
+    /// helper with [`PROBE_FLAG`]: the program then answers the request and
+    /// exits instead of starting a second copy of itself.
     pub fn locate() -> Option<Self> {
         if let Some(path) = std::env::var_os("KODO_SANDBOX_PROBE_BIN") {
             let path = PathBuf::from(path);
@@ -390,12 +420,12 @@ pub fn measure_network(
         let port = addr.port();
         let listener = std::net::TcpListener::bind(addr)
             .map_err(|error| format!("无法监听回环端口：{error}"))?;
-        let args = vec![
+        let args = helper_argv(&[
             std::ffi::OsString::from("connect"),
             std::ffi::OsString::from(host),
             std::ffi::OsString::from(port.to_string()),
             std::ffi::OsString::from("2000"),
-        ];
+        ]);
         // Control: the listener must be reachable without confinement.
         let control = run_unconfined(helper.program(), &args);
         if control != ProbeOutcome::Ok {
@@ -436,10 +466,10 @@ pub fn measure_read(
     runner: &dyn SandboxProbeRunner,
     path: &Path,
 ) -> Result<(), String> {
-    let args = vec![
+    let args = helper_argv(&[
         std::ffi::OsString::from("read"),
         std::ffi::OsString::from(path),
-    ];
+    ]);
     let control = run_unconfined(helper.program(), &args);
     if control != ProbeOutcome::Ok {
         return Err(format!(
@@ -516,6 +546,44 @@ mod tests {
     fn the_protocol_only_answers_probe_requests() {
         assert!(serve(&["kodo".to_owned()]).is_none());
         assert!(serve(&[PROBE_FLAG.to_owned()]).is_some());
+    }
+
+    #[test]
+    fn a_bare_command_is_not_a_probe_request() {
+        // This is the trap the driver has to avoid: a host program that is
+        // handed `read <path>` without the flag treats it as an ordinary
+        // launch. For the desktop app that means a second copy of the whole
+        // application — window, Dock icon and all — instead of one file read.
+        assert!(serve(&["read".to_owned(), "/tmp/whatever".to_owned()]).is_none());
+        assert!(serve(&["connect".to_owned(), "127.0.0.1".to_owned()]).is_none());
+    }
+
+    #[test]
+    fn the_helper_always_starts_with_the_magic_flag() {
+        let argv = helper_argv(&[
+            std::ffi::OsString::from("read"),
+            std::ffi::OsString::from("/tmp/whatever"),
+        ]);
+        assert_eq!(argv.first(), Some(&std::ffi::OsString::from(PROBE_FLAG)));
+        assert_eq!(argv.len(), 3);
+    }
+
+    #[test]
+    fn the_dedicated_helper_understands_both_protocols() {
+        let missing = std::env::temp_dir().join("kodo-probe-missing-file");
+        let _ = std::fs::remove_file(&missing);
+        let path = missing.to_string_lossy().into_owned();
+
+        // With the flag — how the driver starts every helper.
+        assert_eq!(
+            serve_direct(&[PROBE_FLAG.to_owned(), "read".to_owned(), path.clone()]),
+            EXIT_NOT_FOUND
+        );
+        // Without it — the bare protocol the dedicated binary used to speak.
+        assert_eq!(
+            serve_direct(&["read".to_owned(), path.clone()]),
+            EXIT_NOT_FOUND
+        );
     }
 
     #[test]
