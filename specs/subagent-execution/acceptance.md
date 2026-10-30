@@ -158,7 +158,7 @@ exitCode=0
 
 基线 main：`1faed29297986a52566841ab15cfbc545739eef0`。用户已授权创建唯一任务分支 `feat/automatic-subagent-routing`；原提示文件、7 条 stash 和其他分支保持不动。
 
-验收目标为不含 `/subagent`、角色或委派要求的普通任务自动按需选择工具；简单任务直接完成。离线回归仅证明策略传播、权限过滤和主子执行协议；模型自主判断需单独的合成项目真实模型证据。AC-012 至 AC-017 已由最终版本的离线及真实合成项目验证覆盖，最终证据见文末。当前改动尚未提交、尚未合入 main，不据此报告任务完成。
+验收目标为不含 `/subagent`、角色或委派要求的普通任务自动按需选择工具；简单任务直接完成。离线回归仅证明策略传播、权限过滤和主子执行协议；模型自主判断需单独的合成项目真实模型证据。AC-012 至 AC-017 已由最终版本的离线及真实合成项目验证覆盖，最终证据见文末。本任务提交与 `--no-ff` 合并记录见文末「本地集成与交付记录」。
 
 
 ### 自动委派初版与离线验证（否定动作修复前）
@@ -276,7 +276,7 @@ test result: ok. 106 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fi
 
 ### 最终收敛结果（普通任务自动委派）
 
-实现、回归与真实模型流程验收通过；Git 集成仍待独立授权。仅修改 6 个 Agent Rust 文件与本规格目录的 4 份文档，未新增依赖，未改 UI。最终 6 个源码散列在本地测试、验收器链接与真实模型运行后完全一致，记录为临时证据目录 `evidence/file-target-v2-source-hashes.json`。
+实现、回归与真实模型流程验收通过；Git 集成记录见文末「本地集成与交付记录」。仅修改 6 个 Agent Rust 文件与本规格目录的 4 份文档，未新增依赖，未改 UI。最终 6 个源码散列在本地测试、验收器链接与真实模型运行后完全一致，记录为临时证据目录 `evidence/file-target-v2-source-hashes.json`。
 
 ```text
 cargo test --offline -p kodo-core -p kodo-agent -p kodo-shell -p kodo-desktop -p kodo-cli --lib --bins -- --test-threads=4
@@ -311,3 +311,38 @@ git diff --check
 人工核对自动正例：child 正确发现支付在幂等检查前、失败不释放库存/撤销扣款及成功保存未 await；父级正确汇总金额校验、非原子批量预留、重复释放、共享快照与新完成正文。仍有模型语义限制：child 将非原子的 reserveBatch 误称为原子（父级相关描述正确）；仓储实现未提供，覆盖/写入顺序推断不能当成确定事实；负优惠比例不必然产生负总额。细节保存在 `attempt-13/evidence/manual-quality-review.json`，未认证全部结论准确，也未执行代码或数值样例。简单任务虽然没有委派，仍发生了 5 次模型调用，不宣称单次调用或延迟优化已验收。
 
 原始合成任务、4 份 JSON 结果、公开 Trace/session、日志、输入散列与人工核对均仅在系统临时目录 `kodo-subagent-auto-live-4dvgck7d/attempt-13/evidence` 保留，不提交。未向模型发送现有项目源码、历史、用户技能或项目日志。未运行原生桌面点击、前端构建或远程 CI；未核验其他模型的稳定性。自动判断依赖模型，120 秒合作式 child 预算及所有权限上限不变。
+
+
+### 本地集成与交付记录（Git 提交 / `--no-ff` 合并）
+
+基线：`1faed29297986a52566841ab15cfbc545739eef0`（本地 `main`；本次核验时 `origin/main` 为 `b20e714`，本地 main 领先 6 个提交）。
+任务分支：`feat/automatic-subagent-routing`，从上述基线创建，是本任务的唯一工作分支。
+
+本任务提交（均在任务分支上）：
+
+| 提交 | 内容 |
+| --- | --- |
+| `3c4ff49` | `feat(agent): delegate read-only work and respect negated actions` — 7 个 Agent Rust 文件 + 本规格目录 4 份文档 |
+| `dbdf696` | `fix(sandbox): start the probe helper with the magic flag` — `crates/sandbox/src/probe.rs` + `docs/design/SECURE_EXECUTION.md` |
+| `f688237` | `docs(sandbox): add the secure execution implementation brief` — 根目录实施提示文件 |
+
+合并方式：任务分支以 `--no-ff` 合入本地 `main`（保留任务边界），合并后按仓库规范删除已完成任务分支；7 条 stash 与其它分支保持不动。合并前的本地验证：
+
+```text
+cargo fmt --all -- --check
+# exit 0
+git diff --check
+# exit 0
+cargo check -p kodo-agent -p kodo-sandbox
+# Finished `dev` profile [unoptimized + debuginfo] target(s) in 42.44s
+cargo test -p kodo-agent -p kodo-sandbox
+# kodo-agent: 760 passed; 3 failed; 0 ignored; kodo-sandbox: 全部通过
+```
+
+3 个失败用例属环境原因，与本任务改动无关：在未改动的基线 `1faed29` 上以 `git worktree add --detach` 复跑同样 3 个用例、同样 3 个失败（对照 worktree 随后移除）。
+
+- `tests::git_status_permission_runs_in_auto_and_full_but_ask_waits`：测试沙箱内 git 报 `couldn't create cache file '/var/folders/.../xcrun_db-...' (errno=Operation not permitted)`；
+- `subagent::tests::accepted_child_tools_produce_a_completion_summary_without_a_model_final`：同一 git 错误加上 `/bin/sh: npm: command not found`，验证步骤失败使 child 状态落到 blocked；
+- `verify::tests::a_missing_tool_blocks_same_binary_and_skips_the_doomed_chain`：断言依赖 `node -e`，本机未安装 node。
+
+本机未安装 node/npm，因此本轮未运行前端构建、Playwright 视觉基线与原生桌面点击验收；本任务未改前端，也未运行远程 CI。合并后按用户授权推送远端，推送结果与最终合并哈希见交付报告。
