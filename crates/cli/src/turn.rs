@@ -157,6 +157,48 @@ impl TurnContext {
         Some(service.handle())
     }
 
+    /// The run request for one turn.
+    ///
+    /// Every configured surface reaches the agent through here, so the wiring
+    /// is worth a test of its own: a surface that silently drops a
+    /// configuration the user set up is worse than one that never had it.
+    fn build_request(
+        &self,
+        message: &str,
+        session_id: &str,
+        conversation_history: Vec<(String, String)>,
+    ) -> RunRequest {
+        RunRequest {
+            project: Some(self.project.clone()),
+            message: message.to_owned(),
+            conversation_history,
+            pinned_context: Vec::new(),
+            pinned_force_inline: Vec::new(),
+            provider: self.config.provider.clone(),
+            permission: self.permission,
+            sandbox: self.config.sandbox_context(&self.project),
+            mode: AgentMode::Code,
+            fallback_to_local: self.config.fallback_to_local,
+            max_output_tokens: self.config.max_output_tokens,
+            extended_thinking: self.config.extended_thinking,
+            local_trace: self.config.local_trace,
+            session_id: Some(session_id.to_owned()),
+            user_skills_dir: kodo_core::settings::state_dir().map(|d| d.join("skills")),
+            skill_roots: kodo_core::skill_paths::local_skill_roots(Some(&self.project)),
+            // The CLI and the desktop share one `mcp-servers` setting. The
+            // servers reach the agent through the deferred connect tool, so a
+            // server configured in Settings works the same way in both.
+            mcp_servers: self.config.mcp_servers.clone(),
+            agent_instructions: None,
+            personas: Vec::new(),
+            budget_family: None,
+            memory: open_memory_handle(),
+            knowledge_context: None,
+            allow_verify_commands: self.allow_verify,
+            decision: self.decision_handle(session_id),
+        }
+    }
+
     /// Runs one full turn: ask envelope → agent → outcome envelope.
     pub fn run_turn(&mut self, message: &str) -> Result<TurnStatus, String> {
         // Drop a stale interrupt left over from the prompt or a previous turn.
@@ -175,32 +217,11 @@ impl TurnContext {
         )
         .map_err(|error| format!("写入会话失败：{error}"))?;
 
-        let request = RunRequest {
-            project: Some(self.project.clone()),
-            message: message.to_owned(),
-            conversation_history: kodo_shell::turn::conversation_history(&prior_session),
-            pinned_context: Vec::new(),
-            pinned_force_inline: Vec::new(),
-            provider: self.config.provider.clone(),
-            permission: self.permission,
-            sandbox: self.config.sandbox_context(&self.project),
-            mode: AgentMode::Code,
-            fallback_to_local: self.config.fallback_to_local,
-            max_output_tokens: self.config.max_output_tokens,
-            extended_thinking: self.config.extended_thinking,
-            local_trace: self.config.local_trace,
-            session_id: Some(session_id.clone()),
-            user_skills_dir: kodo_core::settings::state_dir().map(|d| d.join("skills")),
-            skill_roots: kodo_core::skill_paths::local_skill_roots(Some(&self.project)),
-            mcp_servers: Vec::new(),
-            agent_instructions: None,
-            personas: Vec::new(),
-            budget_family: None,
-            memory: open_memory_handle(),
-            knowledge_context: None,
-            allow_verify_commands: self.allow_verify,
-            decision: self.decision_handle(&session_id),
-        };
+        let request = self.build_request(
+            message,
+            &session_id,
+            kodo_shell::turn::conversation_history(&prior_session),
+        );
 
         let mut logger = TurnLogger::new(self.session_dir.clone(), session_id)
             .with_capture(self.config.local_trace);
@@ -311,7 +332,11 @@ mod tests {
     use super::*;
 
     fn temp_ctx(project: PathBuf, session_dir: PathBuf) -> TurnContext {
-        let config = ShellConfig {
+        ctx_with(project, session_dir, base_config())
+    }
+
+    fn base_config() -> ShellConfig {
+        ShellConfig {
             provider: None,
             permission: Permission::Ask,
             fallback_to_local: true,
@@ -322,7 +347,10 @@ mod tests {
             mcp_servers: Vec::new(),
             sandbox_mode: kodo_sandbox::SandboxMode::WorkspaceWrite,
             sandbox_runtime: kodo_sandbox::SandboxRuntime::detect(),
-        };
+        }
+    }
+
+    fn ctx_with(project: PathBuf, session_dir: PathBuf, config: ShellConfig) -> TurnContext {
         TurnContext::new(project, session_dir, config)
     }
 
@@ -332,6 +360,31 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("sessions")).expect("sessions dir");
         root
+    }
+
+    #[test]
+    fn the_cli_hands_configured_mcp_servers_to_the_agent() {
+        // The CLI and the desktop read the same `mcp-servers` setting. A
+        // server the user configured must reach the agent, or every plugin
+        // set up in Settings is silently ignored in the terminal.
+        let mut config = base_config();
+        config.mcp_servers = vec![kodo_agent::mcp::McpServerConfig {
+            id: "fake-mcp".into(),
+            name: "Fake MCP".into(),
+            enabled: true,
+            transport: kodo_agent::mcp::McpTransportKind::Stdio,
+            command: "python3".into(),
+            args: vec!["server.py".into()],
+            env: Default::default(),
+            url: String::new(),
+            headers: Default::default(),
+        }];
+        let root = temp_root("mcp");
+        let ctx = ctx_with(root.join("proj"), root.join("sessions"), config);
+        let request = ctx.build_request("用 MCP 工具回显一个标记", "session-1", Vec::new());
+        assert_eq!(request.mcp_servers.len(), 1, "the server reaches the agent");
+        assert_eq!(request.mcp_servers[0].id, "fake-mcp");
+        assert!(request.mcp_servers[0].enabled);
     }
 
     #[test]
