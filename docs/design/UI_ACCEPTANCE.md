@@ -619,13 +619,13 @@ These are asserted in `apps/desktop/tests/visual/behaviour.spec.ts` and
       only; a cross-column drop shows the `todo-column-body--over` state, an
       in-column drop rewrites `sort_order` via `reorder_todo` and keeps the
       status, and Escape or a drop outside a column leaves the row alone;
-- [ ] 待办 editor is a two-column modal: the main column carries title,
-      status, priority, due date/time, description, sub-items, related rows;
-      the rail carries tags, assignee, the four custom fields, attachments,
-      reminders and the activity log. The save button is labelled `保存并关闭`,
-      not `保存`. Reopening reads the same data back: the rail values match
-      the row, the new fields appear in `update_todo`'s payload, and a version
-      conflict surfaces as a message instead of a silent overwrite;
+- [ ] Module navigation scopes the board, list and archive. The summary counts
+      top-level items in that module. New items from the toolbar or a board
+      column inherit the selected module.
+- [ ] Clicking a card title opens the right-side drawer. Its main fields,
+      attachments, reminders and activity remain editable as applicable. Escape
+      closes the drawer and returns focus to the opener. 保存并关闭 persists the
+      draft. A version conflict shows the existing error message.
 - [ ] 待办 status manager (toolbar's `状态管理`) adds, renames, recolours,
       reorders (drag grip or `↑`/`↓` keys) and deletes statuses. Deleting a
       status that still holds rows surfaces a `该状态仍有 n 个事项` notice with a

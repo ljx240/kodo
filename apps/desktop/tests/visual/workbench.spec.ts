@@ -407,7 +407,7 @@ test("only empty columns show a drop zone or the 已完成 celebration", async (
   await expect(page.getByTestId("todo-drop-done")).toHaveCount(0);
 });
 
-test("the stats bar counts the top level and never the sub-items", async ({ page }) => {
+test("the summary counts the top level and never the sub-items", async ({ page }) => {
   await openTodo(page);
 
   // Seven top-level rows: five open, one done, one archived. The nine
@@ -417,7 +417,6 @@ test("the stats bar counts the top level and never the sub-items", async ({ page
   await expect(stats).toContainText("未完成 5");
   await expect(stats).toContainText("已完成 1");
   await expect(stats).toContainText("已归档 1");
-  await expect(stats).toContainText("支持拖拽调整顺序，自定义列状态，提升团队协作效率");
 
   // Creating a row moves the total, and 未完成 with it — one source of truth.
   await page.getByTestId("todo-new").click();
@@ -499,6 +498,48 @@ test("今天 filters on the record's own due date, whatever its status", async (
   await expect(page.getByTestId("todo-filter-week").locator(".todo-chip-count")).toHaveText(
     String(scheduled),
   );
+});
+
+test("module scope follows the board, list, archive and creation", async ({ page }) => {
+  await openTodo(page, { todos: [
+    todo({ id: "scoped", title: "模块内事项", module: "项目甲" }),
+    todo({ id: "scoped-archived", title: "模块内归档", module: "项目甲", archived: true }),
+    todo({ id: "unassigned", title: "无模块事项", module: "" }),
+    todo({ id: "other-archived", title: "其他模块归档", module: "项目乙", archived: true }),
+  ] });
+
+  const modules = page.getByRole("navigation", { name: "模块" });
+  await modules.getByRole("button", { name: "项目甲 1" }).click();
+  await expect(page.locator(".todo-card")).toHaveCount(1);
+  await expect(page.getByTestId("todo-stats")).toContainText("共 2 个事项");
+
+  const title = page.getByRole("button", { name: "模块内事项", exact: true });
+  await title.click();
+  const drawer = page.getByRole("dialog", { name: "事项详情" });
+  await expect(drawer).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(drawer).toHaveCount(0);
+  await expect(title).toBeFocused();
+
+  await page.getByTestId("todo-new").click();
+  await expect(page.getByTestId("todo-edit-module")).toHaveValue("项目甲");
+  await page.getByTestId("todo-edit-title").fill("新建模块事项");
+  await page.getByTestId("todo-edit-save").click();
+  await expect(page.locator(".todo-card")).toHaveCount(2);
+
+  await page.getByTestId("todo-add-todo").click();
+  await page.getByRole("textbox", { name: "在「待处理」中新建" }).fill("列内模块事项");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".todo-card")).toHaveCount(3);
+
+  await page.getByTestId("todo-filter-archived").click();
+  await expect(page.getByTestId("todo-row-scoped-archived")).toBeVisible();
+  await expect(page.getByTestId("todo-row-other-archived")).toHaveCount(0);
+  await page.getByTestId("todo-view-list").click();
+  await expect(page.getByTestId("todo-row-scoped")).toBeVisible();
+  await expect(page.getByTestId("todo-row-unassigned")).toHaveCount(0);
+  await modules.getByRole("button", { name: "未归属 1" }).click();
+  await expect(page.getByTestId("todo-row-unassigned")).toBeVisible();
 });
 
 test("creating needs only a title, and the status decides the column", async ({ page }) => {
@@ -647,14 +688,12 @@ test("editing a card updates the record and its sub-items", async ({ page }) => 
   expect((subtask[0].args.draft as { parentId?: string }).parentId).toBe("todo-5");
 });
 
-test("the two-column editor round-trips every new field on save", async ({ page }) => {
+test("the detail drawer round-trips every editable field on save", async ({ page }) => {
   await openTodo(page);
 
   await page.getByTestId("todo-edit-todo-5").click();
-  // The two columns are visible — main + rail — and the rail carries the
-  // catalog-derived sections.
-  await expect(page.locator(".todo-editor-main")).toBeVisible();
-  await expect(page.locator(".todo-editor-rail")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "事项详情" })).toBeVisible();
+  await expect(page.getByTestId("todo-edit-title")).toBeFocused();
   await expect(page.getByTestId("todo-edit-assignee")).toBeVisible();
   await expect(page.getByTestId("todo-add-attachment")).toBeVisible();
   await expect(page.getByTestId("todo-add-reminder")).toBeVisible();

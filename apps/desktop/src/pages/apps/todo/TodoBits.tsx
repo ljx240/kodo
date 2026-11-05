@@ -266,17 +266,11 @@ export function TagChips({ tagIds, catalogs }: { tagIds: string[]; catalogs: Cat
   );
 }
 
-/** A short, calendar-relative label: "刚刚", "N 分钟前", "N 小时前",
- *  "HH:MM" for the same day, "昨天", "N 天前", or "YYYY/MM/DD". `today` is
- *  the screen's frozen clock. */
+/** Calendar-relative activity time. The demo passes its frozen date. */
 export function relativeTime(epochMs: number, today: string): string {
-  const now = new Date(`${today}T00:00:00`).getTime();
-  const minutes = Math.floor((now - epochMs) / 60_000);
-  if (minutes < 1) return W.updatedJustNow;
-  if (minutes < 60) return W.updatedMinutes(minutes);
   const { days, time } = stampOf(epochMs, today);
-  if (days === 0) return time;
-  if (days === 1) return W.updatedYesterday;
-  if (days < 7) return W.updatedDays(days);
+  if (days === 0) return `${W.updatedToday} ${time}`;
+  if (days === 1) return `${W.updatedYesterday} ${time}`;
+  if (days > 1 && days < 7) return W.updatedDays(days);
   return W.updatedOn(epochMs);
 }

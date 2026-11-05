@@ -102,7 +102,7 @@ test("scheduled task details fit narrow windows and lifecycle actions remain ava
 test("todo controls stay inside narrow cards and summary labels stay on one line", async ({ page }) => {
   await page.goto("/ui-demo/workbench?app=todo");
   await expect(page.locator(".todo-card").first()).toBeVisible();
-  for (const width of [900, 1280, 1586]) {
+  for (const width of [780, 900, 1280, 1586]) {
     await page.setViewportSize({ width, height: 900 });
     const overflow = await page.locator(".todo-card").evaluateAll((cards) =>
       cards.flatMap((card) => {
