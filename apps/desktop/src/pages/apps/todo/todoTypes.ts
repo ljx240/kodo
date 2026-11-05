@@ -150,13 +150,13 @@ export const COLUMN_LABEL: Record<ColumnKey, string> = {
  *  tracks are the ones whose content is a sentence (标题) and a list of chips
  *  (标签), so a wider window gives them the room rather than the date. */
 export const COLUMN_WIDTH: Record<ColumnKey, string> = {
-  status: "112px",
-  priority: "88px",
-  due: "124px",
-  tags: "minmax(110px, 1fr)",
-  assignee: "76px",
-  progress: "96px",
-  updated: "92px",
+  status: "96px",
+  priority: "66px",
+  due: "115px",
+  tags: "minmax(88px, 1fr)",
+  assignee: "62px",
+  progress: "84px",
+  updated: "78px",
 };
 
 /** The list's grid: the checkbox, the title, whichever columns are on, 操作.
@@ -165,7 +165,7 @@ export const COLUMN_WIDTH: Record<ColumnKey, string> = {
  *  the gear; 84px leaves the head breathing room without crowding the
  *  `updated` column. */
 export function listTemplate(columns: ColumnKey[]): string {
-  return ["26px", "minmax(220px, 2fr)", ...columns.map((key) => COLUMN_WIDTH[key]), "84px"].join(
+  return ["26px", "minmax(160px, 2fr)", ...columns.map((key) => COLUMN_WIDTH[key]), "84px"].join(
     " ",
   );
 }
@@ -186,6 +186,12 @@ export function readColumns(raw: string | null): ColumnKey[] {
     return DEFAULT_COLUMNS;
   }
 }
+
+export const SOURCE_LABEL: Record<string, string> = {
+  manual: W.sourceManual,
+  scheduled: W.sourceScheduled,
+  ai: W.sourceAi,
+};
 
 export const PRIORITIES: TodoPriorityDto[] = ["low", "normal", "high"];
 export const PRIORITY_LABEL: Record<TodoPriorityDto, string> = {

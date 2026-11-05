@@ -16,6 +16,7 @@
  * write.
  */
 
+import { Folder, Inbox, Layers } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addTodoComment,
@@ -128,6 +129,7 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
   const [sort, setSort] = useState<Sort>("manual");
   const [group, setGroup] = useState<Group>("none");
   const [query, setQuery] = useState("");
+  const [module, setModule] = useState<string | null>(null);
   const [columns, setColumns] = useState<ColumnKey[]>(
     readColumns(null),
   );
@@ -315,22 +317,33 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
 
   const week = useMemo(() => weekRangeOf(today), [today]);
 
-  /** The ids the search lets through, or `null` while it is empty. Matching a
-   *  row's tags means matching the names the chips show, not their ids. */
+  const modules = new Map<string, number>();
+  let liveCount = 0;
+  for (const row of todos ?? []) {
+    if (row.parentId !== null) continue;
+    const active = row.archived ? 0 : 1;
+    modules.set(row.module, (modules.get(row.module) ?? 0) + active);
+    liveCount += active;
+  }
+  const moduleNames = [...modules.keys()].filter(Boolean).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  if (module && !modules.has(module)) moduleNames.push(module);
+
+  const scopedTodos = useMemo(
+    () => module === null ? todos : todos?.filter((row) => row.module === module) ?? null,
+    [module, todos],
+  );
   const allowed = useMemo<Set<string> | null>(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return null;
+    if (module === null && !needle) return null;
     const hits = new Set<string>();
-    for (const row of todos ?? []) {
-      const tags = row.tagIds
-        .map((id) => tagOf(catalogs.tags, id)?.name ?? "")
-        .join(" ");
+    for (const row of scopedTodos ?? []) {
+      const tags = row.tagIds.map((id) => tagOf(catalogs.tags, id)?.name ?? "").join(" ");
       if (`${row.title} ${row.notes} ${row.module} ${tags}`.toLowerCase().includes(needle)) {
         hits.add(row.id);
       }
     }
     return hits;
-  }, [query, todos, catalogs.tags]);
+  }, [module, query, scopedTodos, catalogs.tags]);
 
   const rows = useMemo(
     () => partitionRows(todos, filter, today, week, allowed),
@@ -340,12 +353,13 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
     () => countsOf(todos, today, week, allowed),
     [todos, today, week, allowed],
   );
-  const stats = useMemo(() => statsOf(todos), [todos]);
+  const stats = useMemo(() => statsOf(scopedTodos), [scopedTodos]);
+  const scopeTitle = module === null ? W.allItems : module || W.unassignedModule;
 
   // --- writes ---------------------------------------------------------------
 
   const create = useCallback(
-    (title: string, status: StatusId, parentId: string | null): Promise<boolean> => {
+    (title: string, status: StatusId, parentId: string | null, module: string): Promise<boolean> => {
       const trimmed = title.trim();
       if (!trimmed) {
         setError(W.titleRequired);
@@ -355,6 +369,7 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
         title: trimmed,
         status,
         parentId,
+        module,
         // One key per attempt: a double submit cannot create two todos.
         requestId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
       })
@@ -527,7 +542,7 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
 
   const openNew = useCallback(() => {
     setEditor({
-      draft: blankTodo(defaultStatus(catalogs.statuses)),
+      draft: { ...blankTodo(defaultStatus(catalogs.statuses)), module: module ?? "" },
       error: null,
       child: "",
       comment: "",
@@ -536,14 +551,25 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
       activity: [],
       reminderDraft: null,
     });
-  }, [catalogs.statuses]);
+  }, [catalogs.statuses, module]);
 
   const pickFilter = useCallback((next: Filter) => {
     setFilter(next);
+    setSelection(new Set());
     // The board has no column an archived row could sit in, so asking for the
     // archived rows takes you to the one view that can show them.
     if (next === "archived") setView("list");
   }, []);
+
+  const pickView = (next: View) => {
+    if (filter === "archived") pickFilter("all");
+    setView(next);
+  };
+
+  const pickModule = (next: string | null) => {
+    setModule(next);
+    setSelection(new Set());
+  };
 
   // --- status manager ----------------------------------------------------
 
@@ -750,7 +776,6 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
       <header className="page-head">
         <div className="page-head-titles">
           <h1>{manifest.name}</h1>
-          <p className="page-subtitle">{manifest.description}</p>
         </div>
         <div className="page-head-actions">
           <label className="todo-search">
@@ -771,84 +796,116 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
         </div>
       </header>
 
-      <div className="app-body">
-        {error && (
-          <p className="page-error" role="alert">
-            {error}
-          </p>
-        )}
+      <div className="todo-workspace">
+        <nav className="todo-sidebar" aria-label={W.moduleNavigation}>
+          <button type="button" className="todo-scope" aria-pressed={module === null}
+            onClick={() => pickModule(null)}>
+            <Layers size={16} aria-hidden="true" />
+            <span className="todo-scope-name">{W.allItems}</span>
+            <span className="todo-scope-count">{liveCount}</span>
+          </button>
+          <button type="button" className="todo-scope" aria-pressed={module === ""}
+            onClick={() => pickModule("")}>
+            <Inbox size={16} aria-hidden="true" />
+            <span className="todo-scope-name">{W.unassignedModule}</span>
+            <span className="todo-scope-count">{modules.get("") ?? 0}</span>
+          </button>
+          {moduleNames.length > 0 && (
+            <div className="todo-module-list">
+              <h2>{W.moduleNavigation}</h2>
+              {moduleNames.map((name) => (
+                <button key={name} type="button" className="todo-scope"
+                  aria-pressed={module === name} title={name} onClick={() => pickModule(name)}>
+                  <Folder size={16} aria-hidden="true" />
+                  <span className="todo-scope-name">{name}</span>
+                  <span className="todo-scope-count">{modules.get(name) ?? 0}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </nav>
 
-        {selection.size > 0 ? (
-          <TodoSelectionBar
-            count={selection.size}
-            catalogs={catalogs}
-            onBulk={bulk}
-            onClear={() => setSelection(new Set())}
-          />
-        ) : (
-          <TodoToolbar
-            view={view}
-            onView={setView}
-            filter={filter}
-            onFilter={pickFilter}
-            counts={counts}
-            sort={sort}
-            onSort={setSort}
-            group={group}
-            onGroup={setGroup}
-            onCreate={openNew}
-            onManageStatuses={() => setStatusModal(true)}
-          />
-        )}
+        <div className="app-body">
+          <div className="todo-workspace-head">
+            <h2>{scopeTitle}</h2>
+            <TodoStatsBar stats={stats} />
+          </div>
+          {error && (
+            <p className="page-error" role="alert">
+              {error}
+            </p>
+          )}
 
-        {view === "board" ? (
-          <TodoBoard
-            rows={rows}
-            catalogs={catalogs}
-            today={today}
-            ghost={ghost}
-            onApply={applyStatus}
-            onEdit={openEditor}
-            onDragStart={startDrag}
-            onCreate={(title, status) => create(title, status, null)}
-          />
-        ) : (
-          <TodoList
-            rows={rows}
-            catalogs={catalogs}
-            today={today}
-            filter={filter}
-            sort={sort}
-            group={group}
-            columns={columns}
-            selection={selection}
-            onSelect={toggleSelect}
-            onSelectAll={selectAll}
-            onColumns={saveColumns}
-            onApply={applyStatus}
-            onEdit={openEditor}
-          />
-        )}
+          {selection.size > 0 ? (
+            <TodoSelectionBar
+              count={selection.size}
+              catalogs={catalogs}
+              onBulk={bulk}
+              onClear={() => setSelection(new Set())}
+            />
+          ) : (
+            <TodoToolbar
+              view={view}
+              onView={pickView}
+              filter={filter}
+              onFilter={pickFilter}
+              counts={counts}
+              sort={sort}
+              onSort={setSort}
+              group={group}
+              onGroup={setGroup}
+              onCreate={openNew}
+              onManageStatuses={() => setStatusModal(true)}
+            />
+          )}
 
-        {/* The 已归档 fold belongs to the table, and the design puts it
-            nowhere on the board — the board's columns are all live rows. */}
-        {view === "list" && filter !== "archived" && rows.archived.length > 0 && (
-          <TodoArchived
-            rows={rows}
-            catalogs={catalogs}
-            today={today}
-            columns={columns}
-            open={archivedOpen}
-            onToggle={() => setArchivedOpen((on) => !on)}
-            selection={selection}
-            onSelect={toggleSelect}
-            onApply={applyStatus}
-            onEdit={openEditor}
-            onUnarchive={(todo) => setArchived(todo, false)}
-          />
-        )}
+          {view === "board" ? (
+            <TodoBoard
+              rows={rows}
+              catalogs={catalogs}
+              today={today}
+              ghost={ghost}
+              onApply={applyStatus}
+              onEdit={openEditor}
+              onDragStart={startDrag}
+              onCreate={(title, status) => create(title, status, null, module ?? "")}
+            />
+          ) : (
+            <TodoList
+              rows={rows}
+              catalogs={catalogs}
+              today={today}
+              filter={filter}
+              sort={sort}
+              group={group}
+              columns={columns}
+              selection={selection}
+              onSelect={toggleSelect}
+              onSelectAll={selectAll}
+              onColumns={saveColumns}
+              onApply={applyStatus}
+              onEdit={openEditor}
+            />
+          )}
 
-        <TodoStatsBar stats={stats} />
+          {/* The 已归档 fold belongs to the table, and the design puts it
+              nowhere on the board — the board's columns are all live rows. */}
+          {view === "list" && filter !== "archived" && rows.archived.length > 0 && (
+            <TodoArchived
+              rows={rows}
+              catalogs={catalogs}
+              today={today}
+              columns={columns}
+              open={archivedOpen}
+              onToggle={() => setArchivedOpen((on) => !on)}
+              selection={selection}
+              onSelect={toggleSelect}
+              onApply={applyStatus}
+              onEdit={openEditor}
+              onUnarchive={(todo) => setArchived(todo, false)}
+            />
+          )}
+        </div>
       </div>
 
       {ghost && (
@@ -860,6 +917,7 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
       {editor && (
         <TodoEditorModal
           editor={editor}
+          today={today}
           todos={todos}
           catalogs={catalogs}
           onPatch={(patch) =>
@@ -882,7 +940,7 @@ export function TodoApp({ manifest, demo, onBack }: TodoAppProps) {
           onSave={() => saveEditor(editor.draft)}
           onArchive={() => setArchived(editor.draft, !editor.draft.archived)}
           onCreateChild={(title) =>
-            create(title, editor.draft.status, editor.draft.id).then((ok) => {
+            create(title, editor.draft.status, editor.draft.id, editor.draft.module).then((ok) => {
               if (ok) setEditor((current) => (current ? { ...current, child: "" } : current));
               return ok;
             })

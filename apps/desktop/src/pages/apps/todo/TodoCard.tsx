@@ -1,19 +1,5 @@
-/**
- * 待办 — one board card.
- *
- * Linear / Things / Trello inspired layout:
- *   • Linear-style identifier chip (`TODO-F47A`) at the head
- *   • Priority accent stripe on the left edge (3px, color-coded)
- *   • Subtask counter pill (`3/5`) when there are children
- *   • Smart date pill: 今天 / 明天 / N 天后 / 已逾期 N 天 (Things-style)
- *   • Status dot in the head reads the column's `--todo-chip` so all four
- *     lanes share one visual language
- *
- * Two controls — status select + complete + edit — stay visible without
- * opening the editor (Linear / Trello convention). The handle is the only
- * pointer-down surface so the rest of the card keeps scrolling.
- */
-
+/** A board card with quick actions and a dedicated drag handle. */
+import { Folder } from "lucide-react";
 import type { TodoDto } from "../../../api";
 import {
   Avatar,
@@ -28,7 +14,7 @@ import {
   type ApplyStatus,
 } from "./TodoBits";
 import { isDone, progressOf, type TodoRows } from "./todoModel";
-import { personOf, type Catalogs } from "./todoTypes";
+import { personOf, SOURCE_LABEL, type Catalogs } from "./todoTypes";
 import { todoIdentifier } from "./todoIdentifier";
 
 export function TodoCard({
@@ -53,21 +39,11 @@ export function TodoCard({
   const progress = progressOf(rows, todo.id);
   const assignee = personOf(catalogs.people, todo.assigneeId);
   const identifier = todoIdentifier(todo.id);
-  // Empty rows (chips / meta) collapse to zero height instead of reserving
-  // their min-height — that's how a bare title card on the board stays
-  // ~50px tall instead of ~110px.
-  const hasChips = todo.tagIds.length > 0 || Boolean(todo.priority);
-  const hasMeta = Boolean(todo.dueDate) || Boolean(assignee);
-  // Linear-style priority accent on the left edge of the card. Width 0
-  // when priority is `none` / absent so the chip-free cards don't carry a
-  // visible stripe (which would feel like a bug, not design).
-  const hasPriorityStripe =
-    todo.priority === "high" || todo.priority === "normal" || todo.priority === "low";
   return (
     <article
       className={`todo-card${dragging ? " todo-card--dragging" : ""}${
         isDone(todo) ? " todo-card--done" : ""
-      }${hasPriorityStripe ? ` todo-card--priority-${todo.priority}` : ""}`}
+      }`}
       data-testid={`todo-card-${todo.id}`}
       data-todo-card={todo.id}
       data-priority={todo.priority}
@@ -75,28 +51,32 @@ export function TodoCard({
       <div className="todo-card-head">
         <TodoDragHandle todo={todo} onDragStart={onDragStart} />
         <span className="todo-card-id">{identifier}</span>
-        <p className="todo-card-title">{todo.title}</p>
+        <span className="todo-card-source">{SOURCE_LABEL[todo.source]}</span>
       </div>
+      <button type="button" className="todo-card-title" onClick={() => onEdit(todo)}>
+        {todo.title}
+      </button>
 
       {todo.notes && <p className="todo-card-notes">{todo.notes}</p>}
 
-      {hasChips && (
-        <div className="todo-card-chips">
-          <PriorityChip priority={todo.priority} />
-          <TagChips tagIds={todo.tagIds} catalogs={catalogs} />
-        </div>
-      )}
+      <div className="todo-card-chips">
+        {todo.module && (
+          <span className="todo-card-module" title={todo.module}>
+            <Folder size={12} aria-hidden="true" />
+            <span>{todo.module}</span>
+          </span>
+        )}
+        <PriorityChip priority={todo.priority} />
+        <TagChips tagIds={todo.tagIds} catalogs={catalogs} />
+      </div>
 
-      {hasMeta && (
+      {(todo.dueDate || assignee) && (
         <div className="todo-card-meta">
           <DueChip todo={todo} today={today} />
           {assignee && <Avatar person={assignee} />}
         </div>
       )}
 
-      {/* The design's foot: subtask progress + controls the design keeps
-          behind ⋯ — exposed here so a card can be re-staged and finished
-          without opening the editor. */}
       <div className="todo-card-foot">
         <TodoProgress done={progress.done} total={progress.total} />
         <div className="todo-card-actions">

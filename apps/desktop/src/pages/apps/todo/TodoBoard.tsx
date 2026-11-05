@@ -151,6 +151,7 @@ export function TodoBoard({
                 <Plus size={14} strokeWidth={1.9} />
               </button>
             </header>
+            {columnBody(column, status.isDone)}
             <button
               type="button"
               className="todo-column-add"
@@ -160,7 +161,6 @@ export function TodoBoard({
               <Plus size={13} strokeWidth={1.9} />
               {W.addRow}
             </button>
-            {columnBody(column, status.isDone)}
           </section>
         );
       })}

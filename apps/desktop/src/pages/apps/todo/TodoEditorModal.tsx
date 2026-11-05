@@ -1,16 +1,4 @@
-/**
- * 待办 — the edit modal.
- *
- * Two columns: a flexible main column for the editable fields and a
- * 320px-wide rail for the catalog-derived sections (assignee, tags, related,
- * attachments, reminders, activity). The modal shell is `settings-modal`
- * (house style), so the body owns its own grid.
- *
- * Sub-resources (attachments / reminders / activity) load on open, not on
- * save — the editor has to be self-sufficient the moment it appears, and
- * the rail never has to ask "did we already fetch?".
- */
-
+/** The right-side detail drawer and its sub-resource editors. */
 import {
   Check,
   FileText,
@@ -21,7 +9,7 @@ import {
   X,
   Bell,
 } from "lucide-react";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   TODO_ITEM_TYPES,
   type TodoActivityDto,
@@ -37,6 +25,7 @@ import {
   Avatar,
   relativeTime,
   TodoCompleteButton,
+  TodoProgress,
   TodoStatusSelect,
   type ApplyStatus,
 } from "./TodoBits";
@@ -44,6 +33,7 @@ import { isDone } from "./todoModel";
 import {
   PRIORITIES,
   PRIORITY_LABEL,
+  SOURCE_LABEL,
   personOf,
   type Catalogs,
   type EditorState,
@@ -60,6 +50,7 @@ const REMINDER_KIND_LABEL: Record<TodoReminderKindDto, string> = {
 
 export function TodoEditorModal({
   editor,
+  today,
   todos,
   catalogs,
   onPatch,
@@ -79,6 +70,7 @@ export function TodoEditorModal({
   onApply,
 }: {
   editor: EditorState;
+  today: string;
   todos: TodoDto[] | null;
   catalogs: Catalogs;
   onPatch: (patch: Partial<TodoDto>) => void;
@@ -103,19 +95,52 @@ export function TodoEditorModal({
 }) {
   const { draft, attachments, reminders, activity } = editor;
   const isNew = draft.id === "";
-  const title = isNew ? W.newItemTitle : W.edit;
+  const title = isNew ? W.newItemTitle : W.details;
+  const dialog = useRef<HTMLDialogElement>(null);
+  const titleInput = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    titleInput.current?.focus({ preventScroll: true });
+    return () => element?.close();
+  }, []);
   const children = (todos ?? []).filter((row) => row.parentId === draft.id);
   const otherTodos = (todos ?? []).filter(
     (row) => row.id !== draft.id && row.parentId === null && !row.archived,
   );
 
   return (
-    <div className="settings-modal" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="settings-modal-backdrop" onClick={onClose} />
-      <div className="settings-modal-panel wb-modal-panel">
+    <dialog
+      ref={dialog}
+      className="todo-drawer"
+      aria-label={title}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="todo-drawer-panel">
         <header className="modal-head">
-          <span className="modal-title">{title}</span>
-          <span className="spacer" />
+          <h2 className="modal-title">{title}</h2>
+          <label className="field">
+            <span className="field-label">{W.status}</span>
+            <select
+              className="select"
+              value={draft.status}
+              aria-label={W.status}
+              data-testid="todo-edit-status"
+              onChange={(event) => onPatch({ status: event.target.value })}
+            >
+              {catalogs.statuses.map((status) => (
+                <option key={status.id} value={status.id}>
+                  {status.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             className="icon-btn icon-btn--sm"
@@ -137,6 +162,7 @@ export function TodoEditorModal({
 
             <label className="todo-editor-section">
               <input
+                ref={titleInput}
                 className="input todo-editor-title-input"
                 value={draft.title}
                 aria-label={W.titleLabel}
@@ -148,22 +174,16 @@ export function TodoEditorModal({
 
             <div className="todo-editor-row">
               <label className="field">
-                <span className="field-label">{W.status}</span>
-                <select
-                  className="select"
-                  value={draft.status}
-                  aria-label={W.status}
-                  data-testid="todo-edit-status"
-                  onChange={(event) => onPatch({ status: event.target.value })}
-                >
-                  {catalogs.statuses.map((status) => (
-                    <option key={status.id} value={status.id}>
-                      {status.name}
-                    </option>
-                  ))}
-                </select>
+                <span className="field-label">{W.module}</span>
+                <input
+                  className="input"
+                  value={draft.module}
+                  aria-label={W.module}
+                  placeholder={W.module}
+                  data-testid="todo-edit-module"
+                  onChange={(event) => onPatch({ module: event.target.value })}
+                />
               </label>
-
               <label className="field">
                 <span className="field-label">{W.priority}</span>
                 <select
@@ -209,18 +229,80 @@ export function TodoEditorModal({
               </label>
             </div>
 
-            <div className="todo-editor-row">
-              <label className="field">
-                <span className="field-label">{W.module}</span>
-                <input
-                  className="input"
-                  value={draft.module}
-                  aria-label={W.module}
-                  placeholder={W.module}
-                  data-testid="todo-edit-module"
-                  onChange={(event) => onPatch({ module: event.target.value })}
-                />
-              </label>
+            {children.length > 0 && (
+              <section className="todo-editor-section">
+                <h3 className="todo-editor-section-title">{W.columns.progress}</h3>
+                <TodoProgress done={children.filter(isDone).length} total={children.length} compact />
+              </section>
+            )}
+
+            {!isNew && (
+              <section className="todo-editor-section">
+                <h3 className="todo-editor-section-title">{W.sourceLabel}</h3>
+                <div className="todo-editor-source">{SOURCE_LABEL[draft.source]}</div>
+              </section>
+            )}
+
+            <section className="todo-editor-section">
+              <h3 className="todo-editor-section-title">{W.description}</h3>
+              <textarea
+                className="input todo-editor-textarea todo-notes"
+                value={draft.notes}
+                aria-label={W.description}
+                placeholder={W.description}
+                data-testid="todo-edit-notes"
+                onChange={(event) => onPatch({ notes: event.target.value })}
+              />
+            </section>
+
+            {!isNew && (
+              <section className="todo-editor-section">
+                <h3 className="todo-editor-section-title">{W.activity(activity.length)}</h3>
+                <ul className="todo-activity" data-testid="todo-activity">
+                  {activity.length === 0 ? (
+                    <li className="todo-chip-empty">{W.noActivity}</li>
+                  ) : (
+                    activity.map((row) => (
+                      <ActivityRow key={row.id} row={row} catalogs={catalogs} today={today} />
+                    ))
+                  )}
+                </ul>
+                <form
+                  className="todo-comment"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void onCommentSend();
+                  }}
+                >
+                  <textarea
+                    className="todo-comment-input"
+                    value={editor.comment}
+                    placeholder={W.commentPlaceholder}
+                    aria-label={W.commentPlaceholder}
+                    data-testid="todo-comment-input"
+                    rows={1}
+                    onChange={(event) => onCommentText(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                        event.preventDefault();
+                        void onCommentSend();
+                      }
+                    }}
+                  />
+                  <button
+                    type="submit"
+                    className="todo-comment-send"
+                    disabled={!editor.comment.trim()}
+                    data-testid="todo-comment-send"
+                    aria-label={W.sendComment}
+                  >
+                    <Send size={14} strokeWidth={1.9} />
+                  </button>
+                </form>
+              </section>
+            )}
+
+            <div className="todo-editor-row todo-editor-row--three">
               <label className="field">
                 <span className="field-label">{W.estimate}</span>
                 <input
@@ -238,9 +320,6 @@ export function TodoEditorModal({
                   }
                 />
               </label>
-            </div>
-
-            <div className="todo-editor-row">
               <label className="field">
                 <span className="field-label">{W.actual}</span>
                 <input
@@ -277,18 +356,6 @@ export function TodoEditorModal({
             </div>
 
             <section className="todo-editor-section">
-              <h3 className="todo-editor-section-title">{W.description}</h3>
-              <textarea
-                className="input todo-editor-textarea todo-notes"
-                value={draft.notes}
-                aria-label={W.description}
-                placeholder={W.description}
-                data-testid="todo-edit-notes"
-                onChange={(event) => onPatch({ notes: event.target.value })}
-              />
-            </section>
-
-            <section className="todo-editor-section">
               <h3 className="todo-editor-section-title">{W.tagsLabel}</h3>
               {catalogs.tags.length === 0 ? (
                 <span className="todo-chip-empty">{W.noTags}</span>
@@ -320,39 +387,41 @@ export function TodoEditorModal({
               )}
             </section>
 
-            <section className="todo-editor-children">
-              <h3 className="todo-editor-section-title">{W.subtasks}</h3>
-              {children.length === 0 ? null : (
-                <ul className="todo-list" data-testid="todo-edit-children">
-                  {children.map((child) => (
-                    <li key={child.id} className="todo-list-item" data-testid={`todo-child-${child.id}`}>
-                      <TodoStatusSelect todo={child} catalogs={catalogs} onApply={onApply} />
-                      <span className={`todo-list-title${isDone(child) ? " todo-list-title--done" : ""}`}>
-                        {child.title}
-                      </span>
-                      <span className="spacer" />
-                      <TodoCompleteButton todo={child} catalogs={catalogs} onApply={onApply} />
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <form
-                className="todo-inline"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void onCreateChild(editor.child);
-                }}
-              >
-                <input
-                  className="input"
-                  value={editor.child}
-                  placeholder={W.addSubtask}
-                  aria-label={W.addSubtask}
-                  data-testid="todo-add-subtask"
-                  onChange={(event) => onChildText(event.target.value)}
-                />
-              </form>
-            </section>
+            {!isNew && (
+              <section className="todo-editor-children">
+                <h3 className="todo-editor-section-title">{W.subtasks}</h3>
+                {children.length === 0 ? null : (
+                  <ul className="todo-list" data-testid="todo-edit-children">
+                    {children.map((child) => (
+                      <li key={child.id} className="todo-list-item" data-testid={`todo-child-${child.id}`}>
+                        <TodoStatusSelect todo={child} catalogs={catalogs} onApply={onApply} />
+                        <span className={`todo-list-title${isDone(child) ? " todo-list-title--done" : ""}`}>
+                          {child.title}
+                        </span>
+                        <span className="spacer" />
+                        <TodoCompleteButton todo={child} catalogs={catalogs} onApply={onApply} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <form
+                  className="todo-inline"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void onCreateChild(editor.child);
+                  }}
+                >
+                  <input
+                    className="input"
+                    value={editor.child}
+                    placeholder={W.addSubtask}
+                    aria-label={W.addSubtask}
+                    data-testid="todo-add-subtask"
+                    onChange={(event) => onChildText(event.target.value)}
+                  />
+                </form>
+              </section>
+            )}
           </div>
 
           <aside className="todo-editor-rail">
@@ -489,50 +558,6 @@ export function TodoEditorModal({
               <ReminderComposer onSubmit={async (value) => onReminderAdd(value)} />
             </section>
 
-            <section className="todo-editor-section">
-              <h3 className="todo-editor-section-title">{W.activity(activity.length)}</h3>
-              <ul className="todo-activity" data-testid="todo-activity">
-                {activity.length === 0 ? (
-                  <li className="todo-chip-empty">{W.noActivity}</li>
-                ) : (
-                  activity.map((row) => (
-                    <ActivityRow key={row.id} row={row} catalogs={catalogs} />
-                  ))
-                )}
-              </ul>
-              <form
-                className="todo-comment"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void onCommentSend();
-                }}
-              >
-                <textarea
-                  className="todo-comment-input"
-                  value={editor.comment}
-                  placeholder={W.commentPlaceholder}
-                  aria-label={W.commentPlaceholder}
-                  data-testid="todo-comment-input"
-                  rows={1}
-                  onChange={(event) => onCommentText(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void onCommentSend();
-                    }
-                  }}
-                />
-                <button
-                  type="submit"
-                  className="todo-comment-send"
-                  disabled={!editor.comment.trim()}
-                  data-testid="todo-comment-send"
-                  aria-label={W.sendComment}
-                >
-                  <Send size={14} strokeWidth={1.9} />
-                </button>
-              </form>
-            </section>
           </aside>
         </div>
 
@@ -560,16 +585,18 @@ export function TodoEditorModal({
           </button>
         </footer>
       </div>
-    </div>
+    </dialog>
   );
 }
 
 function ActivityRow({
   row,
   catalogs,
+  today,
 }: {
   row: TodoActivityDto;
   catalogs: Catalogs;
+  today: string;
 }) {
   const author = personOf(catalogs.people, row.authorId);
   return (
@@ -578,8 +605,7 @@ function ActivityRow({
       <div className="todo-activity-body">
         <div className="todo-activity-meta">
           <span>{author?.name ?? "系统"}</span>
-          <span>·</span>
-          <span>{relativeTime(row.createdAt, "2026-09-30")}</span>
+          <span>{relativeTime(row.createdAt, today)}</span>
         </div>
         <div className="todo-activity-text">{row.body}</div>
       </div>

@@ -182,41 +182,30 @@ Settings stays pinned at bottom, below the scrollable tree, as a single
 
 ## 2b. 工作台 apps — 待办 sub-layout
 
-An app opens *inside* 工作台 (`/workbench?app=todo`) and never takes a sidebar
-row (`LAYOUT.md` §2). The 待办 page is the only app with its own visual
-language (`DESIGN.md` §2a); its geometry is:
+The app opens inside 工作台 (`/workbench?app=todo`).
 
 ```text
 待办 page (main.page-app.todo-app)
-├─ page head     title 待办 + subtitle · actions: search field, 返回工作台
-├─ toolbar       row 1  filter chips (with counts) + 筛选/排序/分组 + 看板|列表 + 新建事项
-│                row 2  ⚙ 状态管理
-├─ board | list  the active view fills the remaining height and scrolls itself
-├─ stats bar     sticky to the bottom of the page body (共 n 个事项 …)
-└─ editor        modal (settings-modal house style), two columns inside
+├─ header       待办, search, 返回工作台
+├─ module rail  全部事项, 未归属, modules with live counts
+├─ work area    scope title and summary, 看板 / 列表 / 已归档, controls and items
+└─ detail       modal drawer aligned with the right edge
 ```
 
-- **Board** — one column per status in the catalog (`todo_statuses`), in
-  `sort_order`; a column is a fixed `--todo-column-width` wide and the board
-  scrolls horizontally when the statuses exceed the viewport. Each column head
-  carries the status dot + name + count and a `+`; an empty column shows the
-  dashed drop area, a status with no items at all shows the illustration empty
-  state.
-- **List** — a table whose header row carries the sortable columns; rows group
-  by status (default), priority or none; the 已归档 group renders last behind a
-  collapsible head. Selecting rows replaces the toolbar's right cluster with
-  the batch bar.
-- **Stats bar** — always pinned to the bottom of the app body; the board and
-  the list scroll above it and never under it.
-- **Editor** — the shared `settings-modal` shell, its panel widened
-  (`.wb-modal-panel`) and split into two columns: main fields left (title,
-  status/priority/due, tags, assignee, description, subtasks, related),
-  metadata right (custom fields, attachments, reminders, activity). The footer
-  is 归档 · 取消 · 保存.
+- **Scope** uses the existing 所属模块 field. Search and filters narrow the
+  selected scope. Both creation entry points prefill the selected module.
+- **Board** uses the status catalog and preserves drag ordering. The columns
+  scroll horizontally when they exceed the work area's width.
+- **List** supports sorting, grouping and batch actions. The archive tab
+  opens the archived rows in the selected scope. The ordinary list also
+  offers a collapsible 已归档 section.
+- **Detail** scrolls in a single column. The header contains the status
+  control. The body starts with the title, module, priority, deadline, source
+  and notes. The footer contains 归档, 取消 and 保存并关闭. Escape or a click on
+  the backdrop closes the drawer.
 
-Responsive: below 820px the board collapses to a single stacked column and the
-list drops its non-essential columns; the stats bar stays sticky. The toolbar
-wraps rather than scrolling horizontally.
+Below 1050px, the module rail becomes a horizontally scrollable row. Below
+820px, the board stacks vertically.
 
 ---
 

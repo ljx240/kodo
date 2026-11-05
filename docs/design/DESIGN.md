@@ -97,20 +97,19 @@ retain the workstation's compact metadata and panel widths.
 
 ## 2a. Scoped exception: 待办 (approved 2026-10-14)
 
-The 待办 app inside 工作台 follows its own design reference and is the **only**
-surface exempt from §2 type scale, §3 density and §4 shape language. It uses a
-28px page title, 10–12px card radii, pill-shaped status/priority/tag chips,
-letter avatars, progress bars and a sticky bottom stats bar. Its header carries
-a search field; its toolbar is two rows (filter chips with counts, then view /
-sort / group / new).
+The 待办 app inside 工作台 follows its own reference. A module rail sits beside
+a board or list with a scoped summary. Cards use subtle borders, metadata chips
+and sub-item progress. Editing opens a single-column drawer aligned to the
+right edge. Scoped semantic aliases map to Radix Sage and Jade, with separate
+light and dark values and Radix hues for catalog colours.
 
 The exception is **contained**, not a new house style:
 
 - every rule lives in `apps/desktop/src/styles/todo.css` and every selector in
   that file begins with `.todo-app`;
 - `.todo-app` renders only on the 待办 `<main>`, so no other page can match;
-- the app's tokens (`--todo-*`) are declared on `.todo-app`, never on `:root`,
-  the shared shell tokens remain independent of this exception;
+- the app declares its geometry tokens and theme aliases on `.todo-app`. The
+  shared shell keeps its own token values;
 - §10 copy policy still holds — every string comes from `i18n.ts`.
 
 Nothing outside 待办 adopts this language. A second surface wanting pills or a
