@@ -57,13 +57,20 @@ GUI shows up in the CLI and vice versa.
 
 ## GUI
 
-- **Settings → Memory** shows the storage path, row counts, outbox
-  pending, DB size, and a "Run doctor" / "Reindex" button pair.
+- **Settings → Memory → 启用项目记忆** enables automatic recall and
+  capture for subsequent project turns in both the desktop and CLI.
+  The shared setting is `memory-enabled=true`; its default is off.
+  The panel shows the storage path, memory count, pending events and
+  database size, with actions for diagnostics and reindexing.
+- Completed project turns with a passed verification record contribute
+  an excerpt of up to 240 characters from the final answer. Entries
+  carry a session source reference and the recorded change paths. Matching
+  excerpts are included in the current model request for later turns
+  in the same project, branch and worktree.
 - **Inspector → Memory** lists entries for the active project,
-  supports search-by-keyword and search-by-snippet, and per-row
-  "Disable". The list reflects `include_history = true` so disabled
-  entries are still visible (with a `rejected` chip) so the user can
-  re-enable them later if needed.
+  supports keyword, symbol and path search, and offers a per-row
+  "Disable" action. The list includes history, where disabled entries
+  appear with a `rejected` status.
 - **Topbar** has a `Memory` chip in the conversation route; clicking
   it opens the Inspector's Memory tab.
 
@@ -77,7 +84,7 @@ GUI shows up in the CLI and vice versa.
 | `integrity` | raw list — multiple entries = corruption |
 | `tombstones` | number of rows in `memory_tombstones` |
 | `db_size_bytes` | file size on disk |
-| `outbox_pending` | rows in `memory_outbox` with `compiled_at IS NULL` |
+| `outbox_pending` | pending or failed rows eligible for another attempt |
 | `outbox_replayed` | number of rows the doctor actually replayed (only with `--apply`) |
 | `row_counts` | per-table count snapshot |
 

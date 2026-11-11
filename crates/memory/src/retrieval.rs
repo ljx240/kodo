@@ -2,7 +2,7 @@
 //! with RRF (k=60), enforces scope + validity + diversity, and assembles a
 //! `MemoryPack` that fits the budget.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::MemoryResult;
 use crate::fts::{self, FtsHit};
@@ -11,7 +11,7 @@ use crate::model::{
     MemoryEntry, MemoryPack, MemoryQuery, MemoryScope, MemorySnippet, ValidityLabel,
 };
 use crate::scope;
-use crate::store::Store;
+use crate::store::{scope_params, Store, PROJECT_SCOPE_SQL, RECALL_STATUS_SQL, SESSION_SCOPE_SQL};
 use crate::validity;
 
 const RRF_K: f64 = 60.0;
@@ -45,7 +45,7 @@ impl Rrf {
 
     fn into_sorted(self) -> Vec<(String, f64)> {
         let mut v: Vec<_> = self.scores.into_iter().collect();
-        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         v
     }
 }
@@ -80,14 +80,15 @@ pub fn recall(store: &Store, query: &MemoryQuery) -> MemoryResult<RecallReport> 
     }
 
     // 1. FTS channel.
-    let fts_hits = fts::search(store, &query.text, HARD_FETCH).unwrap_or_default();
+    let fts_hits =
+        fts::search_in_scope(store, &query.text, HARD_FETCH, &query.scope).unwrap_or_default();
     // 2. Exact-token channel: scan memory_entries for body/title/abstract
     //    matches. This is what catches CJK / paths / error codes that
     //    FTS5's tokenizer stumbles on.
     let exact_hits = exact_token_search(store, query)?;
     // 3. Path/symbol channel: any entry whose evidence mentions one of
     //    the query's paths boosts it.
-    let path_hits = path_evidence_search(store, &query.related_paths)?;
+    let path_hits = path_evidence_search(store, &query.related_paths, &query.scope)?;
 
     let mut rrf = Rrf::default();
     rrf.add_fts(&fts_hits);
@@ -108,12 +109,9 @@ pub fn recall(store: &Store, query: &MemoryQuery) -> MemoryResult<RecallReport> 
         let Some(entry) = store.get_entry(id)? else {
             continue;
         };
-        if !entry.visible_to_recall() {
-            omitted += 1;
-            continue;
-        }
-        if !entry.scope.matches(&query.scope) {
-            omitted += 1;
+        // Each channel filters in SQL. An entry can still be disabled or
+        // removed while another connection is ranking the candidates.
+        if !entry.visible_to_recall() || !entry.scope.matches(&query.scope) {
             continue;
         }
         scope_filter_hits += 1;
@@ -133,11 +131,11 @@ pub fn recall(store: &Store, query: &MemoryQuery) -> MemoryResult<RecallReport> 
             live_file_digest: None,
             stored_file_digest: stored_digest,
         });
-        after_validity += 1;
         if label == ValidityLabel::Stale {
             omitted += 1;
             continue;
         }
+        after_validity += 1;
         // Diversity by id (already-accepted) and by title Jaccard once
         // the first three slots are filled. The first three are kept
         // unconditionally so the highest-ranked hits always surface;
@@ -164,10 +162,11 @@ pub fn recall(store: &Store, query: &MemoryQuery) -> MemoryResult<RecallReport> 
     }
 
     let elapsed = start.elapsed().as_millis() as u64;
+    let retrieved_ids = snippets.iter().take(64).map(|s| s.id.clone()).collect();
     let pack = MemoryPack {
         snippets,
         estimated_tokens: tokens_used,
-        retrieved_ids: sorted.iter().take(64).map(|(id, _)| id.clone()).collect(),
+        retrieved_ids,
         omitted_count: omitted,
         diagnostic: crate::model::MemoryDiagnostic {
             scope_filter_hits,
@@ -229,73 +228,54 @@ fn estimate_tokens(s: &MemorySnippet) -> usize {
 }
 
 fn exact_token_search(store: &Store, query: &MemoryQuery) -> MemoryResult<Vec<String>> {
-    let mut out = Vec::new();
     if query.text.trim().is_empty() && query.related_symbols.is_empty() {
-        return Ok(out);
+        return Ok(Vec::new());
     }
-    let candidates: Vec<String> = query
+    let mut candidates: HashSet<String> = query
         .related_symbols
         .iter()
         .cloned()
         .chain(query.text.split_whitespace().map(|s| s.to_owned()))
         .filter(|s| s.chars().count() >= 2)
         .collect();
+    // FTS unicode61 treats an unspaced Chinese sentence as one term.
+    let chars: Vec<char> = query.text.chars().collect();
+    candidates.extend(
+        chars
+            .windows(3)
+            .filter(|term| term.iter().all(|ch| ('\u{4e00}'..='\u{9fff}').contains(ch)))
+            .map(|term| term.iter().collect::<String>()),
+    );
     if candidates.is_empty() {
-        return Ok(out);
+        return Ok(Vec::new());
     }
-    let filter = crate::model::MemoryFilter {
-        limit: Some(HARD_FETCH),
-        include_history: false,
-        ..Default::default()
-    };
-    let entries = store.list(&filter)?;
-    for e in &entries {
-        for c in &candidates {
-            if entry_contains(e, c) {
-                if !out.contains(&e.id) {
-                    out.push(e.id.clone());
-                }
-                break;
-            }
-        }
-    }
-    Ok(out)
+    store.exact_matches(&query.scope, &candidates, HARD_FETCH)
 }
 
-fn entry_contains(e: &MemoryEntry, needle: &str) -> bool {
-    if e.title.contains(needle) || e.abstract_text.contains(needle) {
-        return true;
-    }
-    // The body is a JSON value (often an Object, never a plain string
-    // except for very simple entries). `as_str()` returns `None` for
-    // any non-string value, so we serialize back to a string for the
-    // substring check. `to_string()` is cheap on Object values and
-    // hits the same stringification that lands on disk.
-    let body_str = e.body.to_string();
-    if body_str.contains(needle) {
-        return true;
-    }
-    for u in &e.source_uris {
-        if u.contains(needle) {
-            return true;
-        }
-    }
-    false
-}
-
-fn path_evidence_search(store: &Store, paths: &[String]) -> MemoryResult<Vec<String>> {
+fn path_evidence_search(
+    store: &Store,
+    paths: &[String],
+    scope: &MemoryScope,
+) -> MemoryResult<Vec<String>> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
     store.with_conn(|c| {
-        let mut stmt = c.prepare(
-            "SELECT DISTINCT memory_id FROM memory_evidence WHERE path = ?1 \
-             ORDER BY memory_id",
-        )?;
+        let mut stmt = c.prepare(&format!(
+            "SELECT DISTINCT e.id FROM memory_evidence AS evidence
+             JOIN memory_entries e ON e.id = evidence.memory_id
+             WHERE evidence.path = ? AND {PROJECT_SCOPE_SQL} AND {SESSION_SCOPE_SQL}
+               AND {RECALL_STATUS_SQL}
+             ORDER BY e.id"
+        ))?;
+        let [project, repository, branch, worktree, session] = scope_params(scope);
         let mut out = Vec::new();
         for p in paths {
             let rows = stmt
-                .query_map(rusqlite::params![p], |r| r.get::<_, String>(0))?
+                .query_map(
+                    rusqlite::params![p, project, repository, branch, worktree, session],
+                    |r| r.get::<_, String>(0),
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             for r in rows {
                 if !out.contains(&r) {

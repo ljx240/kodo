@@ -15,11 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 use kodo_agent::{self as agent, SinkEvent, StepKind};
-use kodo_memory::SqliteMemory;
 use kodo_shell::{approval_fingerprint, step_kind_label, Logged, TurnLogger, TurnOutcome};
 
 use crate::view::{ItemView, RunEvent};
-use kodo_memory::MemoryHandle;
 
 pub use kodo_agent::Permission;
 pub use kodo_shell::ApprovalChoice;
@@ -382,6 +380,7 @@ pub fn approval_gate(
 pub struct StartArgs {
     pub dir: PathBuf,
     pub id: String,
+    pub turn_seq: u32,
     /// `None` = no project selected (Work-mode pure conversation).
     pub project: Option<PathBuf>,
     pub message: String,
@@ -653,22 +652,19 @@ pub fn start(
         let record_id = args.id.clone();
         let record_token = token.clone();
         let record_app = app.clone();
-        // Memory handle for the outbox writer. Opened independently of
-        // the `RunRequest` so the sink can forward started/completed
-        // items without having to thread the request through the
-        // closure capture. Same on-disk file as the agent loop will
-        // see — fail-open if HOME is unset.
         // Evidence and knowledge-derived answers must not enter the ordinary
         // memory outbox and later bypass per-turn approval as recalled memory.
-        let memory_handle = if args.knowledge_context.is_some() {
+        let memory_project = if args.knowledge_context.is_some() {
             None
         } else {
-            open_memory_handle()
+            args.project.as_deref()
         };
         // Envelope writes live in kodo-shell; this sink records first, then
         // emits, so the log stays the source of truth for the GUI.
-        let mut logger =
-            TurnLogger::new(args.dir.clone(), args.id.clone()).with_capture(args.local_trace);
+        let mut logger = TurnLogger::new(args.dir.clone(), args.id.clone())
+            .with_capture(args.local_trace)
+            .with_memory(memory_project, args.turn_seq);
+        let memory = logger.memory_handle();
         let logger_ref = &mut logger;
         // Track whether the agent loop emitted a terminal `AgentMessage`
         // with `delivery == "ready"`. If it didn't, the run loop exited
@@ -754,12 +750,6 @@ pub fn start(
                 }
                 SinkEvent::Started { .. } => {
                     if let Logged::Started(item) = logged {
-                        if let (Some(handle), Some(event)) = (
-                            memory_handle.as_ref(),
-                            kodo_shell::event_for_item(&item, kodo_core::session::Phase::Started),
-                        ) {
-                            kodo_shell::write_event(handle, &event);
-                        }
                         emit_run(
                             &record_app,
                             &record_token,
@@ -772,16 +762,6 @@ pub fn start(
                 }
                 SinkEvent::Finished { .. } => {
                     if let Logged::Finished(item) = logged {
-                        let phase = match item.status {
-                            kodo_core::session::Status::Failed => kodo_core::session::Phase::Failed,
-                            _ => kodo_core::session::Phase::Completed,
-                        };
-                        if let (Some(handle), Some(event)) = (
-                            memory_handle.as_ref(),
-                            kodo_shell::event_for_item(&item, phase),
-                        ) {
-                            kodo_shell::write_event(handle, &event);
-                        }
                         emit_run(
                             &record_app,
                             &record_token,
@@ -917,11 +897,7 @@ pub fn start(
             agent_instructions: args.agent_instructions.clone(),
             personas: args.personas.clone(),
             budget_family: args.budget_family.clone(),
-            memory: if args.knowledge_context.is_some() {
-                None
-            } else {
-                open_memory_handle()
-            },
+            memory,
             decision: args.decision.clone(),
         };
 
@@ -1044,28 +1020,6 @@ fn synthesize_fallback_answer(original_message: &str) -> String {
     format!(
         "{head} 这一轮我执行了若干读操作，但模型在生成最终答复前就被截断了 —— 常见原因是上下文窗口耗尽、复合命令被权限策略拒绝后没有 fallback 路径，或可读取文件过多挤掉了正文。\n\n可尝试：\n1. 在「查看响应轨迹」里看执行记录和已读取文件清单；\n2. 在 Settings → 模型中调大「最大输出 tokens」后重试；\n3. 如果是 review / 调研类任务，先把任务拆成更小的子任务再发。",
     )
-}
-
-/// Open the on-disk memory store at `<state_dir>/memory/v1/memory.sqlite`
-/// and wrap it in a `MemoryHandle`. Returns `None` if the state directory
-/// is unavailable (HOME unset, sandbox restrictions) — fail-open: the
-/// agent loop continues with the memory channel disabled.
-fn open_memory_handle() -> Option<MemoryHandle> {
-    let state_dir = kodo_core::settings::state_dir()?;
-    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match SqliteMemory::open(&path) {
-        Ok(mem) => Some(mem.into()),
-        Err(e) => {
-            eprintln!(
-                "kodo memory: failed to open store at {}: {e}",
-                path.display()
-            );
-            None
-        }
-    }
 }
 
 #[cfg(test)]

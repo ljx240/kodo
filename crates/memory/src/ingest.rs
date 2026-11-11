@@ -12,21 +12,53 @@ pub fn observe(
     event: &SafeMemoryEvent,
     privacy: crate::model::MemoryPrivacy,
 ) -> MemoryResult<bool> {
-    // Sanitize the body, if any, before persistence.
+    enqueue(store, &prepare(event, privacy)?)
+}
+
+pub(crate) fn prepare(
+    event: &SafeMemoryEvent,
+    privacy: crate::model::MemoryPrivacy,
+) -> MemoryResult<SafeMemoryEvent> {
     let mut sanitized = event.clone();
+    sanitized.label = sanitizer::scrub(&event.label, privacy)?;
     if let Some(body) = &event.body {
         sanitized.body = Some(sanitizer::scrub(body, privacy)?);
     }
-    // Refuse prompt-injection-shaped events outright: route to the
-    // outbox as usual but mark it for quarantine at compile time.
-    if let Some(body) = &sanitized.body {
-        if sanitizer::looks_hostile(body) {
-            sanitized
-                .extra
-                .insert("quarantine_hint".to_owned(), "hostile".to_owned());
+    if let Some(path) = &event.project_path {
+        sanitized.project_path = Some(sanitizer::scrub(path, privacy)?);
+    }
+    for value in sanitized.extra.values_mut() {
+        *value = sanitizer::scrub(value, privacy)?;
+    }
+    if let Some(uris) = sanitized.extra.get("source_uris") {
+        for uri in uris.split(',').map(str::trim) {
+            crate::evidence::validate_source_uri(uri)?;
         }
     }
-    let inserted = store.outbox_enqueue(&sanitized)?;
+    if sanitizer::looks_hostile(&sanitized.label)
+        || sanitized
+            .body
+            .as_deref()
+            .is_some_and(sanitizer::looks_hostile)
+    {
+        sanitized
+            .extra
+            .insert("quarantine_hint".into(), "hostile".into());
+    }
+    if sanitized
+        .extra
+        .get("verified_turn")
+        .is_some_and(|value| value == "true")
+    {
+        if let Some(body) = &mut sanitized.body {
+            *body = body.chars().take(240).collect();
+        }
+    }
+    Ok(sanitized)
+}
+
+pub(crate) fn enqueue(store: &Store, event: &SafeMemoryEvent) -> MemoryResult<bool> {
+    let inserted = store.outbox_enqueue(event)?;
     if inserted {
         store
             .metrics

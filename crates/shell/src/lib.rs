@@ -22,7 +22,7 @@ pub use decision::{
     save_decision_settings, DecisionConfig, DecisionConsent, DecisionConsentAnswer,
     DecisionPreview, DecisionService, DecisionSettingsView,
 };
-pub use memory_outbox::{event_for_item, open_default_handle, write_event};
+pub use memory_outbox::{memory_enabled, MEMORY_ENABLED_SETTING};
 pub use scheduler::{
     recover_inflight, AdmissionLimits, DispatchedRun, DispatcherConfig, Job, JobCancellation,
     JobContext, JobOutcome, JobRegistry, JobReport, ResourceGuard, ResourceHandle, Scheduler,

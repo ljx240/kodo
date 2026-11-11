@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior};
 use serde_json::Value as Json;
 
 use crate::error::MemoryResult;
@@ -21,6 +21,21 @@ use crate::model::{
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_tombstones.sql");
+
+pub(crate) const PROJECT_SCOPE_SQL: &str =
+    "e.project_id IS ? AND e.repository_id IS ? AND e.branch IS ? AND e.worktree_id IS ?";
+pub(crate) const SESSION_SCOPE_SQL: &str = "(e.session_id IS NULL OR e.session_id IS ?)";
+pub(crate) const RECALL_STATUS_SQL: &str = "e.status IN ('candidate', 'active')";
+
+pub(crate) fn scope_params(scope: &MemoryScope) -> [&dyn ToSql; 5] {
+    [
+        &scope.project_id,
+        &scope.repository_id,
+        &scope.branch,
+        &scope.worktree_id,
+        &scope.session_id,
+    ]
+}
 
 /// Clock used everywhere in the engine. Wrapped so tests can override it
 /// without `chrono`.
@@ -142,8 +157,40 @@ impl Store {
     /// already exists, `version` is incremented and `updated_at` bumped.
     /// The FTS index is kept in sync inside the same transaction.
     pub fn upsert_entry(&self, entry: &MemoryEntry) -> MemoryResult<()> {
+        self.write_entry(entry, None, &[]).map(|_| ())
+    }
+
+    pub(crate) fn insert_compiled_entry(
+        &self,
+        entry: &MemoryEntry,
+        legacy_id: &str,
+        paths: &[String],
+    ) -> MemoryResult<bool> {
+        self.write_entry(entry, Some(legacy_id), paths)
+    }
+
+    fn write_entry(
+        &self,
+        entry: &MemoryEntry,
+        legacy_id: Option<&str>,
+        paths: &[String],
+    ) -> MemoryResult<bool> {
         self.with_conn(|c| {
-            let tx = c.transaction()?;
+            let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tombstoned = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_tombstones WHERE memory_id IN (?1, ?2))",
+                params![entry.id, legacy_id],
+                |r| r.get::<_, bool>(0),
+            )?;
+            if tombstoned {
+                return if legacy_id.is_some() {
+                    Ok(false)
+                } else {
+                    Err(crate::MemoryError::InvalidEvent(
+                        "memory ID is tombstoned".into(),
+                    ))
+                };
+            }
             let existing_version: Option<i64> = tx
                 .query_row(
                     "SELECT version FROM memory_entries WHERE id = ?1",
@@ -151,6 +198,21 @@ impl Store {
                     |r| r.get(0),
                 )
                 .optional()?;
+            if let Some(legacy_id) = legacy_id {
+                if existing_version.is_some() {
+                    return Ok(false);
+                }
+                let legacy = tx
+                    .query_row(
+                        "SELECT * FROM memory_entries WHERE id = ?1",
+                        params![legacy_id],
+                        row_to_entry,
+                    )
+                    .optional()?;
+                if legacy.is_some_and(|old| old.scope == entry.scope) {
+                    return Ok(false);
+                }
+            }
             let new_version = existing_version.map(|v| v + 1).unwrap_or(1);
             let body_json = serde_json::to_string(&entry.body)?;
             let conditions_json = serde_json::to_string(&entry.conditions)?;
@@ -255,8 +317,20 @@ impl Store {
                 "INSERT INTO memory_entries_fts(rowid, title, abstract_text) VALUES (?1, ?2, ?3)",
                 params![rowid, entry.title, entry.abstract_text],
             )?;
+            for path in paths {
+                tx.execute(
+                    "INSERT INTO memory_evidence(memory_id, path, digest, uri, captured_at)
+                     VALUES (?1, ?2, '', ?3, ?4)",
+                    params![
+                        entry.id,
+                        path,
+                        entry.source_uris.first(),
+                        entry.created_at as i64
+                    ],
+                )?;
+            }
             tx.commit()?;
-            Ok(())
+            Ok(true)
         })
     }
 
@@ -275,56 +349,86 @@ impl Store {
 
     pub fn list(&self, filter: &MemoryFilter) -> MemoryResult<Vec<MemoryEntry>> {
         self.with_conn(|c| {
-            let mut sql = String::from("SELECT * FROM memory_entries WHERE 1=1");
-            let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            if let Some(kind) = filter.kind {
+            let mut sql = String::from("SELECT e.* FROM memory_entries e WHERE 1=1");
+            let mut args: Vec<&dyn ToSql> = Vec::new();
+            let kind = filter.kind.map(MemoryKind::as_str);
+            let status = filter.status.map(MemoryStatus::as_str);
+            if kind.is_some() {
                 sql.push_str(" AND kind = ?");
-                args.push(Box::new(kind.as_str().to_owned()));
+                args.push(&kind);
             }
-            if let Some(status) = filter.status {
+            if status.is_some() {
                 sql.push_str(" AND status = ?");
-                args.push(Box::new(status.as_str().to_owned()));
+                args.push(&status);
             }
             if let Some(p) = &filter.project_id {
                 sql.push_str(" AND project_id = ?");
-                args.push(Box::new(p.clone()));
+                args.push(p);
             }
             if let Some(r) = &filter.repository_id {
                 sql.push_str(" AND repository_id = ?");
-                args.push(Box::new(r.clone()));
+                args.push(r);
+            }
+            if let Some(scope) = &filter.scope {
+                sql.push_str(&format!(" AND {PROJECT_SCOPE_SQL} AND {SESSION_SCOPE_SQL}"));
+                args.extend(scope_params(scope));
             }
             if !filter.include_history {
                 sql.push_str(" AND status NOT IN ('superseded', 'rejected', 'quarantined')");
             }
-            sql.push_str(" ORDER BY updated_at DESC");
+            sql.push_str(" ORDER BY updated_at DESC, id");
             if let Some(limit) = filter.limit {
                 sql.push_str(&format!(" LIMIT {}", limit.min(1024)));
             }
-            let params_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
             let mut stmt = c.prepare(&sql)?;
             let rows = stmt
-                .query_map(params_refs.as_slice(), row_to_entry)?
+                .query_map(args.as_slice(), row_to_entry)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
     }
 
-    /// Lookup by content hash (used for de-duplication at compile time).
-    pub fn by_content_hash(&self, hash: &str) -> MemoryResult<Option<MemoryEntry>> {
+    pub(crate) fn exact_matches(
+        &self,
+        scope: &MemoryScope,
+        terms: &std::collections::HashSet<String>,
+        limit: usize,
+    ) -> MemoryResult<Vec<String>> {
+        let terms = serde_json::to_string(terms)?;
+        let [project, repository, branch, worktree, session] = scope_params(scope);
         self.with_conn(|c| {
-            c.query_row(
-                "SELECT * FROM memory_entries WHERE content_hash = ?1",
-                params![hash],
-                row_to_entry,
-            )
-            .optional()
-            .map_err(Into::into)
+            let mut stmt = c.prepare(&format!(
+                "SELECT e.id FROM memory_entries e
+                 WHERE {PROJECT_SCOPE_SQL} AND {SESSION_SCOPE_SQL} AND {RECALL_STATUS_SQL}
+                   AND EXISTS (
+                       SELECT 1 FROM json_each(?) AS term
+                       WHERE instr(e.title, term.value) > 0
+                          OR instr(e.abstract_text, term.value) > 0
+                          OR instr(e.body_json, term.value) > 0
+                          OR instr(e.source_uris_json, term.value) > 0
+                   )
+                 ORDER BY e.updated_at DESC, e.id LIMIT ?"
+            ))?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        project,
+                        repository,
+                        branch,
+                        worktree,
+                        session,
+                        terms,
+                        limit as i64
+                    ],
+                    |r| r.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
     }
 
-    /// Mark every entry that references any of the given paths (in their
-    /// evidence rows) as `stale`. Returns the number of entries touched.
-    pub fn mark_changed_paths(&self, paths: &[String]) -> MemoryResult<usize> {
+    /// Invalidate active evidence for these paths in the affected worktree.
+    pub fn mark_changed_paths(&self, scope: &MemoryScope, paths: &[String]) -> MemoryResult<usize> {
         if paths.is_empty() {
             return Ok(0);
         }
@@ -344,14 +448,17 @@ impl Store {
                     stmt.execute(params![p])?;
                 }
             }
+            let [project, repository, branch, worktree, _] = scope_params(scope);
             let n = tx.execute(
-                "UPDATE memory_entries
-                 SET status = 'stale', updated_at = ?1
-                 WHERE id IN (
+                &format!(
+                    "UPDATE memory_entries AS e
+                 SET status = 'stale', updated_at = ?
+                 WHERE {PROJECT_SCOPE_SQL} AND {RECALL_STATUS_SQL} AND id IN (
                      SELECT DISTINCT memory_id FROM memory_evidence
                      WHERE path IN (SELECT path FROM tmp_paths)
-                 )",
-                params![now],
+                 )"
+                ),
+                params![now, project, repository, branch, worktree],
             )?;
             tx.commit()?;
             Ok(n)
@@ -367,7 +474,7 @@ impl Store {
             let row: Option<String> = c
                 .query_row(
                     "SELECT digest FROM memory_evidence
-                     WHERE memory_id = ?1
+                     WHERE memory_id = ?1 AND digest <> ''
                      ORDER BY captured_at DESC, id DESC
                      LIMIT 1",
                     params![id],
@@ -387,6 +494,9 @@ impl Store {
         digest: &str,
         uri: Option<&str>,
     ) -> MemoryResult<()> {
+        if let Some(uri) = uri {
+            crate::evidence::validate_source_uri(uri)?;
+        }
         self.with_conn(|c| {
             c.execute(
                 "INSERT INTO memory_evidence(memory_id, path, digest, uri, captured_at) \
@@ -563,7 +673,8 @@ impl Store {
     pub fn outbox_mark_compiled(&self, event_id: &str) -> MemoryResult<()> {
         self.with_conn(|c| {
             c.execute(
-                "UPDATE memory_outbox SET status = 'compiled', processed_at = ?1 WHERE event_id = ?2",
+                "UPDATE memory_outbox SET status = 'compiled', processed_at = ?1
+                 WHERE event_id = ?2 AND status IN ('pending', 'failed')",
                 params![now_secs() as i64, event_id],
             )?;
             Ok(())
@@ -578,7 +689,7 @@ impl Store {
                      attempts = attempts + 1,
                      last_error = ?1,
                      last_attempted = ?2
-                 WHERE event_id = ?3",
+                 WHERE event_id = ?3 AND status IN ('pending', 'failed')",
                 params![err, now_secs() as i64, event_id],
             )?;
             Ok(())
@@ -588,7 +699,7 @@ impl Store {
     pub fn outbox_count_pending(&self) -> MemoryResult<u64> {
         self.with_conn(|c| {
             let n: i64 = c.query_row(
-                "SELECT COUNT(*) FROM memory_outbox WHERE status IN ('pending', 'failed')",
+                "SELECT COUNT(*) FROM memory_outbox WHERE status IN ('pending', 'failed') AND attempts < 5",
                 [],
                 |r| r.get(0),
             )?;
@@ -854,7 +965,7 @@ mod tests {
             .insert_evidence("ep-1", "src/main.rs", "digest1", None)
             .unwrap();
         let n = store
-            .mark_changed_paths(&["src/main.rs".to_owned()])
+            .mark_changed_paths(&entry.scope, &["src/main.rs".to_owned()])
             .unwrap();
         assert_eq!(n, 1);
         let got = store.get_entry("ep-1").unwrap().unwrap();

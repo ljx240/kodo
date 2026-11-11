@@ -1504,6 +1504,39 @@ test("each Settings category swaps the detail pane", async ({ page }) => {
   }
 });
 
+test("Memory starts off and persists the project memory setting", async ({ page }) => {
+  await stubShell(page);
+  await page.goto("/settings");
+  const categories = page.locator(".settings-nav-item");
+  await categories.getByText("Memory", { exact: true }).click();
+  const memory = page.getByRole("switch", { name: "启用项目记忆" });
+  await expect(memory).not.toBeChecked();
+  await expect(page.getByText("2 条记忆", { exact: true })).toBeVisible();
+  await memory.click();
+  await expect(memory).toBeChecked();
+  await categories.getByText("通用", { exact: true }).click();
+  await categories.getByText("Memory", { exact: true }).click();
+  await expect(memory).toBeChecked();
+  await memory.click();
+  await expect(memory).not.toBeChecked();
+  const log = await page.evaluate(() =>
+    (window as unknown as { __settingsLog: Array<{ key: string; value: string }> })
+      .__settingsLog.filter((entry) => entry.key === "memory-enabled"),
+  );
+  expect(log.map((entry) => entry.value)).toEqual(["true", "false"]);
+});
+
+test("Memory can be switched off when the database is unavailable", async ({ page }) => {
+  await stubShell(page, { settings: { "memory-enabled": "true" }, failMemoryStatus: true });
+  await page.goto("/settings");
+  await page.locator(".settings-nav-item").getByText("Memory", { exact: true }).click();
+  const memory = page.getByRole("switch", { name: "启用项目记忆" });
+  await expect(memory).toBeChecked();
+  await expect(page.getByRole("status")).toHaveText("fixture memory store unavailable");
+  await memory.click();
+  await expect(memory).not.toBeChecked();
+});
+
 test("an approval request is shown and can be allowed or denied", async ({ page }) => {
   await stubShell(page, {
     workspace: { projects: [project("/tmp/ws/alpha", "alpha")], sessions: [sessionRef("s1", "/tmp/ws/alpha", "修复路由")] },

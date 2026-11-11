@@ -1246,4 +1246,57 @@ cd apps/desktop && npm ci && npm run typecheck
 
 ---
 
-**文档结束。** KME 第一阶段优先保证：真实代码状态与记忆不会相互矛盾、跨会话能用、隐私与项目隔离可靠、CLI/GUI 共用、出现故障可以降级。后续再通过 Benchmark 决定是否增加向量、关系图扩散与学习策略。
+## 23. 项目记忆运行链路与隔离修复
+
+本次基线为本地 `main` 的 `27a7f473b2aa28b155fc62eb1b43e74a3568a848`。
+
+| 编号 | 可验收行为 | 实现与验证 |
+| --- | --- | --- |
+| FR-231 | 列表、召回和文件变更限定在项目、仓库、分支及 worktree。项目记忆可跨会话召回，会话专属记忆要求相同会话。候选数量上限作用于匹配且在作用域内的结果。 | 在 SQLite 应用作用域约束和匹配条件。覆盖跨项目、跨 worktree、跨会话、中文查询及超过 200 条无关记录的情况。 |
+| FR-232 | 显式启用项目记忆后，桌面与 CLI 在成功落盘的已验证回合中保存短摘要。下一轮可召回，持久化来源使用会话、轮次及步骤。停用、无项目、知识库回合及未通过验证的回合跳过自动记录。 | 共用 `TurnLogger`、原有 outbox 和本地 SQLite。覆盖两个会话、不同轮次的相同步骤序号、停止、知识库隔离和重开数据库。 |
+| FR-233 | 标题、摘要和证据路径在写入前按现有隐私策略处理，中文按字符截取。同文内容在不同作用域独立保存，重放保持停用和删除状态。 | 事务内写入记忆和路径证据。用合成密钥、中文文本、同文不同作用域和同源删除后重放测试。 |
+
+实施顺序为数据库作用域与写入约束、共享回合接入、桌面开关及验收。沿用 SQLite 结构和既有索引，旧会话和旧记忆继续按各自的作用域读取。内置管理命令仍可查询状态和运行诊断。
+
+### 23.1 本地验收
+
+- FR-231：通过 SQLite 集成测试。大量外部项目命中和同项目无关条目同时存在时，旧的精确命中仍可召回。文件失效测试检查同路径的其他项目、worktree 和已停用记录。
+- FR-232：共享回合测试在临时数据库写入两个会话的三条已验证摘要，重开后从第三个会话召回，再通过文件变更使其失效。停止、未验证和关闭的回合没有新增事件。Playwright 验证设置持久化和数据库故障时仍可关闭。
+- FR-233：测试覆盖超过 32 KiB 的中文原文、摘要上限、标题脱敏、来源 URI、同文跨作用域以及停用和删除后重放。决策记录由共享回合入口排除。
+
+```text
+cargo test --locked --offline -p kodo-memory
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test listing_applies_project_worktree_and_session_scope_before_limit ... ok
+test retrieval_smoke_project_a ... ok
+test tombstone_blocks_replay_revival ... ok
+test worktree_isolation_denies_recall_from_other_worktree ... ok
+
+cargo test --locked --offline -p kodo-shell --lib turn::tests
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.15s
+
+cargo test --locked --offline -p kodo-shell --lib verified_project_turns_save_bounded_memory_for_the_next_session
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out; finished in 0.12s
+
+cargo test --locked --offline -p kodo-shell --lib a_decision_record_never_reaches_the_memory_outbox
+test decision::tests::a_decision_record_never_reaches_the_memory_outbox ... ok
+
+cargo test --locked --offline -p kodo-agent --lib knowledge_observation_stays_in_user_message_and_none_is_legacy_stable
+test tests::knowledge_observation_stays_in_user_message_and_none_is_legacy_stable ... ok
+
+cargo check --locked --offline -p kodo-cli -p kodo-desktop
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.81s
+
+npm run build
+✓ 4147 modules transformed.
+✓ built in 1.24s
+(!) Some chunks are larger than 500 kB after minification.
+
+npm run test:visual -- --project=behaviour behaviour.spec.ts inspector-fixes.spec.ts --grep 'Memory starts off|Settings category|memory panel' --workers=2
+3 passed (5.3s)
+
+npm run test:visual -- --project=behaviour behaviour.spec.ts --grep 'Memory starts off|Memory can be switched off' --workers=2
+2 passed (4.5s)
+```
+
+Memory crate 共通过 50 项测试，另有 2 个文档示例标记为忽略。前端使用本机 Node.js 22.15.1。Rust 格式和差异空白检查通过。真实模型、原生安装包和远程 CI 待验证。当前文件失效依据 Kodo 记录的变更，外部编辑后的文件摘要比对仍待接入。

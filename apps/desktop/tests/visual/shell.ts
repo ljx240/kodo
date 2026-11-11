@@ -201,6 +201,7 @@ export type Core = {
   providers?: unknown[];
   /** `setting` values by key. */
   settings?: Record<string, string>;
+  failMemoryStatus?: boolean;
   /** Project-relative files for Add context (`list_project_files`). */
   files?: string[];
   /** Paths returned by the OS file dialog (`pick_files`) for 添加照片和文件. */
@@ -689,6 +690,16 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
           }
           case "setting":
             return settings[args?.key as string] ?? null;
+          case "memory_status":
+            if (config.failMemoryStatus) throw "fixture memory store unavailable";
+            return {
+              path: "/tmp/fixture-memory.sqlite",
+              rowCounts: { memory_entries: 2, memory_evidence: 5 },
+              outboxPending: 0,
+              tombstones: 0,
+              dbSizeBytes: 1024,
+              mode: settings["memory-enabled"] === "true" ? "read_write" : "off",
+            };
           case "set_setting":
             if (args?.key) {
               settings[args.key as string] = String(args.value ?? "");

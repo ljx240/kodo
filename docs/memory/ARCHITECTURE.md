@@ -22,11 +22,10 @@
 +------------------------------------------------------+
 ```
 
-The shell layer (Tauri `run.rs`, CLI `turn.rs`) is responsible for opening
-the handle once at startup and threading it into every `RunRequest`. The
-agent loop does not open DBs, does not run schema migrations, and does not
-know the on-disk path — it only calls `MemoryAccess` methods through the
-`MemoryHandle` it was given.
+The desktop and CLI share `TurnLogger`. For enabled project turns it
+opens one local store, passes its `MemoryHandle` to the agent and
+submits the verified result after writing the completion envelope.
+The agent accesses storage through `MemoryAccess`.
 
 ## Trait surface
 
@@ -78,11 +77,11 @@ top of `run()` and falls back to an empty `MemoryPack` on
                 query.text + related_paths
                           │
                           ▼
-        scope filter (project/repository/branch)
+   project, repository, branch, worktree, session
                           │
         ┌─────────────────┼─────────────────┐
         ▼                 ▼                 ▼
-   FTS5 (BM25)    exact (LIKE on body)   recent
+   FTS5 (BM25)    exact substring    evidence paths
         │                 │                 │
         └──────── RRF(k=60) ────────────────┘
                           │
@@ -94,9 +93,9 @@ top of `run()` and falls back to an empty `MemoryPack` on
               (NEVER the system block — invariant §9.5)
 ```
 
-P0 ships FTS + exact + recent with RRF fusion and a 2000-token default
-budget. The embedding channel is a no-op stub in P0; the trait exists so
-P1+ can plug a local provider without touching the call site.
+Recall combines the scoped channels with RRF and a 2,000-token default
+budget. Exact matching includes overlapping three-character terms for
+Chinese queries. Candidate caps apply after scope and match filtering.
 
 ## Failure posture
 

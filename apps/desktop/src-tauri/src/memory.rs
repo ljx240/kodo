@@ -4,7 +4,7 @@
 //! All errors propagate as `String` so the React side can render them
 //! verbatim (the existing convention in this crate).
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use kodo_core::settings;
 use kodo_memory::{doctor, model as m, retrieval, scope, SqliteMemory};
@@ -16,11 +16,7 @@ use crate::view::MemoryEntryView;
 fn open_sqlite() -> Result<SqliteMemory, String> {
     let state_dir = settings::state_dir()
         .ok_or_else(|| "HOME is not set, so there is nowhere to keep memory".to_owned())?;
-    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    SqliteMemory::open(&path).map_err(|e| e.to_string())
+    SqliteMemory::open_at(&state_dir).map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -51,7 +47,13 @@ pub fn memory_status() -> Result<MemoryStatusDto, String> {
         outbox_pending,
         tombstones,
         db_size_bytes,
-        mode: "off".to_owned(),
+        mode: if kodo_shell::memory_enabled() {
+            m::MemoryMode::ReadWrite
+        } else {
+            m::MemoryMode::Off
+        }
+        .as_str()
+        .to_owned(),
     })
 }
 
@@ -67,13 +69,11 @@ pub struct MemoryListArgs {
 
 #[tauri::command]
 pub fn memory_list(args: MemoryListArgs) -> Result<Vec<MemoryEntryView>, String> {
+    let Some(project) = args.project.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let project_scope = project_scope(project)?;
     let sqlite = open_sqlite()?;
-    let project = args
-        .project
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let project_scope = scope::scope_for(&project, None, None);
     let mut filter = m::MemoryFilter {
         scope: Some(project_scope),
         limit: args.limit,
@@ -113,15 +113,13 @@ pub struct MemorySnippetDto {
 
 #[tauri::command]
 pub fn memory_search(args: MemorySearchArgs) -> Result<Vec<MemorySnippetDto>, String> {
+    let Some(project) = args.project.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let scope = project_scope(project)?;
     let sqlite = open_sqlite()?;
-    let project = args
-        .project
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let project_scope = scope::scope_for(&project, None, None);
     let query = m::MemoryQuery {
-        scope: project_scope,
+        scope,
         text: args.query,
         related_paths: Vec::new(),
         related_symbols: Vec::new(),
@@ -146,6 +144,14 @@ pub fn memory_search(args: MemorySearchArgs) -> Result<Vec<MemorySnippetDto>, St
             scope_label: s.scope_label,
         })
         .collect())
+}
+
+fn project_scope(project: &str) -> Result<m::MemoryScope, String> {
+    let scope = scope::scope_for(Path::new(project), None, None);
+    if scope.project_id.is_none() {
+        return Err("项目目录不可用".to_owned());
+    }
+    Ok(scope)
 }
 
 #[tauri::command]

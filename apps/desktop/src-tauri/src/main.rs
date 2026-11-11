@@ -253,6 +253,9 @@ fn set_setting(key: String, value: String) -> Result<(), String> {
     if key == "context-window-tokens" {
         kodo_shell::config::parse_context_window(&value).map_err(str::to_owned)?;
     }
+    if key == kodo_shell::MEMORY_ENABLED_SETTING && !matches!(value.as_str(), "true" | "false") {
+        return Err("memory-enabled must be true or false".to_owned());
+    }
     settings::append(&path, &key, &value).map_err(|error| error.to_string())
 }
 
@@ -1619,6 +1622,7 @@ fn send_message(
         Ok(StartArgs {
             dir,
             id: id.clone(),
+            turn_seq: turn_seq as u32,
             project: effective_project,
             message: text,
             conversation_history,

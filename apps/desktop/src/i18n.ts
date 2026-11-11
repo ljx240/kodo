@@ -1373,8 +1373,10 @@ export const T = {
    *  Memory tab, the conversation header chip, and the doctor reports. */
   memory: {
     section: "Memory",
+    enableProjectMemory: "启用项目记忆",
     description:
-      "Kodo 会把跨会话有用的发现写入本地 Memory Engine；召回时自动注入本轮。",
+      "保存已验证任务的摘要。相关记忆会随新请求发送给当前模型，下轮生效。",
+    saveFailed: "保存记忆设置失败，请重试。",
     enabled: "启用",
     mode: "模式",
     modeOff: "关闭",
@@ -1386,7 +1388,7 @@ export const T = {
     reindex: "重建索引",
     doctorReport: "诊断报告",
     doctorApply: "应用修复",
-    doctorDone: "诊断完成",
+    doctorDone: (ok: boolean) => ok ? "完整性检查通过" : "完整性检查发现问题",
     entries: (n: number) => `${n} 条记忆`,
     used: (n: number) => `已用 ${n} 条记忆`,
     empty: "（暂无）",
@@ -1405,7 +1407,7 @@ export const T = {
     noTitle: "（无标题）",
     confirmDisable: "确认停用此记忆？",
     recalled: (n: number) => `召回 ${n} 条`,
-    outbox: (n: number) => `待处理 outbox ${n}`,
+    outbox: (n: number) => `待处理事件 ${n} 条`,
     tombstones: (n: number) => `墓碑 ${n}`,
     size: (bytes: number) => {
       if (bytes < 1024) return `${bytes} B`;

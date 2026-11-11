@@ -41,3 +41,21 @@ fn high_privacy_refuses_secret_body() {
     let r = ingest::observe(&store, &evt, MemoryPrivacy::High);
     assert!(r.is_err());
 }
+
+#[test]
+fn the_outbox_applies_privacy_to_labels_and_rejects_external_uris() {
+    let (_dir, store) = fresh_store("redact-label");
+    let mut event = event_with_body("ordinary evidence");
+    event.label = "token=sk-1234567890ABCDEFGH".into();
+    assert!(ingest::observe(&store, &event, MemoryPrivacy::High).is_err());
+    event.extra.insert(
+        "source_uris".into(),
+        "https://example.invalid/fixture".into(),
+    );
+    assert!(ingest::observe(&store, &event, MemoryPrivacy::Low).is_err());
+    assert_eq!(store.outbox_count_pending().unwrap(), 0);
+    event.extra.clear();
+    ingest::observe(&store, &event, MemoryPrivacy::Low).unwrap();
+    let pending = store.outbox_pending(10).unwrap();
+    assert!(!pending[0].label.contains("1234567890ABCDEFGH"));
+}

@@ -19,7 +19,7 @@ const HOSTILE_PATTERNS: &[&str] = &[
     "system:",
     "<|system|>",
     "<system>",
-    "[INST]",
+    "[inst]",
     "### instruction",
     "run `rm -rf",
     "execute rm -rf",
@@ -28,6 +28,8 @@ const HOSTILE_PATTERNS: &[&str] = &[
     "send your api key",
     "send your api_key",
     "send your secret",
+    "忽略之前的指令",
+    "忽略系统提示",
 ];
 
 /// Redact obvious secret material. Delegates to the engine-wide helper
