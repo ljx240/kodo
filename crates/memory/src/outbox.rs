@@ -1,54 +1,57 @@
-//! Outbox replay. Invoked by `kodo memory doctor` and the Tauri
-//! `memory_reindex` command. Not in the agent hot path.
+//! Immediate compilation and replay of the durable memory outbox.
 
-use crate::compiler;
-use crate::error::{MemoryError, MemoryResult};
 use crate::model::{MemoryPrivacy, SafeMemoryEvent};
-use crate::store::Store;
+use crate::{compiler, ingest, MemoryResult, Store};
+use std::sync::atomic::Ordering;
+
+pub(crate) fn observe_and_compile(
+    store: &Store,
+    event: &SafeMemoryEvent,
+    privacy: MemoryPrivacy,
+) -> MemoryResult<()> {
+    let prepared = ingest::prepare(event, privacy)?;
+    if ingest::enqueue(store, &prepared)? {
+        let result = compiler::compile(store, &prepared);
+        record_compile_result(store, &prepared.event_id, result)?;
+    }
+    Ok(())
+}
 
 pub fn replay(store: &Store, privacy: MemoryPrivacy, limit: usize) -> MemoryResult<usize> {
-    let mut compiled = 0usize;
-    let pending = store.outbox_pending(limit)?;
-    for event in pending {
-        match compile_one(store, &event, privacy) {
-            Ok(true) => {
-                store.outbox_mark_compiled(&event.event_id)?;
-                store
-                    .metrics
-                    .outbox_compiled
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                compiled += 1;
-            }
-            Ok(false) => {
-                // The compiler intentionally decided not to write an
-                // entry (e.g. a duplicate). Mark compiled to drop from
-                // the queue.
-                store.outbox_mark_compiled(&event.event_id)?;
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                store.outbox_mark_failed(&event.event_id, &msg)?;
-                store
-                    .metrics
-                    .outbox_failed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if !is_recoverable(&e) {
-                    return Err(e);
-                }
-            }
-        }
+    let mut compiled = 0;
+    for event in store.outbox_pending(limit)? {
+        // Existing outbox rows predate label and path sanitization.
+        let result = ingest::prepare(&event, privacy)
+            .and_then(|prepared| compiler::compile(store, &prepared));
+        compiled += usize::from(record_compile_result(store, &event.event_id, result)?);
     }
     Ok(compiled)
 }
 
-fn is_recoverable(err: &MemoryError) -> bool {
-    crate::error::is_recoverable(err)
-}
-
-fn compile_one(
+fn record_compile_result(
     store: &Store,
-    event: &SafeMemoryEvent,
-    privacy: MemoryPrivacy,
+    event_id: &str,
+    result: MemoryResult<bool>,
 ) -> MemoryResult<bool> {
-    compiler::compile(store, event, privacy)
+    match result {
+        Ok(written) => {
+            store.outbox_mark_compiled(event_id)?;
+            if written {
+                store
+                    .metrics
+                    .outbox_compiled
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(written)
+        }
+        Err(error) => {
+            store.outbox_mark_failed(event_id, &error.to_string())?;
+            store.metrics.outbox_failed.fetch_add(1, Ordering::Relaxed);
+            if crate::error::is_recoverable(&error) {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
 }

@@ -156,6 +156,13 @@ impl SqliteMemory {
     pub fn path(&self) -> &Path {
         &self.store.path
     }
+
+    /// Save the event durably and compile it before the next turn can recall it.
+    pub fn remember(&self, event: &SafeMemoryEvent) {
+        if let Err(error) = outbox::observe_and_compile(&self.store, event, self.privacy) {
+            self.fail_open(&format!("remember: {error}"));
+        }
+    }
 }
 
 impl MemoryAccess for SqliteMemory {
@@ -187,12 +194,8 @@ impl MemoryAccess for SqliteMemory {
         }
     }
 
-    fn mark_changed_paths(
-        &self,
-        _scope: &MemoryScope,
-        paths: &[String],
-    ) -> Result<(), MemoryError> {
-        let n = match self.store.mark_changed_paths(paths) {
+    fn mark_changed_paths(&self, scope: &MemoryScope, paths: &[String]) -> Result<(), MemoryError> {
+        let n = match self.store.mark_changed_paths(scope, paths) {
             Ok(n) => n,
             Err(e) => {
                 self.fail_open(&format!("mark_changed_paths: {e}"));

@@ -5,8 +5,9 @@
 //! A failed step is written twice: payload first (so exit code and output
 //! survive reload), then a status-only `Failed` stamp.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::memory_outbox::TurnMemory;
 use kodo_agent::{tools, FileDelta, SinkEvent, Step};
 use kodo_core::session::{self, Change, Item, ItemKind, Phase, Status};
 
@@ -73,6 +74,7 @@ pub struct TurnLogger {
     capture_turn: Option<u32>,
     capture_seq: u32,
     pending_trace: Option<(&'static str, serde_json::Value)>,
+    memory: Option<TurnMemory>,
     /// Explicit trace-root override. When `None`, capture writes fall back to
     /// `kodo_core::traces::traces_root()` so the shell and the GUI agree on
     /// where the bodies land. Tests that need hermetic paths use
@@ -91,8 +93,18 @@ impl TurnLogger {
             capture_turn: None,
             capture_seq: 0,
             pending_trace: None,
+            memory: None,
             trace_root_override: None,
         }
+    }
+
+    pub fn with_memory(mut self, project: Option<&Path>, turn_seq: u32) -> Self {
+        self.memory = project.and_then(|root| TurnMemory::open(root, turn_seq));
+        self
+    }
+
+    pub fn memory_handle(&self) -> Option<kodo_memory::MemoryHandle> {
+        self.memory.as_ref().map(TurnMemory::handle)
     }
 
     /// Pin the trace root for one turn logger. Capture writes then land under
@@ -275,7 +287,12 @@ impl TurnLogger {
                 };
                 self.attach_capture(&mut item.kind);
                 match session::record_item(&self.dir, &self.session_id, &item, Phase::Completed) {
-                    Ok(()) => Logged::Finished(item),
+                    Ok(()) => {
+                        if let Some(memory) = &mut self.memory {
+                            memory.record(&item);
+                        }
+                        Logged::Finished(item)
+                    }
                     Err(_) => Logged::WriteFailed,
                 }
             }
@@ -289,6 +306,11 @@ impl TurnLogger {
         let result = match outcome {
             TurnOutcome::Complete => {
                 session::record_turn_complete(&self.dir, &self.session_id, session::now())
+                    .map_err(|error| error.to_string())?;
+                if let Some(memory) = &self.memory {
+                    memory.finish(&self.session_id);
+                }
+                return Ok(());
             }
             TurnOutcome::Stopped => {
                 session::record_stopped(&self.dir, &self.session_id, session::now())
@@ -505,6 +527,124 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verified_project_turns_save_bounded_memory_for_the_next_session() {
+        use kodo_memory::{MemoryAccess, MemoryFilter, MemoryQuery, SqliteMemory};
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("sessions");
+        let project = temp.path().join("fixture-project");
+        std::fs::create_dir(&project).unwrap();
+        let db_path = temp.path().join("memory.sqlite");
+        let first = session::open(&dir, &project, "first", 1, session::Mode::Code).unwrap();
+        let second = session::open(&dir, &project, "second", 1, session::Mode::Code).unwrap();
+        let long_answer = format!("路由表已验证。{}", "路".repeat(11_000));
+        for (id, turn_seq, text, verification, outcome, enabled) in [
+            (
+                &first,
+                1,
+                long_answer.as_str(),
+                "passed",
+                TurnOutcome::Complete,
+                true,
+            ),
+            (
+                &first,
+                2,
+                "路由表缓存已验证。",
+                "passed",
+                TurnOutcome::Complete,
+                true,
+            ),
+            (
+                &second,
+                1,
+                "路由表默认分支已验证。",
+                "passed",
+                TurnOutcome::Complete,
+                true,
+            ),
+            (&second, 2, "stopped", "passed", TurnOutcome::Stopped, true),
+            (
+                &second,
+                3,
+                "unverified",
+                "not_run",
+                TurnOutcome::Complete,
+                true,
+            ),
+            (
+                &second,
+                4,
+                "disabled",
+                "passed",
+                TurnOutcome::Complete,
+                false,
+            ),
+        ] {
+            session::record_ask(&dir, id, 2, "fixture task").unwrap();
+            let mut logger = TurnLogger::new(dir.clone(), id.clone());
+            if enabled {
+                logger.memory = Some(TurnMemory::new(
+                    SqliteMemory::open(&db_path).unwrap(),
+                    &project,
+                    turn_seq,
+                ));
+            }
+            for step in [
+                Step::FileChange {
+                    changes: vec![FileDelta {
+                        path: "src/router.rs".into(),
+                        added: 1,
+                        removed: 0,
+                    }],
+                    file_span_ref: None,
+                },
+                Step::AgentMessage {
+                    text: text.into(),
+                    checks: Vec::new(),
+                    delivery: "ready".into(),
+                    verification: verification.into(),
+                    plain: false,
+                    failure_reason: String::new(),
+                },
+            ] {
+                assert!(matches!(
+                    logger.record(&SinkEvent::Finished {
+                        step,
+                        duration_ms: 0,
+                        denied: false
+                    }),
+                    Logged::Finished(_)
+                ));
+            }
+            logger.finish(outcome).unwrap();
+        }
+
+        let memory = SqliteMemory::open(&db_path).unwrap();
+        let scope = kodo_memory::scope::scope_for(&project, Some("followup"), None);
+        let entries = memory
+            .list(&MemoryFilter {
+                scope: Some(scope.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(entries
+            .iter()
+            .all(|entry| entry.verified && entry.abstract_text.chars().count() <= 240));
+        assert_eq!(memory.store().row_counts().unwrap()["memory_outbox"], 3);
+        assert_eq!(memory.store().outbox_count_pending().unwrap(), 0);
+        let mut query = MemoryQuery::inert(scope.clone());
+        query.text = "请检查路由表".into();
+        query.budget_tokens = 2000;
+        assert_eq!(memory.recall(&query).unwrap().snippets.len(), 3);
+        memory
+            .mark_changed_paths(&scope, &["src/router.rs".into()])
+            .unwrap();
+        assert!(memory.recall(&query).unwrap().snippets.is_empty());
+    }
 
     #[test]
     fn subagent_snapshots_reload_without_consuming_parent_step_identity() {

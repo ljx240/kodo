@@ -38,5 +38,7 @@ fn mark_compiled_drops_from_pending() {
     let e = event("e2");
     store.outbox_enqueue(&e).unwrap();
     store.outbox_mark_compiled("e2").unwrap();
+    // A concurrent worker can report an error after the successful write.
+    store.outbox_mark_failed("e2", "late failure").unwrap();
     assert_eq!(store.outbox_count_pending().unwrap(), 0);
 }

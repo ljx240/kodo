@@ -1400,7 +1400,7 @@ export function memoryStatus(): Promise<MemoryStatusDto> {
   if (!isDesktop()) {
     return Promise.resolve({
       path: "<browser-demo>",
-      rowCounts: { active: 4, candidate: 1 },
+      rowCounts: { memory_entries: 5 },
       outboxPending: 0,
       tombstones: 0,
       dbSizeBytes: 0,

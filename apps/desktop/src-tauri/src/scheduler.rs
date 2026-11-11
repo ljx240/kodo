@@ -650,6 +650,7 @@ fn execute_agent_run(
     let start_args = StartArgs {
         dir: prepared.dir,
         id: session_id.clone(),
+        turn_seq: 1,
         project: Some(project_path.clone()),
         message,
         conversation_history: Vec::new(),

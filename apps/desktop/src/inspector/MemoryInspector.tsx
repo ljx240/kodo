@@ -1,5 +1,5 @@
 import { Brain, Search, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   memoryDisable,
   memoryList,
@@ -24,6 +24,7 @@ export function MemoryOverview({
     if (!project) return;
     setLoading(true);
     setError(null);
+    setQuery("");
     try {
       const list = await memoryList({ project, includeHistory: true, limit: 200 });
       setEntries(list);
@@ -39,19 +40,9 @@ export function MemoryOverview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project]);
 
-  const filtered = useMemo(() => {
-    if (!query.trim()) return entries;
-    const needle = query.trim().toLowerCase();
-    return entries.filter((entry) =>
-      entry.title.toLowerCase().includes(needle) ||
-      entry.abstractText.toLowerCase().includes(needle) ||
-      entry.kind.toLowerCase().includes(needle) ||
-      (entry.scopeProjectId ?? "").toLowerCase().includes(needle),
-    );
-  }, [entries, query]);
-
   const runSearch = async () => {
-    if (!project || !query.trim()) return;
+    if (!project || loading) return;
+    if (!query.trim()) return refresh();
     setLoading(true);
     setError(null);
     try {
@@ -132,11 +123,11 @@ export function MemoryOverview({
         </button>
       </div>
       {error && <p className="setting-hint" role="alert">{error}</p>}
-      {filtered.length === 0 ? (
+      {entries.length === 0 ? (
         <p className="ins-empty-text">{query ? T.memory.noResults : T.memory.empty}</p>
       ) : (
         <ul className="memory-list">
-          {filtered.map((entry) => (
+          {entries.map((entry) => (
             <li key={entry.id} className="memory-row" data-kind={entry.kind} data-status={entry.status}>
               <div className="memory-row-head">
                 <span className="memory-row-id" title={entry.id}>{shorten(entry.id, 12)}</span>

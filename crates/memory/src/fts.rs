@@ -2,10 +2,11 @@
 //! fuses these with the exact-token channel via RRF; this module never
 //! picks winners on its own.
 
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::ToSql;
 
 use crate::error::MemoryResult;
-use crate::store::Store;
+use crate::model::MemoryScope;
+use crate::store::{scope_params, Store, PROJECT_SCOPE_SQL, RECALL_STATUS_SQL, SESSION_SCOPE_SQL};
 
 #[derive(Debug, Clone)]
 pub struct FtsHit {
@@ -50,6 +51,24 @@ fn fts_escape(query: &str) -> String {
 }
 
 pub fn search(store: &Store, query: &str, limit: usize) -> MemoryResult<Vec<FtsHit>> {
+    search_with_scope(store, query, limit, None)
+}
+
+pub(crate) fn search_in_scope(
+    store: &Store,
+    query: &str,
+    limit: usize,
+    scope: &MemoryScope,
+) -> MemoryResult<Vec<FtsHit>> {
+    search_with_scope(store, query, limit, Some(scope))
+}
+
+fn search_with_scope(
+    store: &Store,
+    query: &str,
+    limit: usize,
+    scope: Option<&MemoryScope>,
+) -> MemoryResult<Vec<FtsHit>> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -57,34 +76,34 @@ pub fn search(store: &Store, query: &str, limit: usize) -> MemoryResult<Vec<FtsH
     if escaped.is_empty() {
         return Ok(Vec::new());
     }
-    store.with_conn(|c| fts_search_conn(c, &escaped, limit))
-}
-
-fn fts_search_conn(c: &Connection, escaped: &str, limit: usize) -> MemoryResult<Vec<FtsHit>> {
-    // Open a read-only connection to a transient URI is unnecessary; we
-    // already have `c`. But we want to *force* a read-only statement for
-    // clarity.
-    let _ = OpenFlags::SQLITE_OPEN_READ_ONLY;
-    // bm25() returns a negative score; lower = more relevant. We negate
-    // it so higher is better, matching the exact-token channel's
-    // direction.
-    let mut stmt = c.prepare(
-        "SELECT me.id, -bm25(memory_entries_fts) AS score
+    let limit = limit as i64;
+    let mut sql = String::from(
+        "SELECT e.id, -bm25(memory_entries_fts) AS score
          FROM memory_entries_fts
-         JOIN memory_entries me ON me.rowid = memory_entries_fts.rowid
-         WHERE memory_entries_fts MATCH ?1
-         ORDER BY score DESC
-         LIMIT ?2",
-    )?;
-    let rows = stmt
-        .query_map(params![escaped, limit as i64], |r| {
-            Ok(FtsHit {
-                id: r.get(0)?,
-                score: r.get::<_, f64>(1)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+         JOIN memory_entries e ON e.rowid = memory_entries_fts.rowid
+         WHERE memory_entries_fts MATCH ?",
+    );
+    let mut args: Vec<&dyn ToSql> = vec![&escaped];
+    if let Some(scope) = scope {
+        sql.push_str(&format!(
+            " AND {PROJECT_SCOPE_SQL} AND {SESSION_SCOPE_SQL} AND {RECALL_STATUS_SQL}"
+        ));
+        args.extend(scope_params(scope));
+    }
+    sql.push_str(" ORDER BY score DESC, e.id LIMIT ?");
+    args.push(&limit);
+    store.with_conn(|c| {
+        let mut stmt = c.prepare(&sql)?;
+        let rows = stmt
+            .query_map(args.as_slice(), |r| {
+                Ok(FtsHit {
+                    id: r.get(0)?,
+                    score: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
 }
 
 /// Sanity test: insert, search, ensure the row is hit.

@@ -88,7 +88,7 @@ type Props = {
    *  actually injected into the user-message observation block this turn.
    *  App uses this to render the live count on the TopBar Memory chip.
    *  `null` = no event this turn (engine off). */
-  onMemoryRecalled?: (count: number) => void;
+  onMemoryRecalled?: (count: number | undefined) => void;
   /** Opens App's right-sidebar 文件 panel (demo / no project → onViewFiles). */
   onOpenFilePanel?: (request: FilePanelRequest) => void;
   /** Publishes the per-file diff map up so the panel can render 变更 tabs. */
@@ -416,6 +416,7 @@ export function ConversationPage({
     acceptStreamRef.current = true;
     stickToBottomRef.current = true;
     if (createdConversationId && conversationId === createdConversationId) return;
+    onMemoryRecalled?.(undefined);
     setCreatedConversationId(null);
     if (!conversationId || demoMode) {
       setTurns([]);
@@ -486,7 +487,7 @@ export function ConversationPage({
       alive = false;
       if (loadingEventsRef.current === loading) loadingEventsRef.current = null;
     };
-  }, [conversationId, demoMode, onSnapshot, createdConversationId]);
+  }, [conversationId, demoMode, onSnapshot, createdConversationId, onMemoryRecalled]);
 
   // Sent-image thumbnails: probes are not persisted with the turn, so a
   // reloaded session re-probes image attachments once (shared map; the
@@ -1271,10 +1272,7 @@ export function ConversationPage({
       setFailover(null);
       setBudget(null);
       setCompactToast(null);
-      // A new turn starts: until the next memoryRecalled event, the chip
-      // should show "engine on, nothing yet" rather than the prior turn's
-      // count. `null` = "no event yet this turn".
-      onMemoryRecalled?.(0);
+      onMemoryRecalled?.(undefined);
       setBudgetLiftToast(null);
       if (compactToastTimerRef.current !== null) {
         window.clearTimeout(compactToastTimerRef.current);

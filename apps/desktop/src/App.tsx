@@ -143,7 +143,7 @@ export function App() {
   /** Memory recall summary for the active turn. `-1` means "engine off"
    *  (no event was emitted this turn) — distinct from `0` ("engine on,
    *  nothing matched"). The TopBar renders different copy in each case. */
-  const [memoryRecalledCount, setMemoryRecalledCount] = useState<number>(-1);
+  const [memoryRecalledCount, setMemoryRecalledCount] = useState<number>();
   /**
    * Composer persona selection per conversation — the chain in application
    * order. A single-element list is the common case; shift-click on the

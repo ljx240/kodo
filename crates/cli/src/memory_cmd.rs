@@ -122,16 +122,18 @@ fn resolve_project(input: Option<&Path>) -> Result<PathBuf, i32> {
 fn open_sqlite() -> Result<SqliteMemory, kodo_memory::MemoryError> {
     let state_dir = settings::state_dir()
         .ok_or_else(|| kodo_memory::MemoryError::StorageUnavailable("HOME not set".into()))?;
-    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    SqliteMemory::open(&path)
+    SqliteMemory::open_at(&state_dir)
 }
 
 fn run_status(store: &kodo_memory::store::Store) -> i32 {
     match store.row_counts() {
         Ok(counts) => {
+            let mode = if kodo_shell::memory_enabled() {
+                "read_write"
+            } else {
+                "off"
+            };
+            println!("mode                        {mode}");
             for (table, n) in counts {
                 println!("{table:<28} {n}");
             }

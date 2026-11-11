@@ -1058,30 +1058,52 @@ function ContextWindow() {
   );
 }
 
-/** Memory Engine surface: status snapshot, run doctor / reindex. Read-only
- *  for now — toggles live in their own settings keys, not in this pane. */
 function MemoryBody() {
   const [status, setStatus] = useState<MemoryStatusDto | null>(null);
-  const [busy, setBusy] = useState<null | "doctor" | "reindex">(null);
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState<null | "doctor" | "reindex" | "setting">(null);
   const [report, setReport] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     memoryStatus()
-      .then((s) => { if (!cancelled) setStatus(s); })
-      .catch(() => { if (!cancelled) setStatus(null); });
+      .then((s) => {
+        if (cancelled) return;
+        setStatus(s);
+        setEnabled(s.mode === "read_write");
+      })
+      .catch(async (error) => {
+        if (cancelled) return;
+        setReport(String(error));
+        const value = await setting("memory-enabled");
+        if (!cancelled) setEnabled(value === "true");
+      });
     return () => { cancelled = true; };
   }, []);
+
+  const updateMemory = async () => {
+    setBusy("setting");
+    setReport(null);
+    try {
+      await setSetting("memory-enabled", String(!enabled));
+      setEnabled(!enabled);
+    } catch {
+      setReport(T.memory.saveFailed);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const runDoctor = async (apply: boolean) => {
     setBusy(apply ? "reindex" : "doctor");
     try {
       const result = await memoryDoctor(apply);
       setReport(
-        `${T.memory.doctorDone} · ok=${result.ok} · ${T.memory.outbox(result.outboxPending)} · ${T.memory.tombstones(result.tombstones)}`,
+        `${T.memory.doctorDone(result.ok)}，${T.memory.outbox(result.outboxPending)}，${T.memory.tombstones(result.tombstones)}`,
       );
       const fresh = await memoryStatus();
       setStatus(fresh);
+      setEnabled(fresh.mode === "read_write");
     } catch (error) {
       setReport(String(error));
     } finally {
@@ -1091,6 +1113,14 @@ function MemoryBody() {
 
   return (
     <>
+      <Field label={T.memory.enableProjectMemory} hint={T.memory.description} wide>
+        <Switch
+          label={T.memory.enableProjectMemory}
+          checked={enabled === true}
+          disabled={enabled === null || busy !== null}
+          onChange={() => void updateMemory()}
+        />
+      </Field>
       <div className="setting-row">
         <span className="setting-label">{T.memory.storage}</span>
         <span className="setting-hint" style={{ fontFamily: "var(--font-mono, monospace)" }}>
@@ -1098,11 +1128,9 @@ function MemoryBody() {
         </span>
       </div>
       <div className="setting-row">
-        <span className="setting-label">{T.memory.entries(
-          Object.values(status?.rowCounts ?? {}).reduce((a, b) => a + b, 0),
-        )}</span>
+        <span className="setting-label">{T.memory.entries(status?.rowCounts.memory_entries ?? 0)}</span>
         <span className="setting-hint">
-          {T.memory.outbox(status?.outboxPending ?? 0)} · {T.memory.size(status?.dbSizeBytes ?? 0)}
+          {T.memory.outbox(status?.outboxPending ?? 0)}，{T.memory.size(status?.dbSizeBytes ?? 0)}
         </span>
       </div>
       <div className="setting-row">
@@ -1121,8 +1149,7 @@ function MemoryBody() {
           {busy === "reindex" ? "…" : T.memory.reindex}
         </button>
       </div>
-      {report && <p className="setting-hint">{report}</p>}
-      <p className="setting-hint">{T.memory.description}</p>
+      {report && <p className="setting-hint" role="status">{report}</p>}
     </>
   );
 }

@@ -1,157 +1,159 @@
-//! Bridge from the session log into the memory outbox.
-//!
-//! The session log is the source of truth. After the log has been
-//! written, the turn sink calls [`write_event`] for the kinds of items
-//! the memory engine is allowed to read: file reads, file changes,
-//! public agent messages, and the high-signal search / command
-//! executions. Private reasoning and model-call traces are deliberately
-//! not forwarded — they live in the trace file, not the memory DB.
-//!
-//! All failures here are non-fatal: the memory engine is a derived
-//! index, and a dropped event just means the engine has one less data
-//! point. The function returns `false` on any error so the caller can
-//! log a metric counter without breaking the run.
+//! Save a bounded, verified result after the session's completion is durable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use kodo_core::session::{Item, ItemKind, Phase};
+use kodo_core::{
+    session::{Item, ItemKind},
+    settings,
+};
 use kodo_memory::model::{EventPhase, MemoryEventKind, SafeMemoryEvent};
-use kodo_memory::MemoryHandle;
+use kodo_memory::{MemoryHandle, MemoryScope, SqliteMemory};
 
-/// The maximum body size we will forward to the outbox in one go. Any
-/// payload over the cap is dropped — the memory engine prefers
-/// short, scoped observations over a per-turn transcript.
-const MAX_BODY_BYTES: usize = 32 * 1024;
+pub const MEMORY_ENABLED_SETTING: &str = "memory-enabled";
 
-/// Open the on-disk store at `<state_dir>/memory/v1/memory.sqlite` and
-/// wrap it in a `MemoryHandle`. Returns `Ok(None)` when `state_dir()`
-/// is unavailable (HOME unset, sandbox restriction) — fail-open.
-pub fn open_default_handle() -> kodo_memory::error::MemoryResult<Option<MemoryHandle>> {
-    let Some(state_dir) = kodo_core::settings::state_dir() else {
-        return Ok(None);
-    };
-    let path = state_dir.join("memory").join("v1").join("memory.sqlite");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    Ok(Some(MemoryHandle::from(kodo_memory::SqliteMemory::open(
-        path,
-    )?)))
+pub fn memory_enabled() -> bool {
+    settings::settings_path()
+        .and_then(|path| settings::read(&path, MEMORY_ENABLED_SETTING))
+        .as_deref()
+        == Some("true")
 }
 
-/// Build a `SafeMemoryEvent` from a freshly-logged `Item`. Returns
-/// `None` when the item is a private kind the memory engine must not
-/// see (Reasoning, Thinking, ModelCall, PlanStep, Permission,
-/// ContextBudget, Failover, Compaction). Returning `None` is the
-/// intended path for the majority of items.
-pub fn event_for_item(item: &Item, phase: Phase) -> Option<SafeMemoryEvent> {
-    let (kind, project_path, label, body) = match &item.kind {
-        ItemKind::Search { query, detail } => (
-            MemoryEventKind::Search,
-            None,
-            truncate_label("search", query),
-            cap_body(detail),
-        ),
-        ItemKind::FileRead { path, detail } => (
-            MemoryEventKind::FileRead,
-            Some(path.clone()),
-            truncate_label("read", path),
-            cap_body(detail),
-        ),
-        ItemKind::FileChange { changes, .. } => {
-            let first_path = changes.first().map(|c| c.path.clone());
-            let label = first_path
-                .clone()
-                .unwrap_or_else(|| "file_change".to_owned());
-            (
-                MemoryEventKind::FileChange,
-                first_path,
-                truncate_label("edit", &label),
-                None,
-            )
+pub(crate) struct TurnMemory {
+    store: Arc<SqliteMemory>,
+    project: PathBuf,
+    turn_seq: u32,
+    answer: Option<VerifiedAnswer>,
+    paths: BTreeSet<String>,
+}
+
+struct VerifiedAnswer {
+    item_id: u32,
+    at: u64,
+    text: String,
+}
+
+impl TurnMemory {
+    pub(crate) fn open(project: &Path, turn_seq: u32) -> Option<Self> {
+        if !memory_enabled() {
+            return None;
         }
-        ItemKind::CommandExecution { command, cwd, .. } => (
-            MemoryEventKind::CommandExecution,
-            None,
-            truncate_label("command", command),
-            cap_body(cwd),
-        ),
-        ItemKind::AgentMessage { text, .. } => (
-            MemoryEventKind::AgentMessage,
-            None,
-            truncate_label("message", text),
-            cap_body(text),
-        ),
-        // Private or transport-level kinds. Not forwarded.
-        ItemKind::Subagent { .. }
-        | ItemKind::Reasoning { .. }
-        | ItemKind::Thinking { .. }
-        | ItemKind::ModelCall { .. }
-        | ItemKind::Compaction { .. }
-        | ItemKind::Failover { .. }
-        | ItemKind::PlanStep { .. }
-        | ItemKind::Permission { .. }
-        | ItemKind::ContextBudget { .. } => return None,
-    };
+        let state = settings::state_dir()?;
+        match SqliteMemory::open_at(&state) {
+            Ok(store) => Some(Self::new(store, project, turn_seq)),
+            Err(error) => {
+                eprintln!("[kodo-memory] fail-open: open store: {error}");
+                None
+            }
+        }
+    }
 
-    let event_phase = match phase {
-        Phase::Started => EventPhase::Started,
-        Phase::Completed => EventPhase::Completed,
-        Phase::Failed => EventPhase::Failed,
-    };
+    pub(crate) fn new(store: SqliteMemory, project: &Path, turn_seq: u32) -> Self {
+        Self {
+            store: Arc::new(store),
+            project: project.to_owned(),
+            turn_seq,
+            answer: None,
+            paths: BTreeSet::new(),
+        }
+    }
 
+    pub(crate) fn handle(&self) -> MemoryHandle {
+        MemoryHandle::new(self.store.clone())
+    }
+
+    pub(crate) fn record(&mut self, item: &Item) {
+        match &item.kind {
+            ItemKind::FileChange { changes, .. } => {
+                self.paths
+                    .extend(changes.iter().map(|change| change.path.clone()));
+            }
+            ItemKind::AgentMessage { .. } => {
+                self.answer = verified_text(item).map(|text| VerifiedAnswer {
+                    item_id: item.id,
+                    at: item.at,
+                    text: text.trim().to_owned(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn finish(&self, session_id: &str) {
+        if let Some(answer) = &self.answer {
+            let scope = kodo_memory::scope::scope_for(&self.project, None, None);
+            if let Some(event) =
+                event_for_answer(answer, &scope, session_id, self.turn_seq, &self.paths)
+            {
+                self.store.remember(&event);
+            }
+        }
+    }
+}
+
+pub(crate) fn verified_text(item: &Item) -> Option<&str> {
+    match &item.kind {
+        ItemKind::AgentMessage {
+            text,
+            delivery,
+            verification,
+            plain: false,
+            ..
+        } if delivery == "ready" && verification == "passed" && !text.trim().is_empty() => {
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
+fn event_for_answer(
+    answer: &VerifiedAnswer,
+    scope: &MemoryScope,
+    session_id: &str,
+    turn_seq: u32,
+    paths: &BTreeSet<String>,
+) -> Option<SafeMemoryEvent> {
+    let project_id = scope.project_id.as_ref()?;
+    let mut extra = BTreeMap::from([
+        ("verified_turn".to_owned(), "true".to_owned()),
+        ("project_id".to_owned(), project_id.clone()),
+        (
+            "source_uris".to_owned(),
+            format!(
+                "kodo://sessions/{session_id}/turns/{turn_seq}/items/{}",
+                answer.item_id
+            ),
+        ),
+        (
+            "evidence_paths".to_owned(),
+            serde_json::to_string(paths).expect("file paths serialize"),
+        ),
+    ]);
+    for (key, value) in [
+        ("repository_id", &scope.repository_id),
+        ("branch", &scope.branch),
+        ("worktree_id", &scope.worktree_id),
+    ] {
+        if let Some(value) = value {
+            extra.insert(key.to_owned(), value.clone());
+        }
+    }
     Some(SafeMemoryEvent {
-        // A stable id: session/turn/item/phase/kind keeps the
-        // outbox's idempotency check valid under retries.
         event_id: format!(
-            "item-{}-{}-{}",
-            item.id,
-            event_phase.as_str(),
-            kind.as_str()
+            "turn:{session_id}:{turn_seq}:{}:completed:agent_message",
+            answer.item_id
         ),
-        session_id: String::new(), // filled in by the caller if known
-        turn_seq: 0,
-        item_seq: item.id,
-        phase: event_phase,
-        kind,
+        session_id: session_id.to_owned(),
+        turn_seq,
+        item_seq: answer.item_id,
+        phase: EventPhase::Completed,
+        kind: MemoryEventKind::AgentMessage,
         source_digest: String::new(),
-        observed_at: item.at,
-        project_path,
-        label,
-        body,
-        extra: BTreeMap::new(),
+        observed_at: answer.at,
+        project_path: None,
+        label: String::new(),
+        body: Some(answer.text.clone()),
+        extra,
     })
-}
-
-/// Forward `event` to the outbox. Returns `true` on `Ok(true)`, `false`
-/// on any error or `Ok(false)` (the outbox may reject the event for
-/// policy reasons — secret-shaped body, etc.). The caller treats both
-/// `false` outcomes identically: bump a metric counter and move on.
-pub fn write_event(handle: &MemoryHandle, event: &SafeMemoryEvent) -> bool {
-    handle.observe(event).unwrap_or(false)
-}
-
-fn truncate_label(prefix: &str, body: &str) -> String {
-    const MAX: usize = 80;
-    if body.len() <= MAX {
-        format!("{prefix}:{body}")
-    } else {
-        let end = body.char_indices().nth(MAX).map(|(i, _)| i).unwrap_or(MAX);
-        format!("{}:{}…", prefix, &body[..end])
-    }
-}
-
-fn cap_body(body: &str) -> Option<String> {
-    if body.is_empty() {
-        return None;
-    }
-    if body.len() <= MAX_BODY_BYTES {
-        return Some(body.to_owned());
-    }
-    let end = body
-        .char_indices()
-        .nth(MAX_BODY_BYTES)
-        .map(|(i, _)| i)
-        .unwrap_or(MAX_BODY_BYTES);
-    Some(format!("{}…[truncated]", &body[..end]))
 }

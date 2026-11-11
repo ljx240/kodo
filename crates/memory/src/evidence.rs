@@ -19,9 +19,9 @@ pub fn validate_source_uri(uri: &str) -> MemoryResult<()> {
     if ALLOWED_SCHEMES.iter().any(|s| lower.starts_with(s)) {
         Ok(())
     } else {
-        Err(MemoryError::InvalidEvent(format!(
-            "source uri must start with one of {ALLOWED_SCHEMES:?}: {uri:?}"
-        )))
+        Err(MemoryError::InvalidEvent(
+            "source URI must use kodo:// or git://".to_owned(),
+        ))
     }
 }
 

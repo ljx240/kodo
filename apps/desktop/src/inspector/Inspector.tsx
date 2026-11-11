@@ -132,11 +132,8 @@ function contentFor(
     if (tab === "tools") return <ToolsSection {...data} />;
     if (tab === "llm") return <LlmSection {...data} />;
     if (tab === "memory") {
-      return (
-        <MemoryOverview
-          project={project?.id ?? null}
-        />
-      );
+      const path = project?.path ?? project?.id ?? null;
+      return <MemoryOverview key={path} project={path} />;
     }
     return <ResponseOverview {...data} onShowAllFiles={() => onSelectTab("files")} />;
   }

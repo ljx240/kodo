@@ -42,10 +42,12 @@ export function Switch({
   checked,
   onChange,
   label,
+  disabled,
 }: {
   checked: boolean;
   onChange: () => void;
   label?: string;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -53,6 +55,7 @@ export function Switch({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       className={`toggle${checked ? " toggle--on" : ""}`}
       onClick={onChange}
     >

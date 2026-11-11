@@ -1957,7 +1957,7 @@ mod tests {
         // The record rides on a reasoning item. The outbox bridge drops
         // every reasoning kind, so a decision record can never be recalled
         // into a later turn.
-        use kodo_core::session::{Item, ItemKind, Phase};
+        use kodo_core::session::{Item, ItemKind};
         let item = Item {
             id: 1,
             at: 0,
@@ -1970,7 +1970,7 @@ mod tests {
             },
         };
         assert!(
-            crate::memory_outbox::event_for_item(&item, Phase::Completed).is_none(),
+            crate::memory_outbox::verified_text(&item).is_none(),
             "a decision record must not become a memory event"
         );
     }

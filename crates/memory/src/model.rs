@@ -240,42 +240,14 @@ impl MemoryScope {
     /// any session in the same branch. A project-level memory matches any
     /// session in the same project.
     pub fn matches(&self, caller: &MemoryScope) -> bool {
-        if let (Some(a), Some(b)) = (&self.project_id, &caller.project_id) {
-            if a != b {
-                return false;
-            }
-        } else if self.project_id.is_some() || caller.project_id.is_some() {
-            return false;
-        }
-        if let (Some(a), Some(b)) = (&self.repository_id, &caller.repository_id) {
-            if a != b {
-                return false;
-            }
-        } else if self.repository_id.is_some() || caller.repository_id.is_some() {
-            return false;
-        }
-        if let (Some(a), Some(b)) = (&self.worktree_id, &caller.worktree_id) {
-            if a != b {
-                return false;
-            }
-        } else if self.worktree_id.is_some() || caller.worktree_id.is_some() {
-            return false;
-        }
-        if let (Some(a), Some(b)) = (&self.session_id, &caller.session_id) {
-            if a != b {
-                return false;
-            }
-        } else if self.session_id.is_some() || caller.session_id.is_some() {
-            return false;
-        }
-        if let (Some(a), Some(b)) = (&self.branch, &caller.branch) {
-            if a != b {
-                return false;
-            }
-        } else if self.branch.is_some() || caller.branch.is_some() {
-            return false;
-        }
-        true
+        self.project_id == caller.project_id
+            && self.repository_id == caller.repository_id
+            && self.worktree_id == caller.worktree_id
+            && self.branch == caller.branch
+            && self
+                .session_id
+                .as_ref()
+                .is_none_or(|id| caller.session_id.as_ref() == Some(id))
     }
 }
 
