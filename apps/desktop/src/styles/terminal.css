@@ -1,63 +1,107 @@
-/* Bottom terminal: tabbed, split panes of PTY-backed shells. */
+/* Radix Gray and Teal for the panel, with Radix text colors for ANSI output. */
+:root {
+  --kodo-terminal-canvas: #fcfcfc;
+  --kodo-terminal-toolbar: #f9f9f9;
+  --kodo-terminal-hover: #e8e8e8;
+  --kodo-terminal-selected: #e0e0e0;
+  --kodo-terminal-border: #d9d9d9;
+  --kodo-terminal-divider: #cecece;
+  --kodo-terminal-grip: #8d8d8d;
+  --kodo-terminal-active-edge: #53b9ab;
+  --kodo-terminal-focus: #008573;
+  --kodo-terminal-secondary: #646464;
+  --kodo-terminal-text: #202020;
+  --kodo-terminal-error: #ce2c31;
+
+  --kodo-terminal-ansi-black: var(--kodo-terminal-text);
+  --kodo-terminal-ansi-green: #218358;
+  --kodo-terminal-ansi-yellow: #ab6400;
+  --kodo-terminal-ansi-blue: #0d74ce;
+  --kodo-terminal-ansi-magenta: #6550b9;
+  --kodo-terminal-ansi-cyan: #107d98;
+  --kodo-terminal-ansi-bright-black: #838383;
+  --kodo-terminal-ansi-bright-red: #641723;
+  --kodo-terminal-ansi-bright-green: #193b2d;
+  --kodo-terminal-ansi-bright-yellow: #4f3422;
+  --kodo-terminal-ansi-bright-blue: #113264;
+  --kodo-terminal-ansi-bright-magenta: #2f265f;
+  --kodo-terminal-ansi-bright-cyan: #0d3c48;
+}
+
+:root[data-theme="dark"] {
+  --kodo-terminal-canvas: #111111;
+  --kodo-terminal-toolbar: #191919;
+  --kodo-terminal-hover: #2a2a2a;
+  --kodo-terminal-selected: #313131;
+  --kodo-terminal-border: #3a3a3a;
+  --kodo-terminal-divider: #484848;
+  --kodo-terminal-grip: #6e6e6e;
+  --kodo-terminal-active-edge: #207e73;
+  --kodo-terminal-focus: #0bd8b6;
+  --kodo-terminal-secondary: #b4b4b4;
+  --kodo-terminal-text: #eeeeee;
+  --kodo-terminal-error: #ff9592;
+
+  --kodo-terminal-ansi-black: #606060;
+  --kodo-terminal-ansi-green: #3dd68c;
+  --kodo-terminal-ansi-yellow: #ffca16;
+  --kodo-terminal-ansi-blue: #70b8ff;
+  --kodo-terminal-ansi-magenta: #baa7ff;
+  --kodo-terminal-ansi-cyan: #4ccce6;
+  --kodo-terminal-ansi-bright-black: #7b7b7b;
+  --kodo-terminal-ansi-bright-red: #ffd1d9;
+  --kodo-terminal-ansi-bright-green: #b1f1cb;
+  --kodo-terminal-ansi-bright-yellow: #ffe7b3;
+  --kodo-terminal-ansi-bright-blue: #c2e6ff;
+  --kodo-terminal-ansi-bright-magenta: #e2ddfe;
+  --kodo-terminal-ansi-bright-cyan: #b6ecf7;
+}
 
 .terminal-panel {
+  --terminal-control-size: 24px;
   flex: none;
   height: clamp(200px, 36vh, 560px);
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-top: 1px solid var(--kodo-border);
-  background: var(--kodo-canvas);
+  border-top: 0.5px solid var(--kodo-terminal-border);
+  background: var(--kodo-terminal-canvas);
 }
 
-/* The panel's top edge doubles as a drag grip for its height. */
 .terminal-resize {
   flex: none;
-  position: relative;
-  height: 4px;
-  background: var(--kodo-sidebar);
+  display: grid;
+  place-items: center;
+  height: 8px;
+  background: var(--kodo-terminal-toolbar);
   cursor: row-resize;
   touch-action: none;
 }
 
 .terminal-resize::after {
   content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
   width: 28px;
   height: 2px;
-  margin: -1px 0 0 -14px;
-  border-radius: 2px;
-  background: var(--kodo-border-strong);
-  opacity: 0;
-  transition:
-    opacity 120ms ease,
-    background-color 120ms ease;
+  border-radius: 1px;
+  background: var(--kodo-terminal-grip);
 }
 
 .terminal-resize:hover::after,
 .terminal-resize:focus-visible::after {
-  background: var(--kodo-accent);
-  opacity: 1;
-}
-
-.terminal-resize:focus-visible,
-.terminal-divider:focus-visible {
-  outline: none;
+  background: var(--kodo-terminal-focus);
 }
 
 .terminal-head {
   flex: none;
-  height: 32px;
+  height: 36px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 6px 0 10px;
-  border-bottom: 1px solid var(--kodo-border);
-  background: var(--kodo-sidebar);
-  color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-xs);
+  padding-inline: var(--kodo-space-4);
+  border-bottom: 0.5px solid var(--kodo-terminal-border);
+  background: var(--kodo-terminal-toolbar);
+  color: var(--kodo-terminal-secondary);
+  font-size: var(--kodo-font-sm);
 }
 
 .terminal-tabs {
@@ -65,6 +109,8 @@
   min-width: 0;
   height: 100%;
   display: flex;
+  align-items: center;
+  gap: var(--kodo-space-2);
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -75,61 +121,67 @@
 
 .terminal-tab {
   flex: none;
-  height: 100%;
+  height: 28px;
   display: flex;
   align-items: center;
-  border-right: 1px solid var(--kodo-border);
-  color: var(--kodo-text-secondary);
+  padding-inline-end: 2px;
+  border-radius: var(--kodo-radius-sm);
 }
 
-.terminal-tab--active {
-  background: var(--kodo-canvas);
-  color: var(--kodo-text);
-  box-shadow: inset 0 -2px 0 var(--kodo-accent);
+.terminal-tab:hover {
+  background: var(--kodo-terminal-hover);
+}
+
+.terminal-tab--active,
+.terminal-tab--active:hover {
+  background: var(--kodo-terminal-selected);
+  color: var(--kodo-terminal-text);
+  font-weight: 600;
 }
 
 .terminal-tab-label {
   height: 100%;
   max-width: 150px;
-  padding: 0 4px 0 10px;
+  padding-inline: 10px 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: inherit;
   font: inherit;
-  cursor: pointer;
 }
 
-.terminal-tab-label:focus-visible {
-  outline: 1px solid var(--kodo-accent);
+.terminal-panel :is(.terminal-tab-label, .icon-btn, .terminal-resize, .terminal-divider):focus-visible {
+  outline: 0.5px solid var(--kodo-terminal-focus);
   outline-offset: -2px;
 }
 
-.terminal-tab-close {
-  width: 18px;
-  height: 18px;
-  margin-right: 4px;
-  color: inherit;
-  opacity: 0.55;
+.terminal-panel .icon-btn--sm {
+  width: var(--terminal-control-size);
+  height: var(--terminal-control-size);
+  color: var(--kodo-terminal-secondary);
 }
 
-.terminal-tab:hover .terminal-tab-close,
-.terminal-tab--active .terminal-tab-close {
-  opacity: 1;
+.terminal-panel .icon-btn:hover:not(:disabled) {
+  background: var(--kodo-terminal-hover);
+  color: var(--kodo-terminal-text);
+}
+
+.terminal-tab-close {
+  border-radius: calc(var(--kodo-radius-sm) - 2px);
 }
 
 .terminal-actions {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 1px;
+  gap: 2px;
 }
 
 .terminal-actions-divider {
-  width: 1px;
-  height: 14px;
+  width: 0.5px;
+  height: 16px;
   margin: 0 4px;
-  background: var(--kodo-border);
+  background: var(--kodo-terminal-border);
 }
 
 .terminal-stage {
@@ -149,21 +201,25 @@
 
 .terminal-pane {
   position: absolute;
-  box-sizing: border-box;
   min-width: 0;
   min-height: 0;
-  background: var(--kodo-canvas);
+  overflow: hidden;
+  background: var(--kodo-terminal-canvas);
 }
 
-.terminal-pane--active {
-  outline: 1px solid var(--kodo-accent);
+.terminal-pane--split.terminal-pane--active {
+  outline: 0.5px solid var(--kodo-terminal-active-edge);
   outline-offset: -1px;
 }
 
 .terminal-host {
   position: absolute;
-  inset: 0;
-  padding: 6px 10px 8px;
+  /* FitAddon measures this box directly. Keep the padding outside it. */
+  inset: var(--kodo-space-4) var(--kodo-space-5);
+}
+
+.terminal-pane--split .terminal-host {
+  inset-inline-end: calc(var(--terminal-control-size) + var(--kodo-space-4));
 }
 
 .terminal-host .xterm {
@@ -187,11 +243,10 @@
 }
 
 .terminal-host .xterm .composition-view {
-  background: var(--kodo-canvas);
-  color: var(--kodo-text);
+  background: var(--kodo-terminal-canvas);
+  color: var(--kodo-terminal-text);
 }
 
-/* Split boundaries: a 7px hit area with a hairline that tracks the ratio. */
 .terminal-divider {
   position: absolute;
   z-index: 3;
@@ -199,68 +254,72 @@
 }
 
 .terminal-divider--row {
-  width: 7px;
-  margin-left: -3px;
+  width: 8px;
+  margin-left: -4px;
   cursor: col-resize;
 }
 
 .terminal-divider--column {
-  height: 7px;
-  margin-top: -3px;
+  height: 8px;
+  margin-top: -4px;
   cursor: row-resize;
 }
 
 .terminal-divider::after {
   content: "";
   position: absolute;
-  background: var(--kodo-border);
-  transition: background-color 120ms ease;
+  background: var(--kodo-terminal-divider);
 }
 
 .terminal-divider--row::after {
-  left: 3px;
+  left: 4px;
   top: 0;
   bottom: 0;
-  width: 1px;
+  width: 0.5px;
 }
 
 .terminal-divider--column::after {
-  top: 3px;
+  top: 4px;
   left: 0;
   right: 0;
-  height: 1px;
+  height: 0.5px;
 }
 
 .terminal-divider:hover::after,
 .terminal-divider:focus-visible::after {
-  background: var(--kodo-accent);
+  background: var(--kodo-terminal-focus);
 }
 
-.terminal-pane-status {
+.terminal-pane-status,
+.terminal-unavailable {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
+  padding: var(--kodo-space-5);
+  color: var(--kodo-terminal-secondary);
+  font-size: var(--kodo-font-sm);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.terminal-pane-status {
   pointer-events: none;
-  color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-xs);
 }
 
 .terminal-pane-status--error {
-  color: var(--kodo-error);
+  color: var(--kodo-terminal-error);
 }
 
 .terminal-pane-close {
   position: absolute;
-  top: 4px;
+  top: 6px;
   right: 6px;
   z-index: 2;
-  background: var(--kodo-canvas);
-  border: 1px solid var(--kodo-border);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+  background: var(--kodo-terminal-canvas);
+  border: 0.5px solid var(--kodo-terminal-border);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease;
 }
 
 .terminal-pane:hover .terminal-pane-close,
@@ -269,7 +328,6 @@
   pointer-events: auto;
 }
 
-/* While dragging a divider the pointer usually leaves its 7px strip. */
 body.terminal-dimensioning {
   user-select: none;
 }
@@ -280,13 +338,4 @@ body.terminal-dimensioning--col {
 
 body.terminal-dimensioning--row {
   cursor: row-resize;
-}
-
-.terminal-unavailable {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: var(--kodo-text-secondary);
-  font-size: var(--kodo-font-sm);
 }
