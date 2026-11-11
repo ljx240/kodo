@@ -140,6 +140,8 @@ impl Default for Budget {
 }
 
 impl Budget {
+    pub(crate) const EXTENDED_MAX_ROUNDS: usize = 32;
+
     pub fn rounds_exhausted(&self) -> bool {
         self.rounds_used >= self.max_rounds
     }
@@ -258,7 +260,7 @@ impl Budget {
     pub fn lift_for_pressure(&mut self) -> (usize, usize, usize, usize) {
         let old_round = self.max_rounds;
         let old_tool = self.max_tool_calls;
-        self.max_rounds = self.max_rounds.max(12);
+        self.max_rounds = self.max_rounds.max(Self::EXTENDED_MAX_ROUNDS);
         self.max_tool_calls = self.max_tool_calls.max(128);
         self.max_context_chars = self.max_context_chars.max(160_000);
         (old_round, self.max_rounds, old_tool, self.max_tool_calls)

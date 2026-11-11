@@ -4847,11 +4847,12 @@ fn run_scoped(
                     .windows(2)
                     .all(|pair| pair[0] == pair[1]);
             let budget = machine.budget();
-            // Reserve separate decisions for writing, re-reading and answering.
-            let closing = budget.rounds_used.saturating_add(3) >= budget.max_rounds
-                || budget.tool_calls_used.saturating_add(4) >= budget.max_tool_calls
-                || budget.tool_calls_used.saturating_mul(5)
-                    >= budget.max_tool_calls.saturating_mul(4);
+            // Reserve delivery rounds against the cap after any available lift.
+            let closing = budget_lifted
+                && (budget.rounds_used.saturating_add(3) >= budget.max_rounds
+                    || budget.tool_calls_used.saturating_add(4) >= budget.max_tool_calls
+                    || budget.tool_calls_used.saturating_mul(5)
+                        >= budget.max_tool_calls.saturating_mul(4));
             if !wrap_up_pushed && !conversational && (in_loop || closing) {
                 let (detail, hint) = if in_loop {
                     let names = recent_exploration_batches[0]
@@ -7939,7 +7940,10 @@ mod tests {
                     serde_json::json!({"text": report}),
                 ]),
                 "never-reports" => {
-                    responses.extend((0..20).map(|_| serde_json::json!({"text": progress})))
+                    responses.extend(
+                        (0..Budget::EXTENDED_MAX_ROUNDS)
+                            .map(|_| serde_json::json!({"text": progress})),
+                    );
                 }
                 _ => responses.extend([
                     serde_json::json!({"text": ""}),
@@ -8017,7 +8021,7 @@ mod tests {
                 assert!(text.contains("评分：80/100") && text.contains("README.md:1"));
             } else {
                 assert_eq!(delivery, "failed", "{case}: {text}");
-                assert!(calls <= 12, "{case}: calls={calls}");
+                assert_eq!(calls, Budget::EXTENDED_MAX_ROUNDS, "{case}");
                 assert!(
                     !text.contains("下一步聚焦"),
                     "interim prose leaked into delivery"
@@ -8028,6 +8032,8 @@ mod tests {
 
     #[test]
     fn review_recovery_preserves_read_tools_and_bounds_final_only_requests() {
+        let final_round = Budget::EXTENDED_MAX_ROUNDS;
+        let reads_before_final = final_round - 1;
         for native in [false, true] {
             for case in [
                 "early",
@@ -8042,7 +8048,7 @@ mod tests {
                 ));
                 let project = root.join("repo");
                 std::fs::create_dir_all(&project).unwrap();
-                for index in 0..12 {
+                for index in 0..final_round {
                     std::fs::write(
                         project.join(format!("source-{index}.rs")),
                         "fn validate() {}\n",
@@ -8062,7 +8068,7 @@ mod tests {
                 };
                 let hard_final = matches!(case, "final-tools" | "no-final");
                 let mut responses = if hard_final {
-                    (0..11)
+                    (0..reads_before_final)
                         .map(|index| tools(vec![read(index)]))
                         .collect::<Vec<_>>()
                 } else {
@@ -8075,7 +8081,7 @@ mod tests {
                 if !hard_final {
                     responses.push(serde_json::json!({"text":""}));
                 }
-                let mut next = vec![read(if hard_final { 11 } else { 3 })];
+                let mut next = vec![read(if hard_final { reads_before_final } else { 3 })];
                 if case == "mutation" {
                     next.push(serde_json::json!({"id":"forbidden-write","name":"create_file","arguments":{"path":"must-not-write.md","content":"unsafe"}}));
                 }
@@ -8095,7 +8101,7 @@ mod tests {
                 )
                 .unwrap();
                 let mut request = temp_request(&project, Permission::Full);
-                request.message = "为我做一个详细的代码评审，为我输出详细评分，按照该项目情况设定评分项目 然后评分 分析问题和解决方案".into();
+                request.message = "帮我做一个详细的评审".into();
                 if case == "repeated-progress" {
                     request.budget_family = Some("extended".into());
                 }
@@ -8151,13 +8157,17 @@ mod tests {
                     "{native}/{case}: {text}"
                 );
                 if case == "no-final" {
-                    assert_eq!(requests.len(), 14, "{native}/{case}");
+                    assert_eq!(requests.len(), final_round + 2, "{native}/{case}");
                     assert_eq!(delivery, "failed", "{native}/{case}: {text}");
                     assert_eq!(failure_reason, "no_answer", "{native}/{case}: {text}");
                 } else {
                     assert_eq!(
                         requests.len(),
-                        if hard_final { 13 } else { 4 + progress_count },
+                        if hard_final {
+                            final_round + 1
+                        } else {
+                            4 + progress_count
+                        },
                         "{native}/{case}"
                     );
                     assert_eq!(delivery, "ready", "{native}/{case}: {text}");
@@ -8172,17 +8182,19 @@ mod tests {
                 }
                 assert_eq!(
                     read_paths.len(),
-                    if hard_final { 11 } else { 2 },
+                    if hard_final { reads_before_final } else { 2 },
                     "{native}/{case}: {read_paths:?}"
                 );
                 if hard_final {
+                    let unread_file = format!("source-{reads_before_final}.rs");
+                    let unexecuted_call = format!("read-{reads_before_final}");
                     assert!(
-                        !read_paths.iter().any(|path| path.ends_with("source-11.rs")),
+                        !read_paths.iter().any(|path| path.ends_with(&unread_file)),
                         "{native}/{case}"
                     );
-                    for pending in requests.iter().skip(12) {
+                    for pending in requests.iter().skip(final_round) {
                         assert!(
-                            !pending["messages"].to_string().contains("read-11"),
+                            !pending["messages"].to_string().contains(&unexecuted_call),
                             "orphan native tool call in {native}/{case}"
                         );
                     }
@@ -8365,7 +8377,12 @@ mod tests {
             ("distinct", vec![1, 1, 1], false, false),
             ("repeat", vec![1, 1, 1], true, true),
             ("closeout", vec![15; 7], false, false),
-            ("round-closeout", vec![1; 9], false, false),
+            (
+                "round-closeout",
+                vec![1; Budget::EXTENDED_MAX_ROUNDS - 3],
+                false,
+                false,
+            ),
         ] {
             let dir =
                 std::env::temp_dir().join(format!("kodo-doc-budget-{}-{case}", std::process::id()));
@@ -8468,7 +8485,7 @@ mod tests {
             if case == "round-closeout" {
                 assert_eq!(
                     closeout_round,
-                    Some(9),
+                    Some(Budget::EXTENDED_MAX_ROUNDS - 3),
                     "reserve write, re-read and final answer"
                 );
             }
@@ -8480,7 +8497,7 @@ mod tests {
         for family in [Some("extended"), Some("summary")] {
             let resumed = budget_for_task(TaskType::BugFix, false, family);
             assert_eq!(resumed.max_repairs, Budget::default().max_repairs);
-            assert_eq!((resumed.max_rounds, resumed.max_tool_calls), (12, 128));
+            assert_eq!((resumed.max_rounds, resumed.max_tool_calls), (32, 128));
             assert!(
                 !resumed.is_summary_family(),
                 "recovery must keep code repairs"
@@ -8543,13 +8560,16 @@ mod tests {
         });
         assert_eq!(
             (machine.budget().max_rounds, machine.budget().max_tool_calls),
-            (12, 128)
+            (32, 128)
         );
     }
 
     #[test]
     fn document_hard_budget_remains_bounded_and_reports_unexecuted_batches() {
-        for (case, rounds, batch) in [("oversized", 1, 129), ("never-delivers", 20, 8)] {
+        for (case, rounds, batch) in [
+            ("oversized", 1, 129),
+            ("never-delivers", Budget::EXTENDED_MAX_ROUNDS + 1, 1),
+        ] {
             let dir = std::env::temp_dir()
                 .join(format!("kodo-doc-ceiling-{}-{case}", std::process::id()));
             let project = dir.join("repo");
@@ -8621,13 +8641,16 @@ mod tests {
                 "budget diagnostics are not verification: {case}"
             );
             assert!(!project.join("docs/总体架构设计.md").exists());
-            assert!(model_calls <= 12, "hard bound survives recovery: {case}");
             if case == "oversized" {
+                assert_eq!(model_calls, 1);
                 assert_eq!(reads_after_model, 0, "oversized batches execute nothing");
                 assert!(
                     text.contains("申请 129 次") && text.contains("本批未执行"),
                     "{text}"
                 );
+            } else {
+                assert_eq!(model_calls, Budget::EXTENDED_MAX_ROUNDS);
+                assert_eq!(reads_after_model, Budget::EXTENDED_MAX_ROUNDS - 1);
             }
         }
     }
