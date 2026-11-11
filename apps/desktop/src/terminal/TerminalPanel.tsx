@@ -5,7 +5,7 @@ import {
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { Columns2, Plus, Rows2, Terminal as TerminalIcon, X } from "lucide-react";
+import { Columns2, Plus, Rows2, X } from "lucide-react";
 import { T } from "../i18n";
 import { TerminalPane } from "./TerminalPane";
 import {
@@ -13,7 +13,6 @@ import {
   newId,
   paneLayout,
   paneLeaf,
-  paneLeaves,
   removePane,
   setSplitRatio,
   splitHandles,
@@ -62,6 +61,7 @@ export function TerminalPanel({
   const nextTabNumber = useRef(2);
   const panelRef = useRef<HTMLElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const resizeCleanup = useRef<(() => void) | null>(null);
   const [tabs, setTabs] = useState<TerminalTab[]>(() => [createTab(1)]);
   const [activeTabId, setActiveTabId] = useState(() => tabs[0].id);
   const [panelHeight, setPanelHeight] = useState<number | null>(readPanelHeight);
@@ -71,6 +71,8 @@ export function TerminalPanel({
       .getElementById(tabDomId(activeTabId))
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeTabId]);
+
+  useEffect(() => () => resizeCleanup.current?.(), []);
 
   const setTabSplitRatio = (tabId: string, splitId: string, ratio: number) => {
     setTabs((current) =>
@@ -162,6 +164,46 @@ export function TerminalPanel({
     }
   };
 
+  const trackResize = (
+    pointerId: number,
+    axis: "x" | "y",
+    apply: (position: number) => void,
+    commit?: () => void,
+  ) => {
+    let position: number;
+    let frame: number | null = null;
+    const cursor = axis === "x" ? "terminal-dimensioning--col" : "terminal-dimensioning--row";
+    const move = (event: PointerEvent) => {
+      if (event.pointerId !== pointerId) return;
+      position = axis === "x" ? event.clientX : event.clientY;
+      frame ??= requestAnimationFrame(() => {
+        frame = null;
+        apply(position);
+      });
+    };
+    const cleanup = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.classList.remove("terminal-dimensioning", cursor);
+      resizeCleanup.current = null;
+    };
+    const finish = (event: PointerEvent) => {
+      if (event.pointerId !== pointerId) return;
+      const pending = frame !== null;
+      cleanup();
+      if (pending) apply(position);
+      commit?.();
+    };
+    resizeCleanup.current?.();
+    resizeCleanup.current = cleanup;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    document.body.classList.add("terminal-dimensioning", cursor);
+  };
+
   const beginPanelResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     const panel = panelRef.current;
@@ -171,21 +213,15 @@ export function TerminalPanel({
     const startHeight = panel.getBoundingClientRect().height;
     let latest = startHeight;
 
-    const move = (moveEvent: PointerEvent) => {
-      latest = clampPanelHeight(startHeight + startY - moveEvent.clientY);
-      setPanelHeight(latest);
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
-      document.body.classList.remove("terminal-dimensioning", "terminal-dimensioning--row");
-      persistHeight(latest);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
-    document.body.classList.add("terminal-dimensioning", "terminal-dimensioning--row");
+    trackResize(
+      event.pointerId,
+      "y",
+      (position) => {
+        latest = clampPanelHeight(startHeight + startY - position);
+        setPanelHeight(latest);
+      },
+      () => persistHeight(latest),
+    );
   };
 
   const handlePanelResizeKey = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -212,37 +248,18 @@ export function TerminalPanel({
     event.stopPropagation();
 
     const bounds = stage.getBoundingClientRect();
-    const boxLeft = bounds.left + (bounds.width * handle.rect.left) / 100;
-    const boxTop = bounds.top + (bounds.height * handle.rect.top) / 100;
-    const boxWidth = (bounds.width * handle.rect.width) / 100;
-    const boxHeight = (bounds.height * handle.rect.height) / 100;
     const row = handle.split.direction === "row";
-    const minRatio = Math.min(0.45, MIN_PANE_PX / (row ? boxWidth : boxHeight));
-    const cursor = row ? "terminal-dimensioning--col" : "terminal-dimensioning--row";
+    const start = row
+      ? bounds.left + (bounds.width * handle.rect.left) / 100
+      : bounds.top + (bounds.height * handle.rect.top) / 100;
+    const size = (row ? bounds.width * handle.rect.width : bounds.height * handle.rect.height) / 100;
+    const minRatio = Math.min(0.45, MIN_PANE_PX / size);
 
-    const move = (moveEvent: PointerEvent) => {
-      const raw = row
-        ? (moveEvent.clientX - boxLeft) / boxWidth
-        : (moveEvent.clientY - boxTop) / boxHeight;
+    trackResize(event.pointerId, row ? "x" : "y", (position) => {
+      const raw = (position - start) / size;
       const ratio = Math.min(1 - minRatio, Math.max(minRatio, raw));
-      setTabs((current) =>
-        current.map((item) =>
-          item.id === tabId
-            ? { ...item, root: setSplitRatio(item.root, handle.split.id, ratio) }
-            : item,
-        ),
-      );
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
-      document.body.classList.remove("terminal-dimensioning", cursor);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
-    document.body.classList.add("terminal-dimensioning", cursor);
+      setTabSplitRatio(tabId, handle.split.id, ratio);
+    });
   };
 
   const handleSplitKey = (
@@ -279,7 +296,6 @@ export function TerminalPanel({
         onKeyDown={handlePanelResizeKey}
       />
       <header className="terminal-head">
-        <TerminalIcon size={14} strokeWidth={1.8} />
         <div className="terminal-tabs" role="tablist" aria-label={T.terminal.title}>
           {tabs.map((tab, index) => {
             const selected = tab.id === activeTabId;
@@ -316,7 +332,6 @@ export function TerminalPanel({
             );
           })}
         </div>
-        <span className="spacer" />
         <div className="terminal-actions">
           <button
             type="button"
@@ -366,7 +381,7 @@ export function TerminalPanel({
           const shown = tab.id === activeTabId;
           const panes = paneLayout(tab.root);
           const handles = splitHandles(tab.root);
-          const closable = paneLeaves(tab.root).length > 1;
+          const closable = tab.root.kind === "split";
           return (
             <div
               key={tab.id}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -15,60 +15,32 @@ import {
 import { T } from "../i18n";
 import type { PaneRect } from "./paneTree";
 
-function cssVar(style: CSSStyleDeclaration, name: string, fallback: string): string {
-  return style.getPropertyValue(name).trim() || fallback;
-}
-
-const LIGHT_ANSI = {
-  black: "#242424",
-  red: "#b91c2a",
-  green: "#116329",
-  yellow: "#984308",
-  blue: "#0550ae",
-  magenta: "#7542b4",
-  cyan: "#0f6f75",
-  white: "#606060",
-  brightBlack: "#8c959f",
-  brightRed: "#cf222e",
-  brightGreen: "#1a7f37",
-  brightYellow: "#9a6700",
-  brightBlue: "#218bff",
-  brightMagenta: "#a475f9",
-  brightCyan: "#3192aa",
-  brightWhite: "#242424",
-};
-
-const DARK_ANSI = {
-  black: "#484848",
-  red: "#ff7b72",
-  green: "#3fb950",
-  yellow: "#d29922",
-  blue: "#79c0ff",
-  magenta: "#d2a8ff",
-  cyan: "#56d4dd",
-  white: "#b9b9b9",
-  brightBlack: "#828282",
-  brightRed: "#ffa198",
-  brightGreen: "#56d364",
-  brightYellow: "#e3b341",
-  brightBlue: "#a5d6ff",
-  brightMagenta: "#e2c5ff",
-  brightCyan: "#76e3ea",
-  brightWhite: "#eeeeee",
-};
-
-/** xterm paints on a canvas, so it cannot read CSS variables itself. */
+/** xterm's theme takes resolved colors. */
 function terminalTheme(): ITheme {
-  const root = document.documentElement;
-  const style = getComputedStyle(root);
-  const dark = root.dataset.theme === "dark";
+  const style = getComputedStyle(document.documentElement);
+  const color = (name: string) => style.getPropertyValue(`--kodo-terminal-${name}`).trim();
   return {
-    background: cssVar(style, "--kodo-canvas", dark ? "#1c1c1c" : "#ffffff"),
-    foreground: cssVar(style, "--kodo-text", dark ? "#eeeeee" : "#242424"),
-    cursor: cssVar(style, "--kodo-accent", "#176b60"),
-    cursorAccent: cssVar(style, "--kodo-canvas", "#ffffff"),
-    selectionBackground: cssVar(style, "--kodo-selected", "#e7e7e7"),
-    ...(dark ? DARK_ANSI : LIGHT_ANSI),
+    background: color("canvas"),
+    foreground: color("text"),
+    cursor: color("focus"),
+    cursorAccent: color("canvas"),
+    selectionBackground: color("selected"),
+    black: color("ansi-black"),
+    red: color("error"),
+    green: color("ansi-green"),
+    yellow: color("ansi-yellow"),
+    blue: color("ansi-blue"),
+    magenta: color("ansi-magenta"),
+    cyan: color("ansi-cyan"),
+    white: color("secondary"),
+    brightBlack: color("ansi-bright-black"),
+    brightRed: color("ansi-bright-red"),
+    brightGreen: color("ansi-bright-green"),
+    brightYellow: color("ansi-bright-yellow"),
+    brightBlue: color("ansi-bright-blue"),
+    brightMagenta: color("ansi-bright-magenta"),
+    brightCyan: color("ansi-bright-cyan"),
+    brightWhite: color("text"),
   };
 }
 
@@ -95,35 +67,11 @@ export function TerminalPane({
 }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<XTerm | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
-  const sessionRef = useRef<string | null>(null);
   const visibleRef = useRef(visible);
-  /** The async open path must not focus a pane the user has since left. */
-  const activePaneRef = useRef(active);
   const [status, setStatus] = useState<Status>("starting");
   const [error, setError] = useState<string | null>(null);
   const desktop = isDesktop();
   visibleRef.current = visible;
-  activePaneRef.current = active;
-
-  const refit = useCallback(() => {
-    const host = hostRef.current;
-    const terminal = terminalRef.current;
-    const fit = fitRef.current;
-    if (!host || !terminal || !fit) return;
-    if (!visibleRef.current) return;
-    if (host.clientWidth === 0 || host.clientHeight === 0) return;
-    try {
-      fit.fit();
-    } catch {
-      // The pane can be mid-layout; the next observer tick retries.
-      return;
-    }
-    const sessionId = sessionRef.current;
-    if (sessionId) {
-      void resizeTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
-    }
-  }, []);
 
   useEffect(() => {
     if (!desktop) return;
@@ -131,15 +79,13 @@ export function TerminalPane({
     if (!host) return;
 
     let alive = true;
-    let pending: TerminalDataEvent[] = [];
+    let sessionId: string | null = null;
+    let opening: TerminalDataEvent[] | null = null;
     let frame: number | null = null;
     const unlisteners: Array<() => void> = [];
 
     const terminal = new XTerm({
-      cursorBlink: true,
-      fontFamily:
-        getComputedStyle(document.documentElement).getPropertyValue("--kodo-font-mono").trim() ||
-        "monospace",
+      fontFamily: 'Menlo, Consolas, "Liberation Mono", monospace',
       fontSize: 13,
       lineHeight: 1.25,
       scrollback: 5000,
@@ -147,23 +93,28 @@ export function TerminalPane({
     });
     terminalRef.current = terminal;
     const fit = new FitAddon();
-    fitRef.current = fit;
     terminal.loadAddon(fit);
     terminal.open(host);
+    const refit = () => {
+      if (visibleRef.current && host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
+    };
     refit();
 
-    const scheduleSize = () => {
-      if (frame !== null) cancelAnimationFrame(frame);
+    const observer = new ResizeObserver(() => {
+      if (!visibleRef.current || frame !== null) return;
       frame = requestAnimationFrame(() => {
         frame = null;
         refit();
       });
-    };
-
-    const observer = new ResizeObserver(scheduleSize);
+    });
     observer.observe(host);
+    const resizeSession = ({ cols, rows }: { cols: number; rows: number }) => {
+      if (sessionId && !terminal.options.disableStdin) {
+        void resizeTerminal(sessionId, cols, rows).catch(() => {});
+      }
+    };
+    const resize = terminal.onResize(resizeSession);
     const input = terminal.onData((data) => {
-      const sessionId = sessionRef.current;
       if (!sessionId) return;
       void writeTerminal(sessionId, data).catch((failure) => {
         if (alive) setError(String(failure));
@@ -172,8 +123,8 @@ export function TerminalPane({
 
     void (async () => {
       const offData = await onTerminalData((event) => {
-        if (sessionRef.current === null) pending.push(event);
-        else if (event.id === sessionRef.current) terminal.write(event.data);
+        if (event.id === sessionId) terminal.write(event.data);
+        else opening?.push(event);
       });
       if (!alive) {
         offData();
@@ -182,10 +133,10 @@ export function TerminalPane({
       unlisteners.push(offData);
 
       const offExit = await onTerminalExit((event) => {
-        if (event.id !== sessionRef.current) return;
+        if (event.id !== sessionId) return;
         setStatus("exited");
         terminal.options.disableStdin = true;
-        const code = event.code === null ? "" : ` · ${event.code}`;
+        const code = event.code === null ? "" : `（${event.code}）`;
         terminal.write(`\r\n\x1b[2m[${T.terminal.exited}${code}]\x1b[0m\r\n`);
       });
       if (!alive) {
@@ -194,8 +145,11 @@ export function TerminalPane({
       }
       unlisteners.push(offExit);
 
+      const { cols, rows } = terminal;
+      const buffered: TerminalDataEvent[] = [];
+      opening = buffered;
       try {
-        const id = await openTerminal(cwd || null, terminal.cols, terminal.rows);
+        const id = await openTerminal(cwd || null, cols, rows);
         if (!alive) {
           if (id) void closeTerminal(id);
           return;
@@ -206,20 +160,20 @@ export function TerminalPane({
           terminal.options.disableStdin = true;
           return;
         }
-        sessionRef.current = id;
-        for (const event of pending) {
+        sessionId = id;
+        for (const event of buffered) {
           if (event.id === id) terminal.write(event.data);
         }
-        pending = [];
         setStatus("ready");
-        refit();
-        if (activePaneRef.current) terminal.focus();
+        if (cols !== terminal.cols || rows !== terminal.rows) resizeSession(terminal);
       } catch (failure) {
         if (alive) {
           setStatus("error");
           setError(String(failure));
           terminal.options.disableStdin = true;
         }
+      } finally {
+        opening = null;
       }
     })();
 
@@ -228,27 +182,20 @@ export function TerminalPane({
       observer.disconnect();
       if (frame !== null) cancelAnimationFrame(frame);
       input.dispose();
+      resize.dispose();
       for (const off of unlisteners) off();
       terminal.dispose();
       terminalRef.current = null;
-      fitRef.current = null;
-      const sessionId = sessionRef.current;
-      sessionRef.current = null;
       if (sessionId) void closeTerminal(sessionId);
+      sessionId = null;
+      opening = null;
     };
-  }, [desktop, cwd, refit]);
+  }, [desktop, cwd]);
 
-  // Deferred so a pane that just appeared (tab switch / split) fits its box.
   useEffect(() => {
-    if (!desktop || !visible) return;
-    const frame = requestAnimationFrame(() => {
-      refit();
-      if (active) terminalRef.current?.focus();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [active, desktop, refit, visible]);
+    if (active) terminalRef.current?.focus();
+  }, [active, desktop]);
 
-  // Theme switches repaint the whole app; the canvas needs the new palette.
   useEffect(() => {
     if (!desktop) return;
     const observer = new MutationObserver(() => {
@@ -270,7 +217,7 @@ export function TerminalPane({
 
   return (
     <div
-      className={`terminal-pane${active ? " terminal-pane--active" : ""}`}
+      className={`terminal-pane${active ? " terminal-pane--active" : ""}${closable ? " terminal-pane--split" : ""}`}
       style={style}
       data-testid="terminal-pane"
       data-active={active ? "true" : undefined}
@@ -281,9 +228,11 @@ export function TerminalPane({
         <>
           <div className="terminal-host" ref={hostRef} data-testid="terminal-host" />
           {status === "error" ? (
-            <div className="terminal-pane-status terminal-pane-status--error">{error}</div>
+            <div className="terminal-pane-status terminal-pane-status--error" role="alert">
+              {error}
+            </div>
           ) : status === "starting" ? (
-            <div className="terminal-pane-status">{T.terminal.starting}</div>
+            <div className="terminal-pane-status" role="status">{T.terminal.starting}</div>
           ) : null}
         </>
       ) : (

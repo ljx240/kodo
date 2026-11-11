@@ -87,11 +87,6 @@ export function removePane(node: PaneNode, paneId: string): PaneNode | null {
   return left ?? right;
 }
 
-export function paneLeaves(node: PaneNode): PaneLeaf[] {
-  if (node.kind === "leaf") return [node];
-  return [...paneLeaves(node.children[0]), ...paneLeaves(node.children[1])];
-}
-
 export function firstPaneId(node: PaneNode): string {
   return node.kind === "leaf" ? node.id : firstPaneId(node.children[0]);
 }
