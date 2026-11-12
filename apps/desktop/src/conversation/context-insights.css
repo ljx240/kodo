@@ -1,0 +1,345 @@
+.context-insights {
+  position: fixed;
+  inset: 0;
+  width: min(660px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 0.5px solid var(--kodo-context-border);
+  border-radius: var(--kodo-radius-popover);
+  background: var(--kodo-context-bg);
+  color: var(--kodo-context-fg);
+  font-size: var(--kodo-font-md);
+}
+
+.context-insights[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.context-insights::backdrop {
+  background: var(--kodo-context-scrim);
+}
+
+.context-insights-head,
+.context-insights-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.context-insights-head {
+  flex: none;
+  padding: 10px 16px 10px 20px;
+  border-bottom: 0.5px solid var(--kodo-context-border);
+}
+
+.context-insights :is(h2, h3, p, dl, dd, ul) {
+  margin: 0;
+}
+
+.context-insights :is(h2, h3) {
+  font-size: var(--kodo-font-md);
+  font-weight: 600;
+}
+
+.context-insights-close {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--kodo-context-secondary);
+}
+
+.context-insights-close:hover,
+.context-insights-request:hover,
+.context-insights-modes button:hover {
+  background: var(--kodo-context-hover);
+}
+
+.context-insights button:focus-visible {
+  outline-color: var(--kodo-context-focus);
+  outline-offset: -2px;
+}
+
+.context-insights-body {
+  display: grid;
+  gap: 16px;
+  min-height: 0;
+  padding: 16px 20px 20px;
+  overflow: auto;
+}
+
+.context-insights-overview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 12px 14px;
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-context-surface);
+}
+
+.context-insights-reading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-insights-reading strong {
+  font-size: var(--kodo-font-title);
+  font-weight: 600;
+}
+
+.context-insights-model {
+  display: grid;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
+.context-insights-request-details {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--kodo-context-border);
+  color: var(--kodo-context-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-insights-muted,
+.context-insights-section-head > span,
+.context-insights-axis {
+  color: var(--kodo-context-secondary);
+  font-size: 12px;
+}
+
+.context-insights-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.context-insights-section + .context-insights-section {
+  padding-top: 12px;
+  border-top: 0.5px solid var(--kodo-context-border);
+}
+
+.context-insights-modes {
+  display: flex;
+  justify-self: start;
+  gap: 2px;
+  padding: 2px;
+  border: 0.5px solid var(--kodo-context-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-context-surface);
+}
+
+.context-insights-modes button {
+  padding: 4px 9px;
+  border-radius: calc(var(--kodo-radius-sm) - 2px);
+  color: var(--kodo-context-secondary);
+  font-size: 12px;
+}
+
+.context-insights-modes button[aria-pressed="true"] {
+  background: var(--kodo-context-selected);
+  color: var(--kodo-context-fg);
+}
+
+.context-insights-plot {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px;
+}
+
+.context-insights-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 10px 0 2px;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-insights-requests {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 32px;
+  gap: 4px;
+  height: 94px;
+  padding: 4px;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: var(--kodo-context-surface);
+}
+
+.context-insights-request {
+  display: grid;
+  grid-template-rows: 10px minmax(0, 1fr);
+  justify-items: center;
+  min-height: 0;
+  padding: 2px 5px 4px;
+  border-radius: 4px;
+}
+
+.context-insights-request[aria-pressed="true"] {
+  background: var(--kodo-context-selected);
+}
+
+.context-insights-bar-area {
+  position: relative;
+  grid-row: 2;
+  width: 100%;
+}
+
+.context-insights-bar {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  width: 100%;
+  min-height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--kodo-context-neutral);
+}
+
+.context-insights-request[aria-pressed="true"] .context-insights-bar {
+  background: var(--kodo-context-solid);
+}
+
+.context-insights-plot[data-mode="delta"] .context-insights-bar-area::before {
+  position: absolute;
+  inset-inline: -7px;
+  top: 50%;
+  border-top: 0.5px solid var(--kodo-context-border);
+  content: "";
+}
+
+.context-insights-plot[data-mode="delta"] .context-insights-bar {
+  bottom: 50%;
+}
+
+.context-insights-plot[data-mode="delta"] .context-insights-bar[data-negative="true"] {
+  top: 50%;
+  bottom: auto;
+  border-radius: 0 0 2px 2px;
+}
+
+.context-insights-missing {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  color: var(--kodo-context-secondary);
+  font-size: 12px;
+}
+
+.context-insights-plot[data-mode="delta"] .context-insights-missing {
+  bottom: 50%;
+}
+
+.context-insights-marker {
+  grid-row: 1;
+  align-self: center;
+  width: 5px;
+  height: 5px;
+  background: var(--kodo-context-fg);
+  transform: rotate(45deg);
+}
+
+.context-insights-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.context-insights-composition {
+  display: grid;
+  gap: 6px;
+}
+
+.context-insights-composition > div {
+  display: grid;
+  grid-template-columns: minmax(98px, 24%) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.context-insights-injected dt {
+  padding-inline-start: 10px;
+  color: var(--kodo-context-secondary);
+  font-size: 12px;
+}
+
+.context-insights-composition dd {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8ch, max-content);
+  align-items: center;
+  gap: 8px;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-insights-composition[data-comparing="true"] dd {
+  grid-template-columns: minmax(0, 1fr) minmax(8ch, max-content) minmax(8ch, max-content);
+}
+
+.context-insights-delta-heading {
+  text-align: end;
+}
+
+.context-insights-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 2.5px;
+  background: var(--kodo-context-selected);
+}
+
+.context-insights-track > span {
+  display: block;
+  height: 100%;
+  background: var(--kodo-context-solid);
+}
+
+.context-insights-adjustments {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.context-insights-adjustments li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px 10px;
+}
+
+.context-insights-adjustments li > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+}
+
+.context-insights-adjustments button {
+  padding: 2px 0;
+  color: var(--kodo-context-fg);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.context-insights-empty {
+  padding: 20px 0;
+  text-align: center;
+  color: var(--kodo-context-secondary);
+}

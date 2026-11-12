@@ -17,6 +17,7 @@ import {
   undoTurn,
   validateContextPath,
   type ChangeDto,
+  type ContextBudget,
   type ContextProbe,
   type InterimNote,
   type ItemDto,
@@ -26,6 +27,8 @@ import {
 import { AssistantReply } from "../conversation/AssistantReply";
 import { Composer } from "../conversation/Composer";
 import { ContextCard } from "../conversation/ContextCard";
+import { ContextInsightsDialog } from "../conversation/ContextInsightsDialog";
+import { latestContextBudget } from "../conversation/contextInsights";
 import { FindBar } from "../conversation/FindBar";
 import { KnowledgeBinding } from "../conversation/KnowledgeBinding";
 import { KnowledgeSources } from "../conversation/KnowledgeSources";
@@ -41,7 +44,6 @@ import {
   toReply,
   totals,
   verifyCounts,
-  type ContextBudget,
   type Reply,
   type RunStatus,
 } from "../conversation/trace";
@@ -246,6 +248,8 @@ export function ConversationPage({
   const demoMode = Boolean(demo);
   const openSettings = onOpenSettings ?? navigateSettings;
   const [turns, setTurns] = useState<TurnDto[]>([]);
+  const [turnSessionId, setTurnSessionId] = useState<string | null>(null);
+  const [contextInsightsOpen, setContextInsightsOpen] = useState(false);
   const [createdConversationId, setCreatedConversationId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [running, setRunning] = useState(false);
@@ -416,8 +420,10 @@ export function ConversationPage({
     acceptStreamRef.current = true;
     stickToBottomRef.current = true;
     if (createdConversationId && conversationId === createdConversationId) return;
+    setContextInsightsOpen(false);
     setCreatedConversationId(null);
     if (!conversationId || demoMode) {
+      setTurnSessionId(null);
       setTurns([]);
       setTitle("");
       setRunning(false);
@@ -446,6 +452,7 @@ export function ConversationPage({
         return;
       }
       setTurns(loaded.turns);
+      setTurnSessionId(loaded.id);
       setTitle(loaded.title);
       const last = loaded.turns.length > 0 ? loaded.turns[loaded.turns.length - 1] : null;
       const logFinished = Boolean(last && (last.done || last.stopped || last.error));
@@ -517,6 +524,11 @@ export function ConversationPage({
   }, [turns, probes, projectPath]);
 
   const sessionId = conversationId ?? createdConversationId;
+  const savedBudget = useMemo(
+    () => sessionId === turnSessionId ? latestContextBudget(turns) : null,
+    [sessionId, turnSessionId, turns],
+  );
+  const liveBudget = running && sessionId === turnSessionId ? budget : null;
   /** Persona selector key: same slots as draftKey, so "new" pre-creation. */
   const sessionKey = sessionId ?? "new";
   const personaChain = personaListBySession[sessionKey] ?? [];
@@ -904,6 +916,7 @@ export function ConversationPage({
         sessionIdRef.current = createdId;
         createInFlightRef.current = false;
         setCreatedConversationId(createdId);
+        setTurnSessionId(createdId);
         onConversationCreated?.(createdId);
         if (!opts?.skipTitle) adoptAskTitle(text, createdId);
         // Replay the run events that arrived before the id was known — for a
@@ -1152,7 +1165,8 @@ export function ConversationPage({
 
   // Legacy streams flush only at tool boundaries; bookkeeping and retries are not public updates.
   const flushInterim = (item: ItemDto) => {
-    if (item.kind === "modelCall" || item.kind === "agentMessage") return;
+    if (item.kind === "modelCall" || item.kind === "agentMessage" ||
+        item.kind === "contextBudget" || item.kind === "compaction" || item.kind === "contextTrim") return;
     if (item.kind === "reasoning") {
       if (item.phase === "commentary") textBufRef.current = "";
       return;
@@ -1257,6 +1271,7 @@ export function ConversationPage({
     }
     if (event.type === "itemStarted" || event.type === "itemCompleted") {
       if (event.type === "itemStarted" && event.item.kind === "modelCall") textBufRef.current = "";
+      if (event.type === "itemCompleted" && event.item.kind === "contextBudget") setBudget(null);
       flushInterim(event.item);
     }
     if (event.type === "itemCompleted" && event.item.kind === "agentMessage") {
@@ -1621,7 +1636,8 @@ export function ConversationPage({
         onSelectAgents={(names) => onSelectAgents(sessionKey, names)}
         favoriteAgents={favoriteAgents}
         recentAgents={recentAgents}
-        contextBudget={running ? budget : null}
+        contextBudget={liveBudget?.used ? liveBudget : savedBudget ?? liveBudget}
+        onOpenContextInsights={demoMode ? undefined : () => setContextInsightsOpen(true)}
         agentsVersion={agentsVersion}
       />
     </>
@@ -1633,6 +1649,12 @@ export function ConversationPage({
         stowed ? " main--stowed" : ""
       }`}
     >
+      {contextInsightsOpen && !stowed && (
+        <ContextInsightsDialog
+          turns={sessionId === turnSessionId ? turns : []}
+          onClose={() => setContextInsightsOpen(false)}
+        />
+      )}
       {find.open && (
         <FindBar
           query={find.query}

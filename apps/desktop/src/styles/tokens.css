@@ -39,6 +39,21 @@
   --kodo-success-bg-soft: #e9f7ef;
   --kodo-error-bg: #fef2f2;
 
+  /* Context insight surfaces and data marks use Radix Gray, Teal, Amber and Red. */
+  --kodo-context-bg: #fcfcfc;
+  --kodo-context-surface: #f9f9f9;
+  --kodo-context-hover: #e8e8e8;
+  --kodo-context-selected: #e0e0e0;
+  --kodo-context-border: #d9d9d9;
+  --kodo-context-fg: #202020;
+  --kodo-context-secondary: #646464;
+  --kodo-context-neutral: #8d8d8d;
+  --kodo-context-solid: #12a594;
+  --kodo-context-focus: #53b9ab;
+  --kodo-context-warning: #ffc53d;
+  --kodo-context-danger: #e5484d;
+  --kodo-context-scrim: rgb(0 0 0 / 50%);
+
   /* ── Syntax highlighting (highlight.js, all ≥4.5:1 on every surface) ─── */
   --kodo-syntax-comment: #606060;
   --kodo-syntax-keyword: #b91c2a;
@@ -142,6 +157,16 @@
   --kodo-success-bg: #10251c;
   --kodo-success-bg-soft: #10251c;
   --kodo-error-bg: #2a1515;
+
+  --kodo-context-bg: #111111;
+  --kodo-context-surface: #191919;
+  --kodo-context-hover: #2a2a2a;
+  --kodo-context-selected: #313131;
+  --kodo-context-border: #3a3a3a;
+  --kodo-context-fg: #eeeeee;
+  --kodo-context-secondary: #b4b4b4;
+  --kodo-context-neutral: #6e6e6e;
+  --kodo-context-focus: #207e73;
 
   /* Syntax — provisional GitHub-dark family; V1 ships light only. */
   --kodo-syntax-comment: #a1a1a1;

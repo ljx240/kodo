@@ -2598,8 +2598,9 @@ test("hovering the composer context ring shows the three-line Codex-style toolti
   // Hidden text must never wrap into a stray character beside the model.
   await expect(tooltip).toHaveCount(1);
   await expect(tooltip).toBeHidden();
-  await expect(ring).toHaveAttribute("role", "progressbar");
-  await expect(ring).toHaveAttribute("aria-valuenow", "44");
+  await expect(ring).toHaveRole("button");
+  await expect(ring).toHaveAttribute("aria-haspopup", "dialog");
+  await expect(ring).toHaveAccessibleDescription(/44% 已用/);
   for (const circle of [".composer-context-ring-bg", ".composer-context-ring-fg"]) {
     expect(await ring.locator(circle).evaluate((el) => getComputedStyle(el).stroke)).not.toBe("none");
   }

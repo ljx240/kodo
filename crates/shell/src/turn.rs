@@ -438,13 +438,14 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             freed_pct,
             source_summary,
             covered_messages,
-        } => ItemKind::Reasoning {
-            summary: format!(
-                "compacted {covered_messages} messages into {summarized_into} ({dropped} dropped, {freed_pct}% freed)"
-            ),
-            phase: "compact".into(),
-            diagnostics: Some(source_summary.clone()),
+        } => ItemKind::Compaction {
+            dropped: *dropped,
+            summarized_into: *summarized_into,
+            freed_pct: *freed_pct,
+            source_summary: source_summary.clone(),
+            covered_messages: *covered_messages,
         },
+        Step::ContextTrim(trim) => ItemKind::ContextTrim(*trim),
         Step::Failover {
             from_provider,
             from_model,
@@ -492,12 +493,15 @@ pub fn to_item_kind(step: &Step, denied: bool) -> ItemKind {
             cumulative_chars,
             compacted_count,
             last_model,
-        } => ItemKind::Reasoning {
-            summary: format!(
-                "context {percent}% ({used}/{window}) after {cumulative_chars} chars, {compacted_count} compactions, model={last_model}"
-            ),
-            phase: "budget".into(),
-            diagnostics: None,
+            composition,
+        } => ItemKind::ContextBudget {
+            used: *used,
+            window: *window,
+            percent: *percent,
+            cumulative_chars: *cumulative_chars,
+            compacted_count: *compacted_count,
+            last_model: last_model.clone(),
+            composition: Some(composition.clone()),
         },
     }
 }
@@ -867,6 +871,82 @@ mod tests {
         let failed = steps.iter().find(|item| item.id == 2).expect("item 2");
         assert!(matches!(failed.status, Status::Failed));
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn context_items_reload_without_detailed_capture() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let id = session::open(
+            dir,
+            std::path::Path::new("/tmp/fixture"),
+            "context",
+            1,
+            session::Mode::Code,
+        )
+        .unwrap();
+        session::record_ask(dir, &id, 2, "task").unwrap();
+        let mut logger = TurnLogger::new(dir.to_owned(), id.clone());
+        let composition = session::ContextComposition {
+            system: 100,
+            user_context: 50,
+            assistant: 20,
+            tool_definitions: 30,
+            tool_io: 200,
+            images: 0,
+            injections: Some(session::ContextInjections {
+                observations: 20,
+                memory: 10,
+                knowledge: 0,
+            }),
+        };
+        let trim = session::ContextTrim {
+            cause: session::ContextTrimCause::WindowLimit,
+            dropped: 3,
+        };
+        for step in [
+            Step::Compaction {
+                dropped: 8,
+                summarized_into: 1,
+                freed_pct: 25,
+                source_summary: "fixture".to_owned(),
+                covered_messages: 8,
+            },
+            Step::ContextTrim(trim),
+            Step::ContextBudget {
+                used: 420,
+                window: 2_000,
+                percent: 21,
+                cumulative_chars: 1_600,
+                compacted_count: 1,
+                last_model: "fixture model".to_owned(),
+                composition: composition.clone(),
+            },
+        ] {
+            assert!(matches!(
+                logger.record(&SinkEvent::Finished {
+                    step,
+                    duration_ms: 0,
+                    denied: false
+                }),
+                Logged::Finished(_)
+            ));
+        }
+        logger.finish(TurnOutcome::Complete).unwrap();
+        let loaded = session::load(dir, &id).unwrap();
+        let items = &loaded.turns[0].items;
+        assert!(matches!(
+            &items[0].kind,
+            ItemKind::Compaction { dropped: 8, .. }
+        ));
+        assert!(matches!(
+            &items[1].kind,
+            ItemKind::ContextTrim(saved) if *saved == trim
+        ));
+        assert!(matches!(
+            &items[2].kind,
+            ItemKind::ContextBudget { used: 420, composition: Some(saved), .. } if *saved == composition
+        ));
     }
 
     #[test]

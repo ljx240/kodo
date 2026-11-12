@@ -1,5 +1,6 @@
 import type {
   ChangeDto,
+  ContextBudget,
   DeliveryStatus,
   InterimNote,
   ItemDto,
@@ -11,6 +12,7 @@ import type {
 } from "../api";
 import type { TraceStep } from "../data/types";
 import { T, failureCopy } from "../i18n";
+import { contextUsage } from "./contextInsights";
 
 /**
  * Step labels come from the central copy table; the core stores what happened,
@@ -18,6 +20,9 @@ import { T, failureCopy } from "../i18n";
  */
 const LABELS: Record<ItemDto["kind"], string> = {
   subagent: T.step.subagent,
+  contextBudget: T.contextInsights.occupancy,
+  contextTrim: T.contextInsights.trim,
+  compaction: T.contextInsights.compaction,
   reasoning: T.step.thinking,
   search: T.step.search,
   fileRead: T.step.read,
@@ -65,6 +70,22 @@ export function toStep(item: ItemDto): TraceStep {
         ...base, type: "subagent", phase: "execute", chip: stripAnsi(item.trace.agent),
         detail: stripAnsi(item.trace.task), subagent: item.trace,
         status: item.trace.status === "cancelled" ? "stopped" : item.status,
+      };
+    case "contextBudget":
+      return { ...base, type: "thinking", detail: formatContextBudget(item) };
+    case "contextTrim":
+      return {
+        ...base,
+        type: "thinking",
+        label: T.contextInsights.trimCause[item.trim.cause],
+        detail: T.contextInsights.trimmed(item.trim.dropped),
+      };
+    case "compaction":
+      return {
+        ...base,
+        type: "thinking",
+        detail: T.contextInsights.compacted(item.dropped, item.summarizedInto),
+        diagnostics: item.sourceSummary,
       };
     case "reasoning":
       return {
@@ -674,24 +695,17 @@ export function formatTokens(count: number, status?: string): string {
   return count < 1000 ? String(count) : `${(count / 1000).toFixed(1)}k`;
 }
 
-/** Live context-window telemetry (mirrors Rust `SinkEvent::ContextBudget`). */
-export type ContextBudget = {
-  used: number;
-  window: number;
-  percent: number;
-  cumulativeChars: number;
-  compactedCount: number;
-  lastModel: string;
-};
-
-/** Compact "12.4k / 200k · 6%" string for the Codex-style bar label. */
+/** Compact count and share for the trace. */
 export function formatContextBudget(b: ContextBudget): string {
-  return `${formatTokenPair(b.used)} / ${formatTokenPair(b.window)} · ${b.percent}%`;
+  const { used, percent } = contextUsage(b);
+  if (used === null || percent === null) return T.contextInsights.usageUnavailable;
+  const label = `${formatTokenPair(used)} / ${formatTokenPair(b.window)} (${percent}%)`;
+  return b.used > 0 ? label : `${label} ${T.contextInsights.estimated}`;
 }
 
 /** Single number shrinker (e.g. 12480 → "12.5k"); mirror of Rust's
  *  `shrink_tokens` in `state.rs` so numbers read the same end-to-end. */
-function formatTokenPair(n: number): string {
+export function formatTokenPair(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);

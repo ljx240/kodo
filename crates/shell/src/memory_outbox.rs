@@ -88,6 +88,7 @@ pub fn event_for_item(item: &Item, phase: Phase) -> Option<SafeMemoryEvent> {
         | ItemKind::Thinking { .. }
         | ItemKind::ModelCall { .. }
         | ItemKind::Compaction { .. }
+        | ItemKind::ContextTrim(_)
         | ItemKind::Failover { .. }
         | ItemKind::PlanStep { .. }
         | ItemKind::Permission { .. }

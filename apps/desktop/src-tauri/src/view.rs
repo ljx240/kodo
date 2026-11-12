@@ -388,6 +388,9 @@ pub enum ItemDetail {
         #[serde(rename = "coveredMessages")]
         covered_messages: usize,
     },
+    ContextTrim {
+        trim: session::ContextTrim,
+    },
     /// A failover event. `errorClass` is the bucketed cause.
     Failover {
         #[serde(rename = "fromProvider")]
@@ -445,6 +448,8 @@ pub enum ItemDetail {
         compacted_count: u32,
         #[serde(rename = "lastModel")]
         last_model: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        composition: Option<session::ContextComposition>,
     },
 }
 
@@ -598,6 +603,7 @@ impl From<session::Item> for ItemView {
                 source_summary,
                 covered_messages,
             },
+            session::ItemKind::ContextTrim(trim) => ItemDetail::ContextTrim { trim },
             session::ItemKind::Failover {
                 from_provider,
                 from_model,
@@ -648,6 +654,7 @@ impl From<session::Item> for ItemView {
                 cumulative_chars,
                 compacted_count,
                 last_model,
+                composition,
             } => ItemDetail::ContextBudget {
                 used,
                 window,
@@ -655,6 +662,7 @@ impl From<session::Item> for ItemView {
                 cumulative_chars,
                 compacted_count,
                 last_model,
+                composition,
             },
         };
 
@@ -1455,6 +1463,21 @@ mod tests {
         assert_eq!(value["type"], json!("itemStarted"));
         assert_eq!(value["session"], json!("abc"));
         assert_eq!(value["item"]["kind"], json!("reasoning"));
+
+        let event = RunEvent::ItemCompleted {
+            session: "abc".to_owned(),
+            item: ItemView::from(item(ItemKind::ContextTrim(session::ContextTrim {
+                cause: session::ContextTrimCause::ProviderLimit,
+                dropped: 6,
+            }))),
+        };
+        let value = serde_json::to_value(event).expect("an event should serialize");
+        assert_eq!(value["type"], json!("itemCompleted"));
+        assert_eq!(value["item"]["kind"], json!("contextTrim"));
+        assert_eq!(
+            value["item"]["trim"],
+            json!({ "cause": "providerLimit", "dropped": 6 })
+        );
     }
 
     #[test]

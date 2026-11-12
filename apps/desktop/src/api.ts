@@ -140,6 +140,31 @@ export type SubagentTraceDto = {
   steps: { kind: string; label: string; status: string; output: string; durationMs: number | null }[];
 };
 
+export type ContextComposition = {
+  system: number;
+  userContext: number;
+  assistant: number;
+  toolDefinitions: number;
+  toolIo: number;
+  images: number;
+  injections?: { observations: number; memory: number; knowledge: number };
+};
+
+export type ContextTrim = {
+  cause: "windowLimit" | "providerLimit" | "messageLimit";
+  dropped: number;
+};
+
+export type ContextBudget = {
+  used: number;
+  window: number;
+  percent: number;
+  cumulativeChars: number;
+  compactedCount: number;
+  lastModel: string;
+  composition?: ContextComposition;
+};
+
 export type ItemDto = {
   id: number;
   at: number;
@@ -147,6 +172,16 @@ export type ItemDto = {
   duration: number | null;
 } & (
   | { kind: "subagent"; trace: SubagentTraceDto }
+  | ({ kind: "contextBudget" } & ContextBudget)
+  | { kind: "contextTrim"; trim: ContextTrim }
+  | {
+      kind: "compaction";
+      dropped: number;
+      summarizedInto: number;
+      freedPct: number;
+      sourceSummary: string;
+      coveredMessages: number;
+    }
   | {
       kind: "reasoning";
       summary: string;
@@ -298,16 +333,7 @@ type RunEventPayload =
       toProvider: string;
       toModel: string;
     }
-  | {
-      type: "contextBudget";
-      session: string;
-      used: number;
-      window: number;
-      percent: number;
-      cumulativeChars: number;
-      compactedCount: number;
-      lastModel: string;
-    }
+  | ({ type: "contextBudget"; session: string } & ContextBudget)
   | {
       type: "compacted";
       session: string;

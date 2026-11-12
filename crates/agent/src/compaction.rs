@@ -418,6 +418,7 @@ mod tests {
         ProviderMessage {
             role,
             content: vec![provider::ContentBlock::Text { text: text.into() }],
+            context_text: provider::ContextText::Other,
         }
     }
 
@@ -710,6 +711,7 @@ mod tests {
             msg(provider::MessageRole::User, "看一下这张图"),
             ProviderMessage {
                 role: provider::MessageRole::User,
+                context_text: provider::ContextText::Other,
                 content: vec![provider::ContentBlock::Image {
                     media_type: "image/png".into(),
                     data_base64: base64,
@@ -787,6 +789,7 @@ mod tests {
             msg(provider::MessageRole::System, "sys"),
             ProviderMessage {
                 role: provider::MessageRole::Assistant,
+                context_text: provider::ContextText::Other,
                 content: vec![provider::ContentBlock::ToolCall {
                     id: "c1".into(),
                     name: "run_command".into(),
@@ -795,6 +798,7 @@ mod tests {
             },
             ProviderMessage {
                 role: provider::MessageRole::Tool,
+                context_text: provider::ContextText::Other,
                 content: vec![provider::ContentBlock::ToolResult {
                     call_id: "c1".into(),
                     content: "a.rs\nb.rs".into(),

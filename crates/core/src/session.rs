@@ -165,6 +165,44 @@ pub struct SubagentTraceStep {
     pub duration_ms: Option<u64>,
 }
 
+/// Estimated input tokens by part of a model request.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextComposition {
+    pub system: u32,
+    pub user_context: u32,
+    pub assistant: u32,
+    pub tool_definitions: u32,
+    pub tool_io: u32,
+    pub images: u32,
+    /// Parts of user_context. Absent on snapshots from before attribution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub injections: Option<ContextInjections>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextInjections {
+    pub observations: u32,
+    pub memory: u32,
+    pub knowledge: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextTrim {
+    pub cause: ContextTrimCause,
+    pub dropped: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextTrimCause {
+    WindowLimit,
+    ProviderLimit,
+    MessageLimit,
+}
+
 /// The per-kind payload. Each kind renders differently, so each carries only
 /// what its own renderer needs — there is no generic `tool { name, state }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +307,7 @@ pub enum ItemKind {
         source_summary: String,
         covered_messages: usize,
     },
+    ContextTrim(ContextTrim),
     /// A failover event. `error_class` is the bucketed cause (`rate_limit` /
     /// `server_error` / `timeout` / `parse` / `unknown`).
     Failover {
@@ -314,6 +353,7 @@ pub enum ItemKind {
         cumulative_chars: u64,
         compacted_count: u32,
         last_model: String,
+        composition: Option<ContextComposition>,
     },
 }
 
@@ -969,6 +1009,9 @@ fn encode_item(item: &Item) -> Vec<String> {
             fields.push(source_summary.clone());
             fields.push(covered_messages.to_string());
         }
+        ItemKind::ContextTrim(trim) => {
+            fields.push(serde_json::to_string(trim).expect("context trim is serializable"));
+        }
         ItemKind::Failover {
             from_provider,
             from_model,
@@ -1026,6 +1069,7 @@ fn encode_item(item: &Item) -> Vec<String> {
             cumulative_chars,
             compacted_count,
             last_model,
+            composition,
         } => {
             fields.push(used.to_string());
             fields.push(window.to_string());
@@ -1033,6 +1077,12 @@ fn encode_item(item: &Item) -> Vec<String> {
             fields.push(cumulative_chars.to_string());
             fields.push(compacted_count.to_string());
             fields.push(last_model.clone());
+            if let Some(composition) = composition {
+                fields.push(
+                    serde_json::to_string(composition)
+                        .expect("context composition is serializable"),
+                );
+            }
         }
     }
 
@@ -1212,6 +1262,7 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
                 covered_messages: covered_messages.parse().unwrap_or(0),
             }
         }
+        ("contextTrim", [trim]) => ItemKind::ContextTrim(serde_json::from_str(trim).ok()?),
         (
             "failover",
             [from_provider, from_model, error_class, error, to_provider, to_model, retry_index],
@@ -1253,7 +1304,7 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
         },
         (
             "contextBudget",
-            [used, window, percent, cumulative_chars, compacted_count, last_model],
+            [used, window, percent, cumulative_chars, compacted_count, last_model, extra @ ..],
         ) => ItemKind::ContextBudget {
             used: used.parse().unwrap_or(0),
             window: window.parse().unwrap_or(0),
@@ -1261,6 +1312,11 @@ fn decode_item(rest: &[String], status: Status) -> Option<Item> {
             cumulative_chars: cumulative_chars.parse().unwrap_or(0),
             compacted_count: compacted_count.parse().unwrap_or(0),
             last_model: last_model.clone(),
+            composition: match extra {
+                [] => None,
+                [composition] => Some(serde_json::from_str(composition).ok()?),
+                _ => return None,
+            },
         },
         _ => return None,
     };
@@ -1286,6 +1342,7 @@ fn kind_name(kind: &ItemKind) -> &'static str {
         ItemKind::AgentMessage { .. } => "agentMessage",
         ItemKind::Thinking { .. } => "thinking",
         ItemKind::Compaction { .. } => "compaction",
+        ItemKind::ContextTrim(_) => "contextTrim",
         ItemKind::Failover { .. } => "failover",
         ItemKind::PlanStep { .. } => "planStep",
         ItemKind::Permission { .. } => "permission",
@@ -2423,34 +2480,40 @@ mod tests {
 
     #[test]
     fn context_budget_round_trips() {
-        let decoded = round_trip(
-            "sess-context-budget",
-            ItemKind::ContextBudget {
+        let composition = ContextComposition {
+            system: 1_000,
+            user_context: 2_000,
+            assistant: 3_000,
+            tool_definitions: 4_000,
+            tool_io: 5_000,
+            images: 1_600,
+            injections: None,
+        };
+        for (id, composition) in [
+            ("sess-context-budget", None),
+            ("sess-context-insights", Some(composition.clone())),
+            (
+                "sess-context-attribution",
+                Some(ContextComposition {
+                    injections: Some(ContextInjections {
+                        observations: 500,
+                        memory: 250,
+                        knowledge: 200,
+                    }),
+                    ..composition
+                }),
+            ),
+        ] {
+            let kind = ItemKind::ContextBudget {
                 used: 168_000,
                 window: 200_000,
                 percent: 84,
                 cumulative_chars: 412_080,
                 compacted_count: 2,
                 last_model: "claude-sonnet-5".to_owned(),
-            },
-        );
-        match decoded.kind {
-            ItemKind::ContextBudget {
-                used,
-                window,
-                percent,
-                cumulative_chars,
-                compacted_count,
-                last_model,
-            } => {
-                assert_eq!(used, 168_000);
-                assert_eq!(window, 200_000);
-                assert_eq!(percent, 84);
-                assert_eq!(cumulative_chars, 412_080);
-                assert_eq!(compacted_count, 2);
-                assert_eq!(last_model, "claude-sonnet-5");
-            }
-            other => panic!("unexpected kind: {other:?}"),
+                composition,
+            };
+            assert_eq!(round_trip(id, kind.clone()).kind, kind);
         }
     }
     #[test]

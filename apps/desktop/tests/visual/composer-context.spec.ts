@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { ItemDto, TurnDto } from "../../src/api";
 import { emit, project, sessionRef, stubShell } from "./shell";
 
 /** Open the + menu and trigger "添加照片和文件" (OS / stubbed filesystem picker). */
@@ -595,4 +596,205 @@ test("vision-skip notice cancel keeps the draft in the composer", async ({ page 
     window.sessionStorage.getItem("kodo:vision-img-skip-acked"),
   );
   expect(acked).not.toBe("1");
+});
+
+const itemEnvelope = {
+  id: 1,
+  at: 1_700_000_000,
+  status: "done",
+  duration: 0,
+} as const;
+
+const requestItem = {
+  ...itemEnvelope,
+  kind: "contextBudget",
+  used: 24_000,
+  window: 40_000,
+  percent: 60,
+  cumulativeChars: 64_000,
+  compactedCount: 0,
+  lastModel: "Fixture model",
+  composition: { system: 4_000, userContext: 8_000, assistant: 1_000, toolDefinitions: 2_000, toolIo: 1_000, images: 0 },
+} satisfies ItemDto;
+
+test("上下文洞察回看当前会话的新旧请求和压缩记录", async ({ page }, testInfo) => {
+  const turns: TurnDto[] = [
+    {
+      ask: "读取历史",
+      context: [],
+      done: true,
+      stopped: false,
+      error: null,
+      items: [
+        { ...itemEnvelope, kind: "reasoning", phase: "budget", summary: "context 20% (8000/40000) after 32000 chars, 0 compactions, model=Older model" },
+        { ...itemEnvelope, id: 2, kind: "reasoning", phase: "compact", summary: "compacted 8 messages into 1 (8 dropped, 28% freed)", diagnostics: "fixture compaction body" },
+        { ...itemEnvelope, id: 3, kind: "contextTrim", trim: { cause: "messageLimit", dropped: 4 } },
+      ],
+    },
+    {
+      ask: "读取新请求",
+      context: [],
+      done: true,
+      stopped: false,
+      error: null,
+      items: [requestItem],
+    },
+  ];
+  const first = { id: "s1", project: "/tmp/ws/alpha", title: "修复路由", at: 1_700_000_000, archived: false, turns };
+  const second = { ...first, id: "s2", title: "另一个会话", turns: [] };
+  await stubShell(page, liveCore({
+    workspace: {
+      projects: [project("/tmp/ws/alpha", "alpha")],
+      sessions: [sessionRef("s1", first.project, first.title), sessionRef("s2", second.project, second.title)],
+    },
+    sessions: { s1: first, s2: second },
+  }));
+  await page.goto("/");
+  await page.locator(".tree-project-main").click();
+  const thread = page.locator(".tree-conversation", { hasText: first.title });
+  await thread.click();
+
+  const ring = page.getByRole("button", { name: "上下文洞察" });
+  const dialog = page.getByRole("dialog", { name: "上下文洞察" });
+  await expect(ring).toHaveAttribute("data-percent", "60");
+  await ring.click();
+  await expect(dialog.getByRole("region", { name: "窗口占用" })).toContainText("24,000 / 40,000 tokens");
+  await expect(dialog).toContainText("估算 16,000 tokens");
+  await expect(dialog).toContainText("8 条消息合并为 1 条摘要");
+  await expect(dialog).not.toContainText("fixture compaction body");
+  const adjustments = dialog.getByRole("region", { name: "上下文调整" });
+  await expect(adjustments).toContainText("消息上限裁剪");
+  await expect(adjustments).toContainText("移除 4 条较早消息");
+  await expect(adjustments.getByRole("button")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("context-insights-light.png") });
+
+  const historical = dialog.getByRole("button", { name: "第 1 轮 / 第 1 次请求，20%" });
+  await historical.click();
+  await expect(historical).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog).toContainText("Older model");
+  await expect(dialog).toContainText("此请求未记录上下文组成");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(ring).toBeFocused();
+
+  await page.locator(".tree-conversation", { hasText: second.title }).click();
+  const input = page.getByTestId("composer-input");
+  await input.fill("/context");
+  await expect(page.getByRole("option", { name: /上下文洞察/ })).toBeVisible();
+  await input.press("Enter");
+  await expect(dialog).toContainText("此会话暂无上下文记录");
+  await page.keyboard.press("Escape");
+  await expect(input).toBeFocused();
+  await expect(input).toHaveValue("");
+  expect(await page.evaluate(() => (window as unknown as { __sendLog: unknown[] }).__sendLog)).toHaveLength(0);
+
+  await thread.click();
+  await ring.click();
+  await expect(dialog.getByRole("button", { name: "第 2 轮 / 第 1 次请求，60%" })).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.setViewportSize({ width: 430, height: 620 });
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("context-insights-dark.png") });
+});
+
+test("上下文洞察实时比较请求，并从裁剪记录定位历史读数", async ({ page }, testInfo) => {
+  await stubShell(page, liveCore());
+  await openLiveConversation(page);
+  const input = page.getByTestId("composer-input");
+  await input.fill("核对运行中的上下文");
+  await input.press("Enter");
+  await expect(page.locator(".composer-send--stop")).toBeVisible();
+  await input.fill("/context ");
+  await input.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "上下文洞察" });
+  await expect(dialog).toContainText("此会话暂无上下文记录");
+
+  await emit(page, { type: "itemCompleted", session: "s1", item: requestItem });
+  await emit(page, {
+    type: "itemCompleted",
+    session: "s1",
+    item: { id: 2, at: requestItem.at, duration: 0, status: "done", kind: "compaction",
+      dropped: 10, coveredMessages: 10, summarizedInto: 1, freedPct: 33, sourceSummary: "fixture" },
+  });
+  await emit(page, {
+    type: "itemCompleted", session: "s1",
+    item: { ...requestItem, id: 3, used: 0, percent: 0, compactedCount: 1 },
+  });
+  const overview = dialog.getByRole("region", { name: "窗口占用" });
+  await expect(overview).toContainText("16,000 / 40,000 tokens");
+  await expect(overview).toContainText("估算");
+  await expect(dialog).toContainText("10 条消息合并为 1 条摘要");
+  await expect(dialog.getByRole("button", { name: "第 1 轮 / 第 2 次请求，40%" })).toHaveAttribute("aria-pressed", "true");
+  await dialog.getByRole("button", { name: "第 1 轮 / 第 1 次请求，60%" }).click();
+  await emit(page, {
+    type: "itemCompleted", session: "s1",
+    item: { ...requestItem, id: 4, used: 20_000, percent: 50, compactedCount: 1 },
+  });
+  await expect(dialog).toContainText("3 次请求");
+  await expect(overview).toContainText("24,000 / 40,000 tokens");
+
+  const attributed = {
+    ...requestItem,
+    composition: {
+      ...requestItem.composition,
+      injections: { observations: 300, memory: 600, knowledge: 1_200 },
+    },
+  };
+  const emitItem = (item: ItemDto) => emit(page, { type: "itemCompleted", session: "s1", item });
+  await emitItem({
+    ...itemEnvelope, id: 5, kind: "modelCall", model: requestItem.lastModel,
+    inputTokens: 26_000, outputTokens: 1_024, duration: 1_280,
+  });
+  await emitItem({ ...attributed, id: 6, used: 26_000, percent: 65 });
+  await emitItem({ ...itemEnvelope, id: 7, kind: "contextTrim", trim: { cause: "providerLimit", dropped: 6 } });
+  const trimmed = {
+    ...attributed,
+    used: 16_000,
+    percent: 40,
+    composition: {
+      ...attributed.composition,
+      userContext: 6_000,
+      injections: { observations: 300, memory: 200, knowledge: 0 },
+    },
+  };
+  await emitItem({ ...trimmed, id: 8 });
+  await emitItem({ ...trimmed, id: 9 });
+  await emitItem({ ...itemEnvelope, id: 10, kind: "reasoning", phase: "failover", summary: "fixture failover" });
+  await emitItem({ ...trimmed, id: 11, used: 20_000, percent: 50 });
+
+  await dialog.getByRole("button", { name: "输入变化", exact: true }).click();
+  const trend = dialog.getByRole("region", { name: "请求趋势" });
+  await expect(trend.getByRole("button", { name: "第 1 轮 / 第 1 次请求，暂无可比读数" })).toHaveAttribute("aria-pressed", "true");
+  await expect(trend.getByRole("button", { name: "第 1 轮 / 第 2 次请求，暂无可比读数" })).toBeVisible();
+  await expect(trend.getByRole("button", { name: "第 1 轮 / 第 6 次请求，0 tokens" })).toBeVisible();
+  await expect(trend.getByRole("button", { name: "第 1 轮 / 第 7 次请求，暂无可比读数" })).toBeVisible();
+  await trend.getByRole("button", { name: "第 1 轮 / 第 4 次请求，+6,000 tokens" }).click();
+  await expect(overview).toContainText("输出 1,024 tokens");
+  await expect(overview).toContainText("耗时 1.3s");
+  const composition = dialog.getByRole("region", { name: "上下文组成" });
+  await expect(composition).toContainText("估算 16,000 tokens");
+  await expect(composition.getByText("知识库注入")).toBeVisible();
+
+  const adjustments = dialog.getByRole("region", { name: "上下文调整" });
+  await expect(adjustments).toContainText("超限重试裁剪");
+  await expect(adjustments).toContainText("移除 6 条较早消息");
+  await adjustments.getByRole("button", { name: "第 1 轮 / 第 5 次请求", exact: true }).click();
+  const reduced = trend.getByRole("button", { name: "第 1 轮 / 第 5 次请求，−10,000 tokens" });
+  await expect(reduced).toHaveAttribute("aria-pressed", "true");
+  await expect(reduced).toHaveAccessibleDescription("此前有上下文调整");
+  await expect(overview).toContainText("输入变化 −10,000 tokens");
+  await expect(composition).toContainText("−400");
+  await expect(composition).toContainText("−1,200");
+  await expect(overview).not.toContainText("输出");
+  await page.screenshot({ path: testInfo.outputPath("context-insights-delta.png") });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.setViewportSize({ width: 430, height: 620 });
+  const body = dialog.locator(".context-insights-body");
+  expect(await body.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("context-insights-delta-dark.png") });
+
+  await emit(page, { type: "stopped", session: "s1" });
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "上下文洞察" })).toHaveAttribute("data-percent", "50");
+  expect(await page.evaluate(() => (window as unknown as { __sendLog: unknown[] }).__sendLog)).toHaveLength(1);
 });

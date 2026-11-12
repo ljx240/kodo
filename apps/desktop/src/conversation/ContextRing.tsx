@@ -1,32 +1,25 @@
-import type { CSSProperties } from "react";
+import { useId, type CSSProperties } from "react";
+import type { ContextBudget } from "../api";
 import { T } from "../i18n";
-import type { ContextBudget } from "./trace";
+import { contextUsage } from "./contextInsights";
+import { formatTokenPair } from "./trace";
 
 /**
- * Codex-style circular progress ring for the live context window.
- *
- * Rendered next to the model picker in the composer so the user sees the
- * window fill up while a turn is in flight. Three stacked layers:
- *
- * - background arc (`--kodo-border-strong`): full circle, fixed
- * - foreground arc: length proportional to `percent`, color band:
- *   muted < 60% < warn < 80% < danger (matches `reply-context-bar` palette)
- * - hover popover (role=tooltip): three lines, see `T.budget.ringTooltipBody`.
- *   The dark popover sits above the control and stays out of the composer
- *   layout until hover or keyboard focus.
- *
- * `null` when `budget` is missing so the ring doesn't hold stale state
- * across turns.
+ * The most recent request's window usage and entry to the session dashboard.
  */
 export function ContextRing({
   budget,
+  onOpen,
   size = 14,
 }: {
   budget: ContextBudget | null;
+  onOpen: () => void;
   size?: number;
 }) {
+  const tooltipId = useId();
   if (!budget) return null;
-  const percent = Math.max(0, Math.min(100, budget.percent));
+  const usage = contextUsage(budget);
+  const percent = usage.percent ?? 0;
   const stroke = 1.6;
   const r = (size - stroke) / 2;
   const circumference = 2 * Math.PI * r;
@@ -40,29 +33,34 @@ export function ContextRing({
     display: "inline-block",
     color: `var(--kodo-context-ring-${tone})`,
   };
-  const usedLabel = formatTokenLabel(budget.used);
-  const windowLabel = formatTokenLabel(budget.window);
-  const tooltipBody = T.budget.ringTooltipBody(percent, usedLabel, windowLabel);
+  const tooltipLines: string[] = [T.budget.ringTitle];
+  if (usage.used === null) {
+    tooltipLines.push(T.contextInsights.usageUnavailable);
+  } else {
+    tooltipLines.push(
+      T.budget.ringPercent(percent, 100 - percent),
+      T.budget.ringTokens(formatTokenPair(usage.used), formatTokenPair(budget.window)),
+    );
+    if (budget.used === 0) tooltipLines.push(T.contextInsights.estimated);
+  }
   return (
-    <span
+    <button
+      type="button"
       className="composer-context-ring"
       data-testid="composer-context-ring"
       data-percent={percent}
       data-tone={tone}
       style={containerStyle}
-      tabIndex={0}
-      role="progressbar"
-      aria-label={T.budget.ringTitle}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={percent}
-      aria-valuetext={tooltipBody.replace(/\n/g, " · ")}
+      aria-label={T.contextInsights.title}
+      aria-haspopup="dialog"
+      aria-describedby={tooltipId}
+      onClick={onOpen}
     >
       <svg
         width={size}
         height={size}
         viewBox={`0 0 ${size} ${size}`}
-        role="presentation"
+        aria-hidden="true"
       >
         <circle
           className="composer-context-ring-bg"
@@ -86,23 +84,16 @@ export function ContextRing({
       </svg>
       <span
         className="composer-context-ring-tooltip"
+        id={tooltipId}
         role="tooltip"
         data-testid="composer-context-ring-tooltip"
       >
-        {tooltipBody.split("\n").map((line, i) => (
-          <span key={i} className="composer-context-ring-tooltip-line">
+        {tooltipLines.map((line) => (
+          <span key={line} className="composer-context-ring-tooltip-line">
             {line}
           </span>
         ))}
       </span>
-    </span>
+    </button>
   );
-}
-
-/** Mirror of `formatTokenPair` in `./trace.ts` so the tooltip numbers read
- *  identically to the in-reply bar (e.g. 12480 → "12.5k", 258000 → "258.0k"). */
-function formatTokenLabel(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
 }

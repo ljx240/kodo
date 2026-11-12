@@ -63,6 +63,7 @@ pub fn step_kind_label(kind: StepKind) -> &'static str {
         StepKind::WebSearch => "web search",
         StepKind::Thinking => "thinking",
         StepKind::Compaction => "compact history",
+        StepKind::ContextTrim => "trim context",
         StepKind::Failover => "failover",
         StepKind::PlanStep => "plan step",
         StepKind::Permission => "permission",

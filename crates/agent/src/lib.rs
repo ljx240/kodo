@@ -64,6 +64,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 /// mirrors the data-URL path used by `probe_context_file` on the desktop
 /// side, so the bytes never escape the request body.
 use base64::Engine as _;
+use kodo_core::session::{ContextComposition, ContextInjections, ContextTrim, ContextTrimCause};
 use skill::{SkillRegistry, SkillSpec};
 use state::{AgentEvent, AgentMachine, AgentState, Budget, FailReason, Transition};
 use tools::{
@@ -229,6 +230,7 @@ pub enum StepKind {
     /// `Approve` callback defaults them to Allow.
     Thinking,
     Compaction,
+    ContextTrim,
     Failover,
     PlanStep,
     Permission,
@@ -334,6 +336,7 @@ pub enum Step {
         source_summary: String,
         covered_messages: usize,
     },
+    ContextTrim(ContextTrim),
     /// A failover event. `error_class` is the bucketed cause (`rate_limit` /
     /// `server_error` / `timeout` / `parse` / `unknown`).
     Failover {
@@ -372,6 +375,7 @@ pub enum Step {
         cumulative_chars: u64,
         compacted_count: u32,
         last_model: String,
+        composition: ContextComposition,
     },
 }
 
@@ -394,6 +398,7 @@ impl Step {
             Step::AgentMessage { .. } => StepKind::AgentMessage,
             Step::Thinking { .. } => StepKind::Thinking,
             Step::Compaction { .. } => StepKind::Compaction,
+            Step::ContextTrim(_) => StepKind::ContextTrim,
             Step::Failover { .. } => StepKind::Failover,
             Step::PlanStep { .. } => StepKind::PlanStep,
             Step::Permission { .. } => StepKind::Permission,
@@ -2578,6 +2583,8 @@ struct ModelAttempt {
     /// surface usage; the caller still charges the budget (zero is fine —
     /// it preserves the "no signal" state for the UI).
     input_tokens: u32,
+    cumulative_chars: u64,
+    composition: ContextComposition,
 }
 
 /// Why one model call failed. The class matters: an oversized request is the
@@ -2832,6 +2839,13 @@ fn call_model(
             ) {
                 return Ok(None);
             }
+            let served_caps = served.capabilities();
+            let sent_tools = if served_caps.streaming || served_caps.native_tools {
+                tool_list
+            } else {
+                &[]
+            };
+            let (cumulative_chars, composition) = measure_context(history, sent_tools);
             Ok(Some(ModelAttempt {
                 provider: served,
                 text,
@@ -2839,6 +2853,8 @@ fn call_model(
                 finish_reason: response.finish_reason,
                 saw_reasoning,
                 input_tokens: input,
+                cumulative_chars,
+                composition,
             }))
         }
         Err(error) => {
@@ -2900,7 +2916,12 @@ fn invocations_from_native(
 }
 
 /// Append tool results as provider-native tool_result messages when possible.
-fn push_tool_results(history: &mut Vec<ProviderMessage>, results: &[ToolResult], native: bool) {
+fn push_tool_results(
+    history: &mut Vec<ProviderMessage>,
+    results: &[ToolResult],
+    native: bool,
+    emit: &mut Emit,
+) {
     if native {
         for result in results {
             let body = if result.ok {
@@ -2938,10 +2959,13 @@ fn push_tool_results(history: &mut Vec<ProviderMessage>, results: &[ToolResult],
             ));
         }
     } else {
-        history.push(ProviderMessage::user(format_observations(results)));
+        let mut message = ProviderMessage::user(format_observations(results));
+        message.context_text = provider::ContextText::ToolResults;
+        history.push(message);
     }
     // Context budget: never unbounded append of complete history.
-    trim_history(history);
+    let dropped = trim_history(history);
+    record_context_trim(ContextTrimCause::MessageLimit, dropped, emit);
 }
 
 fn initial_history(
@@ -3016,6 +3040,13 @@ fn initial_history(
         ),
     };
     let mut user_msg = ProviderMessage::user(user_body);
+    user_msg.context_text = provider::ContextText::Injections {
+        observations: observations.chars().count() as u64,
+        memory: memory_block.chars().count() as u64,
+        knowledge: knowledge_block
+            .as_ref()
+            .map_or(0, |block| block.chars().count() as u64),
+    };
     // Pin inlined image attachments onto the first user message as real
     // multimodal blocks. The text body still leads — the model sees the
     // path/observation context first, then the image bytes — so the
@@ -3072,67 +3103,110 @@ fn format_memory_block(pack: &kodo_memory::MemoryPack) -> String {
     out
 }
 
-/// Approximate size of the agent history in chars (UTF-8 char count). Used
-/// only for the `cumulative_chars` field on `SinkEvent::ContextBudget` so
-/// the UI bar can show "12.4k chars" alongside the token figure when the
-/// provider does not report usage. Cheap: O(n) over `history`.
-fn history_chars(history: &[ProviderMessage]) -> u64 {
-    let mut total: u64 = 0;
-    for m in history {
-        for block in &m.content {
-            match block {
-                provider::ContentBlock::Text { text } => {
-                    total = total.saturating_add(text.chars().count() as u64);
-                }
-                provider::ContentBlock::ToolCall {
-                    name, arguments, ..
-                } => {
-                    total = total.saturating_add(name.chars().count() as u64);
-                    total = total.saturating_add(arguments.to_string().chars().count() as u64);
-                }
-                provider::ContentBlock::ToolResult { content, .. } => {
-                    total = total.saturating_add(content.chars().count() as u64);
-                }
-                // Image blocks contribute their base64 payload to the
-                // budget — the wire size is what counts against the
-                // context window. Media-type label adds a constant ~10
-                // chars per image and is negligible.
-                provider::ContentBlock::Image { data_base64, .. } => {
-                    total = total.saturating_add(data_base64.chars().count() as u64);
-                    total = total.saturating_add(16); // media_type label overhead
-                }
-            }
-        }
+/// The existing context estimate charges a fixed allowance per image.
+const IMAGE_ESTIMATED_CHARS: u64 = 1_600 * state::ESTIMATED_CHARS_PER_TOKEN;
+
+fn block_chars(block: &ContentBlock) -> u64 {
+    match block {
+        ContentBlock::Text { text } => text.chars().count() as u64,
+        ContentBlock::ToolCall {
+            name, arguments, ..
+        } => (name.chars().count() + arguments.to_string().chars().count()) as u64,
+        ContentBlock::ToolResult { content, .. } => content.chars().count() as u64,
+        ContentBlock::Image { data_base64, .. } => data_base64.len() as u64 + 16,
     }
-    total
 }
 
-/// Char volume used to *estimate* the tokens of a request.
-///
-/// [`history_chars`] reports the wire volume, which is what the context bar
-/// shows. An image is not charged that way by a provider: it costs a fixed
-/// allowance regardless of how many base64 chars it carries. Charging the
-/// payload would make every screenshot look like a context overflow, so the
-/// estimate swaps image bytes for that allowance and reuses the text count
-/// verbatim — the two figures cannot drift apart for everything else.
+#[cfg(test)]
+fn history_chars(history: &[ProviderMessage]) -> u64 {
+    history
+        .iter()
+        .flat_map(|message| &message.content)
+        .map(block_chars)
+        .sum()
+}
+
 fn history_estimate_chars(history: &[ProviderMessage]) -> u64 {
-    /// Tokens a provider charges for one image, times the chars-per-token
-    /// ratio the estimate uses.
-    const IMAGE_ESTIMATED_CHARS: u64 = 1_600 * crate::state::ESTIMATED_CHARS_PER_TOKEN;
-    let mut image_payload = 0u64;
-    let mut image_count = 0u64;
+    history
+        .iter()
+        .flat_map(|message| &message.content)
+        .map(|block| match block {
+            ContentBlock::Image { .. } => IMAGE_ESTIMATED_CHARS,
+            _ => block_chars(block),
+        })
+        .sum()
+}
+
+/// Account for the submitted input without keeping any of its text or payloads.
+fn measure_context(history: &[ProviderMessage], tools: &[ToolSchema]) -> (u64, ContextComposition) {
+    use provider::{ContextText, MessageRole};
+    let framing_chars =
+        u64::from(state::ESTIMATED_TOKENS_PER_MESSAGE) * state::ESTIMATED_CHARS_PER_TOKEN;
+    let mut cumulative_chars = 0;
+    let mut system = 0;
+    let mut user_context = 0;
+    let mut observation_chars = 0;
+    let mut memory_chars = 0;
+    let mut knowledge_chars = 0;
+    let mut assistant = 0;
+    let mut tool_io = 0;
+    let mut images = 0;
     for message in history {
+        let mut text_chars = framing_chars;
         for block in &message.content {
-            if let provider::ContentBlock::Image { data_base64, .. } = block {
-                image_payload =
-                    image_payload.saturating_add(data_base64.chars().count() as u64 + 16);
-                image_count += 1;
+            let chars = block_chars(block);
+            cumulative_chars += chars;
+            match block {
+                ContentBlock::Text { .. } => text_chars += chars,
+                ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => tool_io += chars,
+                ContentBlock::Image { .. } => images += IMAGE_ESTIMATED_CHARS,
             }
         }
+        match (message.role, message.context_text) {
+            (
+                MessageRole::User,
+                ContextText::Injections {
+                    observations,
+                    memory,
+                    knowledge,
+                },
+            ) => {
+                user_context += text_chars;
+                observation_chars += observations;
+                memory_chars += memory;
+                knowledge_chars += knowledge;
+            }
+            (MessageRole::User, ContextText::ToolResults) | (MessageRole::Tool, _) => {
+                tool_io += text_chars;
+            }
+            (MessageRole::User, _) => user_context += text_chars,
+            (MessageRole::System, _) => system += text_chars,
+            (MessageRole::Assistant, _) => assistant += text_chars,
+        }
     }
-    history_chars(history)
-        .saturating_sub(image_payload)
-        .saturating_add(image_count.saturating_mul(IMAGE_ESTIMATED_CHARS))
+    let definition_chars = tools
+        .iter()
+        .map(|tool| {
+            (tool.name.chars().count()
+                + tool.description.chars().count()
+                + tool.parameters.to_string().chars().count()) as u64
+        })
+        .sum();
+    let estimate = |chars| state::estimate_input_tokens(chars, 0);
+    let composition = ContextComposition {
+        system: estimate(system),
+        user_context: estimate(user_context),
+        assistant: estimate(assistant),
+        tool_definitions: state::estimate_input_tokens(definition_chars, tools.len()),
+        tool_io: estimate(tool_io),
+        images: estimate(images),
+        injections: Some(ContextInjections {
+            observations: estimate(observation_chars),
+            memory: estimate(memory_chars),
+            knowledge: estimate(knowledge_chars),
+        }),
+    };
+    (cumulative_chars, composition)
 }
 
 /// Build a `MemoryQuery` from a `RunRequest` + project root. Scope is
@@ -3165,9 +3239,9 @@ fn note_changed_path(request: &RunRequest, project: &Path, path: &str) {
 }
 
 /// Cap history size: keep system + last N messages; mark dropped count.
-fn trim_history(history: &mut Vec<ProviderMessage>) {
+fn trim_history(history: &mut Vec<ProviderMessage>) -> usize {
     if history.len() <= crate::context::MAX_HISTORY_MESSAGES {
-        return;
+        return 0;
     }
     // Preserve leading system messages.
     let mut system_end = 0;
@@ -3180,7 +3254,7 @@ fn trim_history(history: &mut Vec<ProviderMessage>) {
     }
     let keep_tail = crate::context::MAX_HISTORY_MESSAGES.saturating_sub(system_end);
     if history.len() <= system_end + keep_tail {
-        return;
+        return 0;
     }
     let drop_from = history.len() - keep_tail;
     // Never drop system prefix.
@@ -3195,6 +3269,18 @@ fn trim_history(history: &mut Vec<ProviderMessage>) {
     rebuilt.push(marker);
     rebuilt.extend(new_hist);
     *history = rebuilt;
+    dropped
+}
+
+fn record_context_trim(cause: ContextTrimCause, dropped: usize, emit: &mut Emit) {
+    if dropped > 0 {
+        let _ = finish_step(
+            Step::ContextTrim(ContextTrim { cause, dropped }),
+            0,
+            false,
+            emit,
+        );
+    }
 }
 
 /// How many times one turn may shrink its history after the provider says the
@@ -3290,6 +3376,7 @@ fn shrink_history_to_fit(
     if report.still_over {
         return Some(report);
     }
+    record_context_trim(ContextTrimCause::WindowLimit, report.dropped, emit);
     let _ = emit(SinkEvent::Progress {
         phase: "context".to_owned(),
         detail: format!(
@@ -4912,7 +4999,7 @@ fn run_scoped(
                     let used = attempt.input_tokens;
                     let window = machine.budget().window_tokens;
                     let percent = machine.budget().percent_used();
-                    let chars = history_chars(&history);
+                    let chars = attempt.cumulative_chars;
                     let compacted = machine.budget().compacted_count;
                     let last_model = attempt.provider.display_label();
                     let _ = emit(SinkEvent::ContextBudget {
@@ -4934,6 +5021,7 @@ fn run_scoped(
                             cumulative_chars: chars,
                             compacted_count: compacted,
                             last_model,
+                            composition: attempt.composition,
                         },
                         0,
                         false,
@@ -5457,7 +5545,7 @@ fn run_scoped(
                         request.session_id.as_deref().filter(|_| has_project),
                         &changeset,
                     )?;
-                    push_tool_results(&mut history, &results, native_tools);
+                    push_tool_results(&mut history, &results, native_tools, emit);
                     let updated_registry =
                         scope.registry(run_registry(request, skill.as_ref(), &mcp));
                     if updated_registry.external_definitions() != registry.external_definitions() {
@@ -5560,7 +5648,12 @@ fn run_scoped(
                                 context_recoveries, MAX_CONTEXT_RECOVERY_ATTEMPTS
                             ),
                         });
-                        if matches!(&report, Some(r) if !r.still_over) {
+                        if let Some(report) = report.filter(|report| !report.still_over) {
+                            record_context_trim(
+                                ContextTrimCause::ProviderLimit,
+                                report.dropped,
+                                emit,
+                            );
                             continue;
                         }
                     }
@@ -7105,15 +7198,48 @@ mod tests {
     use crate::provider::{ContentBlock, MessageRole};
 
     #[test]
-    fn history_chars_counts_text_blocks() {
-        let history = vec![
+    fn context_composition_estimates_the_submitted_input() {
+        let mut user = ProviderMessage::user("find the README");
+        user.content.push(ContentBlock::Image {
+            media_type: "image/png".to_owned(),
+            data_base64: "aGV5".to_owned(),
+        });
+        let history = [
             ProviderMessage::system("You are Kodo."),
-            ProviderMessage::user("find the README"),
-            ProviderMessage::assistant("I'll search.", vec![]),
+            user,
+            ProviderMessage::assistant(
+                "I'll search.",
+                vec![NativeToolCall {
+                    id: "1".to_owned(),
+                    name: "read".to_owned(),
+                    arguments: serde_json::json!({}),
+                }],
+            ),
+            ProviderMessage::tool_result("1", "text", false),
         ];
-        let chars = history_chars(&history);
-        // "You are Kodo." (13) + "find the README" (15) + "I'll search." (12) = 40
-        assert_eq!(chars, 40);
+        let tools = [ToolSchema {
+            name: "read".to_owned(),
+            description: "Read a file".to_owned(),
+            parameters: serde_json::json!({}),
+        }];
+        let (chars, composition) = measure_context(&history, &tools);
+        assert_eq!(chars, 70);
+        assert_eq!(
+            composition,
+            ContextComposition {
+                system: 11,
+                user_context: 11,
+                assistant: 11,
+                tool_definitions: 12,
+                tool_io: 10,
+                images: 1_600,
+                injections: Some(ContextInjections {
+                    observations: 0,
+                    memory: 0,
+                    knowledge: 0,
+                }),
+            }
+        );
     }
 
     #[test]
@@ -7749,6 +7875,86 @@ mod tests {
         assert!(!system_text.contains("synthetic knowledge quote"));
         assert!(user_text.contains(&evidence_json));
         assert!(user_text.contains("synthetic knowledge quote"));
+    }
+
+    #[test]
+    fn context_attribution_follows_injected_messages_and_text_tool_results() {
+        use kodo_memory::{Authority, MemoryKind, MemoryPack, MemorySnippet, ValidityLabel};
+
+        let mut request = temp_request(Path::new("/tmp/context-attribution"), Permission::Ask);
+        let knowledge = test_knowledge_context(true, true);
+        let knowledge_chars = knowledge::user_observation(&knowledge).chars().count() as u64;
+        request.knowledge_context = Some(knowledge);
+        let pack = MemoryPack {
+            snippets: vec![MemorySnippet {
+                id: "fixture".to_owned(),
+                kind: MemoryKind::Rule,
+                title: "Fixture rule".to_owned(),
+                abstract_text: "Use synthetic data for this check".to_owned(),
+                source_uris: Vec::new(),
+                conditions: Vec::new(),
+                scope_label: "historical".to_owned(),
+                authority: Authority::Historical,
+                verified: false,
+                validity: ValidityLabel::HistoricalOnly,
+            }],
+            ..MemoryPack::default()
+        };
+        let observation = "前置观测";
+        let mut history = initial_history(&request, "rules".into(), observation, Some(&pack), &[]);
+        let before = measure_context(&history, &[]).1;
+        assert_eq!(
+            before.injections,
+            Some(ContextInjections {
+                observations: 1,
+                memory: state::estimate_input_tokens(
+                    format_memory_block(&pack).chars().count() as u64,
+                    0
+                ),
+                knowledge: state::estimate_input_tokens(knowledge_chars, 0),
+            })
+        );
+        let user = &history[1];
+        assert_eq!(
+            serde_json::to_value(user).unwrap(),
+            serde_json::json!({"role": "User", "content": &user.content})
+        );
+
+        let result =
+            ToolResult::success(ToolCallId::new("call"), "read_file", "fixture", "contents");
+        let mut events = Vec::new();
+        let mut emit = |event| {
+            events.push(event);
+            true
+        };
+        push_tool_results(&mut history, &[result.clone()], false, &mut emit);
+        let with_tool = measure_context(&history, &[]).1;
+        assert_eq!(with_tool.user_context, before.user_context);
+        assert_eq!(with_tool.injections, before.injections);
+        assert!(with_tool.tool_io > 0);
+
+        history.extend(
+            (history.len()..context::MAX_HISTORY_MESSAGES).map(|_| ProviderMessage::user("tail")),
+        );
+        push_tool_results(&mut history, &[result], false, &mut emit);
+        assert!(matches!(
+            events.as_slice(),
+            [SinkEvent::Finished {
+                step: Step::ContextTrim(ContextTrim {
+                    cause: ContextTrimCause::MessageLimit,
+                    dropped: 1
+                }),
+                ..
+            }]
+        ));
+        assert_eq!(
+            measure_context(&history, &[]).1.injections,
+            Some(ContextInjections {
+                observations: 0,
+                memory: 0,
+                knowledge: 0
+            })
+        );
     }
 
     #[test]
@@ -10429,7 +10635,7 @@ mod tests {
             .iter()
             .any(|event| matches!(event, SinkEvent::Failover { .. })));
         assert!(captured.iter().any(|event| matches!(event, SinkEvent::ContextBudget { window: 32_000, last_model, .. } if last_model == "backup-model")));
-        assert!(captured.iter().any(|event| matches!(event, SinkEvent::Finished { step: Step::ContextBudget { window: 32_000, last_model, .. }, .. } if last_model == "backup-model")));
+        assert!(captured.iter().any(|event| matches!(event, SinkEvent::Finished { step: Step::ContextBudget { window: 32_000, last_model, composition, .. }, .. } if last_model == "backup-model" && composition.system > 0 && composition.user_context > 0)));
         assert!(!captured.iter().any(|event| matches!(
             event,
             SinkEvent::ContextBudget {
@@ -13268,7 +13474,12 @@ mod tests {
         window_tokens: u32,
         replies: &[serde_json::Value],
         message: &str,
-    ) -> (Vec<serde_json::Value>, Vec<String>, Vec<(String, String)>) {
+    ) -> (
+        Vec<serde_json::Value>,
+        Vec<String>,
+        Vec<(String, String)>,
+        Vec<ContextTrim>,
+    ) {
         let mut lines: Vec<String> = replies.iter().map(|line| line.to_string()).collect();
         lines.push(serde_json::json!({"text": "MUST_NOT_CALL_AGAIN"}).to_string());
         std::fs::write(script, lines.join("\n") + "\n").unwrap();
@@ -13285,6 +13496,7 @@ mod tests {
         let mut requests: Vec<serde_json::Value> = Vec::new();
         let mut reports: Vec<String> = Vec::new();
         let mut answers: Vec<(String, String)> = Vec::new();
+        let mut trims = Vec::new();
         run(&request, &|| true, &|_, _| true, &mut |event| {
             match event {
                 SinkEvent::LocalTrace {
@@ -13303,6 +13515,10 @@ mod tests {
                         reports.push(detail)
                     }
                 }
+                SinkEvent::Finished {
+                    step: Step::ContextTrim(trim),
+                    ..
+                } => trims.push(trim),
                 SinkEvent::Started {
                     step: Step::AgentMessage { text, delivery, .. },
                 } => answers.push((text, delivery)),
@@ -13311,7 +13527,7 @@ mod tests {
             true
         })
         .expect("probe run");
-        (requests, reports, answers)
+        (requests, reports, answers, trims)
     }
 
     /// The reply that ends a conversational turn.
@@ -13345,7 +13561,7 @@ mod tests {
         conversation: &[(String, String)],
         message: &str,
     ) -> (serde_json::Value, usize) {
-        let (probe, reports, answers) = context_probe_run(
+        let (probe, reports, answers, trims) = context_probe_run(
             project,
             script,
             conversation,
@@ -13355,6 +13571,7 @@ mod tests {
         );
         assert_eq!(probe.len(), 1, "a window with room sends once");
         assert!(reports.is_empty(), "nothing to fit: {reports:?}");
+        assert!(trims.is_empty());
         assert_eq!(answers[0].1, "ready", "{}", answers[0].0);
         let full_chars = probe[0]["messages"].to_string().chars().count();
         assert!(
@@ -13385,7 +13602,7 @@ mod tests {
         let full_chars = probe["messages"].to_string().chars().count();
 
         // One reply for the summarizer, one for the turn itself.
-        let (requests, reports, answers) = context_probe_run(
+        let (requests, reports, answers, trims) = context_probe_run(
             &project,
             &script,
             &conversation,
@@ -13398,6 +13615,7 @@ mod tests {
         assert_eq!(answers.len(), 1);
         assert_eq!(answers[0].1, "ready", "{}", answers[0].0);
         assert_eq!(reports.len(), 1, "the reduction is reported: {reports:?}");
+        assert!(trims.is_empty(), "summary compaction is not a trim");
         let sent = requests[0]["messages"].to_string();
         assert!(
             sent.contains("[compacted summary from earlier rounds]"),
@@ -13446,7 +13664,7 @@ mod tests {
             oversized_context_shape(&project, &script, &conversation, PROBE_PROMPT);
         let full_chars = probe["messages"].to_string().chars().count();
 
-        let (requests, reports, answers) = context_probe_run(
+        let (requests, reports, answers, trims) = context_probe_run(
             &project,
             &script,
             &conversation,
@@ -13461,6 +13679,10 @@ mod tests {
         assert_eq!(requests.len(), 1, "the turn still reached the model");
         assert_eq!(answers[0].1, "ready", "{}", answers[0].0);
         assert_eq!(reports.len(), 1, "the trim is reported: {reports:?}");
+        assert!(matches!(
+            trims.as_slice(),
+            [ContextTrim { cause: ContextTrimCause::WindowLimit, dropped }] if *dropped > 0
+        ));
         assert!(
             reports[0].contains("发送前裁剪"),
             "the deterministic trim, not a summary: {}",
@@ -13514,7 +13736,7 @@ mod tests {
             "the stated rule rides the checkpoint"
         );
 
-        let (requests, reports, answers) = context_probe_run(
+        let (requests, reports, answers, _) = context_probe_run(
             &project,
             &script,
             &conversation,
@@ -13655,7 +13877,7 @@ mod tests {
         let script = root.join("script.jsonl");
         let conversation = long_public_history();
 
-        let (probe, _, _) = context_probe_run(
+        let (probe, _, _, _) = context_probe_run(
             &project,
             &script,
             &conversation,
@@ -13672,7 +13894,7 @@ mod tests {
             "precondition: the unsqueezed request carried the public history ({before})"
         );
 
-        let (requests, reports, answers) = context_probe_run(
+        let (requests, reports, answers, trims) = context_probe_run(
             &project,
             &script,
             &conversation,
@@ -13683,6 +13905,10 @@ mod tests {
 
         assert_eq!(reports.len(), 1, "one bounded retry: {reports:?}");
         assert!(reports[0].contains("收缩"), "{}", reports[0]);
+        assert!(matches!(
+            trims.as_slice(),
+            [ContextTrim { cause: ContextTrimCause::ProviderLimit, dropped }] if *dropped > 0
+        ));
         assert_eq!(
             requests.len(),
             1,

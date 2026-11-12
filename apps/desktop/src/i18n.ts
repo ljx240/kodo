@@ -937,22 +937,61 @@ export const T = {
     /**
      * Codex-style hover popover for the composer context ring. Three lines:
      * title (背景信息窗口), percent-used line (e.g. "44% 已用（剩余 56%）"),
-     * raw token counts ("已用 114k 标记, 共 258k").
+     * raw token counts ("114k / 258k tokens").
      */
     ringTitle: "背景信息窗口",
     ringPercent: (percent: number, remaining: number) =>
       `${percent}% 已用（剩余 ${remaining}%）`,
     ringTokens: (usedLabel: string, windowLabel: string) =>
-      `已用 ${usedLabel} 标记, 共 ${windowLabel}`,
-    /** Same content, joined with newlines for the popover body. */
-    ringTooltipBody: (percent: number, usedLabel: string, windowLabel: string) => {
-      const remaining = Math.max(0, 100 - percent);
-      return [
-        "背景信息窗口：",
-        `${percent}% 已用（剩余 ${remaining}%）`,
-        `已用 ${usedLabel} 标记, 共 ${windowLabel}`,
-      ].join("\n");
+      `${usedLabel} / ${windowLabel} tokens`,
+  },
+  contextInsights: {
+    title: "上下文洞察",
+    close: "关闭上下文洞察",
+    slashMenu: "命令与技能",
+    empty: "此会话暂无上下文记录",
+    occupancy: "窗口占用",
+    reported: "服务商报告",
+    estimated: "估算",
+    usageUnavailable: "服务商未报告输入用量",
+    trend: "请求趋势",
+    trendMode: "趋势指标",
+    inputChange: "输入变化",
+    changeUnavailable: "暂无可比读数",
+    comparisonRule: "比较同轮内模型、窗口和计量口径相同的相邻请求。",
+    output: "输出",
+    elapsed: "耗时",
+    requestAt: (turn: number, request: number) => `第 ${turn} 轮 / 第 ${request} 次请求`,
+    requestCount: (count: number) => `${count} 次请求`,
+    turn: (turn: number) => `第 ${turn} 轮`,
+    composition: "上下文组成",
+    compositionUnavailable: "此请求未记录上下文组成",
+    compositionChange: "较上次",
+    categories: {
+      system: "系统提示",
+      toolDefinitions: "工具定义",
+      userContext: "用户消息与注入",
+      assistant: "助手消息",
+      toolIo: "工具调用与结果",
+      images: "图片",
     },
+    injections: {
+      observations: "前置观测",
+      memory: "项目记忆",
+      knowledge: "知识库注入",
+    },
+    adjustments: "上下文调整",
+    adjusted: "此前有上下文调整",
+    compaction: "上下文压缩",
+    trim: "上下文裁剪",
+    trimCause: {
+      windowLimit: "发送前窗口裁剪",
+      providerLimit: "超限重试裁剪",
+      messageLimit: "消息上限裁剪",
+    },
+    trimmed: (dropped: number) => `移除 ${dropped} 条较早消息`,
+    compacted: (dropped: number, summarized: number) =>
+      `${dropped} 条消息合并为 ${summarized} 条摘要`,
   },
   /**
    * Short inline tooltip strings for transparency-step rows. The learner's UI

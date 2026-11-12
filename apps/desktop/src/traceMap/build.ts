@@ -20,6 +20,8 @@
  */
 
 import type { ItemDto } from "../api";
+import { formatContextBudget } from "../conversation/trace";
+import { T } from "../i18n";
 
 export type TraceNodeStatus =
   | "running"
@@ -111,6 +113,23 @@ type NodeProjection = {
 };
 
 function projectItem(item: ItemDto): NodeProjection {
+  if (item.kind === "contextBudget") {
+    return { label: T.contextInsights.occupancy, detail: formatContextBudget(item), chips: [] };
+  }
+  if (item.kind === "contextTrim") {
+    return {
+      label: T.contextInsights.trimCause[item.trim.cause],
+      detail: T.contextInsights.trimmed(item.trim.dropped),
+      chips: [],
+    };
+  }
+  if (item.kind === "compaction") {
+    return {
+      label: T.contextInsights.compaction,
+      detail: T.contextInsights.compacted(item.dropped, item.summarizedInto),
+      chips: [],
+    };
+  }
   // Read kind via an index signature so we stay compatible with the wider
   // wire set (planStep / thinking / failover / etc.) without extending
   // the public `ItemDto` union just for this view.

@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   FolderSearch,
+  Gauge,
   Paperclip,
   Plus,
   Puzzle,
@@ -20,6 +21,7 @@ import {
 import { useLayoutEffect, useMemo, useRef, useState, useEffect, useCallback } from "react";
 import {
   type AgentView,
+  type ContextBudget,
   type ContextProbe,
   isDesktop,
   listAgents,
@@ -43,7 +45,6 @@ import { fileLook, kindFromPath } from "../fileKind";
 import { T } from "../i18n";
 import { ContextCard } from "./ContextCard";
 import { ContextRing } from "./ContextRing";
-import type { ContextBudget } from "./trace";
 import { Menu, MenuItem } from "../shell/Menu";
 import { navigate } from "../routes";
 
@@ -115,8 +116,8 @@ type Props = {
   favoriteAgents: string[];
   /** Recently used personas (MRU, capped at 5) — the 最近用 section. */
   recentAgents: Array<{ name: string; at: number }>;
-  /** Live context-window telemetry; null when no turn is in flight. */
   contextBudget: ContextBudget | null;
+  onOpenContextInsights?: () => void;
   /** Persona list version — bumped after AgentsTab CRUD so the dropdown
    *  re-pulls `listAgents()` without a stale cache. */
   agentsVersion?: number;
@@ -168,6 +169,7 @@ export function Composer({
   favoriteAgents,
   recentAgents,
   contextBudget,
+  onOpenContextInsights,
   agentsVersion = 0,
   onSendWithForceInline,
 }: Props) {
@@ -307,7 +309,11 @@ export function Composer({
   const slashMatches =
     slashQuery === null
       ? []
-      : [{ id: "subagent", label: "委派子任务" }, ...skills].filter(
+      : [
+          { id: "subagent", label: "委派子任务" },
+          ...(onOpenContextInsights ? [{ id: "context", label: T.contextInsights.title }] : []),
+          ...skills.filter((skill) => !onOpenContextInsights || skill.id !== "context"),
+        ].filter(
           (skill) =>
             slashQuery === "" ||
             skill.id.includes(slashQuery) ||
@@ -382,8 +388,17 @@ export function Composer({
     requestAnimationFrame(() => input.current?.focus());
   };
 
-  /** Slash selection uses the same structured chip as the + menu. */
-  const applySkillFromSlash = (skillId: string) => {
+  const openContextFromDraft = () => {
+    updateDraft("");
+    input.current?.focus();
+    onOpenContextInsights?.();
+  };
+
+  const applySlash = (skillId: string) => {
+    if (skillId === "context" && onOpenContextInsights) {
+      openContextFromDraft();
+      return;
+    }
     if (skillId === "subagent") {
       setDraft("/subagent ");
       requestAnimationFrame(() => input.current?.focus());
@@ -694,6 +709,10 @@ export function Composer({
   }, [selectedSkills, personaDefaultSkills]);
 
   const send = () => {
+    if (onOpenContextInsights && draft.trim().toLowerCase() === "/context") {
+      openContextFromDraft();
+      return;
+    }
     // Slash menu owns Enter while it is open.
     if (slashOpen) return;
     const skillText = effectiveSkills.map((skillId) => `【技能：${skillId}】`).join("\n");
@@ -827,7 +846,7 @@ export function Composer({
               native.isComposing || native.keyCode === 229 || composingRef.current;
             if (slashOpen && (event.key === "Enter" || event.key === "Tab") && !composing) {
               event.preventDefault();
-              applySkillFromSlash(slashMatches[0].id);
+              applySlash(slashMatches[0].id);
               return;
             }
             if (slashOpen && event.key === "Escape") {
@@ -1283,7 +1302,7 @@ export function Composer({
             {/* Codex-style context ring — sits next to the model picker as a
                 standalone element (the model button is a separate sibling
                 so the ring never visually merges with the picker chrome). */}
-            <ContextRing budget={contextBudget} />
+            {onOpenContextInsights && <ContextRing budget={contextBudget} onOpen={onOpenContextInsights} />}
             {/* Model / provider picker — providers left, their models right. */}
             <div className="menu-anchor composer-model-anchor">
               <Menu
@@ -1410,9 +1429,8 @@ export function Composer({
           </div>
         </div>
 
-        {/* Slash skill suggestions — progressive disclosure, not a second sidebar. */}
         {slashOpen && (
-          <div className="composer-slash" role="listbox" aria-label="技能" data-testid="composer-slash">
+          <div className="composer-slash" role="listbox" aria-label={T.contextInsights.slashMenu} data-testid="composer-slash">
             {slashMatches.map((skill) => (
               <button
                 key={skill.id}
@@ -1420,9 +1438,11 @@ export function Composer({
                 role="option"
                 className="menu-item"
                 data-slash-id={skill.id}
-                onClick={() => applySkillFromSlash(skill.id)}
+                onClick={() => applySlash(skill.id)}
               >
-                <Puzzle size={14} strokeWidth={1.8} />
+                {skill.id === "context" && onOpenContextInsights
+                  ? <Gauge size={14} strokeWidth={1.8} />
+                  : <Puzzle size={14} strokeWidth={1.8} />}
                 <span>{skill.label}</span>
                 <span className="menu-item-hint">/{skill.id}</span>
               </button>
