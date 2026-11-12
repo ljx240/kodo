@@ -145,6 +145,11 @@ impl SandboxBackend for BubblewrapBackend {
         policy: &SandboxPolicy,
         cwd: &Path,
     ) -> Result<PreparedCommand, SandboxError> {
+        if policy.isolated_reads {
+            return Err(SandboxError::Unsupported {
+                reason: "当前 Linux 后端尚未验证 Office 预览的读取白名单".to_owned(),
+            });
+        }
         let binary = self
             .binary
             .as_ref()

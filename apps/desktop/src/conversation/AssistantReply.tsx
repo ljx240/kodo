@@ -52,6 +52,7 @@ type Props = {
   /** Open a path mentioned in the answer's markdown (inline code) in the
    *  right sidebar. Heuristic only — the click probes before opening. */
   onOpenPath?: ((path: string) => void) | null;
+  onPreviewOffice?: () => void;
   /** Session id, used to build the sourceRef when promoting the final
    *  answer to a knowledge base (sourceRef = `${sessionId}:${turnSeq}`).
    *  Null in demo / pre-session preview. */
@@ -89,6 +90,7 @@ export function AssistantReply({
   undoMessage = null,
   onOpenFile = null,
   onOpenPath = null,
+  onPreviewOffice,
   undoingChanges = false,
   sessionId = null,
   preExisting = [],
@@ -138,8 +140,9 @@ export function AssistantReply({
   const retry = !budgetFailure && environmentBlocked ? (onRetryEnvironment ?? onRegenerate) : null;
   const documentsOnly = reply.changes.length > 0 && reply.changes.every((change) => isDocumentPath(change.path));
   const pendingQuestion = isWaitingForReply(reply);
-  const outcomeWord = pendingQuestion ? T.reply.pendingQuestion : T.outcome[reply.status.outcome];
-  const axesLine = `${documentsOnly ? T.reply.documentState[reply.status.delivery] : T.reply.answerState(T.delivery[reply.status.delivery])} · ${T.reply.verifyState(
+  const officeDraft = reply.failureReason === "office_draft_pending";
+  const outcomeWord = officeDraft ? "草稿已生成" : pendingQuestion ? T.reply.pendingQuestion : T.outcome[reply.status.outcome];
+  const axesLine = officeDraft ? "待预览和另存" : `${documentsOnly ? T.reply.documentState[reply.status.delivery] : T.reply.answerState(T.delivery[reply.status.delivery])} · ${T.reply.verifyState(
     documentsOnly && reply.status.verification === "not_run" ? T.reply.commandVerificationNotRun : T.verification[reply.status.verification],
   )}`;
   // No speaker header (2026-09-30): left/right alignment carries who spoke.
@@ -153,7 +156,7 @@ export function AssistantReply({
   // Promote the final answer to a knowledge base. Only when this turn has
   // settled (not running) and there is a non-empty final to save. Mirrors
   // KnowledgeSources' old `showPromote` gate.
-  const canPromote = !running && Boolean(sessionId) && Boolean(reply.final?.trim()) && !promoteOpen;
+  const canPromote = !running && !officeDraft && Boolean(sessionId) && Boolean(reply.final?.trim()) && !promoteOpen;
   const promoteSourceRef = sessionId && typeof turnIndex === "number" ? `${sessionId}:${turnIndex + 1}` : null;
 
   return (
@@ -251,6 +254,9 @@ export function AssistantReply({
           <section className="answer-body" data-testid="answer-body">
             <h3 className="answer-section-head">{documentsOnly && reply.status.outcome === "completed" ? T.reply.documentResult : reply.status.outcome === "completed" ? T.reply.doneThisTurn : T.reply.resultThisTurn}</h3>
             <Markdown text={finalText} onOpenPath={onOpenPath} />
+            {officeDraft && onPreviewOffice && (
+              <button type="button" className="btn btn--sm" onClick={onPreviewOffice}>预览 Office 草稿</button>
+            )}
           </section>
 
           {/* 3. 验证结果 — its own card; a blocked check never cancels the answer. */}

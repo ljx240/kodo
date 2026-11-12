@@ -134,7 +134,8 @@ impl Approver {
         // and it is never remembered either.
         let escalation = matches!(kind, StepKind::SandboxEscalation);
         let fingerprint = approval_fingerprint(kind, command);
-        if !escalation && self.allows.borrow().contains(&fingerprint) {
+        let office_share = command.starts_with(kodo_agent::office_flow::SHARE_PROMPT);
+        if !escalation && !office_share && self.allows.borrow().contains(&fingerprint) {
             let _ = writeln!(output, "· 本会话已允许 {command}");
             let _ = output.flush();
             return true;
@@ -169,6 +170,7 @@ impl Approver {
                 Reply::Once => true,
                 // A sandbox escalation is never remembered and never widens
                 // the session: "本会话" is downgraded to "仅本次".
+                Reply::Session | Reply::All if office_share => true,
                 Reply::Session | Reply::All if escalation => {
                     let _ = writeln!(output, "· 沙箱越权仅对本次生效，不会记住");
                     let _ = output.flush();

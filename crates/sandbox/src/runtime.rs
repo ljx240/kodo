@@ -232,21 +232,22 @@ impl SandboxRuntime {
             ));
         }
         let mut prepared = self.backend.prepare(program, args, policy, cwd)?;
-        if let Ok(scratch) = self.scratch() {
-            // A private, writable home: tools that insist on one get a
-            // usable directory instead of the user's real home.
-            prepared
-                .env
-                .push(("HOME".to_owned(), scratch.home.display().to_string()));
-            prepared
-                .env
-                .push(("TMPDIR".to_owned(), scratch.work.display().to_string()));
-            prepared
-                .env
-                .push(("TMP".to_owned(), scratch.work.display().to_string()));
-            prepared
-                .env
-                .push(("TEMP".to_owned(), scratch.work.display().to_string()));
+        let roots = if policy.isolated_reads {
+            Some((policy.workspace_root.clone(), policy.workspace_root.clone()))
+        } else {
+            self.scratch()
+                .ok()
+                .map(|scratch| (scratch.home, scratch.work))
+        };
+        if let Some((home, temp)) = roots {
+            let home = home.display().to_string();
+            let temp = temp.display().to_string();
+            prepared.env.extend([
+                ("HOME".to_owned(), home),
+                ("TMPDIR".to_owned(), temp.clone()),
+                ("TMP".to_owned(), temp.clone()),
+                ("TEMP".to_owned(), temp),
+            ]);
         }
         Ok(prepared)
     }

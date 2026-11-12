@@ -89,6 +89,8 @@ pub struct SandboxPolicy {
     pub workspace_root: PathBuf,
     /// Extra roots the sandboxed process may read.
     pub allowed_read_roots: Vec<PathBuf>,
+    /// Restrict file data reads to the workspace and declared runtime roots.
+    pub isolated_reads: bool,
     /// Roots the sandboxed process may never read (credentials, keychains…).
     pub denied_read_roots: Vec<PathBuf>,
     /// Roots the sandboxed process may write.
@@ -144,6 +146,7 @@ impl SandboxPolicy {
             mode: SandboxMode::WorkspaceWrite,
             workspace_root: root.clone(),
             allowed_read_roots: Vec::new(),
+            isolated_reads: false,
             denied_read_roots: sensitive_read_roots(),
             allowed_write_roots: vec![root],
             denied_write_roots: Vec::new(),
@@ -159,6 +162,11 @@ impl SandboxPolicy {
 
     pub fn with_read_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.allowed_read_roots.push(normalize_root(&path.into()));
+        self
+    }
+
+    pub fn with_isolated_reads(mut self) -> Self {
+        self.isolated_reads = true;
         self
     }
 
@@ -242,10 +250,19 @@ impl SandboxPolicy {
         if !self.mode.confines() {
             return true;
         }
-        !self
+        if self
             .denied_read_roots
             .iter()
             .any(|root| is_within_resolved(root, path))
+        {
+            return false;
+        }
+        !self.isolated_reads
+            || is_within_resolved(&self.workspace_root, path)
+            || self
+                .allowed_read_roots
+                .iter()
+                .any(|root| is_within_resolved(root, path))
     }
 }
 

@@ -67,7 +67,12 @@ export function ContextCard({ path, probe, onRemove, onOpenPath = null }: Props)
 
   return (
     <div className={`ctx-card ctx-card--${kind}`} data-context-path={path} title={path}>
-      {preview}
+      {onOpenPath ? (
+        <button type="button" className="ctx-card-preview-btn" aria-label={"预览 " + (probe?.name ?? fileName(path))}
+          onClick={() => onOpenPath(path)}>
+          {preview}
+        </button>
+      ) : preview}
       <div className="ctx-card-foot">
         <span className="ctx-badge" style={{ background: look.color }}>
           {look.badge}

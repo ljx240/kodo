@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import {
   coreInfo,
   gitBranch,
+  isDesktop,
   listAgents,
   onMenuAction,
   pickFolder,
@@ -32,6 +33,7 @@ import { Inspector, type FilePanelRequest, type InspectorTab } from "./inspector
 import { BrowsePanel } from "./inspector/BrowsePanel";
 import { PanelResizer, clampWidth, CONVERSATION_WIDTH_MIN, WIDTH_MIN } from "./inspector/PanelResizer";
 import { FileViewer } from "./conversation/FileViewer";
+import { OfficeSidebar } from "./conversation/OfficeViewer";
 import { TerminalPanel } from "./terminal/TerminalPanel";
 import type { ArchiveSelection } from "./inspector/ArchiveInspector";
 import { ArchivePage } from "./pages/ArchivePage";
@@ -81,6 +83,9 @@ export function App() {
   const [liveSnapshot, setLiveSnapshot] = useState<LiveSnapshot | null>(null);
   /** Right-sidebar 文件 panel: what to show and that it may show at all. */
   const [fileRequest, setFileRequest] = useState<FilePanelRequest | null>(null);
+  const officeTarget = fileRequest && "office" in fileRequest ? fileRequest.office : null;
+  const resultsRoute = route.name === "workbench" && route.appId === "artifacts";
+  const resultsPreview = resultsRoute && route.inspectorOpen && officeTarget?.kind === "result";
   /** Per-file unified diffs published up from ConversationPage (reply rows + panel). */
   const [fileDiffs, setFileDiffs] = useState<Record<string, string>>({});
   /** Wide = ≥1200px, where the panel is in-flow (below that it overlays). */
@@ -116,8 +121,8 @@ export function App() {
   }, [wide, inspectorTab, route.name, route.inspectorOpen]);
   const baseWidth = clampWidth(Number.parseInt(inspectorWidth, 10) || 330);
   const wideWidth = clampWidth(Number.parseInt(inspectorWideWidth, 10) || 640);
-  /** 文件 and 浏览 widen via their own key; the route guard mirrors Inspector. */
-  const wideMode = (inspectorTab === "file" || inspectorTab === "browse") && route.name === "conversation";
+  const wideMode = resultsPreview ||
+    ((inspectorTab === "file" || inspectorTab === "browse") && route.name === "conversation");
   const restoreWidth = Math.max(WIDTH_MIN, panelMaxWidth - CONVERSATION_WIDTH_MIN);
   const focusModeActive = wide && route.inspectorOpen && route.name === "conversation" &&
     (dragWidth === null ? inspectorFocusMode : dragWidth > restoreWidth);
@@ -538,25 +543,26 @@ export function App() {
     setInspectorOpen(true);
   };
 
-  // The 文件 chip is a panel-layer request: demo / no project falls back to
-  // Inspector Files (the fixture carries no file bodies), and a bare chip click
-  // seeds an empty browse request so the tree — not a file — is the entry.
   const selectInspectorTab = (next: InspectorTab) => {
     if (next !== "file") {
       setInspectorTab(next);
       return;
     }
-    if (route.demo || !activeProject?.path) {
-      openFiles();
-      return;
-    }
     if (!fileRequest) {
-      setFileRequest({
-        path: null,
-        tab: "full",
-        changes: liveSnapshot?.reply?.changes ?? [],
-        nonce: Date.now(),
-      });
+      if (route.demo || !activeProject?.path) {
+        if (route.demo || agentMode !== "work" || !isDesktop()) {
+          openFiles();
+          return;
+        }
+        setFileRequest({ office: { kind: "pick" }, nonce: Date.now() });
+      } else {
+        setFileRequest({
+          path: null,
+          tab: "full",
+          changes: liveSnapshot?.reply?.changes ?? [],
+          nonce: Date.now(),
+        });
+      }
     }
     setInspectorTab("file");
   };
@@ -568,6 +574,13 @@ export function App() {
     setFileDiffs({});
     setInspectorTab((tab) => (tab === "file" ? "summary" : tab));
   }, [activeConversationId]);
+
+  useEffect(() => {
+    if (!resultsRoute && officeTarget?.kind === "result") {
+      setFileRequest(null);
+      setInspectorTab("summary");
+    }
+  }, [resultsRoute, officeTarget]);
 
   const openTrace = () => {
     navigate(workspace.live ? "/trace" : "/ui-demo/trace");
@@ -909,9 +922,10 @@ export function App() {
               }}
             />
           )}
-          {/* 工作台 and its apps are self-contained pages: the Inspector rail
-              has nothing to add to them, so the route is excluded below too. */}
-          {route.name === "workbench" && <WorkbenchPage route={route} />}
+          {route.name === "workbench" && (
+            <WorkbenchPage route={route}
+              onPreviewOffice={(id) => openFilePanel({ office: { kind: "result", id }, nonce: Date.now() })} />
+          )}
 
           {paletteOpen && (
             <CommandPalette
@@ -947,14 +961,20 @@ export function App() {
             </div>
           )}
 
-          {route.name !== "schedule" && route.name !== "workbench" && (
+          {route.name !== "schedule" && (route.name !== "workbench" || resultsPreview) && (
             <Inspector
               route={route.name}
               open={route.inspectorOpen}
               tab={inspectorTab}
               onSelectTab={selectInspectorTab}
               onOpen={() => setInspectorOpen(true)}
-              onClose={() => setInspectorOpen(false)}
+              onClose={() => {
+                if (resultsPreview) {
+                  setFileRequest(null);
+                  setInspectorTab("summary");
+                }
+                setInspectorOpen(false);
+              }}
               demo={route.demo}
               demoState={demoState}
               live={liveSnapshot}
@@ -971,7 +991,9 @@ export function App() {
               }}
               onOpenTrace={openTrace}
               filePanel={
-                fileRequest && activeProject?.path ? (
+                fileRequest && "office" in fileRequest ? (
+                  <OfficeSidebar key={fileRequest.nonce} target={fileRequest.office} />
+                ) : fileRequest && activeProject?.path ? (
                   <FileViewer
                     projectPath={activeProject.path}
                     diffs={fileDiffs}

@@ -576,28 +576,34 @@ pub(crate) fn has_explicit_file_output(message: &str) -> bool {
 pub fn output_note(
     path: &str,
     operation: OutputOperation,
-    preserve_format: bool,
+    _preserve_format: bool,
 ) -> Option<String> {
+    if let Some(format) = crate::office::work::Format::of(std::path::Path::new(path)) {
+        let note = match operation {
+            OutputOperation::Create => format!(
+                "使用 office_write 生成新的 {} 文件",
+                format.extension().to_uppercase()
+            ),
+            OutputOperation::Update => {
+                "使用 office_read 定位原件，使用 office_write 另存保格式修订副本".to_owned()
+            }
+            OutputOperation::Reuse => "按原生格式回读".to_owned(),
+            OutputOperation::None => return None,
+        };
+        let calculation = if format == crate::office::work::Format::Xlsx {
+            "。仅交付已核验的公式结果，未验证的工作簿须标为待复算"
+        } else {
+            ""
+        };
+        return Some(format!("`{path}` {note}{calculation}"));
+    }
     if let Some(label) = crate::attachment::unsupported_format(path) {
         return Some(format!(
-            "`{path}` 是 {label} 格式，本轮没有回读校验器；请改为 DOCX/Markdown/CSV 等可校验格式，或明确接受“无法校验”的交付"
+            "`{path}` 是 {label} 格式，本轮没有回读校验器；请改用可校验格式"
         ));
-    }
-    if crate::office::is_docx(path) {
-        return Some(match operation {
-            OutputOperation::Create => {
-                format!("`{path}` 将按 Markdown 结构生成新的 DOCX（新建，无原格式可保留）")
-            }
-            _ if preserve_format => format!(
-                "无法在保留原格式的前提下修改 `{path}`：本轮 DOCX 写入是整篇重写，原有样式、表格与页眉会丢失；请先确认是否接受重写"
-            ),
-            _ => format!("`{path}` 将被整篇重写，不保留原有样式与表格结构"),
-        });
     }
     if crate::office::is_spreadsheet(path) {
-        return Some(format!(
-            "`{path}` 写入的是单元格文本值；公式不会被计算或重算"
-        ));
+        return Some(format!("`{path}` 的旧版表格格式仅可读取"));
     }
     None
 }
@@ -721,7 +727,37 @@ impl TaskPlan {
 
     /// Layer 1 of the delivery contract (see [`parse_output_contract`]).
     pub fn set_output_contract(&mut self, message: &str) {
-        let contract = parse_output_contract(message);
+        let mut contract = parse_output_contract(message);
+        if self.deliverable_bar && contract.operation == OutputOperation::Update {
+            let save_as = earliest_marker(message, &["另存为", "另存", "保存为", "save as"]);
+            if let Some(position) = save_as {
+                let mut inputs = Vec::new();
+                contract.targets.retain(|path| {
+                    let is_input = message.find(path).is_some_and(|index| index < position)
+                        && crate::office::work::Format::of(std::path::Path::new(path)).is_some();
+                    if is_input {
+                        inputs.push(path.clone());
+                    }
+                    !is_input
+                });
+                contract.sources.extend(inputs);
+            }
+            if contract.sources.is_empty() && contract.targets.len() == 1 {
+                let path = std::path::Path::new(&contract.targets[0]);
+                if let Some(format) = crate::office::work::Format::of(path) {
+                    let name = path.file_stem().unwrap().to_string_lossy();
+                    let copy = format!("{name}-修订.{}", format.extension());
+                    let target = if path.is_absolute() {
+                        copy
+                    } else {
+                        path.with_file_name(copy).to_string_lossy().into_owned()
+                    };
+                    contract
+                        .sources
+                        .push(std::mem::replace(&mut contract.targets[0], target));
+                }
+            }
+        }
         let preserve = asks_to_preserve_format(message);
         // Stated at plan time, before any write: the model chooses a format
         // knowing what can and cannot be verified afterwards.
@@ -780,24 +816,25 @@ impl TaskPlan {
                                 .into(),
                         );
                     }
+                    let full = crate::tools::resolve_in_project(project, path)?;
+                    if crate::office::work::Format::of(&full).is_some() {
+                        let file = crate::office::work::OfficeFile::open(&full)?;
+                        let view = file.view(None, 0, 1, None)?;
+                        if view.total == 0 {
+                            return Err("Office 成果缺少可读取的结构".into());
+                        }
+                        return Ok(());
+                    }
                     if let Some(label) = crate::attachment::unsupported_format(path) {
                         return Err(format!(
                             "{label} 格式没有回读校验器，本轮不能作为已交付成果；请改用可校验格式"
                         ));
                     }
-                    let full = crate::tools::resolve_in_project(project, path)?;
                     let size = std::fs::metadata(&full).map_err(|e| e.to_string())?.len();
                     if size == 0 {
                         return Err("output is empty".into());
                     }
-                    if crate::office::is_docx(path) {
-                        let doc = crate::office::read_docx(&full, 2 * 1024 * 1024)?;
-                        if doc.text.trim().is_empty() || doc.truncated {
-                            return Err(
-                                "DOCX readback is empty or exceeds the acceptance limit".into()
-                            );
-                        }
-                    } else if crate::office::is_spreadsheet(path) {
+                    if crate::office::is_spreadsheet(path) {
                         let sheet = crate::office::read_spreadsheet(&full, 2 * 1024 * 1024)?;
                         if sheet.sheets == 0 || sheet.non_empty_cells == 0 || sheet.truncated {
                             return Err("spreadsheet has no readable cells".into());
@@ -3135,7 +3172,7 @@ mod tests {
     }
 
     #[test]
-    fn a_docx_create_is_not_an_edit_and_an_edit_is_a_rewrite() {
+    fn docx_create_and_preserving_edit_have_distinct_targets() {
         let create = deliverable_plan("生成 `summary.docx`");
         assert!(
             create
@@ -3147,9 +3184,14 @@ mod tests {
         );
 
         let update = deliverable_plan("修改 `summary.docx` 补充结论");
+        assert_eq!(update.expected_outputs, ["summary-修订.docx"]);
+        assert_eq!(update.output_sources, ["summary.docx"]);
         assert!(
-            update.output_notes.iter().any(|n| n.contains("整篇重写")),
-            "an update must not look like a format-preserving edit: {:?}",
+            update
+                .output_notes
+                .iter()
+                .any(|n| n.contains("另存保格式修订副本")),
+            "an update must request a preserving copy: {:?}",
             update.output_notes
         );
         assert!(
@@ -3160,12 +3202,12 @@ mod tests {
     }
 
     #[test]
-    fn a_format_preserving_docx_edit_is_refused_instead_of_silently_reformatted() {
+    fn format_preserving_docx_edit_uses_office_tools() {
         let plan = deliverable_plan("修改 `summary.docx` 补充结论，保留原格式");
         assert!(
             plan.output_notes
                 .iter()
-                .any(|n| n.contains("无法在保留原格式的前提下修改")),
+                .any(|n| n.contains("另存保格式修订副本")),
             "{:?}",
             plan.output_notes
         );
@@ -3180,9 +3222,7 @@ mod tests {
     fn a_spreadsheet_write_never_claims_formula_results() {
         let plan = deliverable_plan("把明细整理成 `data.xlsx`");
         assert!(
-            plan.output_notes
-                .iter()
-                .any(|n| n.contains("公式不会被计算或重算")),
+            plan.output_notes.iter().any(|n| n.contains("待复算")),
             "{:?}",
             plan.output_notes
         );
@@ -3214,7 +3254,7 @@ mod tests {
         plan.requires_file_output = false;
         let report = plan.evaluate_acceptance(&AcceptanceEvidence::default());
         assert_eq!(report.notes.len(), 1, "{:?}", report.notes);
-        assert!(report.notes[0].contains("公式不会被计算"));
+        assert!(report.notes[0].contains("待复算"));
         assert!(
             !report.passed.iter().any(|p| p.contains("公式")),
             "a format limit is a note, never a passed check: {:?}",

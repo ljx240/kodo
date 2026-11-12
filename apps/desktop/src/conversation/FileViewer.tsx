@@ -1,6 +1,7 @@
 import { Check, ChevronRight, Copy, ExternalLink, FolderTree } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  isDesktop,
   listProjectFiles,
   openProjectFile,
   probeContextFile,
@@ -14,6 +15,8 @@ import { highlightLines, languageForPath } from "../highlight";
 import { T } from "../i18n";
 import { parseDiff, UnifiedLine, type DiffRow } from "./diff";
 import { Markdown } from "./Markdown";
+import { OfficeProjectViewer } from "./OfficeViewer";
+import { supportsOffice } from "./officeApi";
 
 type Props = {
   projectPath: string;
@@ -292,7 +295,8 @@ export function FileViewer({
   // 变更 is reachable for every changed file — never gated on a stored diff.
   const canDiff = (path: string) =>
     turnPaths.has(path) || diffHasBody(diffs[path] ?? "");
-  const showDiffTab = selected !== null && canDiff(selected);
+  const office = route === "office" && selected !== null && supportsOffice(selected) && isDesktop();
+  const showDiffTab = !office && selected !== null && canDiff(selected);
   // 完整文件 only means anything for text — non-text has no readable body.
   const showFullTab = !probe || probe.kind === "text";
   const effectiveTab: Tab =
@@ -541,6 +545,8 @@ export function FileViewer({
                   {T.viewer.retry}
                 </button>
               </div>
+            ) : office ? (
+              <OfficeProjectViewer key={projectPath + ":" + selected} project={projectPath} path={selected} />
             ) : probe !== null && probe.kind !== "text" && effectiveTab !== "diff" ? (
               route === "image" && probe.preview ? (
                 <div className="fv-preview fv-preview--image">

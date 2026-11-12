@@ -38,15 +38,15 @@ pub fn config_dir(home: &Path) -> PathBuf {
     }
 }
 
-/// The current user's settings file, or `None` when `HOME` is unset.
+/// The settings file in the current profile.
 pub fn settings_path() -> Option<PathBuf> {
-    Some(config_dir(&home()?).join(SETTINGS_FILE))
+    Some(state_dir()?.join(SETTINGS_FILE))
 }
 
 /// API keys live apart from ordinary settings so a shared `settings.log` never
 /// contains them.
 pub fn credentials_path() -> Option<PathBuf> {
-    Some(config_dir(&home()?).join(CREDENTIALS_FILE))
+    Some(state_dir()?.join(CREDENTIALS_FILE))
 }
 
 /// The settings key one namespaced secret is stored under (`{namespace}.{id}`).
@@ -126,8 +126,13 @@ fn restrict(path: &Path) {
 #[cfg(not(unix))]
 fn restrict(_path: &Path) {}
 
-/// The directory the core keeps its state in, or `None` when `HOME` is unset.
+/// The directory the core keeps its state in. Development builds can use
+/// a separate profile when a second Kodo instance is already running.
 pub fn state_dir() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("KODO_DEV_STATE_DIR").map(PathBuf::from) {
+        return path.is_absolute().then_some(path);
+    }
     Some(config_dir(&home()?))
 }
 

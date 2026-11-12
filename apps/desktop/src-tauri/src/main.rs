@@ -26,6 +26,7 @@ use decision::{
     decision_set_credential,
 };
 mod knowledge;
+mod office;
 mod platform;
 mod run;
 mod terminal;
@@ -226,10 +227,14 @@ async fn pick_files(app: AppHandle) -> Option<Vec<String>> {
         .file()
         .set_title("添加照片和文件")
         .blocking_pick_files()?;
+    let office = app.state::<office::OfficeService>();
     let paths = picked
         .into_iter()
         .filter_map(|path| path.into_path().ok())
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| {
+            office.grant_attachment(&path);
+            path.to_string_lossy().into_owned()
+        })
         .collect::<Vec<_>>();
     if paths.is_empty() {
         None
@@ -2200,6 +2205,7 @@ fn main() {
         .manage(Approvals::default())
         .manage(BrowseWebview::default())
         .manage(AppService::boot())
+        .manage(office::OfficeService::default())
         .manage(KnowledgeService::boot())
         .manage(Terminals::default())
         .setup(|app| {
@@ -2207,6 +2213,8 @@ fn main() {
             // both the scheduler and the workbench, so it has to exist even
             // when one of them fails to boot and returns early below.
             platform::build_tray(app.handle())?;
+            let office_app = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || office::recover_publications(office_app));
             // The scheduler needs a typed `AppHandle` to install the tick
             // thread and a `state_dir` to write its store under. Both
             // come from the desktop's `kodo_core::settings` module; the
@@ -2242,6 +2250,12 @@ fn main() {
             if let tauri::WindowEvent::Focused(true) = event {
                 let _ = window.set_title("Kodo");
             }
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let office = window.state::<office::OfficeService>();
+                for path in paths {
+                    office.grant_attachment(path);
+                }
+            }
             // Closing hides rather than quits: a run in flight outlives the
             // window, and the status item is the way back in. macOS-only —
             // `RunEvent::Reopen` below is the matching dock-icon path, and
@@ -2270,6 +2284,16 @@ fn main() {
             git_branch,
             reveal_project,
             open_project_file,
+            office::office_pick,
+            office::office_open_project,
+            office::office_open_result,
+            office::office_view,
+            office::office_open_attachment,
+            office::office_pending_drafts,
+            office::office_render,
+            office::office_save,
+            office::office_open_external,
+            office::office_close,
             open_url,
             browse_open,
             browse_set_url,

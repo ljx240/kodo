@@ -988,7 +988,7 @@ pub fn evidence_from_tool_result(
                 hits,
             }
         }
-        ToolName::ReadFile => {
+        ToolName::ReadFile | ToolName::OfficeRead => {
             if !result.ok {
                 return None;
             }
@@ -996,7 +996,7 @@ pub fn evidence_from_tool_result(
                 path: result.input.clone(),
             }
         }
-        ToolName::WriteFile | ToolName::CreateFile => {
+        ToolName::WriteFile | ToolName::CreateFile | ToolName::OfficeWrite => {
             if !result.ok {
                 return None;
             }

@@ -1,0 +1,84 @@
+.office-sidebar {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.office-document {
+  padding: 14px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.office-header,
+.office-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.office-header h3 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.office-header button { flex: none; }
+.office-actions { flex-wrap: wrap; }
+.office-actions label { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
+.office-picker { padding: 12px 14px 0; }
+.office-view-tabs { margin: 12px 0; }
+.office-view-tabs [aria-pressed="true"] { background: var(--kodo-surface); border-color: var(--kodo-border-strong); }
+.office-discard { margin-inline-start: auto; }
+
+.office-sidebar select,
+.office-document :is(input, select) {
+  max-width: 100%;
+  border: 0.5px solid var(--kodo-border-strong);
+  border-radius: 5px;
+  background: var(--kodo-canvas);
+  color: var(--kodo-text);
+  font: inherit;
+  padding: 5px 7px;
+}
+.office-structure input { width: 104px; }
+
+.office-status {
+  color: var(--kodo-text-secondary);
+  font-size: 13px;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.office-sidebar > .office-status { margin: 14px; }
+.office-status[role="alert"] { color: var(--kodo-error); }
+.office-pager { margin-block: 10px; font-variant-numeric: tabular-nums; }
+.office-pages img { display: block; width: 100%; height: auto; border: 0.5px solid var(--kodo-border); }
+
+.office-grid {
+  margin-block: 10px;
+  overflow: auto;
+}
+.office-grid table { width: max-content; min-width: 100%; border-collapse: collapse; }
+.office-grid :is(th, td) { border: 0.5px solid var(--kodo-border); padding: 5px 7px; vertical-align: top; }
+.office-grid th { background: var(--kodo-surface); font-weight: 600; }
+.office-grid td { min-width: 72px; max-width: 240px; overflow-wrap: anywhere; }
+.office-formula { display: block; margin-top: 4px; color: var(--kodo-text-secondary); font-size: 12px; }
+
+.office-objects { list-style: none; margin: 8px 0; padding: 0; }
+.office-objects:empty { display: none; }
+.office-objects > li { padding-block: 8px; border-bottom: 0.5px solid var(--kodo-border); }
+.office-objects > li > strong { display: block; color: var(--kodo-text-secondary); font-size: 12px; margin-bottom: 3px; }
+.office-objects span,
+.office-diff dd { white-space: pre-wrap; overflow-wrap: anywhere; }
+.office-diff { margin-top: 12px; }
+.office-diff summary { cursor: pointer; }
+.office-diff ol { padding-inline-start: 20px; }
+.office-diff li { margin-block: 10px; }
+.office-diff dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 4px 0 0; }
+.office-diff dt { color: var(--kodo-text-secondary); font-size: 12px; }
+.office-diff dd { margin: 0; }
