@@ -1,15 +1,4 @@
-/**
- * 待办 — the two rows above both views.
- *
- * Row one is what you are looking at: the chips, the three menus, the view
- * switch and 新建事项. Everything the chips do, 筛选 does too — the chips are
- * the quick path and the menu is the same six choices in one control, which
- * is what keeps the row usable once it has to wrap.
- *
- * 分组 is list-only by design: on the board the columns already are the
- * grouping, and a control that changed nothing visible would be a lie.
- */
-
+/** The view switch and the controls shared by the board and list. */
 import { ArrowUpDown, Check, LayoutGrid, Layers, ListFilter, Plus, Rows3, Settings2 } from "lucide-react";
 import { T } from "../../../i18n";
 import { Menu, MenuItem } from "../../../shell/Menu";
@@ -61,91 +50,51 @@ export function TodoToolbar({
   onManageStatuses: () => void;
 }) {
   return (
-    <div className="todo-toolbar">
-      <div className="todo-filters" role="group" aria-label={W.filterLabel}>
-        {FILTERS.map((value) => (
+    <>
+      <div className="todo-view-tabs" role="group" aria-label={W.viewLabel}>
+        {(["board", "list"] as const).map((value) => (
           <button
             key={value}
             type="button"
-            className={`todo-chip${filter === value ? " todo-chip--active" : ""}`}
-            aria-pressed={filter === value}
-            onClick={() => onFilter(value)}
-            data-testid={`todo-filter-${value}`}
+            className={`todo-view-tab${filter !== "archived" && view === value ? " todo-view-tab--active" : ""}`}
+            aria-pressed={filter !== "archived" && view === value}
+            onClick={() => onView(value)}
+            data-testid={`todo-view-${value}`}
           >
-            {FILTER_LABEL[value]}
-            <span className="todo-chip-count">{counts[value]}</span>
+            {VIEW_ICON[value]}
+            {value === "board" ? W.board : W.list}
+            {value === "board" && <span className="todo-chip-count">{counts.all}</span>}
           </button>
         ))}
+        <button
+          type="button"
+          className={`todo-view-tab${filter === "archived" ? " todo-view-tab--active" : ""}`}
+          aria-pressed={filter === "archived"}
+          onClick={() => onFilter("archived")}
+          data-testid="todo-filter-archived"
+        >
+          {W.archived}
+          <span className="todo-chip-count">{counts.archived}</span>
+        </button>
       </div>
 
-      <span className="todo-toolbar-divider" aria-hidden="true" />
-
-      <Menu
-        align="right"
-        trigger={({ open, toggle }) => (
-          <button
-            type="button"
-            className={`todo-pill${open ? " todo-pill--open" : ""}`}
-            onClick={toggle}
-            data-testid="todo-menu-filter"
-          >
-            <ListFilter size={13} strokeWidth={1.9} />
-            {W.filterMenu}
-          </button>
-        )}
-      >
-        {(close) =>
-          FILTERS.map((value) => (
-            <MenuItem
+      <div className="todo-toolbar">
+        <div className="todo-filters" role="group" aria-label={W.filterLabel}>
+          {FILTERS.filter((value) => value !== "archived").map((value) => (
+            <button
               key={value}
-              icon={
-                filter === value ? <Check size={14} strokeWidth={2.2} /> : <ListFilter size={14} />
-              }
-              label={FILTER_LABEL[value]}
-              hint={String(counts[value])}
-              selected={filter === value}
-              testId={`todo-menu-filter-${value}`}
-              onSelect={() => {
-                onFilter(value);
-                close();
-              }}
-            />
-          ))
-        }
-      </Menu>
+              type="button"
+              className={`todo-chip${filter === value ? " todo-chip--active" : ""}`}
+              aria-pressed={filter === value}
+              onClick={() => onFilter(value)}
+              data-testid={`todo-filter-${value}`}
+            >
+              {FILTER_LABEL[value]}
+              <span className="todo-chip-count">{counts[value]}</span>
+            </button>
+          ))}
+        </div>
 
-      <Menu
-        align="right"
-        trigger={({ open, toggle }) => (
-          <button
-            type="button"
-            className={`todo-pill${open ? " todo-pill--open" : ""}`}
-            onClick={toggle}
-            data-testid="todo-menu-sort"
-          >
-            <ArrowUpDown size={13} strokeWidth={1.9} />
-            {W.sortMenu}
-          </button>
-        )}
-      >
-        {(close) =>
-          SORTS.map((value) => (
-            <MenuItem
-              key={value}
-              icon={<ArrowUpDown size={14} />}
-              label={SORT_LABEL[value]}
-              selected={sort === value}
-              testId={`todo-menu-sort-${value}`}
-              onSelect={() => {
-                onSort(value);
-                close();
-              }}
-            />
-          ))
-        }
-      </Menu>
-
-      {view === "list" && (
         <Menu
           align="right"
           trigger={({ open, toggle }) => (
@@ -153,67 +102,118 @@ export function TodoToolbar({
               type="button"
               className={`todo-pill${open ? " todo-pill--open" : ""}`}
               onClick={toggle}
-              data-testid="todo-menu-group"
+              data-testid="todo-menu-filter"
             >
-              <Layers size={13} strokeWidth={1.9} />
-              {W.groupMenu}
+              <ListFilter size={13} strokeWidth={1.9} />
+              {W.filterMenu}
             </button>
           )}
         >
           {(close) =>
-            GROUPS.map((value) => (
+            FILTERS.map((value) => (
               <MenuItem
                 key={value}
-                icon={<Layers size={14} />}
-                label={GROUP_LABEL[value]}
-                selected={group === value}
-                testId={`todo-menu-group-${value}`}
+                icon={
+                  filter === value ? <Check size={14} strokeWidth={2.2} /> : <ListFilter size={14} />
+                }
+                label={FILTER_LABEL[value]}
+                hint={String(counts[value])}
+                selected={filter === value}
+                testId={`todo-menu-filter-${value}`}
                 onSelect={() => {
-                  onGroup(value);
+                  onFilter(value);
                   close();
                 }}
               />
             ))
           }
         </Menu>
-      )}
 
-      <button
-        type="button"
-        className="btn todo-pill"
-        onClick={onManageStatuses}
-        data-testid="todo-manage-statuses"
-        title={T.workbench.todo.statusManager.title}
-      >
-        <Settings2 size={13} strokeWidth={1.9} />
-        {T.workbench.todo.statusManager.title}
-      </button>
+        <Menu
+          align="right"
+          trigger={({ open, toggle }) => (
+            <button
+              type="button"
+              className={`todo-pill${open ? " todo-pill--open" : ""}`}
+              onClick={toggle}
+              data-testid="todo-menu-sort"
+            >
+              <ArrowUpDown size={13} strokeWidth={1.9} />
+              {W.sortMenu}
+            </button>
+          )}
+        >
+          {(close) =>
+            SORTS.map((value) => (
+              <MenuItem
+                key={value}
+                icon={<ArrowUpDown size={14} />}
+                label={SORT_LABEL[value]}
+                selected={sort === value}
+                testId={`todo-menu-sort-${value}`}
+                onSelect={() => {
+                  onSort(value);
+                  close();
+                }}
+              />
+            ))
+          }
+        </Menu>
 
-      <div className="app-seg" role="group" aria-label={W.viewLabel}>
-        {(["board", "list"] as const).map((value) => (
-          <button
-            key={value}
-            type="button"
-            className={`app-seg-btn${view === value ? " app-seg-btn--active" : ""}`}
-            aria-pressed={view === value}
-            onClick={() => onView(value)}
-            data-testid={`todo-view-${value}`}
+        {view === "list" && (
+          <Menu
+            align="right"
+            trigger={({ open, toggle }) => (
+              <button
+                type="button"
+                className={`todo-pill${open ? " todo-pill--open" : ""}`}
+                onClick={toggle}
+                data-testid="todo-menu-group"
+              >
+                <Layers size={13} strokeWidth={1.9} />
+                {W.groupMenu}
+              </button>
+            )}
           >
-            {VIEW_ICON[value]}
-            {value === "board" ? W.board : W.list}
-          </button>
-        ))}
-      </div>
+            {(close) =>
+              GROUPS.map((value) => (
+                <MenuItem
+                  key={value}
+                  icon={<Layers size={14} />}
+                  label={GROUP_LABEL[value]}
+                  selected={group === value}
+                  testId={`todo-menu-group-${value}`}
+                  onSelect={() => {
+                    onGroup(value);
+                    close();
+                  }}
+                />
+              ))
+            }
+          </Menu>
+        )}
 
-      <button
-        type="button"
-        className="btn btn--primary todo-new-btn"
-        onClick={onCreate}
-        data-testid="todo-new"
-      >
-        <Plus size={14} strokeWidth={2.2} />
-        {W.add}
-      </button>
-    </div>
+        <button
+          type="button"
+          className="btn todo-pill"
+          onClick={onManageStatuses}
+          data-testid="todo-manage-statuses"
+          title={T.workbench.todo.statusManager.title}
+        >
+          <Settings2 size={13} strokeWidth={1.9} />
+          {T.workbench.todo.statusManager.title}
+        </button>
+
+        <button
+          type="button"
+          className="btn btn--primary todo-new-btn"
+          onClick={onCreate}
+          data-testid="todo-new"
+        >
+          <Plus size={14} strokeWidth={2.2} />
+          {W.add}
+        </button>
+      </div>
+    </>
   );
 }

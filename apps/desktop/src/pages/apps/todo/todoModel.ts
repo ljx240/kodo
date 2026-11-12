@@ -66,8 +66,8 @@ export type TodoRows = {
   tops: TodoDto[];
   /** Live children keyed by parent id, oldest first. */
   children: Map<string, TodoDto[]>;
-  /** Archived top-level rows, filter-independent — the list's 已归档 group
-   *  shows them whatever chip is active, so it cannot be built from `tops`. */
+  /** Archived top-level rows within the current search and module.
+   *  The list's 已归档 group shows them independently of the quick filter. */
   archived: TodoDto[];
 };
 
@@ -92,22 +92,14 @@ export function partitionRows(
 ): TodoRows {
   const all = todos ?? [];
   const live = all.filter((row) => !row.archived);
-  const archived = all.filter((row) => row.archived && row.parentId === null);
-
-  // 已归档 is the one chip that reaches the archived rows; every other chip
-  // works within the live ones.
-  const pool = filter === "archived" ? all.filter((row) => row.archived) : live;
-
-  const tops = pool
-    .filter(
-      (row) =>
-        row.parentId === null &&
-        matchesFilter(row, filter, today, week) &&
-        // The search narrows what the chip already let through. A child that
-        // matches on its own still shows only through the parent that kept it.
-        (allow === null || allow.has(row.id)),
-    )
-    .sort(byManual);
+  const scoped = all.filter(
+    (row) => row.parentId === null && (allow === null || allow.has(row.id)),
+  );
+  const archived = scoped.filter((row) => row.archived);
+  const tops = (filter === "archived"
+    ? [...archived]
+    : scoped.filter((row) => !row.archived && matchesFilter(row, filter, today, week))
+  ).sort(byManual);
 
   const children = new Map<string, TodoDto[]>();
   for (const row of live) {

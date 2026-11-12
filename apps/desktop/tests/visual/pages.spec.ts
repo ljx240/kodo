@@ -54,6 +54,15 @@ const PAGES: Array<{ name: string; url: string; setup?: (page: Page) => Promise<
       await expect(page.locator('[data-testid="todo-list"]')).toBeVisible();
     },
   },
+  {
+    name: "workbench-todo-detail",
+    url: "/ui-demo/workbench?app=todo",
+    setup: async (page) => {
+      await page.getByTestId("todo-edit-todo-1").click();
+      await expect(page.getByRole("dialog", { name: "事项详情" })).toBeVisible();
+      await page.getByRole("button", { name: "关闭", exact: true }).focus();
+    },
+  },
   { name: "workbench-calendar", url: "/ui-demo/workbench?app=calendar" },
   {
     name: "workbench-calendar-month",
