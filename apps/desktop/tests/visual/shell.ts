@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import type { OfficePreview, OpenedOffice } from "../../src/conversation/officeApi";
 import {
   DEMO_CALENDAR_EVENTS,
   DEMO_RESULTS,
@@ -257,6 +258,7 @@ export type Core = {
   }>;
   /** Full file bodies for the file viewer (`read_project_file`). */
   fileBodies?: Record<string, string>;
+  office?: { path: string; document: OpenedOffice; preview: OfficePreview };
   /** Image paths the stub treats as >4MB — `probe_context_file` then returns
    *  `preview: null`, like the Rust cap on inline image previews. */
   oversizedImages?: string[];
@@ -769,6 +771,19 @@ export async function stubShell(page: Page, core: Core = {}): Promise<void> {
               throw `file outside project refused: ${path}`;
             }
             openFileLog.push(path);
+            return null;
+          }
+          case "office_open_project": {
+            const office = config.office;
+            if (!office || office.path !== args?.path) throw "Office fixture not found";
+            return office.document;
+          }
+          case "office_render":
+          case "office_open_external": {
+            const office = config.office;
+            if (!office || office.document.handle !== args?.handle) throw "Office fixture handle not found";
+            if (command === "office_render") return office.preview;
+            openFileLog.push(office.path);
             return null;
           }
           case "reveal_file": {

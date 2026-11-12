@@ -167,6 +167,7 @@ impl<O: Write, E: Write> Renderer<O, E> {
             // session log already captured them via TurnLogger.
             Step::Thinking { .. }
             | Step::Compaction { .. }
+            | Step::ContextTrim(_)
             | Step::Failover { .. }
             | Step::PlanStep { .. }
             | Step::Permission { .. }
@@ -223,6 +224,7 @@ fn started_notice(step: &Step) -> String {
         // Transparency-side steps: surface no per-line notice in the CLI.
         Step::Thinking { .. }
         | Step::Compaction { .. }
+        | Step::ContextTrim(_)
         | Step::Failover { .. }
         | Step::PlanStep { .. }
         | Step::Permission { .. }

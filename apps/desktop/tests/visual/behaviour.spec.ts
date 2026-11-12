@@ -1081,12 +1081,29 @@ test("an image file previews inline — no read failure, no 完整文件 tab", a
   await expect(page.locator('[data-testid="viewer-error"]')).toHaveCount(0);
 });
 
-test("office and binary files show a kind card with an open-external action", async ({ page }) => {
+test("Office files preview in the sidebar and open in the system app", async ({ page }) => {
   await stubShell(
     page,
     fileTurnShell({
       files: ["src/app.ts", "spec.docx"],
       fileBodies: {},
+      office: {
+        path: "spec.docx",
+        document: {
+          handle: "fixture-office",
+          name: "spec.docx",
+          sourcePath: "/tmp/ws/alpha/spec.docx",
+          view: {
+            format: "docx", version: "v1", sections: [], section: "", items: [],
+            offset: 0, total: 0, nextOffset: null, readOnly: null,
+          },
+        },
+        preview: {
+          image: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          pages: 1,
+          version: "v1",
+        },
+      },
     }),
   );
   await page.goto("/");
@@ -1096,13 +1113,12 @@ test("office and binary files show a kind card with an open-external action", as
   await expect(page.locator('[data-testid="file-viewer"]')).toBeVisible();
 
   await page.locator('[data-testid="tree-file-spec.docx"]').click();
-  await expect(page.locator('[data-testid="viewer-kind-card"]')).toBeVisible();
-  await expect(page.locator(".fv-kind-badge")).toHaveText("DOC");
-  await expect(page.locator(".fv-kind-name")).toHaveText("spec.docx");
-  await expect(page.locator(".fv-kind-size")).toHaveText("1.0 KB");
+  const preview = page.getByRole("region", { name: "Office 文件预览" });
+  await expect(preview.getByRole("heading", { name: "spec.docx" })).toBeVisible();
+  await expect(preview.getByRole("img", { name: "第 1 页" })).toHaveAttribute("src", /^data:image\/png/);
   await expect(page.locator('[data-testid="file-tab-full"]')).toHaveCount(0);
 
-  await page.locator('[data-testid="viewer-open-external"]').click();
+  await preview.getByRole("button", { name: "系统打开" }).click();
   const opened = await page.evaluate(
     () => (window as unknown as { __openFileLog?: string[] }).__openFileLog ?? [],
   );
@@ -2631,8 +2647,9 @@ test("hovering the composer context ring shows the three-line Codex-style toolti
   // Hidden text must never wrap into a stray character beside the model.
   await expect(tooltip).toHaveCount(1);
   await expect(tooltip).toBeHidden();
-  await expect(ring).toHaveAttribute("role", "progressbar");
-  await expect(ring).toHaveAttribute("aria-valuenow", "44");
+  await expect(ring).toHaveRole("button");
+  await expect(ring).toHaveAttribute("aria-haspopup", "dialog");
+  await expect(ring).toHaveAccessibleDescription(/44% 已用/);
   for (const circle of [".composer-context-ring-bg", ".composer-context-ring-fg"]) {
     expect(await ring.locator(circle).evaluate((el) => getComputedStyle(el).stroke)).not.toBe("none");
   }

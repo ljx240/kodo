@@ -603,6 +603,21 @@ pub enum ContentBlock {
 pub struct ProviderMessage {
     pub role: MessageRole,
     pub content: Vec<ContentBlock>,
+    #[serde(skip)]
+    pub(crate) context_text: ContextText,
+}
+
+/// Local attribution that follows a message when the request history is pruned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ContextText {
+    #[default]
+    Other,
+    Injections {
+        observations: u64,
+        memory: u64,
+        knowledge: u64,
+    },
+    ToolResults,
 }
 
 impl ProviderMessage {
@@ -610,6 +625,7 @@ impl ProviderMessage {
         Self {
             role: MessageRole::System,
             content: vec![ContentBlock::Text { text: text.into() }],
+            context_text: ContextText::Other,
         }
     }
 
@@ -617,6 +633,7 @@ impl ProviderMessage {
         Self {
             role: MessageRole::User,
             content: vec![ContentBlock::Text { text: text.into() }],
+            context_text: ContextText::Other,
         }
     }
 
@@ -641,6 +658,7 @@ impl ProviderMessage {
         Self {
             role: MessageRole::Assistant,
             content,
+            context_text: ContextText::Other,
         }
     }
 
@@ -656,6 +674,7 @@ impl ProviderMessage {
                 content: content.into(),
                 is_error,
             }],
+            context_text: ContextText::Other,
         }
     }
 
@@ -3543,6 +3562,7 @@ mod tests {
             ProviderMessage::user("inspect and test"),
             ProviderMessage {
                 role: MessageRole::Assistant,
+                context_text: ContextText::Other,
                 content: vec![
                     ContentBlock::Text {
                         text: "I will inspect both.".into(),
@@ -3645,6 +3665,7 @@ mod tests {
                 ProviderMessage::user("go"),
                 ProviderMessage {
                     role: MessageRole::Assistant,
+                    context_text: ContextText::Other,
                     content: vec![ContentBlock::ToolCall {
                         id: ids[0].into(),
                         name: "read_file".into(),

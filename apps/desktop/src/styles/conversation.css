@@ -1111,15 +1111,18 @@ button.changed-file-path:focus-visible {
 
 /* Context usage stays beside the model; its tooltip never takes layout space. */
 .composer-context-ring {
-  --kodo-context-ring-muted: var(--kodo-text-secondary);
-  --kodo-context-ring-warn: var(--kodo-warning);
-  --kodo-context-ring-danger: var(--kodo-error);
+  --kodo-context-ring-muted: var(--kodo-context-neutral);
+  --kodo-context-ring-warn: var(--kodo-context-warning);
+  --kodo-context-ring-danger: var(--kodo-context-danger);
   position: relative;
   box-sizing: content-box;
   padding: 6px;
   border-radius: 50%;
-  cursor: default;
   vertical-align: middle;
+}
+
+.composer-context-ring:hover {
+  background: var(--kodo-context-hover);
 }
 
 .composer-context-ring > svg {
@@ -1127,12 +1130,11 @@ button.changed-file-path:focus-visible {
 }
 
 .composer-context-ring-bg {
-  stroke: var(--kodo-border-strong);
+  stroke: var(--kodo-context-border);
 }
 
 .composer-context-ring-fg {
   stroke: currentColor;
-  transition: stroke-dasharray 160ms ease, stroke 160ms ease;
 }
 
 .composer-context-ring-tooltip {
@@ -1147,13 +1149,12 @@ button.changed-file-path:focus-visible {
   gap: 2px;
   width: max-content;
   max-width: calc(100vw - 32px);
-  padding: 10px 14px;
-  border: 1px solid rgb(255 255 255 / 12%);
-  border-radius: 12px;
-  background: #1b1d1f;
-  box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
-  color: #fff;
-  font-size: var(--kodo-font-sm);
+  padding: 8px 12px;
+  border: 0.5px solid var(--kodo-context-border);
+  border-radius: var(--kodo-radius-sm);
+  background: var(--kodo-context-surface);
+  color: var(--kodo-context-fg);
+  font-size: 12px;
   font-weight: 400;
   line-height: 1.5;
   font-variant-numeric: tabular-nums;
@@ -1162,11 +1163,10 @@ button.changed-file-path:focus-visible {
   visibility: hidden;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease;
 }
 
 .composer-context-ring-tooltip-line:not(:last-child) {
-  color: rgb(255 255 255 / 68%);
+  color: var(--kodo-context-secondary);
 }
 
 .composer-context-ring:hover .composer-context-ring-tooltip,
