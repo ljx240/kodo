@@ -391,7 +391,14 @@ pub(crate) fn execute(
         sink_live.set(keep);
         child_alive()
     };
-    let result = crate::run_scoped(&child, &child_alive, &child_approve, &mut collect, &scope);
+    let result = crate::run_scoped(
+        &child,
+        &child_alive,
+        &child_approve,
+        &mut collect,
+        &scope,
+        None,
+    );
     drop(collect);
     trace.status = terminal_status(
         alive() && sink_live.get(),
@@ -1307,6 +1314,7 @@ mod tests {
             &mut changeset,
             &mut crate::dedup::TurnDedup::new(),
             &mut Delegation::default(),
+            None,
         )
         .unwrap()
         .unwrap();
@@ -1369,6 +1377,7 @@ mod tests {
             &mut crate::TurnChangeSet::default(),
             &mut crate::dedup::TurnDedup::new(),
             &mut delegation,
+            None,
         )
         .unwrap()
         .unwrap();

@@ -222,9 +222,14 @@ impl TurnContext {
             kodo_shell::turn::conversation_history(&prior_session),
         );
 
+        let office = request.mode == kodo_agent::AgentMode::Work
+            && kodo_agent::office_flow::is_request(message, &[]);
         let mut logger = TurnLogger::new(self.session_dir.clone(), session_id)
-            .with_capture(self.config.local_trace)
-            .with_memory(Some(&self.project), (prior_session.turns.len() + 1) as u32);
+            .with_capture(self.config.local_trace && !office)
+            .with_memory(
+                (!office).then_some(self.project.as_path()),
+                (prior_session.turns.len() + 1) as u32,
+            );
         request.memory = logger.memory_handle();
         let result = {
             let logger_ref = &mut logger;

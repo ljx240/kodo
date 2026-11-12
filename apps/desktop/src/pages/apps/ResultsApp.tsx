@@ -29,6 +29,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   createResult,
   deleteResult,
+  isDesktop,
   listResults,
   openResultFile,
   pickFiles,
@@ -40,6 +41,7 @@ import {
   type ArtifactViewDto,
 } from "../../api";
 import { T } from "../../i18n";
+import { supportsOffice } from "../../conversation/officeApi";
 import { KnowledgeSaveDialog } from "./KnowledgeSaveDialog";
 import { workbenchErrorText } from "./errors";
 
@@ -56,6 +58,7 @@ type EditorState = {
 type Props = {
   manifest: AppManifestDto;
   onBack: () => void;
+  onPreviewOffice: (id: string) => void;
 };
 
 function blankResult(): ArtifactDto {
@@ -90,7 +93,7 @@ function statusLabel(status: ArtifactViewDto["fileStatus"]): string | null {
   }
 }
 
-export function ResultsApp({ manifest, onBack }: Props) {
+export function ResultsApp({ manifest, onBack, onPreviewOffice }: Props) {
   const [rows, setRows] = useState<ArtifactViewDto[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "favorites">("all");
@@ -305,6 +308,12 @@ export function ResultsApp({ manifest, onBack }: Props) {
               )}
               {row.currentSize !== null && <span className="result-size">{row.currentSize} B</span>}
               <span className="spacer" />
+              {isDesktop() && row.fileStatus !== "missing" && supportsOffice(artifact.filePath ?? "") && (
+                <button type="button" className="btn" onClick={() => onPreviewOffice(artifact.id)}>
+                  <FileText size={13} strokeWidth={1.8} />
+                  预览
+                </button>
+              )}
               <button
                 type="button"
                 className="btn"

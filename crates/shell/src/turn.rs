@@ -40,6 +40,7 @@ pub fn conversation_history(session: &session::Session) -> Vec<(String, String)>
         .iter()
         .filter(|turn| {
             !turn.knowledge_used
+                && !kodo_agent::office_flow::is_request(&turn.ask, &turn.context)
                 && (turn.done || turn.stopped || turn.interrupted || turn.error.is_some())
         })
         .rev()

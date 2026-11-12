@@ -36,6 +36,8 @@ impl std::fmt::Display for ToolCallId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolName {
     Search,
+    OfficeRead,
+    OfficeWrite,
     ReadFile,
     WriteFile,
     RunCommand,
@@ -61,6 +63,8 @@ impl ToolName {
     pub fn label(self) -> &'static str {
         match self {
             Self::Search => "search",
+            Self::OfficeRead => "office_read",
+            Self::OfficeWrite => "office_write",
             Self::ReadFile => "read_file",
             Self::WriteFile => "write_file",
             Self::RunCommand => "run_command",
@@ -81,6 +85,8 @@ impl ToolName {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim() {
             "search" => Some(Self::Search),
+            "office_read" => Some(Self::OfficeRead),
+            "office_write" => Some(Self::OfficeWrite),
             "read_file" | "read" => Some(Self::ReadFile),
             "write_file" | "write" => Some(Self::WriteFile),
             "run_command" | "bash" | "command" => Some(Self::RunCommand),
@@ -104,6 +110,7 @@ impl ToolName {
         matches!(
             self,
             Self::WriteFile
+                | Self::OfficeWrite
                 | Self::ApplyPatch
                 | Self::ReplaceRange
                 | Self::CreateFile
@@ -123,6 +130,20 @@ pub enum ToolArgs {
     Search {
         query: String,
         glob: Option<String>,
+    },
+    OfficeRead {
+        path: String,
+        section: Option<String>,
+        offset: Option<usize>,
+        range: Option<String>,
+        analysis: Option<crate::office::work::AnalysisRequest>,
+    },
+    OfficeWrite {
+        path: String,
+        source: Option<String>,
+        version: Option<String>,
+        edits: Vec<crate::office::work::Edit>,
+        content: Option<String>,
     },
     ReadFile {
         path: String,
@@ -188,6 +209,8 @@ impl ToolArgs {
             | Self::ReplaceRange { path, .. }
             | Self::CreateFile { path, .. }
             | Self::DeleteFile { path, .. }
+            | Self::OfficeRead { path, .. }
+            | Self::OfficeWrite { path, .. }
             | Self::ReadFile { path, .. }
             | Self::ReadRange { path, .. } => Some(path.as_str()),
             _ => None,
@@ -220,6 +243,39 @@ impl ToolArgs {
                 // of guessing one at a time. (Phase 0 second-pass.)
                 query: require_string_with_schema(args, "query", "search", &["query"])?,
                 glob: optional_string(args, "glob")?,
+            }),
+            ToolName::OfficeRead => Ok(Self::OfficeRead {
+                path: require_string(args, "path")?,
+                section: optional_string(args, "section")?,
+                offset: optional_usize(args, "offset")?,
+                range: optional_string(args, "range")?,
+                analysis: args
+                    .get("analysis")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        serde_json::from_value(value.clone()).map_err(|error| {
+                            ToolError::invalid_args(format!("invalid Excel analysis: {error}"))
+                        })
+                    })
+                    .transpose()?,
+            }),
+            ToolName::OfficeWrite => Ok(Self::OfficeWrite {
+                path: require_string(args, "path")?,
+                source: optional_string(args, "source")?,
+                version: optional_string(args, "version")?,
+                edits: args
+                    .get("edits")
+                    .map(|value| {
+                        serde_json::from_value(value.clone()).map_err(|error| {
+                            ToolError::invalid_args(format!("invalid Office edits: {error}"))
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
+                content: match args.get("content") {
+                    Some(value @ serde_json::Value::Object(_)) => Some(value.to_string()),
+                    _ => optional_string(args, "content")?,
+                },
             }),
             ToolName::ReadFile => Ok(Self::ReadFile {
                 path: require_string(args, "path")?,
@@ -287,7 +343,10 @@ impl ToolArgs {
                 Some(pattern) => format!("{query} (glob: {pattern})"),
                 None => query.clone(),
             },
-            Self::ReadFile { path } | Self::DeleteFile { path } => path.clone(),
+            Self::ReadFile { path }
+            | Self::DeleteFile { path }
+            | Self::OfficeRead { path, .. }
+            | Self::OfficeWrite { path, .. } => path.clone(),
             Self::WriteFile { path, .. } | Self::CreateFile { path, .. } => path.clone(),
             Self::RunCommand { command } => command.clone(),
             Self::ApplyPatch { path, .. } => path.clone(),
@@ -807,6 +866,59 @@ impl ToolRegistry {
                     }),
                 },
                 ToolDefinition {
+                    name: "office_read",
+                    description: "Read a section of a DOCX, XLSX or PPTX, or summarize numeric XLSX data locally. Use section and range for XLSX analysis. Analysis returns source version, counts, sum, minimum, maximum and average, with formula cache and missing value counts. User approval is required before Office data is sent to the model.",
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {"type":"string"},
+                            "section": {"type":"string","description":"Section ID or visible sheet/section name from a previous read"},
+                            "offset": {"type":"integer","minimum":0},
+                            "range": {"type":"string","description":"A1 range for Excel only"},
+                            "analysis": {
+                                "type":"object",
+                                "description":"Summarize an XLSX range in Kodo. Maximum 50000 cells and 20 groups. Cached formulas are identified separately.",
+                                "properties":{
+                                    "columns":{"type":"array","minItems":1,"maxItems":8,"uniqueItems":true,"items":{"type":"string","pattern":"^[A-Za-z]{1,3}$"},"description":"Letters of numeric columns within the range, such as D or AA"},
+                                    "group_by":{"type":"string","pattern":"^[A-Za-z]{1,3}$","description":"Optional group column within the same range"},
+                                    "header":{"type":"boolean","description":"Skip the first row of the range when true"}
+                                },
+                                "required":["columns"],
+                                "additionalProperties":false
+                            }
+                        },
+                        "required":["path"],
+                        "additionalProperties":false
+                    }),
+                },
+                ToolDefinition {
+                    name: "office_write",
+                    description: "Create an editable Office file at a new relative path or save a format-preserving edited copy. For edits include source, its read version, and typed edits. For a new file supply content. DOCX content is Markdown. XLSX content is an object {sheets:[{name,rows:[[cell]],column_widths?:[integer],chart?:{kind,title,category_column,value_column,below_table?:boolean}}]}. Cells can be strings, numbers, booleans, null or {type,value}. Use explicit formula cells for A1 arithmetic, SUM, COUNT, AVERAGE and exact-match SUMIFS/COUNTIFS; charts may use calculated values. PPTX content is an object {slides:[{title,layout,body:[string],secondary:[string],notes,metrics?:[{label,value,detail}],chart?:{kind,title,categories,values}}]}. Use cover, conclusion, comparison (secondary is the right column), metrics (2 to 4 short metrics), trend (with a chart), action or body. Chart kind is column, bar or line. Value and detail are strings. Keep the unit and time period visible and the narrative concise.",
+                    input_schema: serde_json::json!({
+                        "type":"object",
+                        "properties":{
+                            "path":{"type":"string","description":"New relative output path with Office extension"},
+                            "source":{"type":"string"},
+                            "version":{"type":"string"},
+                            "content":{"oneOf":[{"type":"string"},{"type":"object"}]},
+                            "edits":{"type":"array","items":{"type":"object","properties":{
+                                "kind":{"enum":["replace_text","set_cell","set_chart_data","set_number_format","move_shape"]},
+                                "section":{"type":"string"},
+                                "item":{"type":"string"},
+                                "before":{"type":"string"},
+                                "after":{"type":"string"},
+                                "address":{"type":"string"},
+                                "format":{"type":"string","description":"Excel built-in format, e.g. 0.00%"},"x":{"type":"integer","minimum":0},"y":{"type":"integer","minimum":0},
+                                "categories":{"type":"array","items":{"type":"string"}},
+                                "values":{"type":"array","items":{"type":"string"}},
+                                "value":{"type":"object","description":"Excel typed value {type,value}, type is text, number (decimal string), boolean, date, formula or blank"}
+                            },"required":["kind","section"],"additionalProperties":false}}
+                        },
+                        "required":["path"],
+                        "additionalProperties":false
+                    }),
+                },
+                ToolDefinition {
                     name: "write_file",
                     description: "Write a UTF-8 file, or generate a DOCX from text/Markdown headings and pipe tables. Creates parent directories; DOCX is validated by readback. Content replaces the whole file, so an existing file must be read in this turn first; use apply_patch or replace_range for a local change.",
                     input_schema: serde_json::json!({
@@ -984,7 +1096,9 @@ impl ToolRegistry {
             return Self::standard().filtered(|name| matches!(name, "websearch"));
         }
         match mode {
-            crate::AgentMode::Code => Self::standard(),
+            crate::AgentMode::Code => {
+                Self::standard().filtered(|name| !matches!(name, "office_read" | "office_write"))
+            }
             crate::AgentMode::Work => Self::standard()
                 .filtered(|name| !matches!(name, "find_symbol" | "find_references" | "read_range")),
         }

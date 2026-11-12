@@ -364,7 +364,9 @@ pub fn approval_gate(
     headless: bool,
     command: &str,
 ) -> ApprovalGate {
-    if matches!(kind, StepKind::SandboxEscalation) {
+    if matches!(kind, StepKind::SandboxEscalation)
+        || command.starts_with(agent::office_flow::SHARE_PROMPT)
+    {
         return if headless {
             ApprovalGate::Refuse
         } else {
@@ -524,6 +526,7 @@ pub fn start(
                 // be consulted — a command that was allowed earlier does not
                 // authorise running outside the sandbox.
                 let escalation = matches!(kind, StepKind::SandboxEscalation);
+                let office_share = command.starts_with(agent::office_flow::SHARE_PROMPT);
                 match approval_gate(kind, permission, headless, command) {
                     ApprovalGate::Refuse => return false,
                     ApprovalGate::Auto => return true,
@@ -531,7 +534,10 @@ pub fn start(
                 }
                 // Session-wide allow from an earlier "本会话允许".
                 let fingerprint = approval_fingerprint(kind, command);
-                if !escalation && approve_approvals.is_session_allowed(&approve_id, &fingerprint) {
+                if !escalation
+                    && !office_share
+                    && approve_approvals.is_session_allowed(&approve_id, &fingerprint)
+                {
                     return true;
                 }
                 // Run already cancelled — never wait for an approval ticket.
@@ -547,6 +553,8 @@ pub fn start(
                 let risk = kodo_agent::tools::classify_command_risk(command);
                 let reason = if escalation {
                     "沙箱拒绝了该命令，本次将不带沙箱限制执行".to_owned()
+                } else if office_share {
+                    "允许所示模型接收该 Office 文件的本次选区".to_owned()
                 } else {
                     agent::tools::redact_secrets(
                         agent::dangerous_reason(command).unwrap_or_else(|| risk.reason()),
@@ -556,6 +564,8 @@ pub fn start(
                     // The card must not look like an ordinary command
                     // approval: it lifts the confinement.
                     "SandboxEscalation".to_owned()
+                } else if office_share {
+                    "SensitiveData".to_owned()
                 } else {
                     match risk {
                         kodo_agent::tools::CommandRisk::Catastrophic => "Catastrophic",
@@ -642,7 +652,7 @@ pub fn start(
                 // session-allow cache is never written for it, and a
                 // "本会话允许" answer is downgraded to a single approval.
                 let choice = choice.for_kind(kind);
-                if choice.is_session_wide(kind) {
+                if !office_share && choice.is_session_wide(kind) {
                     approve_approvals.remember_session_allow(&approve_id, &fingerprint);
                 }
                 choice.allows()
@@ -654,7 +664,9 @@ pub fn start(
         let record_app = app.clone();
         // Evidence and knowledge-derived answers must not enter the ordinary
         // memory outbox and later bypass per-turn approval as recalled memory.
-        let memory_project = if args.knowledge_context.is_some() {
+        let office_turn = args.mode == agent::AgentMode::Work
+            && agent::office_flow::is_request(&args.message, &args.context);
+        let memory_project = if args.knowledge_context.is_some() || office_turn {
             None
         } else {
             args.project.as_deref()
@@ -662,7 +674,7 @@ pub fn start(
         // Envelope writes live in kodo-shell; this sink records first, then
         // emits, so the log stays the source of truth for the GUI.
         let mut logger = TurnLogger::new(args.dir.clone(), args.id.clone())
-            .with_capture(args.local_trace)
+            .with_capture(args.local_trace && !office_turn)
             .with_memory(memory_project, args.turn_seq);
         let memory = logger.memory_handle();
         let logger_ref = &mut logger;
@@ -901,7 +913,19 @@ pub fn start(
             decision: args.decision.clone(),
         };
 
-        let result = agent::run(&request, &alive, &approve, &mut sink);
+        let stage_office = |draft| {
+            if !token.is_live() {
+                return Err("本轮已停止".to_owned());
+            }
+            crate::office::stage_for_turn(&app, &args.id, args.turn_seq, draft)
+        };
+        let result = agent::run_with_office_drafts(
+            &request,
+            &alive,
+            &approve,
+            &mut sink,
+            Some(&stage_office),
+        );
         approvals.clear_session(&args.id);
         let terminal_kind = if result.is_err() {
             TurnTerminalKind::Failed

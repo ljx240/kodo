@@ -269,61 +269,71 @@ fn render_profile(policy: &SandboxPolicy) -> String {
         ));
     }
 
-    // ── Read confinement: deny the home directory, re-allow the workspace
-    //    and the toolchain caches the build needs. ──
-    out.push_str("\n;; read deny-list\n");
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    if let Some(home) = &home {
-        let home = normalize_root(home);
-        out.push_str(&format!(
-            "(deny file-read* (subpath \"{}\"))\n",
-            escape(&home)
-        ));
-        // Directory traversal is still allowed, otherwise the sandboxed
-        // process cannot even reach the workspace it is confined to.
-        out.push_str(&format!(
-            "(allow file-read-metadata (subpath \"{}\"))\n",
-            escape(&home)
-        ));
-        for relative in TOOLCHAIN_READ_ROOTS {
-            let path = normalize_root(&home.join(relative));
-            if path.exists() {
+    if policy.isolated_reads {
+        // The dynamic loader opens the filesystem root during launch.
+        out.push_str("\n;; file data allow-list\n(deny file-read-data)\n(allow file-read-data (literal \"/\"))\n");
+    } else {
+        // ── Read confinement: deny the home directory, re-allow the workspace
+        //    and the toolchain caches the build needs. ──
+        out.push_str("\n;; read deny-list\n");
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(home) = &home {
+            let home = normalize_root(home);
+            out.push_str(&format!(
+                "(deny file-read* (subpath \"{}\"))\n",
+                escape(&home)
+            ));
+            // Directory traversal is still allowed, otherwise the sandboxed
+            // process cannot even reach the workspace it is confined to.
+            out.push_str(&format!(
+                "(allow file-read-metadata (subpath \"{}\"))\n",
+                escape(&home)
+            ));
+            for relative in TOOLCHAIN_READ_ROOTS {
+                let path = normalize_root(&home.join(relative));
+                if path.exists() {
+                    out.push_str(&format!(
+                        "(allow file-read* (subpath \"{}\"))\n",
+                        escape(&path)
+                    ));
+                }
+            }
+            for relative in TOOLCHAIN_CREDENTIALS {
+                let path = normalize_root(&home.join(relative));
                 out.push_str(&format!(
-                    "(allow file-read* (subpath \"{}\"))\n",
+                    "(deny file-read* (subpath \"{}\"))\n",
+                    escape(&path)
+                ));
+            }
+            for relative in HOME_SENSITIVE {
+                let path = normalize_root(&home.join(relative));
+                out.push_str(&format!(
+                    "(deny file-read* (subpath \"{}\"))\n",
                     escape(&path)
                 ));
             }
         }
-        for relative in TOOLCHAIN_CREDENTIALS {
-            let path = normalize_root(&home.join(relative));
-            out.push_str(&format!(
-                "(deny file-read* (subpath \"{}\"))\n",
-                escape(&path)
-            ));
-        }
-        for relative in HOME_SENSITIVE {
-            let path = normalize_root(&home.join(relative));
-            out.push_str(&format!(
-                "(deny file-read* (subpath \"{}\"))\n",
-                escape(&path)
-            ));
-        }
     }
+    let read_rule = if policy.isolated_reads {
+        "file-read-data"
+    } else {
+        "file-read*"
+    };
     for root in policy.allowed_read_roots.iter() {
         out.push_str(&format!(
-            "(allow file-read* (subpath \"{}\"))\n",
+            "(allow {read_rule} (subpath \"{}\"))\n",
             escape(root)
         ));
     }
     if !policy.workspace_root.as_os_str().is_empty() {
         out.push_str(&format!(
-            "(allow file-read* (subpath \"{}\"))\n",
+            "(allow {read_rule} (subpath \"{}\"))\n",
             escape(&policy.workspace_root)
         ));
     }
     for root in policy.denied_read_roots.iter() {
         out.push_str(&format!(
-            "(deny file-read* (subpath \"{}\"))\n",
+            "(deny {read_rule} (subpath \"{}\"))\n",
             escape(root)
         ));
     }

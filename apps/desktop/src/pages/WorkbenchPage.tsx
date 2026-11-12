@@ -56,9 +56,10 @@ const MAX_TODAY = 3;
 
 type Props = {
   route: Route;
+  onPreviewOffice: (id: string) => void;
 };
 
-export function WorkbenchPage({ route }: Props) {
+export function WorkbenchPage({ route, onPreviewOffice }: Props) {
   const today = route.demo ? DEMO_TODAY : todayIso();
 
   const [apps, setApps] = useState<AppViewDto[] | null>(null);
@@ -217,7 +218,7 @@ export function WorkbenchPage({ route }: Props) {
     );
   }
   if (route.appId === "artifacts" && openAppView?.preference.enabled) {
-    return <ResultsApp manifest={openAppView.manifest} onBack={backToCollection} />;
+    return <ResultsApp manifest={openAppView.manifest} onBack={backToCollection} onPreviewOffice={onPreviewOffice} />;
   }
   if (route.appId === "knowledge" && openAppView?.preference.enabled) {
     return <KnowledgeApp manifest={openAppView.manifest} onBack={backToCollection} />;

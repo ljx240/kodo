@@ -43,6 +43,7 @@ import { fileLook, kindFromPath } from "../fileKind";
 import { T } from "../i18n";
 import { ContextCard } from "./ContextCard";
 import { ContextRing } from "./ContextRing";
+import { supportsOffice } from "./officeApi";
 import type { ContextBudget } from "./trace";
 import { Menu, MenuItem } from "../shell/Menu";
 import { navigate } from "../routes";
@@ -103,6 +104,7 @@ type Props = {
   onOpenProviderSettings: () => void;
   /** localStorage key for the per-conversation draft (loads on change, clears on send). */
   draftKey: string;
+  onPreviewOffice?: (path: string) => void;
   /** 编辑并发送: seeds the draft with a previous ask (nonce forces refocus on repeat clicks). */
   editSeed?: { text: string; nonce: number } | null;
   /** Persona chain selected for this session — empty = 无智能体 (the default).
@@ -162,6 +164,7 @@ export function Composer({
   providerWarning,
   onOpenProviderSettings,
   draftKey,
+  onPreviewOffice,
   editSeed = null,
   personaChain,
   onSelectAgents,
@@ -499,7 +502,7 @@ export function Composer({
 
   // Native file drop (Tauri): full filesystem paths, independent of HTML5 DnD.
   useEffect(() => {
-    if (!isDesktop() || !projectPath) return;
+    if (!isDesktop() || (!projectPath && agentMode !== "work")) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     // getCurrentWebview() can throw synchronously when __TAURI_INTERNALS__ is a stub
@@ -523,7 +526,7 @@ export function Composer({
       cancelled = true;
       unlisten?.();
     };
-  }, [projectPath, addExternalPaths]);
+  }, [projectPath, agentMode, addExternalPaths]);
 
   const addDataTransferPaths = async (transfer: DataTransfer | null) => {
     if (!transfer) return;
@@ -761,6 +764,7 @@ export function Composer({
                 path={path}
                 probe={probes[path]}
                 onRemove={onRemoveContext}
+                onOpenPath={supportsOffice(path) ? onPreviewOffice : undefined}
               />
             ))}
           </div>

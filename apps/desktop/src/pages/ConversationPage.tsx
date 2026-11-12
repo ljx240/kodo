@@ -5,6 +5,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import kodoCodeMark from "../assets/kodo-code-mark.png";
 import kodoWorkMark from "../assets/kodo-work-mark.png";
 import {
+  isDesktop,
   loadSession,
   onRunEvent,
   probeContextFile,
@@ -27,6 +28,7 @@ import { AssistantReply } from "../conversation/AssistantReply";
 import { Composer } from "../conversation/Composer";
 import { ContextCard } from "../conversation/ContextCard";
 import { FindBar } from "../conversation/FindBar";
+import { supportsOffice } from "../conversation/officeApi";
 import { KnowledgeBinding } from "../conversation/KnowledgeBinding";
 import { KnowledgeSources } from "../conversation/KnowledgeSources";
 import { TurnRail, type TurnRailItem } from "../conversation/TurnRail";
@@ -309,6 +311,14 @@ export function ConversationPage({
       return;
     }
     onOpenFilePanel({ path, tab, changes, nonce: Date.now() });
+  };
+  const previewOffice = agentMode === "work" && !demoMode && isDesktop();
+  const openOfficeAttachment = (path: string, session?: string) => {
+    const absolute = path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+    const office = absolute
+      ? { kind: "attachment" as const, path, session }
+      : { kind: "project" as const, project: projectPath, path };
+    onOpenFilePanel?.({ office, nonce: Date.now() });
   };
   /** Click-through from answer markdown / context cards: two-tier validation —
    *  shape already gated at render time, now the probe decides. Project-relative
@@ -1613,6 +1623,7 @@ export function ConversationPage({
         onStop={stop}
         providerWarning={providerWarning}
         onOpenProviderSettings={openSettings}
+        onPreviewOffice={previewOffice ? openOfficeAttachment : undefined}
         draftKey={`kodo:draft:${sessionId ?? "new"}:${projectPath ?? "-"}`}
         editSeed={editSeed}
         personaChain={personaChain}
@@ -1913,19 +1924,14 @@ export function ConversationPage({
                           text={turn.ask}
                           context={turn.context}
                           probes={probes}
-                          // Only project-internal paths render as openable cards;
-                          // external absolute attachments stay static (no-op).
-                          openContext={
-                            projectPath
-                              ? (path) => {
-                                  const root = projectPath.replace(/\/+$/, "");
-                                  if (path.startsWith("/") && !path.startsWith(`${root}/`)) {
-                                    return null;
-                                  }
-                                  return (target) => void openReferencedFile(target, reply.changes);
-                                }
-                              : undefined
-                          }
+                          openContext={(path) => {
+                            if (previewOffice && supportsOffice(path)) {
+                              return (target) => openOfficeAttachment(target, sessionId ?? undefined);
+                            }
+                            const root = projectPath.replace(/\/+$/, "");
+                            if (!root || (path.startsWith("/") && !path.startsWith(`${root}/`))) return null;
+                            return (target) => void openReferencedFile(target, reply.changes);
+                          }}
                           findHit={Boolean(activeFindHit && activeFindHit.part === "ask" && activeFindHit.turn === index)}
                           turnIndex={index}
                           // Session logs are append-only: 编辑预填后作为新轮发送，
@@ -1971,6 +1977,10 @@ export function ConversationPage({
                           // Inline code paths: probed at click, opened full-tab.
                           onOpenPath={(raw) => void openReferencedFile(raw, reply.changes)}
                           sessionId={sessionId}
+                          onPreviewOffice={sessionId && previewOffice ? () => onOpenFilePanel?.({
+                            office: { kind: "drafts", session: sessionId, turn: index + 1 },
+                            nonce: Date.now(),
+                          }) : undefined}
                           preExisting={last ? turnMeta.preExisting : []}
                           conflicts={last ? turnMeta.conflicts : []}
                         />

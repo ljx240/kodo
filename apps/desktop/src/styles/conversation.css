@@ -1453,6 +1453,9 @@ button.changed-file-path:focus-visible {
   color: var(--kodo-text-secondary);
 }
 .ctx-card-preview img { width: 100%; height: 100%; object-fit: contain; }
+.ctx-card-preview-btn { display: block; width: 100%; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.ctx-card-preview-btn:hover { background: var(--kodo-canvas); }
+.ctx-card-preview-btn:focus-visible { outline-offset: -2px; }
 .ctx-card-foot {
   display: flex;
   align-items: center;

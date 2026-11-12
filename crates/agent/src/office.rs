@@ -11,6 +11,8 @@ use calamine::Reader;
 use std::io::{Read, Write};
 use std::path::Path;
 
+pub mod work;
+
 pub fn is_docx(path: &str) -> bool {
     Path::new(path)
         .extension()

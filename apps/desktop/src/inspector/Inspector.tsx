@@ -1,6 +1,7 @@
 import { BarChart3, FileText, Info, Wrench, X } from "lucide-react";
 import { useEffect, useRef, type ReactNode } from "react";
 import type { ChangeDto } from "../api";
+import type { OfficePanelTarget } from "../conversation/officeApi";
 import type { PluginType, RouteName } from "../routes";
 import type { DemoState } from "../data/demoState";
 import type { LiveSnapshot } from "../data/liveContext";
@@ -41,12 +42,10 @@ export type InspectorTab =
  * every ask so re-clicking the same path still re-syncs a panel the user
  * browsed away from (prop identity, not just path, drives the sync effect).
  */
-export type FilePanelRequest = {
-  path: string | null;
-  tab: "full" | "diff";
-  changes: ChangeDto[];
-  nonce: number;
-};
+export type FilePanelRequest = { nonce: number } & (
+  | { path: string | null; tab: "full" | "diff"; changes: ChangeDto[] }
+  | { office: OfficePanelTarget }
+);
 
 const RAIL: { tab: InspectorTab; label: string; Icon: typeof Info }[] = [
   { tab: "summary", label: T.inspector.summary, Icon: Info },
@@ -76,10 +75,7 @@ const PANEL_TABS: Record<RouteName, { tab: InspectorTab; label: string }[]> = {
   // `Record<RouteName, …>` and to guard `panelTabs[0].tab` if the route ever
   // re-enables the Inspector.
   schedule: [{ tab: "summary", label: T.inspector.panel }],
-  // Same as `schedule`: the workbench and its apps are self-contained pages
-  // and App.tsx skips the Inspector on that route. The key exists only to
-  // satisfy `Record<RouteName, …>`.
-  workbench: [{ tab: "summary", label: T.inspector.panel }],
+  workbench: [{ tab: "file", label: T.inspector.file }],
 };
 
 function Tabs({
@@ -202,7 +198,7 @@ export function Inspector({
   // conversation's Inspector panel, only 概览 elsewhere. Settings draws its own
   // help panel and has no rail at all.
   const rail = RAIL.filter((item) => {
-    if (route === "settings") return false;
+    if (route === "settings" || route === "workbench") return false;
     if (route === "conversation") return true;
     return item.tab === "summary";
   });
@@ -306,7 +302,7 @@ export function Inspector({
               // In 文件/浏览 the X steps back to Inspector (the panel stays
               // usable); from the other panels it closes the panel as before.
               onClick={() => {
-                if (wholePanel) onSelectTab("summary");
+                if (wholePanel && allowed.has("summary")) onSelectTab("summary");
                 else onClose();
               }}
             >
